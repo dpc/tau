@@ -1,7 +1,7 @@
 # ARCH-tau-provider-responses: Public Responses backend
 
-`tau-provider-responses` owns one finite API-key HTTP/SSE attempt for the
-generic public Responses protocol. It is separate from both the generic Chat
+`tau-provider-responses` owns one finite API-key HTTP/SSE or WebSocket attempt
+for the generic public Responses protocol. It is separate from both the generic Chat
 Completions backend and the private ChatGPT/Codex WebSocket backend.
 
 The backend replays the complete typed Responses transcript on every request.
@@ -14,6 +14,13 @@ also preserves Responses assistant and function-call replay sidecars and never
 sends `previous_response_id` or provider-side compaction controls. The
 extension owns profile storage, model publication, retry scheduling,
 cancellation policy, and protocol-event sampling.
+
+Profiles select transport explicitly; omission retains the historical SSE
+default. A WebSocket attempt opens a fresh connection, sends one
+`response.create` envelope, and closes after the terminal event. Retry scheduling
+therefore reconnects and replays the complete local transcript rather than
+depending on connection-local continuation state. WebSocket selection never
+falls back to SSE.
 
 Every request also lowers the harness-selected effective reasoning effort as
 `reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining

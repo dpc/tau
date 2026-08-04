@@ -7,5 +7,6 @@
       "id": "fixture-model",
       "context_window": 128000
     }
-  ]
+  ],
+  "transport": "sse"
 }

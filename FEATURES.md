@@ -172,8 +172,9 @@ conservative quota-pacing status when the provider supplies enough data.
 
 The `completions API` route is HTTP/SSE Chat Completions and is suitable for
 local servers such as llama.cpp as well as remote compatible services. The
-`responses API` route is a separate generic public API-key HTTP/SSE backend
-with explicit models and stateless full-transcript replay. The ChatGPT
+`responses API` route is a separate generic public API-key backend with explicit
+`sse` or `websocket` transport, explicit models, and stateless full-transcript
+replay. The ChatGPT
 OAuth/Codex route is a separate private Responses backend whose inference is
 WebSocket-only; it never falls back to HTTP/SSE, though OAuth, quota, and
 standalone compaction remain HTTPS operations. All of these routes share one

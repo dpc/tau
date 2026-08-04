@@ -1,9 +1,11 @@
 # Public Responses provider security boundary
 
-Public Responses profiles send complete typed transcripts to an
-operator-configured HTTP/SSE endpoint under the shared outbound network policy
+Public Responses profiles send complete typed transcripts over explicitly
+selected HTTP/SSE or WebSocket transport to an operator-configured endpoint
+under the shared outbound network policy
 documented in [`tau-provider/SECURITY.md`](../tau-provider/SECURITY.md). Provider
-payloads remain untrusted model data: response and SSE bounds apply before the
+payloads remain untrusted model data: response, SSE-line, and WebSocket-frame
+bounds apply before the
 parser admits only supported assistant text, plain reasoning, and Function
 calls.
 

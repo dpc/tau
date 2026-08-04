@@ -49,7 +49,8 @@ Supported profile kinds:
 - `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, optional API key, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
 - `openrouter` — OpenRouter profile with API key and either explicit models or models fetched from OpenRouter.
 - `responses` — generic public Responses endpoint with base URL, optional API
-  key, and an explicit model list. `tau provider add` calls this selection
+  key, explicit `sse` or `websocket` transport, and an explicit model list.
+  Omitted transport in an older profile means SSE. `tau provider add` calls this selection
   `responses API`; it calls the existing Chat Completions selection
   `completions API`.
 
@@ -62,7 +63,10 @@ inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only fo
 OAuth, quota acquisition, and unary standalone compaction. It is not a public
 API-key OpenAI Responses provider.
 
-`responses` uses a generic API-key HTTP/SSE `POST /responses` adapter. It
+`responses` uses a generic API-key `/responses` adapter with explicit SSE or
+WebSocket transport. The setup wizard preselects WebSocket only for the exact
+official OpenAI base URL and SSE for compatible endpoints. Runtime never probes,
+infers, or falls back between transports. It
 requires user-configured models and does not discover models or choose provider
 presets. Each turn sends the complete typed Responses transcript. It supports
 assistant text, plain `reasoning_text` reasoning, and Function tools. Plain
@@ -72,6 +76,11 @@ is rejected. The backend preserves Responses replay sidecars and does not send
 `previous_response_id` or `store`; it does not expose hosted/custom tools,
 image/file inputs, or compaction. Existing `openrouter` profiles remain on Chat
 Completions.
+
+WebSocket attempts use one fresh connection and one `response.create` envelope.
+Retries reconnect and replay the full local transcript; they do not reuse
+connection-local `previous_response_id` state. This public Responses mode is not
+OpenAI Realtime.
 
 Each `responses.models[]` entry can set `efforts` to an exact set of supported
 reasoning levels. Omission uses `[off, minimal, low, medium, high, xhigh, max]`;

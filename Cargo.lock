@@ -6206,12 +6206,15 @@ dependencies = [
 name = "tau-provider-responses"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tau-proto",
  "tau-provider",
  "tokio",
+ "tokio-tungstenite",
+ "tungstenite",
  "zstd",
 ]
 

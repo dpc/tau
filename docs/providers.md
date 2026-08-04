@@ -335,11 +335,16 @@ declaration. Transcript-v1 deliberately removes image bytes while
 retaining image metadata and a loss marker. Empty, malformed, truncated, or
 over-limit summaries fail the durable transaction without fallback or resend.
 
-`tau-provider-responses` implements `POST /responses` over API-key HTTP/SSE
-for the `responses` profile. `tau provider add` labels the existing generic
+`tau-provider-responses` implements the public `/responses` protocol over
+API-key HTTP/SSE or WebSocket for the `responses` profile. `tau provider add`
+labels the existing generic
 Chat Completions choice `completions API` and this choice `responses API`.
-Responses profiles require a base URL and explicit models; Tau does not infer
-provider presets or discover models. Every turn sends the complete typed
+Responses profiles require a base URL, explicit models, and a `transport` value
+spelled `sse` or `websocket`; omitted values from older profiles mean `sse`.
+The wizard asks for transport after the endpoint, API key, and models. It
+preselects WebSocket only for the exact official
+`https://api.openai.com/v1` base URL and otherwise preselects SSE. Tau does not
+infer endpoint support at runtime or discover models. Every turn sends the complete typed
 Responses transcript. It supports assistant text, plain `reasoning_text`
 reasoning, and Function tools. Plain reasoning uses the existing
 `show-thinking` UI behavior and is retained for full-transcript replay.
@@ -348,6 +353,12 @@ The backend preserves assistant-message, reasoning-item, and Function-call
 replay sidecars. It deliberately omits `previous_response_id`, `store`,
 hosted/custom tools, image/file inputs, and public compaction. Existing
 `openrouter` profiles remain Chat Completions profiles.
+
+WebSocket mode opens a fresh connection for each finite attempt and sends one
+`response.create` envelope without SSE-only fields. A retry reconnects and
+replays the complete local transcript. It never continues from a response ID
+whose connection-local cache may have disappeared, never silently switches to
+SSE, and never targets the distinct OpenAI Realtime protocol.
 
 Each `responses.models[]` entry may set `efforts` to describe the exact
 reasoning-effort levels its upstream model accepts:

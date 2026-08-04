@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use tokio::runtime as path_tokio_runtime;
+use tungstenite::Message;
+use tungstenite::handshake::server::Request as WebSocketRequest;
 
 use super::*;
 
@@ -246,6 +248,7 @@ fn incomplete_reasoning_attempt_rejects_terminal_sentinel() {
             base_url: format!("http://{address}"),
             api_key: String::new(),
             max_output_tokens: 0,
+            transport: Transport::Sse,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -613,6 +616,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
             base_url: format!("http://{address}"),
             api_key: String::new(),
             max_output_tokens: 0,
+            transport: Transport::Sse,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -636,6 +640,7 @@ fn request_lowers_off_and_max_reasoning_efforts() {
         base_url: "https://example.test/v1".to_owned(),
         api_key: String::new(),
         max_output_tokens: 0,
+        transport: Transport::Sse,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),
@@ -652,6 +657,324 @@ fn request_lowers_off_and_max_reasoning_efforts() {
 
         assert_eq!(request["reasoning"]["effort"], expected);
     }
+}
+
+/// Post-upgrade provider errors must terminate known auth/request/context
+/// failures and retain retry classes only for service-side failures.
+#[test]
+fn websocket_provider_errors_classify_retries_and_recovery() {
+    let auth = Error::Provider {
+        status: Some(401),
+        code: Some("invalid_api_key".to_owned()),
+    };
+    assert!(auth.retry().is_none());
+    assert_eq!(
+        auth.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    let context = Error::Provider {
+        status: None,
+        code: Some("context_length_exceeded".to_owned()),
+    };
+    assert!(context.retry().is_none());
+    assert_eq!(
+        context.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+    for code in [
+        "invalid_request_error",
+        "invalid_request",
+        "model_not_found",
+    ] {
+        let request = Error::Provider {
+            status: None,
+            code: Some(code.to_owned()),
+        };
+        assert!(request.retry().is_none());
+        assert_eq!(
+            request.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
+        );
+    }
+    let service = Error::Provider {
+        status: Some(500),
+        code: Some("server_error".to_owned()),
+    };
+    assert_eq!(
+        service.retry().expect("retry service failure").class,
+        RetryClass::Overload
+    );
+}
+
+/// WebSocket mode must negotiate `/responses`, send the public
+/// `response.create` envelope without SSE-only fields, and consume the ordinary
+/// Responses event stream without falling back to HTTP/SSE.
+#[test]
+#[allow(clippy::result_large_err)]
+fn websocket_attempt_uses_response_create_protocol() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let server = std::thread::spawn(move || {
+        let socket = accept_websocket_peer(&listener);
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer read timeout");
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer write timeout");
+        let request_path = Arc::new(Mutex::new(String::new()));
+        let captured_path = Arc::clone(&request_path);
+        let mut socket =
+            tungstenite::accept_hdr(socket, move |request: &WebSocketRequest, response| {
+                *captured_path.lock().expect("path lock") = request.uri().path().to_owned();
+                Ok(response)
+            })
+            .expect("upgrade WebSocket");
+        let message = socket.read().expect("read response.create");
+        let Message::Text(text) = message else {
+            panic!("response.create must be a text frame");
+        };
+        let envelope: Value = serde_json::from_str(text.as_ref()).expect("request JSON");
+        assert_eq!(envelope["type"], "response.create");
+        assert_eq!(envelope["model"], "test-model");
+        assert!(envelope.get("stream").is_none());
+        assert!(envelope.get("previous_response_id").is_none());
+        assert_eq!(
+            request_path.lock().expect("path lock").as_str(),
+            "/responses"
+        );
+        socket
+            .send(Message::Text(
+                r#"{"type":"response.completed","response":{"id":"resp_ws","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#
+                    .into(),
+            ))
+            .expect("send completed response");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: "test-key".to_owned(),
+            max_output_tokens: 0,
+            transport: Transport::Websocket,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    join_websocket_peer(server);
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("WebSocket Responses attempt must complete");
+    };
+    assert_eq!(success.provider_response_id.as_deref(), Some("resp_ws"));
+}
+
+/// A rejected WebSocket upgrade must remain on the selected transport and
+/// surface the provider's HTTP status without attempting an SSE request.
+#[test]
+fn websocket_rejected_upgrade_is_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind upgrade server");
+    let address = listener.local_addr().expect("upgrade server address");
+    let server = std::thread::spawn(move || {
+        let mut socket = accept_websocket_peer(&listener);
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer read timeout");
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer write timeout");
+        let mut request = [0_u8; 4096];
+        let read = socket.read(&mut request).expect("read upgrade request");
+        assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /responses "));
+        let body = r#"{"error":{"code":"invalid_api_key"}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write upgrade rejection");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: "bad-key".to_owned(),
+            max_output_tokens: 0,
+            transport: Transport::Websocket,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    join_websocket_peer(server);
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("authentication rejection must be terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert_eq!(failure.message, "provider returned HTTP 401");
+}
+
+/// Binary and oversized text frames must fail the finite WebSocket attempt
+/// before untrusted payloads reach the Responses event parser.
+#[test]
+fn websocket_rejects_invalid_and_oversized_frames() {
+    for message in [
+        Message::Binary(vec![0_u8; 8].into()),
+        Message::Text("x".repeat(MAX_EVENT_BYTES + 1).into()),
+    ] {
+        let outcome = run_websocket_message(message, &mut || false);
+        assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+    }
+    let outcome = run_websocket_message(
+        Message::Text(r#"{"type":"error","status":401,"error":{"code":"invalid_api_key"}}"#.into()),
+        &mut || false,
+    );
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("known WebSocket auth error must be terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert!(failure.message.contains("invalid_api_key"));
+    let outcome = run_websocket_message(
+        Message::Text(
+            r#"{"type":"response.incomplete","response":{"error":{"code":"context_length_exceeded"}}}"#
+                .into(),
+        ),
+        &mut || false,
+    );
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("status-less context error must be terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
+/// Individually valid WebSocket events must still fail once their aggregate
+/// transport bytes cross the complete-response budget.
+#[test]
+fn websocket_rejects_cumulative_response_overflow() {
+    let event = format!("{{}}{}", " ".repeat(MAX_EVENT_BYTES - 2));
+    let messages = (0..65)
+        .map(|_| Message::Text(event.clone().into()))
+        .collect();
+    let outcome = run_websocket_messages(messages, &mut || false);
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+}
+
+/// Cancellation after `response.create` must drop the socket promptly rather
+/// than waiting for a peer that never sends a model event or acknowledges
+/// close.
+#[test]
+fn websocket_stalled_peer_cancels_without_close_wait() {
+    let mut polls = 0_u8;
+    let started = Instant::now();
+    let outcome = run_websocket_message(Message::Ping(Vec::new().into()), &mut || {
+        polls = polls.saturating_add(1);
+        5 <= polls
+    });
+    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+fn run_websocket_message(
+    message: Message,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> AttemptOutcome {
+    run_websocket_messages(vec![message], is_canceled)
+}
+
+fn run_websocket_messages(
+    messages: Vec<Message>,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> AttemptOutcome {
+    let stall = matches!(messages.as_slice(), [Message::Ping(_)]);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let server = std::thread::spawn(move || {
+        let socket = accept_websocket_peer(&listener);
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer read timeout");
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("set peer write timeout");
+        let mut socket = tungstenite::accept(socket).expect("upgrade WebSocket");
+        let _ = socket.read().expect("read response.create");
+        for message in messages {
+            if socket.send(message).is_err() {
+                break;
+            }
+        }
+        if stall {
+            assert!(matches!(socket.read(), Ok(Message::Pong(_))));
+            let _ = socket.read();
+        }
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Websocket,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        is_canceled,
+        &test_network(),
+    );
+    join_websocket_peer(server);
+    outcome
+}
+
+fn accept_websocket_peer(listener: &TcpListener) -> TcpStream {
+    listener
+        .set_nonblocking(true)
+        .expect("set bounded accept mode");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                socket
+                    .set_nonblocking(false)
+                    .expect("restore blocking peer mode");
+                return socket;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "WebSocket client did not connect"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("accept WebSocket request: {error}"),
+        }
+    }
+}
+
+fn join_websocket_peer(server: std::thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(server.join());
+    });
+    rx.recv_timeout(Duration::from_secs(7))
+        .expect("WebSocket peer must finish within its socket deadlines")
+        .expect("WebSocket peer must not panic");
 }
 
 fn read_http_request(socket: &mut TcpStream) -> (String, Vec<u8>) {
@@ -708,9 +1031,9 @@ fn stalled_header_observes_cancellation() {
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::UnexpectedEof
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::UnexpectedEof
                     ) =>
                 {
                     break;
@@ -730,6 +1053,7 @@ fn stalled_header_observes_cancellation() {
                 base_url: format!("http://{address}"),
                 api_key: String::new(),
                 max_output_tokens: 0,
+                transport: Transport::Sse,
             },
             &AttemptModel {
                 id: ModelName::new("test-model"),
@@ -781,6 +1105,7 @@ fn proxy_407_is_typed_as_auth_retry() {
             base_url: "http://provider.test/v1".to_owned(),
             api_key: String::new(),
             max_output_tokens: 0,
+            transport: Transport::Sse,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -849,9 +1174,9 @@ fn compressed_sse_line_uses_decoded_limits_and_statistics() {
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept SSE request");
         let _ = read_http_request(&mut socket);
-        let decoded = vec![b'x'; MAX_SSE_LINE_BYTES + 1];
+        let decoded = vec![b'x'; MAX_EVENT_BYTES + 1];
         let body = zstd::stream::encode_all(decoded.as_slice(), 1).expect("encode SSE body");
-        assert!(body.len() < MAX_SSE_LINE_BYTES);
+        assert!(body.len() < MAX_EVENT_BYTES);
         write!(
             socket,
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-encoding: zstd\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -866,6 +1191,7 @@ fn compressed_sse_line_uses_decoded_limits_and_statistics() {
             base_url: format!("http://{address}"),
             api_key: String::new(),
             max_output_tokens: 0,
+            transport: Transport::Sse,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -878,7 +1204,7 @@ fn compressed_sse_line_uses_decoded_limits_and_statistics() {
     let AttemptOutcome::Retryable { progress, .. } = outcome else {
         panic!("oversized decoded SSE line must fail retryably");
     };
-    assert!(MAX_SSE_LINE_BYTES < progress.response_bytes_received as usize);
+    assert!(MAX_EVENT_BYTES < progress.response_bytes_received as usize);
 }
 
 fn minimal_prompt() -> tau_proto::AgentPromptCreated {

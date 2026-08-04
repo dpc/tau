@@ -253,6 +253,30 @@ fn chatgpt_setup_defaults_responses_lite_compatibility_to_no() {
     assert!(!std::hint::black_box(DEFAULT_RESPONSES_LITE_COMPATIBILITY));
 }
 
+/// Provider setup may recommend WebSocket only for OpenAI's exact official
+/// Responses base URL; lookalike and compatible endpoints must remain SSE.
+#[test]
+fn responses_transport_recommendation_is_endpoint_exact() {
+    assert_eq!(
+        recommended_responses_transport("https://api.openai.com/v1"),
+        ResponsesTransport::Websocket
+    );
+    assert_eq!(
+        recommended_responses_transport("https://api.openai.com/v1/"),
+        ResponsesTransport::Websocket
+    );
+    for endpoint in [
+        "http://api.openai.com/v1",
+        "https://api.openai.com/v1/responses",
+        "https://compatible.example/v1",
+    ] {
+        assert_eq!(
+            recommended_responses_transport(endpoint),
+            ResponsesTransport::Sse
+        );
+    }
+}
+
 /// OAuth refresh replaces only credentials, so serializing and reloading the
 /// saved full profile preserves the sibling Responses compatibility setting.
 #[test]

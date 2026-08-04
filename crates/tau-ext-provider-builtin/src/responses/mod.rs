@@ -32,6 +32,9 @@ pub struct ResponsesProvider {
         skip_serializing_if = "is_default_max_output_tokens"
     )]
     pub max_output_tokens: u32,
+    /// Explicit public Responses wire transport.
+    #[serde(default)]
+    pub transport: tau_provider_responses::Transport,
 }
 
 /// One generic public Responses model configured by the user.
@@ -205,6 +208,7 @@ pub fn run_prompt_attempt<W: std::io::Write>(
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: provider.max_output_tokens,
+        transport: provider.transport,
     };
     let model = tau_provider_responses::AttemptModel {
         id: model.id.clone(),
@@ -310,10 +314,19 @@ fn finished(
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::Responses,
             base_url: provider.base_url.clone(),
-            transport: tau_proto::ProviderBackendTransport::HttpSse,
+            transport: backend_transport(provider),
             stale_chain_fallback: false,
         }),
         provider_response_id,
         ws_pool_delta: None,
+    }
+}
+
+fn backend_transport(provider: &ResponsesProvider) -> tau_proto::ProviderBackendTransport {
+    match provider.transport {
+        tau_provider_responses::Transport::Sse => tau_proto::ProviderBackendTransport::HttpSse,
+        tau_provider_responses::Transport::Websocket => {
+            tau_proto::ProviderBackendTransport::Websocket
+        }
     }
 }

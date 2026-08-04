@@ -15,6 +15,44 @@ fn profile_round_trips_explicit_models() {
     assert_eq!(encoded["models"][0]["id"], "example-model");
     assert!(encoded["models"][0].get("efforts").is_none());
     assert!(encoded.get("protocol_preset").is_none());
+    assert_eq!(encoded["transport"], "sse");
+}
+
+/// Profiles written before transport selection must remain SSE, while explicit
+/// WebSocket selection must round-trip using the public configuration spelling.
+#[test]
+fn profile_transport_defaults_and_round_trips() {
+    let legacy: ResponsesProvider =
+        serde_json::from_value(serde_json::json!({})).expect("legacy profile");
+    assert_eq!(legacy.transport, tau_provider_responses::Transport::Sse);
+    let websocket: ResponsesProvider = serde_json::from_value(serde_json::json!({
+        "transport": "websocket"
+    }))
+    .expect("WebSocket profile");
+    assert_eq!(
+        websocket.transport,
+        tau_provider_responses::Transport::Websocket
+    );
+    assert_eq!(
+        serde_json::to_value(websocket).expect("serialize")["transport"],
+        "websocket"
+    );
+}
+
+/// Final provider metadata must report the selected public Responses transport
+/// rather than retaining the historical unconditional HTTP/SSE label.
+#[test]
+fn backend_metadata_matches_profile_transport() {
+    let mut provider = ResponsesProvider::default();
+    assert_eq!(
+        backend_transport(&provider),
+        tau_proto::ProviderBackendTransport::HttpSse
+    );
+    provider.transport = tau_provider_responses::Transport::Websocket;
+    assert_eq!(
+        backend_transport(&provider),
+        tau_proto::ProviderBackendTransport::Websocket
+    );
 }
 
 /// An omitted model effort override must retain the complete canonical public
@@ -37,6 +75,7 @@ fn profile_publishes_default_responses_efforts() {
         }],
         tags: Vec::new(),
         max_output_tokens: 0,
+        transport: tau_provider_responses::Transport::Sse,
     };
     let models = models_for_provider(&tau_proto::ProviderName::new("responses"), &provider);
     assert_eq!(models.len(), 1);

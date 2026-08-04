@@ -1,7 +1,9 @@
-//! Generic public API-key HTTP/SSE Responses backend.
+//! Generic public API-key Responses backend over HTTP/SSE or WebSocket.
 //!
 //! This intentionally does not share the private ChatGPT/Codex WebSocket
-//! implementation.  It sends a complete typed transcript on every turn.
+//! implementation. It sends a complete typed transcript on every turn.
+
+mod websocket;
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -21,10 +23,22 @@ use tokio::runtime as path_tokio_runtime;
 
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
-const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ATTEMPT_PHASE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Wire transport selected explicitly by a public Responses profile.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// HTTP request with a server-sent event response stream.
+    #[default]
+    Sse,
+    /// One WebSocket connection and `response.create` exchange per finite
+    /// attempt.
+    Websocket,
+}
 
 /// Resolved endpoint configuration for one public Responses attempt.
 #[derive(Clone)]
@@ -35,6 +49,8 @@ pub struct AttemptConfig {
     pub api_key: String,
     /// Requested output token cap, or zero to omit it.
     pub max_output_tokens: u32,
+    /// Explicit wire transport; omitted profile values resolve to SSE.
+    pub transport: Transport,
 }
 
 /// Model wire identity for one Responses attempt.
@@ -116,6 +132,12 @@ enum Error {
     Canceled,
     Outbound(tau_provider::OutboundError),
     Http(u16, String),
+    Provider {
+        /// Optional status carried by a post-upgrade provider event.
+        status: Option<u16>,
+        /// Bounded provider error code or type.
+        code: Option<String>,
+    },
     Json,
     InvalidRequest,
     UnsupportedTool,
@@ -147,6 +169,35 @@ impl Error {
                     });
                 Some(RetryDecision::new(class))
             }
+            Self::Provider { status, code } => {
+                if code
+                    .as_deref()
+                    .and_then(provider_code_failure_kind)
+                    .is_some()
+                {
+                    return None;
+                }
+                let class = code
+                    .as_deref()
+                    .map(classify_error_code)
+                    .filter(|class| *class != RetryClass::Unknown)
+                    .unwrap_or(match status {
+                        Some(408 | 425) => RetryClass::Transport,
+                        Some(429) => RetryClass::Throttle,
+                        Some(500..=599) => RetryClass::Overload,
+                        Some(401 | 403) => RetryClass::Auth,
+                        _ => RetryClass::Unknown,
+                    });
+                if matches!(class, RetryClass::Auth)
+                    || status.is_some_and(
+                        |status| matches!(status, 400..=407 | 409..=424 | 426..=428 | 430..=499),
+                    )
+                {
+                    None
+                } else {
+                    Some(RetryDecision::new(class))
+                }
+            }
             Self::Outbound(error) => Some(RetryDecision::new(match error.kind() {
                 tau_provider::OutboundErrorKind::InvalidConfiguration
                 | tau_provider::OutboundErrorKind::ProxyAuthentication => RetryClass::Auth,
@@ -163,6 +214,19 @@ impl Error {
     fn failure_kind(&self) -> Option<tau_proto::ProviderFailureKind> {
         match self {
             Self::Http(status, body) => failure_kind(*status, body),
+            Self::Provider { status, code } => {
+                if let Some(kind) = code.as_deref().and_then(provider_code_failure_kind) {
+                    Some(kind)
+                } else if status.is_some_and(|status| matches!(status, 400..=499))
+                    || code
+                        .as_deref()
+                        .is_some_and(|code| classify_error_code(code) == RetryClass::Auth)
+                {
+                    Some(tau_proto::ProviderFailureKind::RequestRejected)
+                } else {
+                    None
+                }
+            }
             Self::InvalidRequest | Self::UnsupportedTool | Self::UnsupportedOutput => {
                 Some(tau_proto::ProviderFailureKind::RequestRejected)
             }
@@ -171,11 +235,21 @@ impl Error {
     }
 }
 
+fn provider_code_failure_kind(code: &str) -> Option<tau_proto::ProviderFailureKind> {
+    match code {
+        "context_length_exceeded" => Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        "invalid_request_error" | "invalid_request" | "model_not_found" => {
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
+        }
+        _ => None,
+    }
+}
+
 fn failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailureKind> {
     if parse_json_error_code(body).as_deref() == Some("context_length_exceeded") {
         return Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
     }
-    matches!(status, 400 | 404 | 409 | 413 | 422)
+    matches!(status, 400 | 401 | 403 | 404 | 409 | 413 | 422)
         .then_some(tau_proto::ProviderFailureKind::RequestRejected)
 }
 
@@ -262,6 +336,14 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
             }
             Error::InvalidRequest => "Responses request was invalid".to_owned(),
             Error::Http(status, _) => format!("provider returned HTTP {status}"),
+            Error::Provider { status, code } => match (status, code) {
+                (Some(status), Some(code)) => {
+                    format!("provider returned WebSocket error {status} ({code})")
+                }
+                (Some(status), None) => format!("provider returned WebSocket error {status}"),
+                (None, Some(code)) => format!("provider returned WebSocket error ({code})"),
+                (None, None) => "provider returned a WebSocket error".to_owned(),
+            },
             _ => "Responses request failed".to_owned(),
         },
         failure_kind: error.failure_kind(),
@@ -872,6 +954,21 @@ async fn stream(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<State, (Error, AttemptProgress)> {
+    match config.transport {
+        Transport::Sse => stream_sse(config, body, on_update, is_canceled, network).await,
+        Transport::Websocket => {
+            websocket::stream(config, body, on_update, is_canceled, network).await
+        }
+    }
+}
+
+async fn stream_sse(
+    config: &AttemptConfig,
+    body: &RequestBody,
+    on_update: &mut impl FnMut(AttemptProgress),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<State, (Error, AttemptProgress)> {
     let url = format!("{}/responses", config.base_url.trim_end_matches('/'));
     let client = network
         .client_for(&url)
@@ -949,7 +1046,7 @@ async fn stream(
             return Err((Error::StreamFailure, state.progress()));
         }
         pending.extend_from_slice(&chunk);
-        if MAX_SSE_LINE_BYTES < pending.len() {
+        if MAX_EVENT_BYTES < pending.len() {
             return Err((Error::StreamFailure, state.progress()));
         }
         while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
@@ -958,7 +1055,7 @@ async fn stream(
                 line.pop();
             }
             let line = String::from_utf8_lossy(&line);
-            if MAX_SSE_LINE_BYTES < line.len() {
+            if MAX_EVENT_BYTES < line.len() {
                 return Err((Error::StreamFailure, state.progress()));
             }
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {

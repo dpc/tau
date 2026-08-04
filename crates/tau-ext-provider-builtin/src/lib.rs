@@ -37,7 +37,7 @@ use chat_completions::{
     PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,
     models_for_provider as chat_models_for_provider, run_prompt_attempt,
 };
-use dialoguer::{Confirm, Input};
+use dialoguer::{Confirm, Input, Select};
 use oauth_refresh_rejection::{
     LockedRefreshOutcome, OAuthRefreshRejectionCache, RefreshCredentialsError,
 };
@@ -72,6 +72,7 @@ use tau_provider_codex::{
     StreamDeltaEmitter as CodexStreamDeltaEmitter, StreamState as CodexStreamState, StreamUpdate,
     TurnAbort, TurnAbortWaker,
 };
+pub use tau_provider_responses::Transport as ResponsesTransport;
 
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "provider-builtin";
@@ -95,7 +96,7 @@ pub enum BuiltinProviderProfile {
     /// OpenRouter provider using a wrapped Chat Completions backend.
     #[serde(rename = "openrouter")]
     OpenRouter(OpenRouterProfile),
-    /// Generic public API-key HTTP/SSE Responses provider.
+    /// Generic public API-key Responses provider with explicit transport.
     Responses(ResponsesProvider),
 }
 
@@ -772,6 +773,19 @@ fn cmd_add_responses() -> Result<(), Box<dyn Error>> {
         .with_prompt("Models (comma-separated)")
         .interact_text()?;
     let models = parse_responses_model_list(&models_input)?;
+    let transport_options = ["sse", "websocket"];
+    let default_transport =
+        usize::from(recommended_responses_transport(&base_url) == ResponsesTransport::Websocket);
+    let transport = Select::new()
+        .with_prompt("Transport")
+        .items(&transport_options)
+        .default(default_transport)
+        .interact()?;
+    let transport = match transport {
+        0 => ResponsesTransport::Sse,
+        1 => ResponsesTransport::Websocket,
+        _ => unreachable!("dialoguer returns an offered transport"),
+    };
     save_profile(
         &name,
         &BuiltinProviderProfile::Responses(ResponsesProvider {
@@ -780,9 +794,18 @@ fn cmd_add_responses() -> Result<(), Box<dyn Error>> {
             models,
             tags: Vec::new(),
             max_output_tokens: 8192,
+            transport,
         }),
     )?;
     Ok(())
+}
+
+fn recommended_responses_transport(base_url: &str) -> ResponsesTransport {
+    if base_url.trim_end_matches('/') == "https://api.openai.com/v1" {
+        ResponsesTransport::Websocket
+    } else {
+        ResponsesTransport::Sse
+    }
 }
 
 fn cmd_add_chatgpt(network: &tau_provider::OutboundNetworkPolicy) -> Result<(), Box<dyn Error>> {
@@ -3172,7 +3195,8 @@ enum PromptBackend {
         provider: ChatCompletionsProvider,
         model: ChatCompletionsModel,
     },
-    /// Generic public Responses API request using HTTP/SSE.
+    /// Generic public Responses API request using profile-selected SSE or
+    /// WebSocket.
     PublicResponses {
         provider: ResponsesProvider,
         model: ResponsesModel,

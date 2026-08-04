@@ -395,8 +395,12 @@ Chat Completions crate owns HTTP/SSE request, cancellation, typed-error, Functio
 tool, raw-argument, semantic-replay, and transport-byte tests; the extension owns
 OpenRouter discovery, capability/default/explicit-false publication, sampling,
 events, and scheduler integration. The public Responses crate owns generic
-`/responses` HTTP/SSE parsing, no-`[DONE]` completion, typed full replay, and
-Function-call raw-argument preservation. The Codex crate owns Standard/Lite goldens,
+`/responses` HTTP/SSE and WebSocket protocol coverage, transport selection
+without fallback, full-replay retry semantics, no-`[DONE]` completion, typed
+full replay, and Function-call raw-argument preservation. Its bounded loopback
+WebSocket lane owns upgrade and HTTP-error handling, control-frame deadlines,
+per-frame and cumulative response limits, and stalled-peer cancellation. The Codex crate owns
+Standard/Lite goldens,
 WS-only negotiation and no-fallback, typed finite outcomes, exact dispatch,
 cumulative bytes, one-budget semantic-safe recovery, strict prewarm
 prefix/fingerprint chaining, invalidation generations, compact cancellation, and
