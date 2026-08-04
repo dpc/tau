@@ -101,13 +101,41 @@ fn cfg() -> RuntimeConfig {
             stream_id: 7,
             topic: Some("deploy".to_owned()),
             receive: Some(ReceiveMode::MentionsOnly),
-            proactive_send: true,
+            proactive: ProactiveRoute::ExactTopic("deploy".to_owned()),
             description: Some("Operations".to_owned()),
         }],
         receive_direct_messages: true,
         max_message_bytes: 1024,
         id_key: [7; 32],
     }
+}
+
+/// Validate a minimal stream-route configuration with deterministic test
+/// secrets.
+fn validated_config(conversations: serde_json::Value) -> Result<RuntimeConfig, String> {
+    let config = CborValue::serialized(&serde_json::json!({
+        "bot_email_secret":"email",
+        "api_key_secret":"key",
+        "identity_key_secret":"identity",
+        "site":"https://chat.example.test",
+        "allowed_user_ids":[42],
+        "conversations":conversations,
+    }))
+    .expect("config value")
+    .deserialized::<ExtConfig>()
+    .expect("config schema");
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    config.validate(&secrets)
 }
 
 fn agent_id() -> AgentId {
@@ -121,10 +149,21 @@ fn extension() -> (
     mpsc::Receiver<HarnessInputMessage>,
     Arc<FakeClient>,
 ) {
+    extension_with_config(cfg())
+}
+
+/// Build a configured extension with deterministic local I/O.
+fn extension_with_config(
+    config: RuntimeConfig,
+) -> (
+    Extension,
+    mpsc::Receiver<HarnessInputMessage>,
+    Arc<FakeClient>,
+) {
     let (tx, rx) = mpsc::channel();
     let client = Arc::new(FakeClient::default());
     let ext = Extension::new(client.clone(), tx, ToolNames::logical());
-    ext.apply_config(cfg(), publisher());
+    ext.apply_config(config, publisher());
     {
         let mut state = ext.state.lock();
         state.registered_agents.insert(agent_id());
@@ -193,6 +232,128 @@ fn configuration_validation_is_strict() {
         panic!("empty allowlist accepted")
     };
     assert_eq!(error, "zulip config requires non-empty `allowed_user_ids`");
+}
+
+/// Channel-wide topic authority requires both proactive-send authority and no
+/// configured exact topic, preventing a typo from silently widening an alias.
+#[test]
+fn agent_chosen_topic_configuration_fails_closed() {
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    let parse = |conversation: serde_json::Value| {
+        CborValue::serialized(&serde_json::json!({
+            "bot_email_secret":"email",
+            "api_key_secret":"key",
+            "identity_key_secret":"identity",
+            "site":"https://chat.example.test",
+            "allowed_user_ids":[42],
+            "conversations":[conversation],
+        }))
+        .expect("config value")
+        .deserialized::<ExtConfig>()
+        .expect("config schema")
+    };
+    let Err(error) = parse(serde_json::json!({
+        "alias":"channel", "stream_id":7, "topic":"deploy",
+        "proactive_send":true, "agent_chosen_topic":true
+    }))
+    .validate(&secrets) else {
+        panic!("exact route accepted agent-chosen topic authority")
+    };
+    assert_eq!(
+        error,
+        "zulip `agent_chosen_topic` routes must omit the configured `topic`"
+    );
+    let Err(error) = parse(serde_json::json!({
+        "alias":"channel", "stream_id":7, "receive":"mentions_only",
+        "agent_chosen_topic":true
+    }))
+    .validate(&secrets) else {
+        panic!("non-proactive route accepted agent-chosen topic authority")
+    };
+    assert_eq!(
+        error,
+        "zulip `agent_chosen_topic` requires `proactive_send: true`"
+    );
+    let config = parse(serde_json::json!({
+        "alias":"channel", "stream_id":7,
+        "proactive_send":true, "agent_chosen_topic":true
+    }))
+    .validate(&secrets)
+    .expect("valid channel-wide authority");
+    assert!(config.routes[0].proactive.allows_agent_chosen_topic());
+    assert!(config.routes[0].topic.is_none());
+}
+
+/// A topicless agent-chosen route may receive every topic in its stream, while
+/// receive overlap remains rejected and a send-only route can share that
+/// stream.
+#[test]
+fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
+    let all_topics = validated_config(serde_json::json!([{
+        "alias":"channel", "stream_id":7, "receive":"mentions_only",
+        "proactive_send":true, "agent_chosen_topic":true
+    }]))
+    .expect("valid all-topic receive route");
+    let (ext, rx, _) = extension_with_config(all_topics);
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    ext.process_event(
+        serde_json::json!({
+            "id":16, "type":"message", "flags":["mentioned"], "message": {
+                "id":505, "type":"stream", "sender_id":42, "stream_id":7,
+                "subject":"any topic", "content":"@**Tau Bot** all topics"
+            }
+        }),
+        generation,
+        registration,
+        99,
+        Some("Tau Bot"),
+    );
+    assert!(matches!(
+        event_from(rx.recv().expect("all-topic receive report")),
+        Event::MessageDeliveredReported(_)
+    ));
+
+    let send_and_exact_receive = validated_config(serde_json::json!([
+        {
+            "alias":"channel", "stream_id":7,
+            "proactive_send":true, "agent_chosen_topic":true
+        },
+        {
+            "alias":"deploy", "stream_id":7, "topic":"deploy",
+            "receive":"mentions_only"
+        }
+    ]));
+    assert!(send_and_exact_receive.is_ok());
+
+    let Err(error) = validated_config(serde_json::json!([
+        {
+            "alias":"channel", "stream_id":7, "receive":"mentions_only",
+            "proactive_send":true, "agent_chosen_topic":true
+        },
+        {
+            "alias":"deploy", "stream_id":7, "topic":"deploy",
+            "receive":"mentions_only"
+        }
+    ])) else {
+        panic!("overlapping receive routes accepted")
+    };
+    assert_eq!(
+        error,
+        "a receive-all-topics Zulip route cannot overlap another receive route"
+    );
 }
 
 /// Pseudonymization identity remains stable across API-key rotation and changes
@@ -337,6 +498,207 @@ fn send_report_precedes_tool_result() {
     };
     assert!(text.contains("zulip-message:"));
     assert!(!text.contains("777"));
+}
+
+/// An explicit channel-wide grant lets an agent choose a bounded topic,
+/// including Zulip's canonical empty topic for general chat, without exposing a
+/// stream ID, and keeps the documented 256-byte maximum from regressing.
+#[test]
+fn agent_chosen_topic_destination_sends_to_general_chat() {
+    let mut config = cfg();
+    let route = config.routes.first_mut().expect("configured route");
+    route.topic = None;
+    route.proactive = ProactiveRoute::AgentChosenTopic;
+    let (ext, _rx, client) = extension_with_config(config);
+    let result = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("hello general chat".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Text(String::new())),
+        ],
+    ));
+    assert!(matches!(result, Event::ToolResult(_)));
+    assert_eq!(
+        client.sends.lock().expect("sends").as_slice(),
+        &[(
+            NativeRoute::Stream {
+                stream_id: 7,
+                topic: String::new(),
+            },
+            "hello general chat".to_owned(),
+        )]
+    );
+    let maximum_topic = "x".repeat(256);
+    let maximum = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("maximum topic".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Text(maximum_topic.clone())),
+        ],
+    ));
+    assert!(matches!(maximum, Event::ToolResult(_)));
+    assert_eq!(
+        client.sends.lock().expect("sends").last(),
+        Some(&(
+            NativeRoute::Stream {
+                stream_id: 7,
+                topic: maximum_topic,
+            },
+            "maximum topic".to_owned(),
+        ))
+    );
+    let missing_topic = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("missing topic".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+        ],
+    ));
+    assert!(matches!(missing_topic, Event::ToolError(_)));
+    let whitespace_topic = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("whitespace topic".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Text(" ".to_owned())),
+        ],
+    ));
+    assert!(matches!(whitespace_topic, Event::ToolError(_)));
+    let oversized_topic = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("oversized topic".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Text("x".repeat(257))),
+        ],
+    ));
+    assert!(matches!(oversized_topic, Event::ToolError(_)));
+    let control_topic = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("control topic".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Text("\u{1b}".to_owned())),
+        ],
+    ));
+    assert!(matches!(control_topic, Event::ToolError(_)));
+    assert_eq!(client.sends.lock().expect("sends").len(), 2);
+}
+
+/// The send schema exposes `topic` as an optional string and wrong-typed
+/// selectors fail before any remote send can widen or choose a destination.
+#[test]
+fn send_schema_and_selector_types_fail_closed() {
+    let spec = send_spec(&ToolNames::logical());
+    let parameters = spec.parameters.expect("send parameters");
+    assert_eq!(
+        parameters.pointer("/properties/topic/type"),
+        Some(&serde_json::Value::String("string".to_owned()))
+    );
+    assert_eq!(
+        parameters.get("additionalProperties"),
+        Some(&serde_json::Value::Bool(false))
+    );
+
+    let (ext, _rx, client) = extension();
+    for fields in [
+        vec![
+            ("message", CborValue::Text("bad topic".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Bool(true)),
+        ],
+        vec![
+            ("message", CborValue::Text("bad destination".to_owned())),
+            ("destination", CborValue::Bool(true)),
+        ],
+        vec![
+            ("message", CborValue::Text("bad reply".to_owned())),
+            ("reply_to", CborValue::Bool(true)),
+        ],
+    ] {
+        assert!(matches!(
+            ext.handle_send(tool(SEND_TOOL_NAME, fields)),
+            Event::ToolError(_)
+        ));
+    }
+    assert!(client.sends.lock().expect("sends").is_empty());
+}
+
+/// Exact aliases and source-bound replies reject caller-selected topics so
+/// their configured and admitted source routes cannot be widened by a tool
+/// call.
+#[test]
+fn exact_and_reply_sends_reject_caller_selected_topics() {
+    let (ext, _rx, client) = extension();
+    let exact = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("wrong route".to_owned())),
+            ("destination", CborValue::Text("ops".to_owned())),
+            ("topic", CborValue::Text("other".to_owned())),
+        ],
+    ));
+    assert!(matches!(exact, Event::ToolError(_)));
+
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    ext.process_event(
+        serde_json::json!({
+            "id":15, "type":"message", "message": {
+                "id":504, "type":"private", "sender_id":42, "content":"hello", "flags":[],
+                "display_recipient":[{"id":99},{"id":42}]
+            }
+        }),
+        generation,
+        registration,
+        99,
+        Some("Tau Bot"),
+    );
+    let reply = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("wrong reply route".to_owned())),
+            (
+                "reply_to",
+                CborValue::Text(message_fact_id(&cfg(), 504).as_str().to_owned()),
+            ),
+            ("topic", CborValue::Text("other".to_owned())),
+        ],
+    ));
+    assert!(matches!(reply, Event::ToolError(_)));
+    assert!(client.sends.lock().expect("sends").is_empty());
+}
+
+/// Discovery makes the exceptional channel-wide topic authority explicit while
+/// leaving the configured stream identifier extension-private.
+#[test]
+fn discovery_marks_agent_chosen_topic_authority() {
+    let mut config = cfg();
+    let route = config.routes.first_mut().expect("configured route");
+    route.topic = None;
+    route.proactive = ProactiveRoute::AgentChosenTopic;
+    let (ext, _rx, _client) = extension_with_config(config);
+    let Event::ToolResult(result) = ext.handle_conversations(tool(CONVERSATIONS_TOOL_NAME, vec![]))
+    else {
+        panic!("expected discovery result");
+    };
+    let CborValue::Text(value) = result.result else {
+        panic!("expected JSON discovery result");
+    };
+    let value: serde_json::Value = serde_json::from_str(&value).expect("valid discovery JSON");
+    assert_eq!(
+        value.pointer("/conversations/0/kind"),
+        Some(&serde_json::Value::String("stream".to_owned()))
+    );
+    assert_eq!(
+        value.pointer("/conversations/0/agent_chosen_topic"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(!value.to_string().contains("stream_id"));
 }
 
 /// Duplicate native creates and self-authored messages are suppressed before
@@ -552,6 +914,11 @@ fn http_register_uses_basic_auth_and_native_queue_api() {
                 .is_some_and(|value| value == "[\"realm\"]"),
             "registration must request the `realm` section containing the \
              long-poll timeout"
+        );
+        assert_eq!(
+            form.get("client_capabilities").map(String::as_str),
+            Some(r#"{"empty_topic_name":true}"#),
+            "registration must preserve Zulip's canonical empty general-chat topic"
         );
         assert!(
             !form.values().any(|value| value.contains("realm_user")),

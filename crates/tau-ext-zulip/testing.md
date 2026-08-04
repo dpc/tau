@@ -8,7 +8,8 @@ credential, DNS, webhook, or wall-clock sleep is required.
 Injected-client tests cover strict unknown-field and allowlist validation,
 official outer-event mention flags, one exact stream/topic and DM route,
 participant canonicalization, duplicate/self suppression, source-bound and
-proactive sends, incoming edit/reaction/delete reports, stale ingress
+proactive sends, explicit agent-chosen-topic authorization including the empty
+general-chat topic, incoming edit/reaction/delete reports, stale ingress
 generation, delayed-enable/later-unregister ordering, report-before-result
 ordering, and successful queue-expiry
 replacement with a content-free gap notice. Harness tests remain responsible

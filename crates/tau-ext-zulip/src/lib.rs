@@ -17,7 +17,7 @@ use std::thread::Builder as ThreadBuilder;
 use std::time::Duration;
 
 use api::{ApiError, EventQueue, HttpZulipClient, NativeRoute, ZulipClient};
-use config::{ExtConfig, ReceiveMode, RuntimeConfig, StreamRoute};
+use config::{ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
 use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
@@ -582,12 +582,17 @@ impl Extension {
         let routes = cfg
             .routes
             .iter()
-            .filter(|route| route.proactive_send)
+            .filter(|route| route.proactive.is_enabled())
             .map(|route| {
                 serde_json::json!({
                     "alias": route.alias,
-                    "kind": "stream_topic",
+                    "kind": if route.proactive.allows_agent_chosen_topic() {
+                        "stream"
+                    } else {
+                        "stream_topic"
+                    },
                     "topic": route.topic,
+                    "agent_chosen_topic": route.proactive.allows_agent_chosen_topic(),
                     "description": route.description,
                 })
             })
@@ -599,17 +604,28 @@ impl Extension {
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Event {
-        if let Err(error) =
-            validate_fields(&invoke.arguments, &["message", "reply_to", "destination"])
-        {
+        if let Err(error) = validate_fields(
+            &invoke.arguments,
+            &["message", "reply_to", "destination", "topic"],
+        ) {
             return tool_error(invoke, error);
         }
         let message = match string_field(&invoke.arguments, "message") {
             Ok(value) => value,
             Err(error) => return tool_error(invoke, error),
         };
-        let reply_to = optional_string_field(&invoke.arguments, "reply_to");
-        let destination = optional_string_field(&invoke.arguments, "destination");
+        let reply_to = match optional_string_field(&invoke.arguments, "reply_to") {
+            Ok(value) => value,
+            Err(error) => return tool_error(invoke, error),
+        };
+        let destination = match optional_string_field(&invoke.arguments, "destination") {
+            Ok(value) => value,
+            Err(error) => return tool_error(invoke, error),
+        };
+        let requested_topic = match optional_string_field(&invoke.arguments, "topic") {
+            Ok(value) => value,
+            Err(error) => return tool_error(invoke, error),
+        };
         if message.trim().is_empty() {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
@@ -653,24 +669,51 @@ impl Extension {
                 owner.conversation.clone()
             } else {
                 let alias = destination.as_deref().unwrap_or_default();
-                let Some(route) = cfg
-                    .routes
-                    .iter()
-                    .find(|route| route.alias == alias && route.proactive_send)
-                else {
+                let Some(route) = cfg.routes.iter().find(|route| route.alias == alias) else {
                     return tool_error(
                         invoke,
                         "unknown or unauthorized Zulip destination alias".to_owned(),
                     );
                 };
-                let Some(topic) = route.topic.clone() else {
-                    return tool_error(
-                        invoke,
-                        "proactive Zulip stream destinations require an exact topic".to_owned(),
-                    );
+                let topic = match &route.proactive {
+                    ProactiveRoute::Disabled => {
+                        return tool_error(
+                            invoke,
+                            "unknown or unauthorized Zulip destination alias".to_owned(),
+                        );
+                    }
+                    ProactiveRoute::AgentChosenTopic => {
+                        let Some(topic) = requested_topic.as_deref() else {
+                            return tool_error(
+                                invoke,
+                                "`topic` is required for this Zulip destination".to_owned(),
+                            );
+                        };
+                        if let Err(error) = validate_agent_topic(topic) {
+                            return tool_error(invoke, error);
+                        }
+                        topic
+                    }
+                    ProactiveRoute::ExactTopic(topic) => {
+                        if requested_topic.is_some() {
+                            return tool_error(
+                                invoke,
+                                "`topic` is allowed only for destinations with \
+                                 `agent_chosen_topic` authority"
+                                    .to_owned(),
+                            );
+                        }
+                        topic
+                    }
                 };
-                stream_conversation(&cfg, route, &topic)
+                stream_conversation(&cfg, route, topic)
             };
+            if reply_to.is_some() && requested_topic.is_some() {
+                return tool_error(
+                    invoke,
+                    "`topic` cannot be used with a Zulip reply reference".to_owned(),
+                );
+            }
             (
                 cfg,
                 conversation.route.clone(),
@@ -1348,6 +1391,17 @@ fn stream_conversation(cfg: &RuntimeConfig, route: &StreamRoute, topic: &str) ->
     }
 }
 
+/// Validate an agent-selected topic, including Zulip's canonical empty topic.
+fn validate_agent_topic(value: &str) -> Result<(), String> {
+    let valid = value.is_empty()
+        || (!value.trim().is_empty()
+            && value.len() < 257
+            && !value.chars().any(tau_proto::requires_visible_escape));
+    valid.then_some(()).ok_or_else(|| {
+        "zulip agent-chosen topics must be empty or visible and at most 256 bytes".to_owned()
+    })
+}
+
 fn normalize_mention(text: &str, mentioned: bool, bot_full_name: Option<&str>) -> String {
     if !mentioned {
         return text.to_owned();
@@ -1612,14 +1666,48 @@ fn conversations_spec(names: &ToolNames) -> ToolSpec {
     base_spec(
         CONVERSATIONS_TOOL_NAME,
         names.conversations.clone(),
-        "List proactive Zulip stream/topic aliases configured for this bridge.".to_owned(),
+        "List proactive Zulip aliases, including any configured stream destination \
+         that explicitly lets an agent choose its topic."
+            .to_owned(),
         serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
         CONVERSATIONS_TOOL_TAG,
         vec![example("discover", CborValue::Map(vec![]))],
     )
 }
 fn send_spec(names: &ToolNames) -> ToolSpec {
-    base_spec(SEND_TOOL_NAME, names.send.clone(), "Send Zulip Markdown using either a Tau-issued source reply reference or configured destination alias.".to_owned(), serde_json::json!({"type":"object","properties":{"message":{"type":"string"},"reply_to":{"type":"string"},"destination":{"type":"string"}},"required":["message"],"additionalProperties":false}), SEND_TOOL_TAG, vec![example("reply", CborValue::Map(vec![(CborValue::Text("message".to_owned()), CborValue::Text("Thanks".to_owned())),(CborValue::Text("reply_to".to_owned()), CborValue::Text("zulip-message:…".to_owned()))]))])
+    base_spec(
+        SEND_TOOL_NAME,
+        names.send.clone(),
+        "Send Zulip Markdown using a Tau-issued source reply reference or configured \
+         destination alias. Supply `topic` only with a discovered destination marked \
+         `agent_chosen_topic`; `topic: \"\"` sends to Zulip general chat."
+            .to_owned(),
+        serde_json::json!({
+            "type":"object",
+            "properties":{
+                "message":{"type":"string"},
+                "reply_to":{"type":"string"},
+                "destination":{"type":"string"},
+                "topic":{"type":"string"}
+            },
+            "required":["message"],
+            "additionalProperties":false
+        }),
+        SEND_TOOL_TAG,
+        vec![example(
+            "reply",
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("message".to_owned()),
+                    CborValue::Text("Thanks".to_owned()),
+                ),
+                (
+                    CborValue::Text("reply_to".to_owned()),
+                    CborValue::Text("zulip-message:…".to_owned()),
+                ),
+            ]),
+        )],
+    )
 }
 fn react_spec(names: &ToolNames) -> ToolSpec {
     base_spec(
@@ -1691,13 +1779,12 @@ fn string_field(value: &CborValue, field: &str) -> Result<String, String> {
         _ => Err(format!("`{field}` must be a string")),
     })
 }
-fn optional_string_field(value: &CborValue, field: &str) -> Option<String> {
-    field_value(value, field)
-        .ok()
-        .and_then(|value| match value {
-            CborValue::Text(value) => Some(value.clone()),
-            _ => None,
-        })
+fn optional_string_field(value: &CborValue, field: &str) -> Result<Option<String>, String> {
+    match field_value(value, field) {
+        Ok(CborValue::Text(value)) => Ok(Some(value.clone())),
+        Ok(_) => Err(format!("`{field}` must be a string")),
+        Err(_) => Ok(None),
+    }
 }
 fn field_value<'a>(value: &'a CborValue, field: &str) -> Result<&'a CborValue, String> {
     let CborValue::Map(entries) = value else {

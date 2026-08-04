@@ -237,6 +237,10 @@ impl ZulipClient for HttpZulipClient {
                 ("fetch_event_types".to_owned(), "[\"realm\"]".to_owned()),
                 ("all_public_streams".to_owned(), "false".to_owned()),
                 ("apply_markdown".to_owned(), "false".to_owned()),
+                (
+                    "client_capabilities".to_owned(),
+                    r#"{"empty_topic_name":true}"#.to_owned(),
+                ),
             ],
         )?;
         let queue_id = value

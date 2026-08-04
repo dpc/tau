@@ -53,6 +53,10 @@ pub(crate) struct ConversationConfig {
     /// Whether agents may proactively send through this alias.
     #[serde(default)]
     pub(crate) proactive_send: bool,
+    /// Whether this destination lets an agent choose a topic in its fixed
+    /// stream.
+    #[serde(default)]
+    pub(crate) agent_chosen_topic: bool,
     /// Optional trusted operator description returned by discovery.
     pub(crate) description: Option<String>,
 }
@@ -86,10 +90,34 @@ pub(crate) struct StreamRoute {
     pub(crate) topic: Option<String>,
     /// Optional receive authority.
     pub(crate) receive: Option<ReceiveMode>,
-    /// Proactive-send authority.
-    pub(crate) proactive_send: bool,
+    /// Proactive destination authority derived from the operator configuration.
+    pub(crate) proactive: ProactiveRoute,
     /// Trusted bounded description.
     pub(crate) description: Option<String>,
+}
+
+/// Validated proactive topic authority for one configured stream destination.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProactiveRoute {
+    /// This route cannot send proactively.
+    Disabled,
+    /// This destination sends only to its configured exact topic.
+    ExactTopic(String),
+    /// This destination permits an agent-selected topic in its configured
+    /// stream.
+    AgentChosenTopic,
+}
+
+impl ProactiveRoute {
+    /// Return whether the route may be selected for proactive sends.
+    pub(crate) fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Return whether the route explicitly grants agent-chosen topic authority.
+    pub(crate) fn allows_agent_chosen_topic(&self) -> bool {
+        matches!(self, Self::AgentChosenTopic)
+    }
 }
 
 /// Validated runtime configuration including resolved secrets.
@@ -169,8 +197,18 @@ impl ExtConfig {
                     "each Zulip conversation needs receive or proactive_send authority".to_owned(),
                 );
             }
-            if route.proactive_send && route.topic.is_none() {
-                return Err("proactive Zulip stream routes require an exact `topic`".to_owned());
+            if route.agent_chosen_topic && !route.proactive_send {
+                return Err("zulip `agent_chosen_topic` requires `proactive_send: true`".to_owned());
+            }
+            if route.agent_chosen_topic && route.topic.is_some() {
+                return Err(
+                    "zulip `agent_chosen_topic` routes must omit the configured `topic`".to_owned(),
+                );
+            }
+            if route.proactive_send && route.topic.is_none() && !route.agent_chosen_topic {
+                return Err("proactive Zulip stream routes require an exact `topic` or \
+                     `agent_chosen_topic: true`"
+                    .to_owned());
             }
             if !route_aliases.insert(route.alias.clone())
                 || !native_routes.insert((route.stream_id, route.topic.clone()))
@@ -180,12 +218,24 @@ impl ExtConfig {
                         .to_owned(),
                 );
             }
+            let proactive = if route.agent_chosen_topic {
+                ProactiveRoute::AgentChosenTopic
+            } else if route.proactive_send {
+                ProactiveRoute::ExactTopic(
+                    route
+                        .topic
+                        .clone()
+                        .expect("validated proactive exact topic"),
+                )
+            } else {
+                ProactiveRoute::Disabled
+            };
             routes.push(StreamRoute {
                 alias: route.alias,
                 stream_id: route.stream_id,
                 topic: route.topic,
                 receive: route.receive,
-                proactive_send: route.proactive_send,
+                proactive,
                 description: route.description,
             });
         }

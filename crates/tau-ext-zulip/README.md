@@ -33,10 +33,15 @@ extensions:
         - alias: engineering
           stream_id: 8
           receive: all_messages
+        - alias: announcements
+          stream_id: 9
+          proactive_send: true
+          agent_chosen_topic: true
+          description: Choose a topic, including general chat
       max_message_bytes: 16384
 ```
 
-The sender allowlist is mandatory and uses stable numeric Zulip user IDs. Aliases are presentation only. A stream route covers one exact `stream_id` and either one exact topic or all topics. `mentions_only` checks Zulip's `mentioned` flag; `all_messages` is explicit operator authority. Proactive stream sends require an exact configured topic. Direct messages derive their conversation from the sorted participant IDs and remain source-reply-only.
+The sender allowlist is mandatory and uses stable numeric Zulip user IDs. Aliases are presentation only. A stream route covers one exact `stream_id` and either one exact topic or all topics. `mentions_only` checks Zulip's `mentioned` flag; `all_messages` is explicit operator authority. Proactive stream sends require an exact configured topic unless the operator explicitly sets `agent_chosen_topic: true` and omits `topic`. A topicless agent-chosen route may also receive all topics in that stream, but cannot overlap another receive route; a send-only agent-chosen route may coexist with an exact-topic receive route. Direct messages derive their conversation from the sorted participant IDs and remain source-reply-only.
 Every non-bot group-DM participant must be allowlisted. Subscribe the bot to
 each configured stream; the queue does not request all-public-stream access.
 Keep `zulip_identity_key` stable across API-key rotation and restart. It keys
@@ -48,20 +53,21 @@ Route aliases match `^[a-z][a-z0-9_-]{0,63}$`. Unknown configuration and tool fi
 
 ## Routing and tools
 
-Call `zulip_register {"enabled":true}` before receiving, discovering, sending, or reacting. Registration creates a live event queue before returning success. `zulip_conversations {}` returns only proactive aliases, kinds, topics, and trusted operator descriptions; it never returns stream IDs, participant IDs, queue IDs, credentials, or runtime authority.
+Call `zulip_register {"enabled":true}` before receiving, discovering, sending, or reacting. Registration creates a live event queue before returning success. `zulip_conversations {}` returns only proactive aliases, kinds, configured topics, explicit `agent_chosen_topic` authority, and trusted operator descriptions; it never returns stream IDs, participant IDs, queue IDs, credentials, or runtime authority.
 
 `zulip_send` requires exactly one selector:
 
 ```json
 {"message":"On it.","reply_to":"zulip-message:<opaque-digest>"}
 {"message":"Deployment complete.","destination":"ops"}
+{"message":"Hello general chat.","destination":"announcements","topic":""}
 ```
 
-A reply selector resolves only in bounded extension-local state and returns to the exact source DM participants or stream/topic. A destination resolves only a current `proactive_send` alias. Successful sends emit `message.sent_reported` before the tool result and return an opaque `message_ref`; native Zulip IDs never become model authority.
+A reply selector resolves only in bounded extension-local state and returns to the exact source DM participants or stream/topic. A destination resolves only a current `proactive_send` alias. By default it has one configured exact topic and rejects a caller `topic`. An operator may instead set `agent_chosen_topic: true` on a proactive route that omits `topic`; only that discovered destination accepts a caller topic, while retaining its configured private stream ID. The empty string (`"topic":""`) is Zulip's canonical general-chat topic. Replies and exact-topic aliases always reject caller topics. Successful sends emit `message.sent_reported` before the tool result and return an opaque `message_ref`; native Zulip IDs never become model authority.
 
 `zulip_react` accepts a same-agent, live Tau-issued `message_ref`, a bounded Zulip emoji name, and `add` or `remove`. It never accepts a numeric message ID or route. Inbound edits, deletes, and reactions become immutable `message.*_reported` occurrences referencing a locally owned base message. Delete removes local reply/reaction authority.
 
-Messages use Zulip Markdown with queue registration requesting `apply_markdown=false`; rendered HTML is never submitted to the model. For an admitted mentioned stream message, the bridge removes at most one complete leading `@**Bot Name**` token. Other text remains untrusted external content.
+Messages use Zulip Markdown with queue registration requesting `apply_markdown=false` and the `empty_topic_name` client capability; rendered HTML is never submitted to the model, and empty general-chat topics retain their stable canonical form. For an admitted mentioned stream message, the bridge removes at most one complete leading `@**Bot Name**` token. Other text remains untrusted external content.
 
 ## Delivery and reconnect behavior
 
