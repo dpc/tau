@@ -65,9 +65,7 @@ title. Initial snapshots do not activate the watcher. Later status transitions
 are durable typed, isolated notifications. Prompt presentation escapes the title
 as untrusted visible metadata and uses the generic shape
 `[tau-internal]: Watched agent <agent-id> status: <state> on <title>` without
-inferring start/update sequencing. The former content-free `WatchTurnState` schema
-remains accepted only for compatibility and replay; the harness no longer
-produces lifecycle notifications.
+inferring start/update sequencing.
 
 The default `status` tool remains subject to each effective prompt's ordinary
 tool policy. Each dispatched visible-user or external-message activation and

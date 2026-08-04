@@ -125,7 +125,6 @@ fn semantic_items_share_global_journal_timing_and_order() {
             sender_session_id: None,
             recipient_id: AgentId::parse("agent-b").expect("agent"),
             kind: AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,

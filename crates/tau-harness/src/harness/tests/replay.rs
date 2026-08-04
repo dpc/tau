@@ -1003,7 +1003,6 @@ fn received_agent_message_replay_restores_context_without_wake() {
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
                 kind: tau_proto::AgentMessageKind::Message,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,

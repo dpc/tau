@@ -351,12 +351,6 @@ pub(crate) struct EventRenderer {
     agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection,
     /// Last exact dispatched model per browsable agent.
     agent_models: HashMap<String, tau_proto::ModelId>,
-    /// Latest harness-authored agent-turn state keyed by `(watcher, watched)`.
-    ///
-    /// Once present, this outer lifecycle is authoritative over provider-prompt
-    /// activity across model rounds and intervening tool rounds.
-    watched_agent_turn_states:
-        HashMap<String, HashMap<String, tau_proto::AgentWatchTurnStateNotification>>,
     /// Latest self-reported work status keyed by watched agent id.
     watched_agent_work_statuses: HashMap<String, tau_proto::AgentWatchWorkStatusNotification>,
     /// In-flight `agent_prompt_id`s keyed by the agent currently producing a
@@ -1676,7 +1670,6 @@ impl EventRenderer {
             agent_stats: HashMap::new(),
             agent_estimated_api_costs: path_crate_estimated_cost::AgentCostProjection::default(),
             agent_models: HashMap::new(),
-            watched_agent_turn_states: HashMap::new(),
             watched_agent_work_statuses: HashMap::new(),
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
@@ -2047,30 +2040,6 @@ impl EventRenderer {
             return;
         }
         let watcher_id = updated.watcher_id.to_string();
-        let next_watched: HashSet<_> = updated
-            .watched_agent_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let previous_watched: HashSet<_> = self
-            .watched_agents
-            .get(&watcher_id)
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        if let Some(states) = self.watched_agent_turn_states.get_mut(&watcher_id) {
-            states.retain(|state_watched, _| {
-                next_watched.contains(state_watched)
-                    && (matches!(
-                        updated.cause,
-                        tau_proto::AgentWatchUpdateCause::SessionSnapshot
-                    ) || previous_watched.contains(state_watched.as_str()))
-            });
-            if states.is_empty() {
-                self.watched_agent_turn_states.remove(&watcher_id);
-            }
-        }
         if let Some(previous) = self.watched_agents.get(&watcher_id) {
             for watched_agent_id in previous {
                 if let Some(watchers) = self.agent_watchers.get_mut(watched_agent_id) {
@@ -2202,27 +2171,19 @@ impl EventRenderer {
             .is_some_and(|prompts| !prompts.is_empty())
     }
 
-    /// Returns the authoritative agent-turn state for one directed watch.
+    /// Returns the current runtime state for one watched agent.
     ///
     /// Prompt activity is retained as a compatibility/catch-up fallback until
     /// the first complete runtime snapshot for the watched agent is observed.
-    fn watched_agent_is_running(&self, watcher_id: &str, watched_agent_id: &str) -> bool {
-        self.watched_agent_turn_states
-            .get(watcher_id)
-            .and_then(|states| states.get(watched_agent_id))
-            .map_or_else(
-                || {
-                    self.agent_stats.get(watched_agent_id).map_or_else(
-                        || self.agent_has_active_prompt(watched_agent_id),
-                        |stats| stats.runtime_state == tau_proto::AgentRuntimeState::Running,
-                    )
-                },
-                |state| state.state == tau_proto::AgentRuntimeState::Running,
-            )
+    fn watched_agent_is_running(&self, watched_agent_id: &str) -> bool {
+        self.agent_stats.get(watched_agent_id).map_or_else(
+            || self.agent_has_active_prompt(watched_agent_id),
+            |stats| stats.runtime_state == tau_proto::AgentRuntimeState::Running,
+        )
     }
 
     /// Derives exact recursive watch activity from current live topology and
-    /// edge-authoritative direct lifecycle facts.
+    /// current runtime state.
     fn watch_activity_projection(&self) -> WatchActivityProjection {
         let direct_edges = self
             .watched_agents
@@ -2230,47 +2191,11 @@ impl EventRenderer {
             .flat_map(|(watcher, watched)| {
                 watched
                     .iter()
-                    .filter(|target| self.watched_agent_is_running(watcher, target))
+                    .filter(|target| self.watched_agent_is_running(target))
                     .map(|target| (watcher.clone(), target.clone()))
             })
             .collect();
         WatchActivityProjection::new(&self.watched_agents, &self.agent_watchers, direct_edges)
-    }
-
-    /// Records a structured outer agent-turn snapshot or edge for a watch.
-    fn handle_watched_agent_turn_state(
-        &mut self,
-        message: &tau_proto::AgentMessageReceived,
-        state: &tau_proto::AgentWatchTurnStateNotification,
-    ) {
-        if self
-            .current_session_id
-            .as_ref()
-            .is_some_and(|session_id| session_id != state.session_id.as_str())
-        {
-            return;
-        }
-        let watcher_id = message.recipient_id.as_str();
-        let watched_agent_id = message.sender_id.as_str();
-        let stale = self
-            .watched_agent_turn_states
-            .get(watcher_id)
-            .and_then(|states| states.get(watched_agent_id))
-            .is_some_and(|current| {
-                current.subscription_id == state.subscription_id
-                    && (state.turn_generation < current.turn_generation
-                        || (state.turn_generation == current.turn_generation
-                            && current.state == tau_proto::AgentRuntimeState::Idle
-                            && state.state == tau_proto::AgentRuntimeState::Running))
-            });
-        if !stale {
-            self.watched_agent_turn_states
-                .entry(watcher_id.to_owned())
-                .or_default()
-                .insert(watched_agent_id.to_owned(), state.clone());
-            self.render_model_status_if_present();
-            self.refresh_watched_agent_blocks();
-        }
     }
 
     /// Records a current-session self-reported work-status snapshot for a
@@ -2355,12 +2280,6 @@ impl EventRenderer {
         }
         self.agent_watchers
             .retain(|_, watchers| !watchers.is_empty());
-        self.watched_agent_turn_states.remove(agent_id);
-        for states in self.watched_agent_turn_states.values_mut() {
-            states.remove(agent_id);
-        }
-        self.watched_agent_turn_states
-            .retain(|_, states| !states.is_empty());
         self.watched_agent_work_statuses.remove(agent_id);
         self.render_model_status_if_present();
         self.refresh_watched_agent_blocks();
@@ -3298,7 +3217,6 @@ impl EventRenderer {
         self.agent_watchers.clear();
         self.agent_stats.clear();
         self.agent_estimated_api_costs.clear();
-        self.watched_agent_turn_states.clear();
         self.watched_agent_work_statuses.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
@@ -4755,9 +4673,6 @@ impl EventRenderer {
             Event::AgentMessageReceived(message) => {
                 self.remember_agent(message.sender_id.to_string());
                 self.mark_agent_live(message.recipient_id.to_string());
-                if let Some(state) = &message.watch_turn_state {
-                    self.handle_watched_agent_turn_state(message, state);
-                }
                 if let Some(status) = &message.watch_work_status {
                     self.handle_watched_agent_work_status(message, status);
                 }
@@ -5109,15 +5024,6 @@ impl EventRenderer {
                 summary,
             );
         }
-        if let Some(summary) =
-            self.watch_turn_state_summary_with_local_names(event, use_local_names)
-        {
-            return self.marked_plain_block(
-                tau_themes::names::SYSTEM_INFO,
-                crate::transcript_markers::STATUS_UPDATE,
-                summary,
-            );
-        }
         match Self::message_render_mode(self.show_messages, event) {
             MessageRenderMode::Hidden => Self::empty_block(),
             MessageRenderMode::Summary => {
@@ -5310,39 +5216,6 @@ impl EventRenderer {
             .expect("formatted endpoint starts with its routing identity");
         parts.push((identity, true));
         parts.push((context.to_owned(), false));
-    }
-
-    /// Render structured watch lifecycle state as a compact status rather than
-    /// attributing the harness-authored event as a message from the watched
-    /// agent.
-    #[cfg(test)]
-    fn watch_turn_state_summary(&self, event: &Event) -> Option<String> {
-        self.watch_turn_state_summary_with_local_names(event, true)
-    }
-
-    fn watch_turn_state_summary_with_local_names(
-        &self,
-        event: &Event,
-        use_local_names: bool,
-    ) -> Option<String> {
-        let Event::AgentMessageReceived(message) = event else {
-            return None;
-        };
-        let state = message.watch_turn_state.as_ref()?;
-        let watched = self.agent_message_received_sender_label(message, use_local_names);
-        Some(if state.initial {
-            let state_label = match state.state {
-                tau_proto::AgentRuntimeState::Running => "running",
-                tau_proto::AgentRuntimeState::Idle => "idle",
-            };
-            format!("Watching {watched} · {state_label}")
-        } else {
-            let transition = match state.state {
-                tau_proto::AgentRuntimeState::Running => "turn started",
-                tau_proto::AgentRuntimeState::Idle => "turn stopped",
-            };
-            format!("{watched} · {transition}")
-        })
     }
 
     /// Renders a structured watched-agent work report as purpose-built content,

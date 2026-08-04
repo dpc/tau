@@ -270,7 +270,6 @@ fn public_compact_exports_project_persisted_explicit_observations() {
             sender_session_id: None,
             recipient_id: agent_id.clone(),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,

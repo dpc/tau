@@ -8004,7 +8004,6 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
             sender_session_id: None,
             recipient_id: durable_agent_id.clone(),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,

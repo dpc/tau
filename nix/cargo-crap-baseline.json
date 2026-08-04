@@ -13467,15 +13467,6 @@
       "crate": "tau-provider-chat-completions"
     },
     {
-      "file": "/build/source/crates/tau-harness/src/harness/subagents_tool.rs",
-      "function": "Harness::notify_agent_watcher_turn_state",
-      "line": 797,
-      "cyclomatic": 7.0,
-      "coverage": 97.91666666666666,
-      "crap": 7.000443070023148,
-      "crate": "tau-harness"
-    },
-    {
       "file": "/build/source/crates/tau-ext-rhai/src/lib.rs",
       "function": "shell_spawn",
       "line": 932,
@@ -13560,15 +13551,6 @@
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::learn_provider_tool_metadata",
       "line": 4157,
-      "cyclomatic": 7.0,
-      "coverage": 100.0,
-      "crap": 7.0,
-      "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
-      "function": "EventRenderer::watch_turn_state_summary_with_local_names",
-      "line": 4694,
       "cyclomatic": 7.0,
       "coverage": 100.0,
       "crap": 7.0,
@@ -23376,15 +23358,6 @@
       "crate": "tau-provider-codex"
     },
     {
-      "file": "/build/source/crates/tau-harness/src/prompt.rs",
-      "function": "watch_turn_transition_text",
-      "line": 659,
-      "cyclomatic": 4.0,
-      "coverage": 92.85714285714286,
-      "crap": 4.005830903790088,
-      "crate": "tau-harness"
-    },
-    {
       "file": "/build/source/crates/tau-ext-shell/src/tools/edit.rs",
       "function": "edit_display_args",
       "line": 660,
@@ -29328,15 +29301,6 @@
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::set_current_agent_id",
       "line": 1687,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
-      "function": "EventRenderer::handle_watched_agent_turn_state",
-      "line": 1878,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -37824,15 +37788,6 @@
       "file": "/build/source/crates/tau-cli/src/event_renderer/tests.rs",
       "function": "renderer_for_agent_id_tests",
       "line": 15,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-cli/src/event_renderer/tests.rs",
-      "function": "watch_turn_state_event",
-      "line": 30,
       "cyclomatic": 1.0,
       "coverage": null,
       "crap": 2.0,
@@ -55795,15 +55750,6 @@
     },
     {
       "file": "/build/source/crates/tau-e2e-tests/src/fake_provider/tests.rs",
-      "function": "watch_turn",
-      "line": 1315,
-      "cyclomatic": 1.0,
-      "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-e2e-tests"
-    },
-    {
-      "file": "/build/source/crates/tau-e2e-tests/src/fake_provider/tests.rs",
       "function": "prompt_for",
       "line": 1339,
       "cyclomatic": 1.0,
@@ -59253,15 +59199,6 @@
       "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
       "function": "EventRenderer::push_agent_message_endpoint",
       "line": 4671,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-cli"
-    },
-    {
-      "file": "/build/source/crates/tau-cli/src/event_renderer.rs",
-      "function": "EventRenderer::watch_turn_state_summary",
-      "line": 4690,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,

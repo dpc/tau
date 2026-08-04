@@ -361,86 +361,8 @@ fn status_element_priorities_cover_every_element() {
     }
 }
 
-fn watch_turn_state_event(
-    message_id: &str,
-    state: tau_proto::AgentRuntimeState,
-) -> tau_proto::Event {
-    tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse(message_id)
-            .expect("test identifier must satisfy its grammar"),
-        sender_id: agent_id("worker"),
-        sender_session_id: None,
-        recipient_id: agent_id("manager"),
-        kind: tau_proto::AgentMessageKind::WatchTurnState,
-        watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-            session_id: "s1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            subscription_id: "watch-1".to_owned(),
-            state,
-            initial: false,
-            turn_generation: 1,
-        }),
-        watch_provider_status: None,
-        watch_work_status: None,
-        watch_long_wait: None,
-        message: "non-authoritative compatibility text".to_owned(),
-    })
-}
-
-/// Structured agent-turn state must drive both directed watch rendering and
-/// the aggregate side-agent count after inner prompt activity has ended.
-#[test]
-fn watched_agent_turn_state_is_authoritative_for_running_counts() {
-    let mut renderer = renderer_for_agent_id_tests();
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            session_id: "s1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            watcher_id: agent_id("manager"),
-            watched_agent_ids: vec![agent_id("worker")],
-            changed_agent_id: Some(agent_id("worker")),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-        },
-    ));
-    renderer.handle(&watch_turn_state_event(
-        "running",
-        tau_proto::AgentRuntimeState::Running,
-    ));
-
-    assert!(renderer.watched_agent_is_running("manager", "worker"));
-    assert_eq!(renderer.active_side_agent_count(), 1);
-
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            session_id: "s1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            watcher_id: agent_id("reviewer"),
-            watched_agent_ids: vec![agent_id("worker")],
-            changed_agent_id: Some(agent_id("worker")),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-        },
-    ));
-    renderer.handle(&watch_turn_state_event(
-        "manager-idle",
-        tau_proto::AgentRuntimeState::Idle,
-    ));
-    renderer
-        .active_agent_prompts
-        .entry("worker".to_owned())
-        .or_default()
-        .insert("inner-round".to_owned());
-    assert_eq!(
-        renderer.active_side_agent_count(),
-        1,
-        "the reviewer edge still uses prompt fallback after the manager edge is idle"
-    );
-}
-
 /// Generic complete stats keep a watched row running across an inner
-/// continuation when no legacy watch-turn record is available.
+/// continuation until the outer turn becomes idle.
 #[test]
 fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
     let mut renderer = renderer_for_agent_id_tests();
@@ -471,42 +393,10 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
     };
 
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
-    assert!(renderer.watched_agent_is_running("manager", "worker"));
+    assert!(renderer.watched_agent_is_running("worker"));
 
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
-    assert!(!renderer.watched_agent_is_running("manager", "worker"));
-}
-
-/// A direct status row must retain its terminal block identity while turn state
-/// starts and stops, preventing visible remove-and-reinsert flicker.
-#[test]
-fn watched_agent_turn_state_reuses_status_row_block() {
-    let mut renderer = renderer_for_agent_id_tests();
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            session_id: "s1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            watcher_id: agent_id("manager"),
-            watched_agent_ids: vec![agent_id("worker")],
-            changed_agent_id: Some(agent_id("worker")),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-        },
-    ));
-    renderer.current_agent_id = Some("manager".to_owned());
-    renderer.refresh_watched_agent_blocks();
-    let row_id = renderer.watched_agent_blocks["worker"];
-
-    renderer.handle(&watch_turn_state_event(
-        "running",
-        tau_proto::AgentRuntimeState::Running,
-    ));
-    assert_eq!(renderer.watched_agent_blocks["worker"], row_id);
-    renderer.handle(&watch_turn_state_event(
-        "idle",
-        tau_proto::AgentRuntimeState::Idle,
-    ));
-    assert_eq!(renderer.watched_agent_blocks["worker"], row_id);
+    assert!(!renderer.watched_agent_is_running("worker"));
 }
 
 /// The global side-agent count must include intermediate watched ancestors in a
@@ -533,175 +423,6 @@ fn watched_agent_count_projects_recursive_activity() {
         1,
         "the existing selected-agent exclusion remains in force"
     );
-}
-
-/// An idle edge is terminal for its generation, and removing topology or
-/// resetting the session must retire the corresponding cached lifecycle.
-#[test]
-fn watched_agent_turn_state_rejects_stale_start_and_clears_with_scope() {
-    let mut renderer = renderer_for_agent_id_tests();
-    let watch_update = tau_proto::AgentWatchesUpdated {
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        watcher_id: agent_id("manager"),
-        watched_agent_ids: vec![agent_id("worker")],
-        changed_agent_id: Some(agent_id("worker")),
-        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    };
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(watch_update.clone()));
-    renderer.handle(&watch_turn_state_event(
-        "idle",
-        tau_proto::AgentRuntimeState::Idle,
-    ));
-    renderer.handle(&watch_turn_state_event(
-        "late-running",
-        tau_proto::AgentRuntimeState::Running,
-    ));
-    assert!(!renderer.watched_agent_is_running("manager", "worker"));
-
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            watched_agent_ids: Vec::new(),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
-            ..watch_update.clone()
-        },
-    ));
-    assert!(renderer.watched_agent_turn_states.is_empty());
-
-    renderer
-        .active_agent_prompts
-        .entry("worker".to_owned())
-        .or_default()
-        .insert("inner-round".to_owned());
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(watch_update));
-    assert_eq!(
-        renderer.active_side_agent_count(),
-        1,
-        "re-enabled edges use prompt fallback before their fresh snapshot"
-    );
-    renderer.handle(&watch_turn_state_event(
-        "running-again",
-        tau_proto::AgentRuntimeState::Running,
-    ));
-    renderer.clear_for_new_session();
-    assert!(renderer.watched_agent_turn_states.is_empty());
-    assert_eq!(renderer.active_side_agent_count(), 0);
-}
-
-/// Empty topology snapshots, session changes, and endpoint unload are
-/// authoritative scope boundaries even when no matching lifecycle edge arrives.
-#[test]
-fn watched_agent_turn_state_does_not_survive_scope_boundaries() {
-    let mut renderer = renderer_for_agent_id_tests();
-    let tau_proto::Event::AgentMessageReceived(orphan) =
-        watch_turn_state_event("orphan", tau_proto::AgentRuntimeState::Running)
-    else {
-        unreachable!()
-    };
-    renderer
-        .watched_agent_turn_states
-        .entry("manager".to_owned())
-        .or_default()
-        .insert(
-            "worker".to_owned(),
-            orphan.watch_turn_state.expect("watch state"),
-        );
-    let live_enable = tau_proto::AgentWatchesUpdated {
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        watcher_id: agent_id("manager"),
-        watched_agent_ids: vec![agent_id("worker")],
-        changed_agent_id: Some(agent_id("worker")),
-        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    };
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(live_enable.clone()));
-    assert!(
-        renderer.watched_agent_turn_states.is_empty(),
-        "a fresh live edge must not expose replayed orphan state"
-    );
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            watched_agent_ids: Vec::new(),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
-            ..live_enable.clone()
-        },
-    ));
-    assert!(renderer.watched_agent_turn_states.is_empty());
-
-    let tau_proto::Event::AgentMessageReceived(replay) =
-        watch_turn_state_event("replay", tau_proto::AgentRuntimeState::Running)
-    else {
-        unreachable!()
-    };
-    renderer
-        .watched_agent_turn_states
-        .entry("manager".to_owned())
-        .or_default()
-        .insert(
-            "worker".to_owned(),
-            replay.watch_turn_state.expect("watch state"),
-        );
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            cause: tau_proto::AgentWatchUpdateCause::SessionSnapshot,
-            ..live_enable
-        },
-    ));
-    assert_eq!(
-        renderer.active_side_agent_count(),
-        1,
-        "a replay session snapshot preserves its preceding folded lifecycle"
-    );
-
-    renderer.clear_for_new_session();
-    renderer.current_session_id = Some(
-        "s2".parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-    );
-    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            session_id: "s2"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            watcher_id: agent_id("manager"),
-            watched_agent_ids: vec![agent_id("worker")],
-            changed_agent_id: Some(agent_id("worker")),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-        },
-    ));
-    renderer.handle(&watch_turn_state_event(
-        "old-session",
-        tau_proto::AgentRuntimeState::Running,
-    ));
-    assert!(renderer.watched_agent_turn_states.is_empty());
-
-    let mut current_session =
-        watch_turn_state_event("current-session", tau_proto::AgentRuntimeState::Running);
-    let tau_proto::Event::AgentMessageReceived(message) = &mut current_session else {
-        unreachable!()
-    };
-    message
-        .watch_turn_state
-        .as_mut()
-        .expect("watch state")
-        .session_id = "s2"
-        .parse::<tau_proto::SessionId>()
-        .expect("known-safe SessionId must be valid");
-    renderer.handle(&current_session);
-    assert_eq!(renderer.active_side_agent_count(), 1);
-    renderer.handle(&tau_proto::Event::SessionAgentUnloaded(
-        tau_proto::SessionAgentUnloaded {
-            session_id: "s2"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            agent_id: agent_id("manager"),
-        },
-    ));
-    assert!(renderer.watched_agents.is_empty());
-    assert!(renderer.watched_agent_turn_states.is_empty());
-    assert_eq!(renderer.active_side_agent_count(), 0);
 }
 
 /// Renderer-owned auto-selection from the empty screen must retarget any
@@ -801,7 +522,6 @@ fn received_agent_message(
         }),
         recipient_id: agent_id(recipient_id),
         kind: tau_proto::AgentMessageKind::Message,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
@@ -1394,7 +1114,6 @@ fn watch_work_status_renders_all_reportable_states() {
             sender_session_id: None,
             recipient_id: agent_id("manager"),
             kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: "session-1"
@@ -1446,7 +1165,6 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
             sender_session_id: None,
             recipient_id: agent_id("manager"),
             kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: tau_proto::SessionId::parse("session-1").expect("valid session ID"),
@@ -1518,7 +1236,6 @@ fn watch_provider_and_long_wait_statuses_use_the_status_marker() {
         sender_session_id: None,
         recipient_id: agent_id("manager"),
         kind: tau_proto::AgentMessageKind::WatchProviderStatus,
-        watch_turn_state: None,
         watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
             session_id: tau_proto::SessionId::parse("session-1").expect("valid session id"),
             subscription_id: "subscription-1".to_owned(),
@@ -1540,7 +1257,6 @@ fn watch_provider_and_long_wait_statuses_use_the_status_marker() {
         sender_session_id: None,
         recipient_id: agent_id("manager"),
         kind: tau_proto::AgentMessageKind::WatchLongWait,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
@@ -1574,7 +1290,6 @@ fn watch_work_status_visibly_escapes_structural_unicode() {
         sender_session_id: None,
         recipient_id: agent_id("manager"),
         kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
             session_id: "session-1"
@@ -1628,80 +1343,6 @@ fn resumed_session_clears_agent_display_name_authority() {
     assert_eq!(
         renderer.agent_message_summary(&message),
         "Message from @agent-a to @agent-b"
-    );
-}
-
-/// Watch lifecycle records are harness-authored statuses, so the renderer must
-/// use their typed payload and never label their body as an agent message. See
-/// `SPEC-tau-cli-agent-message-labels`.
-#[test]
-fn watch_turn_state_renders_as_compact_typed_status() {
-    let mut event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("watch-state-1")
-            .expect("test identifier must satisfy its grammar"),
-        sender_id: agent_id("researcher"),
-        sender_session_id: None,
-        recipient_id: agent_id("manager"),
-        kind: tau_proto::AgentMessageKind::WatchTurnState,
-        watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-            session_id: "session-1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            subscription_id: "subscription-1".to_owned(),
-            state: tau_proto::AgentRuntimeState::Running,
-            initial: false,
-            turn_generation: 1,
-        }),
-        watch_provider_status: None,
-        watch_work_status: None,
-        watch_long_wait: None,
-        message: "[tau-internal]: stale presentation".to_owned(),
-    });
-
-    assert_eq!(
-        renderer_for_agent_id_tests()
-            .watch_turn_state_summary(&event)
-            .as_deref(),
-        Some("@researcher · turn started")
-    );
-
-    let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
-        unreachable!()
-    };
-    let state = message.watch_turn_state.as_mut().expect("watch state");
-    state.state = tau_proto::AgentRuntimeState::Idle;
-    assert_eq!(
-        renderer_for_agent_id_tests()
-            .watch_turn_state_summary(&event)
-            .as_deref(),
-        Some("@researcher · turn stopped")
-    );
-
-    let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
-        unreachable!()
-    };
-    let state = message.watch_turn_state.as_mut().expect("watch state");
-    state.initial = true;
-    assert_eq!(
-        renderer_for_agent_id_tests()
-            .watch_turn_state_summary(&event)
-            .as_deref(),
-        Some("Watching @researcher · idle")
-    );
-
-    let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
-        unreachable!()
-    };
-    message
-        .watch_turn_state
-        .as_mut()
-        .expect("watch state")
-        .state = tau_proto::AgentRuntimeState::Running;
-    assert_eq!(
-        renderer_for_agent_id_tests()
-            .watch_turn_state_summary(&event)
-            .as_deref(),
-        Some("Watching @researcher · running")
     );
 }
 

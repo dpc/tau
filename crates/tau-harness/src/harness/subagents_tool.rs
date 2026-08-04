@@ -1,7 +1,6 @@
 //! Harness-owned `agent_start`, `wait`, `cancel`, and `message` tools.
 //!
-//! Watch turn-state transitions follow
-//! `SPEC-agent-watch`.
+//! Watch provider and work-status notifications follow `SPEC-agent-watch`.
 //! Cross-session delivery and sender authentication follow
 //! `SPEC-tau-harness-peer-routing`.
 
@@ -857,7 +856,6 @@ impl Harness {
             sender_session_id: None,
             recipient_id: recipient_id.clone(),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1252,7 +1250,6 @@ impl Harness {
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(watcher_id),
                 kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                     session_id: self.current_session_id.clone(),
@@ -1289,7 +1286,6 @@ impl Harness {
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(watcher_id),
                 kind: tau_proto::AgentMessageKind::WatchLongWait,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
@@ -1433,7 +1429,6 @@ impl Harness {
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(watcher_id),
                 kind: tau_proto::AgentMessageKind::WatchProviderStatus,
-                watch_turn_state: None,
                 watch_provider_status: Some(status),
                 watch_work_status: None,
                 watch_long_wait: None,
@@ -1494,7 +1489,6 @@ impl Harness {
                     sender_session_id: None,
                     recipient_id: agent_id,
                     kind,
-                    watch_turn_state: None,
                     watch_provider_status: None,
                     watch_work_status: None,
                     watch_long_wait: None,
@@ -1740,7 +1734,6 @@ impl Harness {
             sender_session_id: Some(request.sender_session_id),
             recipient_id: recipient_id.clone(),
             kind: request.kind,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1812,7 +1805,6 @@ impl Harness {
                 sender_session_id: Some(request.sender_session_id),
                 recipient_id: recipient_id.clone(),
                 kind: request.kind,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,

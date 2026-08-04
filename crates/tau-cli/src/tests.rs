@@ -6196,7 +6196,6 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
             sender_session_id: None,
             recipient_id: agent_id("recipient-agent"),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -6253,42 +6252,16 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
     assert!(vt.screen_contains(96, "overview semantic body"));
 }
 
-/// Structured watch status belongs only to the watcher transcript when no agent
-/// is selected, while user-recipient messages retain current-visible broadcast
-/// routing without being copied into the overview.
+/// Structured current watch statuses remain exclusive to their watcher
+/// transcript and do not appear in the no-agent message overview.
 #[test]
-fn no_agent_overview_excludes_structured_watch_status() {
+fn no_agent_overview_excludes_structured_current_watch_status() {
     let (_term, handle, vt) = setup(100, 20);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::AgentMessageReceived(
-        tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("watch-turn")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: agent_id("watched-agent"),
-            sender_session_id: None,
-            recipient_id: agent_id("watcher-agent"),
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: test_session_id("s1"),
-                subscription_id: "sub-1".to_owned(),
-                state: tau_proto::AgentRuntimeState::Running,
-                initial: false,
-                turn_generation: 1,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: "watch turn compatibility body".to_owned(),
-        },
-    ));
-    sync(&handle);
-    assert!(!vt.screen_contains(100, "watched-agent · turn started"));
-    assert!(!vt.screen_contains(100, "watch turn compatibility body"));
-
     let provider_status_body = "watched provider is blocked";
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
@@ -6298,7 +6271,6 @@ fn no_agent_overview_excludes_structured_watch_status() {
             sender_session_id: None,
             recipient_id: agent_id("watcher-agent"),
             kind: tau_proto::AgentMessageKind::WatchProviderStatus,
-            watch_turn_state: None,
             watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
                 session_id: test_session_id("s1"),
                 subscription_id: "sub-1".to_owned(),
@@ -6314,10 +6286,6 @@ fn no_agent_overview_excludes_structured_watch_status() {
             message: provider_status_body.to_owned(),
         },
     ));
-    sync(&handle);
-    let provider_status_row = format!("▤ {provider_status_body}");
-    assert!(!vt.screen_contains(100, &provider_status_row));
-
     let long_wait_row = "▤ @watched-agent has been working for 5 minutes";
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
@@ -6327,7 +6295,6 @@ fn no_agent_overview_excludes_structured_watch_status() {
             sender_session_id: None,
             recipient_id: agent_id("watcher-agent"),
             kind: tau_proto::AgentMessageKind::WatchLongWait,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
@@ -6340,33 +6307,14 @@ fn no_agent_overview_excludes_structured_watch_status() {
         },
     ));
     sync(&handle);
+    let provider_status_row = format!("▤ {provider_status_body}");
+    assert!(!vt.screen_contains(100, &provider_status_row));
     assert!(!vt.screen_contains(100, long_wait_row));
 
     renderer.switch_agent("watcher-agent".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(100, "watched-agent · turn started"));
     assert!(vt.screen_contains(100, &provider_status_row));
     assert!(vt.screen_contains(100, long_wait_row));
-
-    renderer.handle(&agent_message(
-        "watched-agent",
-        "user",
-        "selected user broadcast",
-    ));
-    sync(&handle);
-    assert!(vt.screen_contains(100, "selected user broadcast"));
-
-    renderer.clear_selected_agent();
-    sync(&handle);
-    assert!(!vt.screen_contains(100, "selected user broadcast"));
-
-    renderer.handle(&agent_message(
-        "watched-agent",
-        "user",
-        "overview user broadcast",
-    ));
-    sync(&handle);
-    assert!(vt.screen_contains(100, "overview user broadcast"));
 }
 
 /// Cross-session labels retain and emphasize the complete session-qualified
@@ -6394,7 +6342,6 @@ fn external_agent_messages_render_session_agent_labels() {
             sender_session_id: Some(test_session_id("my_project-cafe-abc123")),
             recipient_id: agent_id("manager_11111111"),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -6424,54 +6371,6 @@ fn external_agent_messages_render_session_agent_labels() {
         .expect("remote agent id") as u16;
     assert!(vt.cell_style(row, session_suffix).2);
     assert!(vt.cell_style(row, remote_agent).2);
-}
-
-/// Watched-turn lifecycle records are harness-authored status events, not
-/// messages authored by the watched agent, and must stay compact in the UI.
-#[test]
-fn watched_turn_transition_renders_as_compact_status() {
-    let (_term, handle, vt) = setup(80, 8);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.switch_agent("manager".to_owned());
-
-    renderer.handle(&Event::AgentMessageReceived(
-        tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-watch-turn-start")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: agent_id("researcher"),
-            sender_session_id: None,
-            recipient_id: agent_id("manager"),
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: test_session_id("session-1"),
-                subscription_id: "subscription-1".to_owned(),
-                state: tau_proto::AgentRuntimeState::Running,
-                initial: false,
-                turn_generation: 1,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: "[tau-internal]: compatibility presentation".to_owned(),
-        },
-    ));
-    sync(&handle);
-
-    assert!(vt.screen_contains(80, "researcher · turn started"));
-    assert!(!vt.screen_contains(80, "Message from @researcher"));
-    assert!(!vt.screen_contains(80, "compatibility presentation"));
-
-    for setting in ["none", "all-full", "none"] {
-        renderer.apply_setting("show-messages", setting);
-        sync(&handle);
-        assert!(vt.screen_contains(80, "researcher · turn started"));
-        assert!(!vt.screen_contains(80, "Message from @researcher"));
-        assert!(!vt.screen_contains(80, "compatibility presentation"));
-    }
 }
 
 #[test]
@@ -9887,7 +9786,6 @@ fn watched_agent_stats_redraws_status_row() {
             sender_session_id: None,
             recipient_id: agent_id("parent_1"),
             kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: test_session_id("s1"),
@@ -10255,119 +10153,6 @@ fn watched_agent_response_finished_keeps_status_row() {
     );
 }
 
-/// A watched agent turn spans every model round and intervening tool round, so
-/// prompt-terminal events must not make its status row flicker.
-#[test]
-fn watched_agent_turn_state_keeps_status_row_across_model_rounds() {
-    let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.switch_agent("parent_1".to_owned());
-    renderer.handle(&Event::AgentWatchesUpdated(
-        tau_proto::AgentWatchesUpdated {
-            session_id: test_session_id("s1"),
-            watcher_id: agent_id("parent_1"),
-            watched_agent_ids: vec![agent_id("engineer_1")],
-            changed_agent_id: Some(agent_id("engineer_1")),
-            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-        },
-    ));
-    let watch_state = |message_id: &str, state| {
-        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse(message_id)
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: agent_id("engineer_1"),
-            sender_session_id: None,
-            recipient_id: agent_id("parent_1"),
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: test_session_id("s1"),
-                subscription_id: "watch-1".to_owned(),
-                state,
-                initial: false,
-                turn_generation: 1,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: "compatibility text is not UI state".to_owned(),
-        })
-    };
-    renderer.handle(&watch_state(
-        "watch-running",
-        tau_proto::AgentRuntimeState::Running,
-    ));
-    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-        model_params: Some(tau_proto::ModelParams::default()),
-        outer_turn_id: None,
-
-        session_id: test_session_id("s1"),
-        agent_id: agent_id("engineer_1"),
-        agent_prompt_id: test_agent_prompt_id("ap-engineer_1-0"),
-        model: "test/model".parse().expect("model id"),
-        operation: tau_proto::PromptOperation::Inference,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::parse("__harness__")
-                .expect("test identifier must satisfy its grammar"),
-            query_id: "delegate-1".to_owned(),
-        },
-        ctx_id: None,
-    }));
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
-        agent_id: agent_id("engineer_1"),
-        stop_reason: ProviderStopReason::ToolCalls,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::parse("__harness__")
-                .expect("test identifier must satisfy its grammar"),
-            query_id: "delegate-1".to_owned(),
-        },
-        ..finished_response("ap-engineer_1-0", Vec::new())
-    }));
-    sync(&handle);
-    assert!(
-        vt.screen_contains(100, "@engineer_1 unreported"),
-        "the outer agent turn remains running while tools are pending"
-    );
-
-    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-        agent_id: agent_id("engineer_1"),
-        originator: tau_proto::PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::parse("__harness__")
-                .expect("test identifier must satisfy its grammar"),
-            query_id: "delegate-1".to_owned(),
-        },
-        ..agent_prompt_started("ap-engineer_1-1", "s1")
-    }));
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
-        agent_id: agent_id("engineer_1"),
-        originator: tau_proto::PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::parse("__harness__")
-                .expect("test identifier must satisfy its grammar"),
-            query_id: "delegate-1".to_owned(),
-        },
-        ..finished_response("ap-engineer_1-1", Vec::new())
-    }));
-    sync(&handle);
-    assert!(
-        vt.screen_contains(100, "@engineer_1 unreported"),
-        "the provider's final model round is not the agent-turn boundary"
-    );
-
-    renderer.handle(&watch_state(
-        "watch-idle",
-        tau_proto::AgentRuntimeState::Idle,
-    ));
-    sync(&handle);
-    assert!(
-        vt.screen_contains(100, "@engineer_1 unreported"),
-        "the row remains after the harness-authored agent-turn idle edge"
-    );
-}
-
 /// A direct watched row must use the canonical task-status phase for lifetime.
 ///
 /// Missing status is unreported; working and blocked preserve the same row
@@ -10414,7 +10199,6 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             sender_session_id: None,
             recipient_id: agent_id("parent_1"),
             kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: test_session_id("s1"),

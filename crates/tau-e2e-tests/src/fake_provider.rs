@@ -125,9 +125,6 @@ struct FakeState {
     child_agents: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
     /// Count of exact watch notifications consumed by a staged action.
     watch_progress: HashMap<tau_proto::AgentId, usize>,
-    /// Subscription/generation correlation retained across staged watch
-    /// prompts.
-    watch_turn_correlations: HashMap<tau_proto::AgentId, WatchTurnCorrelation>,
     /// Admitted facts for the current two-chain watch action.
     watch_chain_progress: HashMap<tau_proto::AgentId, WatchChainProgress>,
     /// Live S6 repair-pair progress for the sole closed dummy call; `None`
@@ -149,14 +146,6 @@ enum DummyRepairPhase {
     AwaitingToolError,
     /// Both events arrived in exact order.
     Complete,
-}
-
-/// Stable correlation shared by one action's non-initial turn notifications.
-struct WatchTurnCorrelation {
-    /// Harness-minted watch subscription identity.
-    subscription_id: String,
-    /// Harness-minted watched-agent outer-turn generation.
-    turn_generation: u64,
 }
 
 /// Progress through one two-fact causal chain.
@@ -520,15 +509,10 @@ impl FakeState {
     }
 
     fn record_watch_notification(&mut self, message: &AgentMessageReceived) -> ClientResult<()> {
-        let model_visible = match message.kind {
-            tau_proto::AgentMessageKind::WatchResponse
-            | tau_proto::AgentMessageKind::WatchPrompt => true,
-            tau_proto::AgentMessageKind::WatchTurnState => message
-                .watch_turn_state
-                .as_ref()
-                .is_some_and(|state| !state.initial),
-            _ => false,
-        };
+        let model_visible = matches!(
+            message.kind,
+            tau_proto::AgentMessageKind::WatchResponse | tau_proto::AgentMessageKind::WatchPrompt
+        );
         if !model_visible {
             return Ok(());
         }
@@ -623,12 +607,7 @@ impl FakeState {
                 (expected, Some(progress))
             }
         };
-        self.validate_watch_notification_payload(
-            cursor,
-            &message.recipient_id,
-            message,
-            &expected_notification,
-        )?;
+        self.validate_watch_notification_payload(cursor, message, &expected_notification)?;
         if let Some(progress) = chain_progress {
             self.watch_chain_progress
                 .insert(message.recipient_id.clone(), progress);
@@ -643,14 +622,12 @@ impl FakeState {
     fn validate_watch_notification_payload(
         &mut self,
         cursor: usize,
-        recipient_id: &tau_proto::AgentId,
         message: &AgentMessageReceived,
         expected: &WatchNotificationV2,
     ) -> ClientResult<()> {
         match expected {
             WatchNotificationV2::Response { content }
                 if message.kind == tau_proto::AgentMessageKind::WatchResponse
-                    && message.watch_turn_state.is_none()
                     && message.watch_provider_status.is_none()
                     && &message.message == content =>
             {
@@ -658,41 +635,10 @@ impl FakeState {
             }
             WatchNotificationV2::Prompt { content }
                 if message.kind == tau_proto::AgentMessageKind::WatchPrompt
-                    && message.watch_turn_state.is_none()
                     && message.watch_provider_status.is_none()
                     && &message.message == content =>
             {
                 Ok(())
-            }
-            WatchNotificationV2::TurnState { state }
-                if message.kind == tau_proto::AgentMessageKind::WatchTurnState
-                    && message.watch_provider_status.is_none() =>
-            {
-                let Some(notification) = &message.watch_turn_state else {
-                    return Err(self.mismatch(cursor, "watch turn state lacks typed payload"));
-                };
-                if notification.initial || notification.state != *state {
-                    return Err(self.mismatch(cursor, "watch turn state payload mismatch"));
-                }
-                match self.watch_turn_correlations.get(recipient_id) {
-                    Some(correlation)
-                        if correlation.subscription_id != notification.subscription_id
-                            || correlation.turn_generation != notification.turn_generation =>
-                    {
-                        Err(self.mismatch(cursor, "watch turn correlation changed in batch"))
-                    }
-                    Some(_) => Ok(()),
-                    None => {
-                        self.watch_turn_correlations.insert(
-                            recipient_id.clone(),
-                            WatchTurnCorrelation {
-                                subscription_id: notification.subscription_id.clone(),
-                                turn_generation: notification.turn_generation,
-                            },
-                        );
-                        Ok(())
-                    }
-                }
             }
             _ => Err(self.mismatch(cursor, "watch notification typed payload mismatch")),
         }
@@ -747,7 +693,6 @@ impl FakeState {
         ))?;
         let terminal_response = if next_progress == expected.len() {
             self.watch_progress.remove(&prompt.agent_id);
-            self.watch_turn_correlations.remove(&prompt.agent_id);
             self.lane_cursors[lane_index] += 1;
             self.persist_cursors()?;
             response
@@ -796,15 +741,6 @@ impl FakeState {
                 tau_proto::AgentMessageKind::WatchResponse => Ok(WatchNotificationV2::Response {
                     content: contents.response.clone(),
                 }),
-                tau_proto::AgentMessageKind::WatchTurnState => Ok(WatchNotificationV2::TurnState {
-                    state: message
-                        .watch_turn_state
-                        .as_ref()
-                        .ok_or_else(|| {
-                            self.mismatch(cursor, "watch chain turn state lacks payload")
-                        })?
-                        .state,
-                }),
                 _ => Err(self.mismatch(cursor, "watch chain contains an invalid kind")),
             })
             .collect::<ClientResult<Vec<_>>>()?;
@@ -835,7 +771,6 @@ impl FakeState {
                 return Err(self.mismatch(cursor, "watch chain completed without both facts"));
             }
             self.watch_progress.remove(&prompt.agent_id);
-            self.watch_turn_correlations.remove(&prompt.agent_id);
             self.lane_cursors[lane_index] += 1;
             self.persist_cursors()?;
             contents.completion
@@ -877,14 +812,7 @@ impl FakeState {
                 expected.len(),
                 actual
                     .iter()
-                    .map(|message| (
-                        message.kind,
-                        message.watch_turn_state.as_ref().map(|state| (
-                            state.state,
-                            state.initial,
-                            state.turn_generation
-                        ))
-                    ))
+                    .map(|message| message.kind)
                     .collect::<Vec<_>>()
             ))?;
             return Err(self.mismatch(cursor, "watch notification batch length mismatch"));
@@ -917,18 +845,6 @@ impl FakeState {
                          <prompt>\n{body}\n</prompt>"
                     )
                 }
-                WatchNotificationV2::TurnState { state } => match state {
-                    tau_proto::AgentRuntimeState::Running => {
-                        format!(
-                            "[tau-internal]: Watched agent {child_agent_id} started an agent turn"
-                        )
-                    }
-                    tau_proto::AgentRuntimeState::Idle => {
-                        format!(
-                            "[tau-internal]: Watched agent {child_agent_id} stopped its agent turn"
-                        )
-                    }
-                },
             };
             expected_user_text.push(text);
         }

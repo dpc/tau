@@ -1,7 +1,7 @@
 //! Strict, versioned scenarios understood by the deterministic fake provider.
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{AgentRuntimeState, ProviderFailureKind, ToolCallId, ToolName};
+use tau_proto::{ProviderFailureKind, ToolCallId, ToolName};
 
 /// Fully-qualified model published by every deterministic scenario.
 pub const FAKE_MODEL_ID: &str = "fake/test";
@@ -282,11 +282,6 @@ pub enum WatchNotificationV2 {
     Prompt {
         /// Exact unescaped child prompt content.
         content: String,
-    },
-    /// The watched child changed outer-turn state.
-    TurnState {
-        /// Exact non-initial runtime state.
-        state: AgentRuntimeState,
     },
 }
 

@@ -75,10 +75,9 @@ the CLI cache.
 Current CLI watched status rows come from the current-session semantic
 `WorkStatus` snapshot for each direct target. Absent status is unreported;
 unreported, working, blocked, and unknown remain visible, and done alone
-removes the row. Legacy `TurnState`, when present, controls activity decoration:
-Running renders direct activity, while Idle retains the status row without an
-activity marker. Otherwise the target's complete generic agent-stats runtime
-state controls activity decoration. Before the first stats snapshot, active
+removes the row. The target's complete generic agent-stats runtime state controls
+activity decoration: Running renders direct activity, while Idle retains the
+status row without an activity marker. Before the first stats snapshot, active
 prompt tracking for the target is the compatibility/catch-up fallback.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
@@ -100,12 +99,7 @@ their compatibility fallback contribution.
 
 ## Lifecycle projection
 
-Harness-authored watched-turn lifecycle records are structured state, not
-watched-agent messages. The CLI renders their structured payload as a compact
-single-line status, suppresses any compatibility body, and bypasses
-`show-messages`.
-
-Harness-authored watched-agent `WorkStatus` records are likewise structured
+Harness-authored watched-agent `WorkStatus` records are structured
 state rather than ordinary messages. Working, done, and blocked reports render
 as `▤ Status update from <sender>: <phase> (<reported task>)`, suppress their
 empty compatibility body, and bypass `show-messages`.

@@ -1759,7 +1759,6 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1805,7 +1804,6 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
             ),
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1844,7 +1842,6 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
             sender_session_id: None,
             recipient_id: main,
             kind: tau_proto::AgentMessageKind::WatchResponse,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1879,83 +1876,6 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 
     let watched_items = assemble_conversation_from(&watched_tree, watched_tree.head());
     assert!(watched_items.is_empty());
-}
-
-/// A durable lifecycle transition must replay from its typed state rather than
-/// its compatibility message text, preventing attribution or wording drift.
-#[test]
-fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
-    let watcher = tau_proto::AgentId::parse("watcher").expect("agent id");
-    let watched = tau_proto::AgentId::parse("watched").expect("agent id");
-    let text = "[tau-internal]: Watched agent watched started an agent turn";
-    let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
-    tree.apply_event(&Event::AgentMessageReceived(
-        tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-watch-state")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: watched,
-            sender_session_id: None,
-            recipient_id: watcher,
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: "session-1"
-                    .parse::<tau_proto::SessionId>()
-                    .expect("known-safe SessionId must be valid"),
-                subscription_id: "watch-subscription-1".to_owned(),
-                state: tau_proto::AgentRuntimeState::Running,
-                initial: false,
-                turn_generation: 1,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: "untrusted stale presentation".to_owned(),
-        },
-    ));
-
-    let items = assemble_conversation_from(&tree, tree.head());
-    assert_eq!(items.len(), 1);
-    assert!(matches!(
-        &items[0],
-        ContextItem::Message(MessageItem { role, content, .. })
-            if *role == ContextRole::User
-                && matches!(&content[0], ContentPart::Text { text: replayed } if replayed == text)
-    ));
-}
-
-/// An initial watch snapshot is client-visible state, not new activity for the
-/// watching model, and therefore must not be injected during transcript replay.
-#[test]
-fn assemble_conversation_omits_initial_watch_turn_state() {
-    let watcher = tau_proto::AgentId::parse("watcher").expect("agent id");
-    let watched = tau_proto::AgentId::parse("watched").expect("agent id");
-    let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
-    tree.apply_event(&Event::AgentMessageReceived(
-        tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-initial-watch-state")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: watched,
-            sender_session_id: None,
-            recipient_id: watcher,
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: "session-1"
-                    .parse::<tau_proto::SessionId>()
-                    .expect("known-safe SessionId must be valid"),
-                subscription_id: "watch-subscription-1".to_owned(),
-                state: tau_proto::AgentRuntimeState::Idle,
-                initial: true,
-                turn_generation: 0,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: "[tau-internal]: Watched agent watched is not currently running an agent turn"
-                .to_owned(),
-        },
-    ));
-
-    assert!(assemble_conversation_from(&tree, tree.head()).is_empty());
 }
 
 /// Encrypted-reasoning replay: when `ProviderResponseFinished` carries
@@ -2079,7 +1999,6 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         sender_session_id: None,
         recipient_id: watcher.clone(),
         kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
             session_id: session_id.clone(),
@@ -2098,7 +2017,6 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         sender_session_id: None,
         recipient_id: watcher.clone(),
         kind: tau_proto::AgentMessageKind::WatchLongWait,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {

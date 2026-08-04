@@ -613,9 +613,7 @@ fn assert_no_s4_watch_refanout(
                     && identities.workers().contains(&&message.sender_id)
                     && matches!(
                         message.kind,
-                        AgentMessageKind::WatchPrompt
-                            | AgentMessageKind::WatchResponse
-                            | AgentMessageKind::WatchTurnState
+                        AgentMessageKind::WatchPrompt | AgentMessageKind::WatchResponse
                     )
         )
     }) {

@@ -226,7 +226,6 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                             | crate::WatchNotificationV2::Prompt { content } => {
                                 content.is_empty() || content.len() > 4 * 1024
                             }
-                            crate::WatchNotificationV2::TurnState { .. } => false,
                         }) =>
                 {
                     return Err(ClientError::handler(

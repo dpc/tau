@@ -332,7 +332,7 @@ pub(crate) struct Agent {
     /// Last externally published runtime state, independent of internal
     /// continuation bookkeeping that may temporarily use `Idle`.
     pub(crate) published_runtime_state: tau_proto::AgentRuntimeState,
-    /// Runtime-scoped outer agent-turn generation used by watch state
+    /// Runtime-scoped outer agent-turn generation used by provider-status
     /// notifications.
     pub(crate) turn_generation: u64,
     /// Runtime-only semantic progress reported through the status tool.

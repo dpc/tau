@@ -1012,9 +1012,7 @@ fn assert_no_live_watch_refanout(
                         && message.recipient_id == identities.main
                         && matches!(
                             message.kind,
-                            AgentMessageKind::WatchPrompt
-                                | AgentMessageKind::WatchResponse
-                                | AgentMessageKind::WatchTurnState
+                            AgentMessageKind::WatchPrompt | AgentMessageKind::WatchResponse
                         )
             )
     }) {

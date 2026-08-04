@@ -85,7 +85,7 @@ prompt text:
   wrappers and replace only their own exact closing sentinel in each body;
 - current provider and work-status kinds render wording reconstructed from their
   structured state; current long-wait kinds render their harness-derived
-  threshold, while legacy turn kinds do so only on compatibility replay.
+  threshold.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
 harness instructions. Model-authored work titles receive trusted-frame visible
@@ -126,8 +126,8 @@ Activation classes are:
   provider and work-status projections; and
 - no activation for initial or redundant structured watch snapshots.
 
-Explicit message intake never becomes watch-prompt fanout. Legacy lifecycle
-records are replay-only; isolated current watch turns retain cascade suppression.
+Explicit message intake never becomes watch-prompt fanout. Isolated current
+provider/work-status watch turns retain cascade suppression.
 
 ## Checkpoints, branches, and compaction
 

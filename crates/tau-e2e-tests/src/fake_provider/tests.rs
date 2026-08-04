@@ -734,17 +734,9 @@ fn v2_watch_notification_actions_are_closed_and_bounded() {
     };
     assert!(
         FakeConfig {
-            scenario: ScenarioConfig::V2(v2_action(action(vec![
-                WatchNotificationV2::TurnState {
-                    state: tau_proto::AgentRuntimeState::Running,
-                },
-                WatchNotificationV2::Response {
-                    content: "done".to_owned(),
-                },
-                WatchNotificationV2::TurnState {
-                    state: tau_proto::AgentRuntimeState::Idle,
-                },
-            ])))
+            scenario: ScenarioConfig::V2(v2_action(action(vec![WatchNotificationV2::Response {
+                content: "done".to_owned(),
+            }])))
         }
         .validate()
         .is_ok()
@@ -752,8 +744,8 @@ fn v2_watch_notification_actions_are_closed_and_bounded() {
     for notifications in [
         Vec::new(),
         vec![
-            WatchNotificationV2::TurnState {
-                state: tau_proto::AgentRuntimeState::Running,
+            WatchNotificationV2::Response {
+                content: "done".to_owned(),
             };
             5
         ],
@@ -856,21 +848,13 @@ fn v2_watch_notification_chains_enforce_prompt_before_response() {
     assert_eq!(duplicate_prompt.watch_notifications[&parent].len(), 1);
 }
 
-/// Rejects unrelated, malformed, re-correlated, and excess live watch records
+/// Rejects unrelated, malformed, and excess live watch records
 /// without advancing the lane cursor or admitting the bad record.
 #[test]
 fn v2_watch_runtime_mismatches_leave_the_action_unconsumed() {
-    let notifications = vec![
-        WatchNotificationV2::TurnState {
-            state: tau_proto::AgentRuntimeState::Running,
-        },
-        WatchNotificationV2::Response {
-            content: "done".to_owned(),
-        },
-        WatchNotificationV2::TurnState {
-            state: tau_proto::AgentRuntimeState::Idle,
-        },
-    ];
+    let notifications = vec![WatchNotificationV2::Response {
+        content: "done".to_owned(),
+    }];
     let scenario = v2_action(ScenarioActionV2::WatchNotifications {
         notifications,
         response: "complete".to_owned(),
@@ -883,11 +867,10 @@ fn v2_watch_runtime_mismatches_leave_the_action_unconsumed() {
     state.agent_lanes = HashMap::from([(parent.clone(), 0)]);
     state.child_agents = HashMap::from([(parent.clone(), vec![child.clone()])]);
 
-    let mut wrong_sender = watch_turn(
+    let mut wrong_sender = watch_response(
         &parent,
         &tau_proto::AgentId::parse("other").expect("other id"),
-        tau_proto::AgentRuntimeState::Running,
-        7,
+        "done",
     );
     assert!(state.record_watch_notification(&wrong_sender).is_err());
     assert!(state.watch_notifications.is_empty());
@@ -895,26 +878,14 @@ fn v2_watch_runtime_mismatches_leave_the_action_unconsumed() {
     wrong_sender.sender_id = child.clone();
     state
         .record_watch_notification(&wrong_sender)
-        .expect("exact running notification");
+        .expect("exact response notification");
     assert_eq!(state.watch_notifications[&parent].len(), 1);
 
-    let mut wrong_content = watch_response(&parent, &child, "other");
+    let wrong_content = watch_response(&parent, &child, "other");
     assert!(state.record_watch_notification(&wrong_content).is_err());
     assert_eq!(state.watch_notifications[&parent].len(), 1);
-    wrong_content.message = "done".to_owned();
-    state
-        .record_watch_notification(&wrong_content)
-        .expect("exact response notification");
-
-    let wrong_generation = watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Idle, 8);
-    assert!(state.record_watch_notification(&wrong_generation).is_err());
-    assert_eq!(state.watch_notifications[&parent].len(), 2);
-    let idle = watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Idle, 7);
-    state
-        .record_watch_notification(&idle)
-        .expect("exact idle notification");
-    assert!(state.record_watch_notification(&idle).is_err());
-    assert_eq!(state.watch_notifications[&parent].len(), 3);
+    assert!(state.record_watch_notification(&wrong_sender).is_err());
+    assert_eq!(state.watch_notifications[&parent].len(), 1);
     assert_eq!(state.lane_cursors, [0]);
     assert_eq!(state.agent_lanes.get(&parent), Some(&0));
 }
@@ -1371,7 +1342,6 @@ fn watch_response(
         sender_session_id: None,
         recipient_id: parent.clone(),
         kind: tau_proto::AgentMessageKind::WatchResponse,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
@@ -1391,40 +1361,10 @@ fn watch_prompt(
         sender_session_id: None,
         recipient_id: parent.clone(),
         kind: tau_proto::AgentMessageKind::WatchPrompt,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
         message: content.to_owned(),
-    }
-}
-
-fn watch_turn(
-    parent: &tau_proto::AgentId,
-    child: &tau_proto::AgentId,
-    state: tau_proto::AgentRuntimeState,
-    turn_generation: u64,
-) -> AgentMessageReceived {
-    AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse(format!("watch-turn-{turn_generation}"))
-            .expect("test message id must satisfy the identifier grammar"),
-        sender_id: child.clone(),
-        sender_session_id: None,
-        recipient_id: parent.clone(),
-        kind: tau_proto::AgentMessageKind::WatchTurnState,
-        watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-            session_id: "session"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            subscription_id: "subscription".to_owned(),
-            state,
-            initial: false,
-            turn_generation,
-        }),
-        watch_provider_status: None,
-        watch_work_status: None,
-        watch_long_wait: None,
-        message: String::new(),
     }
 }
 

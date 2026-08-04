@@ -34,8 +34,8 @@ blocks without rewriting the stored message event.
 ## Watched-agent activity
 
 The terminal shows one activity row per direct watched target. `running` means
-that directed edge's outer-turn lifecycle is directly running. `watching` means
-the directed edge is not running but its target recursively watches an active
+the watched agent's current complete stats report it running. `watching` means
+the watched agent is not running but recursively watches an active
 descendant; the row's `-> @agent-id` suffix identifies a nearest directly running
 witness. Direct state wins when both apply. Recursive activity is a CLI-only
 projection over the session's live watch DAG and does not change navigation,

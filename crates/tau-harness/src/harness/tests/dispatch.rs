@@ -4639,7 +4639,6 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -13829,7 +13828,6 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
                 kind: tau_proto::AgentMessageKind::Message,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
@@ -13954,7 +13952,6 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
                 kind: tau_proto::AgentMessageKind::Message,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
@@ -15176,7 +15173,6 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&agent_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -16120,7 +16116,6 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             sender_session_id: None,
             recipient_id: agent_id.clone(),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -21298,7 +21293,6 @@ fn agent_message_interrupts_recipient_active_wait() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -21461,7 +21455,6 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -22766,7 +22759,6 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&target_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -22790,7 +22782,6 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&waiter_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -23426,7 +23417,6 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
                 sender_session_id: None,
                 recipient_id: worker_agent_id.clone(),
                 kind: tau_proto::AgentMessageKind::Message,
-                watch_turn_state: None,
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
@@ -23890,7 +23880,6 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -27971,14 +27960,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         .into_iter()
         .filter(|message| {
             message.recipient_id.as_str() == watcher_id
-                && matches!(
-                    message.kind,
-                    tau_proto::AgentMessageKind::WatchProviderStatus
-                )
-                && !message
-                    .watch_turn_state
-                    .as_ref()
-                    .is_some_and(|state| state.initial)
+                && message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
         })
         .collect();
     let terminal_index = watched_edges
@@ -28022,15 +28004,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
             .into_iter()
             .filter(|message| {
                 message.recipient_id.as_str() == watcher_id
-                    && matches!(
-                        message.kind,
-                        tau_proto::AgentMessageKind::WatchProviderStatus
-                            | tau_proto::AgentMessageKind::WatchTurnState
-                    )
-                    && !message
-                        .watch_turn_state
-                        .as_ref()
-                        .is_some_and(|state| state.initial)
+                    && message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
             })
             .count(),
         before_duplicate
@@ -28667,7 +28641,6 @@ fn agent_message_status_activation_class_covers_watch_prompt() {
         sender_session_id: None,
         recipient_id: "recipient".parse().expect("recipient id"),
         kind,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
@@ -32265,7 +32238,6 @@ fn terminating_agent_route_rejects_direct_work() {
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -32399,7 +32371,6 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -33140,7 +33111,6 @@ fn inbound_agent_message_events_are_ignored() {
         sender_session_id: Some(test_session_id("other-session")),
         recipient_id: crate::parse_agent_id("victim"),
         kind: tau_proto::AgentMessageKind::Message,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,

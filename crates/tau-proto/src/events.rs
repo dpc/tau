@@ -2169,9 +2169,6 @@ pub enum AgentMessageKind {
     WatchResponse,
     /// An automatic `agent_watch` user-prompt notification.
     WatchPrompt,
-    /// An automatic structured `agent_watch` outer agent-turn state
-    /// notification.
-    WatchTurnState,
     /// An automatic structured, sanitized provider-work status notification.
     WatchProviderStatus,
     /// An automatic structured self-reported work-status notification.
@@ -2232,13 +2229,6 @@ pub struct AgentMessageReceived {
     /// Delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
-    /// Structured outer agent-turn state carried by
-    /// [`AgentMessageKind::WatchTurnState`].
-    ///
-    /// This must be present exactly when `kind` is
-    /// [`AgentMessageKind::WatchTurnState`] and absent for every other kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watch_turn_state: Option<AgentWatchTurnStateNotification>,
     /// Structured status carried by [`AgentMessageKind::WatchProviderStatus`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_provider_status: Option<AgentWatchProviderStatusNotification>,
@@ -2394,22 +2384,6 @@ pub struct AgentWatchProviderStatusNotification {
     pub state: AgentWatchProviderState,
     /// Whether this snapshot was returned when enabling an existing/new watch.
     pub initial: bool,
-}
-
-/// Structured state delivered to one watcher for a watched agent's outer turn.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentWatchTurnStateNotification {
-    /// Session in which the session-local watch relation exists.
-    pub session_id: SessionId,
-    /// Fresh identity minted when this directed watch relation is enabled.
-    pub subscription_id: String,
-    /// Current two-state outer agent-turn state.
-    pub state: AgentRuntimeState,
-    /// Whether this is the snapshot sent when the watch was enabled.
-    pub initial: bool,
-    /// Harness-runtime-scoped watched-agent generation, incremented only when
-    /// an idle agent starts an outer turn.
-    pub turn_generation: u64,
 }
 
 /// Closed self-reported task phase exposed to agent watchers.

@@ -355,7 +355,6 @@ fn assert_no_restored_watch(
                             message.kind,
                             AgentMessageKind::WatchPrompt
                                 | AgentMessageKind::WatchResponse
-                                | AgentMessageKind::WatchTurnState
                                 | AgentMessageKind::WatchWorkStatus
                                 | AgentMessageKind::WatchProviderStatus
                         )
@@ -402,7 +401,6 @@ fn assert_dispatch_uncertain_watch(
                         message.kind,
                         AgentMessageKind::WatchPrompt
                             | AgentMessageKind::WatchResponse
-                            | AgentMessageKind::WatchTurnState
                             | AgentMessageKind::WatchWorkStatus
                             | AgentMessageKind::WatchProviderStatus
                     ) =>
@@ -446,7 +444,6 @@ fn assert_dispatch_uncertain_watch(
         || work.subscription_id != subscription_id
         || work.phase != tau_proto::AgentWorkStatusPhase::Unreported
         || status_message.kind != AgentMessageKind::WatchProviderStatus
-        || status_message.watch_turn_state.is_some()
         || !status.initial
         || &status.session_id != session_id
         || status.subscription_id != subscription_id

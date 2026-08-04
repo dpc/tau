@@ -75,8 +75,8 @@ shows one entry per agent-to-agent message according to the current
 originating session and `message_id`. Ctrl-K/Ctrl-J cycle through that overview
 and the active agents. Submitting a prompt from the overview still starts a new
 agent. Ordinary `Message` events and watched response/prompt notifications are
-overview content. Structured watched-turn, provider-status, work-status, and
-long-wait records stay in the watcher
+overview content. Structured provider-status, work-status, and long-wait
+records stay in the watcher
 transcript, while messages to `user` retain current-visible broadcast routing
 without an additional overview copy.
 

@@ -1189,7 +1189,6 @@ fn representative_events() -> Vec<Event> {
             sender_session_id: None,
             recipient_id: agent_id("reviewer_efgh5678"),
             kind: AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -2747,7 +2746,6 @@ fn agent_message_events_have_names_and_persistence_defaults() {
         sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
         kind: AgentMessageKind::Message,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
@@ -2778,7 +2776,6 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
         sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
         kind: AgentMessageKind::Message,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
@@ -2800,24 +2797,6 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     };
     let prompt_json = serde_json::to_value(&watch_prompt).expect("serialize watch prompt");
     assert_eq!(prompt_json["kind"], serde_json::json!("watch_prompt"));
-
-    let watch_turn = AgentMessageReceived {
-        kind: AgentMessageKind::WatchTurnState,
-        watch_turn_state: Some(AgentWatchTurnStateNotification {
-            session_id: test_session_id("session-1"),
-            subscription_id: "watch-subscription-1".to_owned(),
-            state: AgentRuntimeState::Running,
-            initial: true,
-            turn_generation: 7,
-        }),
-        ..watch_prompt
-    };
-    let turn_json = serde_json::to_value(&watch_turn).expect("serialize watch turn");
-    assert_eq!(turn_json["kind"], serde_json::json!("watch_turn_state"));
-    assert_eq!(turn_json["watch_turn_state"]["turn_generation"], 7);
-    let decoded: AgentMessageReceived =
-        serde_json::from_value(turn_json).expect("decode watch turn");
-    assert_eq!(decoded, watch_turn);
 }
 
 /// Ensures representative harness input/output messages round-trip through the

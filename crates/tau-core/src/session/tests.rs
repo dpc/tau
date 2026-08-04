@@ -1378,44 +1378,12 @@ fn legacy_compaction_boundary_without_transaction_metadata_replays() {
     ));
 }
 
-/// Watch-turn messages must carry their structured payload, while ordinary
-/// messages must not smuggle one into the durable agent transcript.
+/// Watch provider-status messages must carry their structured payload, while
+/// ordinary messages must not smuggle one into the durable agent transcript.
 #[test]
-fn validate_event_enforces_watch_turn_state_payload_discriminator() {
+fn validate_event_enforces_watch_payload_discriminator() {
     let id = agent_id();
     let tree = AgentTree::from_events(id.clone(), &[]);
-    let payload = tau_proto::AgentWatchTurnStateNotification {
-        session_id: "session-1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        subscription_id: "watch-1".to_owned(),
-        state: tau_proto::AgentRuntimeState::Running,
-        initial: false,
-        turn_generation: 1,
-    };
-    for (kind, watch_turn_state) in [
-        (AgentMessageKind::WatchTurnState, None),
-        (AgentMessageKind::Message, Some(payload)),
-    ] {
-        let event = Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-state")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: other_agent_id(),
-            sender_session_id: None,
-            recipient_id: id.clone(),
-            kind,
-            watch_turn_state,
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: String::new(),
-        });
-        assert!(
-            validation_error(&tree, event).contains("payload must be present exactly"),
-            "mismatched discriminator and payload must fail closed"
-        );
-    }
-
     let provider_payload = tau_proto::AgentWatchProviderStatusNotification {
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
@@ -1443,7 +1411,6 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
             sender_session_id: None,
             recipient_id: id.clone(),
             kind,
-            watch_turn_state: None,
             watch_provider_status,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1470,7 +1437,6 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
             sender_session_id: None,
             recipient_id: id.clone(),
             kind: AgentMessageKind::WatchWorkStatus,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: "session-1".parse().expect("valid session id"),
@@ -1558,7 +1524,6 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
             sender_session_id: None,
             recipient_id: id.clone(),
             kind,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status,
             watch_long_wait,
@@ -1725,7 +1690,6 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             sender_session_id: None,
             recipient_id: agent_id.clone(),
             kind: AgentMessageKind::Message,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1878,7 +1842,6 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         sender_session_id: None,
         recipient_id: agent_id.clone(),
         kind: AgentMessageKind::Message,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
@@ -1904,7 +1867,6 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         sender_session_id: None,
         recipient_id: agent_id,
         kind: AgentMessageKind::Message,
-        watch_turn_state: None,
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,

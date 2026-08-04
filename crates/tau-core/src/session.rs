@@ -161,8 +161,6 @@ pub enum AgentEntry {
         recipient: AgentMessageRecipient,
         /// Delivery source semantics.
         kind: AgentMessageKind,
-        /// Typed watched-turn state for receiver-only lifecycle projections.
-        watch_turn_state: Option<tau_proto::AgentWatchTurnStateNotification>,
         /// Typed provider status for receiver-only watch projections.
         watch_provider_status: Option<tau_proto::AgentWatchProviderStatusNotification>,
         /// Typed self-reported work status for receiver-only watch projections.
@@ -1765,7 +1763,6 @@ impl AgentTree {
             sender_session_id: None,
             recipient: message.recipient.clone(),
             kind: message.kind,
-            watch_turn_state: None,
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
@@ -1788,7 +1785,6 @@ impl AgentTree {
                 agent_id: message.recipient_id.clone(),
             },
             kind: message.kind,
-            watch_turn_state: message.watch_turn_state.clone(),
             watch_provider_status: message.watch_provider_status.clone(),
             watch_work_status: message.watch_work_status.clone().map(Box::new),
             watch_long_wait: message.watch_long_wait.clone().map(Box::new),
@@ -2014,10 +2010,9 @@ impl AgentTree {
                     .agent_message_entry_from_received(message, self.next_event_seq)
                     .is_some() =>
             {
-                let payload_matches_kind = ((message.kind == AgentMessageKind::WatchTurnState)
-                    == message.watch_turn_state.is_some())
-                    && ((message.kind == AgentMessageKind::WatchProviderStatus)
-                        == message.watch_provider_status.is_some())
+                let payload_matches_kind = ((message.kind
+                    == AgentMessageKind::WatchProviderStatus)
+                    == message.watch_provider_status.is_some())
                     && ((message.kind == AgentMessageKind::WatchWorkStatus)
                         == message.watch_work_status.is_some())
                     && ((message.kind == AgentMessageKind::WatchLongWait)

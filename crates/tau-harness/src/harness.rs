@@ -449,11 +449,6 @@ pub(crate) fn agent_message_activation_class(
         tau_proto::AgentMessageKind::Message
         | tau_proto::AgentMessageKind::WatchResponse
         | tau_proto::AgentMessageKind::WatchPrompt => Some(OrdinaryAgentInput),
-        tau_proto::AgentMessageKind::WatchTurnState => message
-            .watch_turn_state
-            .as_ref()
-            .is_some_and(|state| !state.initial)
-            .then_some(IsolatedWatchNotification),
         tau_proto::AgentMessageKind::WatchProviderStatus => message
             .watch_provider_status
             .as_ref()
