@@ -28634,7 +28634,7 @@ fn status_acknowledgement_resets_at_addressed_work_dispatch() {
 fn coalesced_addressed_work_receives_one_status_reminder() {
     assert_eq!(
         STATUS_REMINDER,
-        "Reminder: call `status` tool when starting new task; batch it with other calls if possible."
+        "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible."
     );
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");

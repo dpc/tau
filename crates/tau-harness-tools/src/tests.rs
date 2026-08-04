@@ -2,15 +2,16 @@ use std::{cell as path_std_cell, path as path_std_path};
 
 use super::*;
 
-/// The model-visible status contract discourages granular reports and avoids a
-/// standalone tool round when independent work can share the call.
+/// The model-visible status contract guides independently useful task labels,
+/// discourages granular reports, and avoids a standalone tool round when
+/// independent work can share the call.
 #[test]
 fn status_guidance_prefers_meaningful_batched_reports() {
     let spec = status::tool_spec();
     assert_eq!(
         spec.description.as_deref(),
         Some(
-            "Report meaningful user-level work status to watchers. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
+            "Report meaningful user-level work status to watchers. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
         )
     );
     assert_eq!(
@@ -21,7 +22,7 @@ fn status_guidance_prefers_meaningful_batched_reports() {
                 "state": {"type":"string","enum":["working","done","blocked"]},
                 "task_name": {
                     "type":"string",
-                    "description":"Short user-visible label for the current task (a few words)."
+                    "description":"Brief, independently informative user-visible task label; do not use opaque identifiers or task/ticket numbers alone."
                 }
             },
             "required": ["state", "task_name"],

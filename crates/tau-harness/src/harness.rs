@@ -104,8 +104,7 @@ use crate::harness::extension_data::{
 };
 
 /// Model-visible reminder to report meaningful work through the status tool.
-pub(crate) const STATUS_REMINDER: &str =
-    "Reminder: call `status` tool when starting new task; batch it with other calls if possible.";
+pub(crate) const STATUS_REMINDER: &str = "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible.";
 #[cfg(test)]
 use crate::harness::extension_data::{
     append_extension_data_file, atomic_replace_extension_data_file, checked_extension_data_path,

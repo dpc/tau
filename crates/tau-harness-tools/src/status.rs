@@ -12,7 +12,7 @@ pub(crate) fn tool_spec() -> ToolSpec {
         name: ToolName::new("status"),
         model_visible_name: None,
         description: Some(
-            "Report meaningful user-level work status to watchers. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
+            "Report meaningful user-level work status to watchers. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
                 .to_owned(),
         ),
         tool_type: ToolType::Function,
@@ -20,7 +20,7 @@ pub(crate) fn tool_spec() -> ToolSpec {
             "type": "object",
             "properties": {
                 "state": {"type":"string","enum":["working","done","blocked"]},
-                "task_name": {"type":"string","description":"Short user-visible label for the current task (a few words)."}
+                "task_name": {"type":"string","description":"Brief, independently informative user-visible task label; do not use opaque identifiers or task/ticket numbers alone."}
             },
             "required": ["state", "task_name"],
             "additionalProperties": false
