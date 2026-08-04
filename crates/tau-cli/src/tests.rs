@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use std::io::BufReader;
 use std::os::unix as path_std_os_unix;
-use std::sync::{Arc, Mutex};
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{ffi as path_std_ffi, fs as path_std_fs, sync as path_std_sync, time as path_std_time};
 
@@ -23,10 +25,11 @@ use tau_proto::{
 use super::agent_navigation::AgentNavigationState;
 use super::chat::cold_attach_stager::ShellStartPresentation;
 use super::chat::{
-    DraftSlot, custom_prompt_replacement, invalidate_pending_draft, is_known_static_command,
-    leading_command_token, next_agent_cycle_selection, queue_prompt_draft_snapshot,
-    redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
-    role_cycling_enabled, should_send_draft_snapshot,
+    DraftSlot, UiIoMeter, UiWriter, custom_prompt_replacement, debounce_loop_with_wait,
+    invalidate_pending_draft, is_known_static_command, leading_command_token,
+    next_agent_cycle_selection, queue_prompt_draft_snapshot, redacted_command_echo_line,
+    redacted_prompt_history_line, retarget_prompt_draft_snapshot, role_cycling_enabled,
+    should_send_draft_snapshot,
 };
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 use super::{cli as path_super_cli, transcript_markers};
@@ -1888,7 +1891,7 @@ fn theme_refresh_preserves_optimistic_session_context() {
             tau_proto::UiPromptDraft {
                 session_id: test_session_id("new-session"),
                 target_agent_id: None,
-                text: "draft".to_owned(),
+                text: Some("draft".to_owned()),
             },
         ));
     }
@@ -5715,6 +5718,8 @@ fn manual_compaction_selects_agent_from_empty_state() {
     );
 }
 
+/// A submission epoch bump must suppress a snapshot already taken by the
+/// debounce worker so cleared or submitted prompt text cannot arrive late.
 #[test]
 fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
     let handle = (
@@ -5729,7 +5734,7 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
             tau_proto::UiPromptDraft {
                 session_id: test_session_id("s1"),
                 target_agent_id: None,
-                text: "old".into(),
+                text: Some("old".into()),
             },
         ));
     }
@@ -5928,6 +5933,8 @@ fn role_setting_updates_are_typed_and_reset_aware() {
     );
 }
 
+/// Action submission uses the same epoch invalidation as ordinary prompt
+/// submission so a pending command draft cannot publish after it runs.
 #[test]
 fn action_submission_invalidates_pending_draft_like_prompt_submission() {
     let handle = (
@@ -5942,7 +5949,7 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
             tau_proto::UiPromptDraft {
                 session_id: test_session_id("s1"),
                 target_agent_id: None,
-                text: ":email list".into(),
+                text: Some(":email list".into()),
             },
         ));
     }
@@ -5955,13 +5962,16 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
     assert!(slot.pending.is_none());
 }
 
-/// A queued draft snapshot must carry the selected viewed agent so later
-/// consumers can distinguish an existing-agent draft from a start-new-agent
-/// draft without consulting mutable UI selection state.
+/// An explicitly content-enabled queued draft preserves the selected agent and
+/// full buffer so subscribers can associate the opt-in text with its
+/// transcript.
 #[test]
 fn queued_draft_snapshot_records_selected_agent_target() {
     let handle = (
-        Mutex::new(DraftSlot::default()),
+        Mutex::new(DraftSlot {
+            send_content: true,
+            ..DraftSlot::default()
+        }),
         path_std_sync::Condvar::new(),
     );
     let agent_id = tau_proto::AgentId::parse("agent-a").expect("agent id");
@@ -5979,11 +5989,11 @@ fn queued_draft_snapshot_records_selected_agent_target() {
     assert_eq!(*epoch, 0);
     assert_eq!(draft.session_id, test_session_id("s1"));
     assert_eq!(draft.target_agent_id, Some(agent_id));
-    assert_eq!(draft.text, "draft for agent");
+    assert_eq!(draft.text.as_deref(), Some("draft for agent"));
 }
 
-/// A queued start-new-agent draft must remain explicitly unscoped instead of
-/// inheriting whatever agent might become current before the debounce fires.
+/// A default queued draft retains liveness and target metadata while omitting
+/// the buffer so normal editing cannot expose prompt content to subscribers.
 #[test]
 fn queued_draft_snapshot_records_no_agent_target() {
     let handle = (
@@ -6004,16 +6014,18 @@ fn queued_draft_snapshot_records_no_agent_target() {
     assert_eq!(*epoch, 0);
     assert_eq!(draft.session_id, test_session_id("s1"));
     assert_eq!(draft.target_agent_id, None);
-    assert_eq!(draft.text, "new agent draft");
+    assert_eq!(draft.text, None);
 }
 
-/// Switching from one viewed agent to another before the debounce fires must
-/// invalidate the stale snapshot and queue the current buffer under the new
-/// target.
+/// Content-enabled retargeting invalidates the stale snapshot and preserves the
+/// full buffer under the replacement viewed agent target.
 #[test]
 fn retarget_draft_snapshot_replaces_agent_a_with_agent_b() {
     let handle = (
-        Mutex::new(DraftSlot::default()),
+        Mutex::new(DraftSlot {
+            send_content: true,
+            ..DraftSlot::default()
+        }),
         path_std_sync::Condvar::new(),
     );
     let agent_a = tau_proto::AgentId::parse("agent-a").expect("agent id");
@@ -6037,15 +6049,18 @@ fn retarget_draft_snapshot_replaces_agent_a_with_agent_b() {
     let (epoch, draft) = slot.pending.as_ref().expect("retargeted draft");
     assert_eq!(*epoch, 1);
     assert_eq!(draft.target_agent_id, Some(agent_b));
-    assert_eq!(draft.text, "draft");
+    assert_eq!(draft.text.as_deref(), Some("draft"));
 }
 
-/// Switching from a viewed agent back to the start-new-agent prompt before the
-/// debounce fires must make the replacement snapshot unscoped.
+/// Content-enabled retargeting back to the new-agent prompt keeps its
+/// replacement snapshot explicitly unscoped and contentful.
 #[test]
 fn retarget_draft_snapshot_replaces_agent_with_no_agent() {
     let handle = (
-        Mutex::new(DraftSlot::default()),
+        Mutex::new(DraftSlot {
+            send_content: true,
+            ..DraftSlot::default()
+        }),
         path_std_sync::Condvar::new(),
     );
     let agent_a = tau_proto::AgentId::parse("agent-a").expect("agent id");
@@ -6063,9 +6078,11 @@ fn retarget_draft_snapshot_replaces_agent_with_no_agent() {
     let (epoch, draft) = slot.pending.as_ref().expect("retargeted draft");
     assert_eq!(*epoch, 1);
     assert_eq!(draft.target_agent_id, None);
-    assert_eq!(draft.text, "draft");
+    assert_eq!(draft.text.as_deref(), Some("draft"));
 }
 
+/// A newly created draft epoch is eligible for the debounce worker until a
+/// submission, retarget, or shutdown invalidates that exact snapshot.
 #[test]
 fn current_draft_snapshot_is_sent_when_epoch_matches() {
     let handle = (
@@ -6076,6 +6093,8 @@ fn current_draft_snapshot_is_sent_when_epoch_matches() {
     assert!(should_send_draft_snapshot(&handle, 0));
 }
 
+/// Shutdown makes even a current pending draft ineligible so the worker cannot
+/// write an event after the UI has begun disconnecting.
 #[test]
 fn draft_snapshot_is_dropped_after_shutdown() {
     let handle = (
@@ -6088,6 +6107,79 @@ fn draft_snapshot_is_dropped_after_shutdown() {
     }
 
     assert!(!should_send_draft_snapshot(&handle, 0));
+}
+
+/// The draft worker must send the first snapshot without waiting, then retain
+/// only the latest edit until the next coalescing boundary instead of emitting
+/// every queued buffer.
+#[test]
+fn draft_debounce_sends_immediately_then_coalesces_latest_snapshot() {
+    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+    let handle = Arc::new((
+        Mutex::new(DraftSlot {
+            send_content: true,
+            ..DraftSlot::default()
+        }),
+        path_std_sync::Condvar::new(),
+    ));
+    let worker_handle = handle.clone();
+    let (boundary_tx, boundary_rx) = mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = mpsc::sync_channel(0);
+    let worker = std::thread::spawn(move || {
+        let mut first_boundary = true;
+        debounce_loop_with_wait(worker_handle, writer, move |_| {
+            if !first_boundary {
+                return false;
+            }
+            first_boundary = false;
+            boundary_tx.send(()).expect("first send reached boundary");
+            continue_rx.recv().expect("advance coalescing boundary");
+            true
+        });
+    });
+    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+
+    queue_prompt_draft_snapshot(
+        handle.as_ref(),
+        test_session_id("s1"),
+        None,
+        "first".to_owned(),
+    );
+    boundary_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first draft must send before the coalescing boundary");
+    assert!(matches!(
+        reader.read_message().expect("read immediate draft"),
+        Some(tau_proto::HarnessInputMessage::Emit(emit))
+            if matches!(
+                emit.event.as_ref(),
+                Event::UiPromptDraft(draft) if draft.text.as_deref() == Some("first")
+            )
+    ));
+
+    queue_prompt_draft_snapshot(
+        handle.as_ref(),
+        test_session_id("s1"),
+        None,
+        "intermediate".to_owned(),
+    );
+    queue_prompt_draft_snapshot(
+        handle.as_ref(),
+        test_session_id("s1"),
+        None,
+        "latest".to_owned(),
+    );
+    continue_tx.send(()).expect("release coalescing boundary");
+    assert!(matches!(
+        reader.read_message().expect("read coalesced draft"),
+        Some(tau_proto::HarnessInputMessage::Emit(emit))
+            if matches!(
+                emit.event.as_ref(),
+                Event::UiPromptDraft(draft) if draft.text.as_deref() == Some("latest")
+            )
+    ));
+    worker.join().expect("join draft worker");
 }
 
 /// `AgentMessage` events are normal history entries, not active blocks. They

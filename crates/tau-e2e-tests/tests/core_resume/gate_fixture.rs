@@ -263,6 +263,17 @@ impl GateFixture {
         })
     }
 
+    /// Enables prompt-draft content only for a test that needs exact draft
+    /// payloads as a synchronization oracle.
+    pub(super) fn enable_prompt_draft_content(&self) -> Result<(), std::io::Error> {
+        let drop_in = self.config_home.join("tau").join("cli.d");
+        std::fs::create_dir_all(&drop_in)?;
+        std::fs::write(
+            drop_in.join("10-send-prompt-draft-content.yaml"),
+            "send_prompt_draft_content: true\n",
+        )
+    }
+
     /// Builds a fully scrubbed exact-Tau command for a fresh or resumed boot.
     pub(super) fn command(&self, resume: Option<&str>) -> Command {
         let mut command = Command::new(&self.tau_bin);

@@ -3245,10 +3245,8 @@ pub struct UiPromptSubmitted {
     pub ctx_id: Option<String>,
 }
 
-/// A trailing-edge debounced snapshot of the in-progress prompt the
-/// user is composing in the UI. Emitted at most once per second
-/// while the user is typing; carries the full current contents of
-/// the prompt buffer.
+/// A prompt-draft liveness snapshot emitted immediately on the first edit and
+/// then at most once per second while the user is typing.
 ///
 /// Defaults to transient, but caller-selected Emit metadata remains
 /// independent: the interactive CLI currently sends `persist=true`. The
@@ -3256,6 +3254,11 @@ pub struct UiPromptSubmitted {
 /// replay. Subscribers use it to detect "user is alive" without polling: e.g.
 /// std-notifications resets its idle deadline on every draft event so the
 /// desktop notification doesn't fire while the user is mid-sentence.
+///
+/// Content is opt-in for the interactive CLI. Its default events leave
+/// [`UiPromptDraft::text`] absent, so subscribers receive only the typing
+/// observation; enabling `send_prompt_draft_content` in `cli.yaml` sends the
+/// full current prompt buffer.
 ///
 /// The target agent scopes the currently viewed transcript at the moment the
 /// snapshot was captured. This keeps future draft restore, autocomplete, or
@@ -3277,8 +3280,10 @@ pub struct UiPromptDraft {
     /// payloads that did not carry target scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<AgentId>,
-    /// Full current prompt-buffer contents.
-    pub text: String,
+    /// Full current prompt-buffer contents when the producer opted into
+    /// transmitting them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// Synthetic boundary emitted after one loaded agent's historical replay.

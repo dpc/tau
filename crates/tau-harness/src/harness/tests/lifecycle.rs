@@ -4443,6 +4443,8 @@ fn session_context_ready_is_published_live() {
     h.shutdown().expect("shutdown");
 }
 
+/// Interceptor registration must remain inactive before Ready, then immediately
+/// receive later prompt-draft observations after the extension becomes ready.
 #[test]
 fn interceptor_registration_is_staged_until_ready() {
     // Interception is an extension capability: before Ready, matching events
@@ -4480,7 +4482,7 @@ fn interceptor_registration_is_staged_until_ready() {
 
     assert!(sink.lock().expect("sink").iter().any(|routed| {
         matches!(&routed.frame, HarnessOutputMessage::InterceptRequest(req)
-            if matches!(req.event.as_ref(), Event::UiPromptDraft(draft) if draft.text == "after ready"))
+            if matches!(req.event.as_ref(), Event::UiPromptDraft(draft) if draft.text.as_deref() == Some("after ready")))
     }));
 
     h.shutdown().expect("shutdown");

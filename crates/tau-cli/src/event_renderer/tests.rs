@@ -483,7 +483,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
         tau_proto::SessionId::parse("s1").expect("known-safe SessionId must be valid")
     );
     assert_eq!(draft.target_agent_id, Some(agent_id("agent-a")));
-    assert_eq!(draft.text, "draft");
+    assert_eq!(draft.text, None);
 }
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {

@@ -115,10 +115,11 @@ This split is governed by
 ## Prompt-draft scope
 
 `ui.prompt_draft` defaults to transient and is runtime-only rather than
-transcript truth, but it is still
-contentful user input. Consumers that store, restore, synchronize, autocomplete,
-or otherwise maintain state from prompt drafts must key that state by both
-`session_id` and `target_agent_id`. A missing `target_agent_id` means an
+transcript truth. Its optional `text` is contentful user input only when a
+producer supplies it; content-free observations remain typing liveness.
+Consumers that store, restore, synchronize, autocomplete, or otherwise
+maintain state from supplied draft text must key that state by both `session_id`
+and `target_agent_id`. A missing `target_agent_id` means an
 unscoped/session-level draft, normally the start-new-agent prompt; consumers
 must not infer the current agent from absence.
 Only an attached socket UI may author draft observations. The event default is

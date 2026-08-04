@@ -10,7 +10,7 @@ fn durable_emit_message_uses_false_metadata_for_liveness_events() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            text: "typing".to_owned(),
+            text: Some("typing".to_owned()),
         }),
         Event::UiFocusChanged(UiFocusChanged {
             session_id: "s1"

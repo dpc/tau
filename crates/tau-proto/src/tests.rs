@@ -733,7 +733,26 @@ fn ui_prompt_draft_target_agent_id_defaults_to_none() {
 
     assert_eq!(draft.session_id, test_session_id("s1"));
     assert_eq!(draft.target_agent_id, None);
-    assert_eq!(draft.text, "draft");
+    assert_eq!(draft.text.as_deref(), Some("draft"));
+}
+
+/// Ensures content-free prompt-draft liveness events omit `text` rather than
+/// serializing a JSON null while still accepting omitted content from peers.
+#[test]
+fn ui_prompt_draft_omits_absent_text_on_the_wire() {
+    let draft = UiPromptDraft {
+        session_id: test_session_id("s1"),
+        target_agent_id: None,
+        text: None,
+    };
+
+    let value = serde_json::to_value(&draft).expect("serialize content-free draft");
+
+    assert_eq!(value, serde_json::json!({ "session_id": "s1" }));
+    assert_eq!(
+        serde_json::from_value::<UiPromptDraft>(value).expect("deserialize content-free draft"),
+        draft
+    );
 }
 
 fn user_text_item(text: &str) -> ContextItem {
@@ -1867,7 +1886,7 @@ fn representative_events() -> Vec<Event> {
         Event::UiPromptDraft(UiPromptDraft {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
-            text: "draft".to_owned(),
+            text: Some("draft".to_owned()),
         }),
         Event::UiFocusChanged(UiFocusChanged {
             session_id: test_session_id("s1"),
@@ -4671,7 +4690,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
         Event::UiPromptDraft(UiPromptDraft {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
-            text: "draft".to_owned(),
+            text: Some("draft".to_owned()),
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,

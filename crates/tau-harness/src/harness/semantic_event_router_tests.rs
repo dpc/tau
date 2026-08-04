@@ -202,7 +202,7 @@ fn ui_liveness_events_never_enter_semantic_history() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            text: "typing".to_owned(),
+            text: Some("typing".to_owned()),
         }),
         Event::UiFocusChanged(tau_proto::UiFocusChanged {
             session_id: "s1"

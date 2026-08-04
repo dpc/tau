@@ -2,6 +2,10 @@
 # greeting: true
 # show_logo: true
 # bar_cursor: true
+# Send full prompt buffers in ui.prompt_draft liveness events. Disabled by
+# default so live subscribers and best-effort events.jsonl do not receive
+# in-progress prompt content.
+# send_prompt_draft_content: false
 # prompt_symbol: "◯"
 # submitted_prompt_symbol: "⬤"
 # notice_level: info  # critical|warning|info|debug|trace

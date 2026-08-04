@@ -11345,7 +11345,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     let new_session_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
         session_id: test_session_id("s2"),
         target_agent_id: None,
-        text: "new session event".to_owned(),
+        text: Some("new session event".to_owned()),
     });
     h.publish_event(None, new_session_draft.clone());
     assert!(h.pending_intercept.is_none());
@@ -11360,7 +11360,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     let post_stale_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
         session_id: test_session_id("s2"),
         target_agent_id: None,
-        text: "interception resumes after stale reply".to_owned(),
+        text: Some("interception resumes after stale reply".to_owned()),
     });
     h.publish_event(None, post_stale_draft.clone());
     assert!(h.pending_intercept.is_some());

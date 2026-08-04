@@ -51,7 +51,8 @@ use crate::ui_prompt::{
 };
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
-type UiIoMeter = tau_client::ProtocolIoMeter;
+/// Cumulative protocol-I/O accounting shared by UI socket writers and readers.
+pub(crate) type UiIoMeter = tau_client::ProtocolIoMeter;
 type UiIoCumulativeStats = tau_client::ProtocolIoCumulativeStats;
 
 struct UiIoTracker {
@@ -113,13 +114,16 @@ fn log_ui_io_sample_if_yellow(sample: &tau_client::ProtocolIoSample) {
     );
 }
 
-struct UiWriter {
+/// Serializes and accounts for one interactive UI connection's outbound frames.
+pub(crate) struct UiWriter {
     writer: PeerOutputWriter<BufWriter<Box<dyn Write + Send>>>,
     meter: UiIoMeter,
 }
 
 impl UiWriter {
-    fn new<W>(writer: W, meter: UiIoMeter) -> Self
+    /// Wraps an outbound stream with framed-message encoding and I/O
+    /// accounting.
+    pub(crate) fn new<W>(writer: W, meter: UiIoMeter) -> Self
     where
         W: Write + Send + 'static,
     {
@@ -660,8 +664,16 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
 /// true` is the shutdown signal.
 #[derive(Default)]
 pub(crate) struct DraftSlot {
+    /// Latest snapshot paired with the draft epoch captured at enqueue time.
+    ///
+    /// A target change or submission advances [`Self::epoch`] and clears this
+    /// slot, so the debounce worker rejects a snapshot from the former draft.
     pub(crate) pending: Option<(u64, UiPromptDraft)>,
+    /// Whether prompt-draft snapshots include the current prompt buffer.
+    pub(crate) send_content: bool,
+    /// Generation incremented whenever pending draft data becomes stale.
     pub(crate) epoch: u64,
+    /// Shutdown request that wakes and terminates the debounce worker.
     pub(crate) done: bool,
 }
 
@@ -671,15 +683,37 @@ pub(crate) struct DraftSlot {
 /// `BufferChanged`.
 type DraftHandle = Arc<(Mutex<DraftSlot>, Condvar)>;
 
-/// Trailing-edge debounce: wait for at least one draft to appear,
-/// send the *latest* one (any older draft was overwritten by a more
-/// recent typing burst), then sleep `DRAFT_DEBOUNCE` before looking
-/// at the slot again. The sleep is interruptible via the `done`
-/// shutdown signal so process exit is prompt.
+/// Send the first queued draft immediately, then coalesce later edits into the
+/// latest snapshot sent at most once per `DRAFT_DEBOUNCE`. The sleep is
+/// interruptible via the `done` shutdown signal so process exit is prompt.
 ///
 /// Never drops a notification: a draft pushed during the
 /// sleep stays in the slot and is sent on the next iteration.
 fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
+    debounce_loop_with_period(handle, writer, DRAFT_DEBOUNCE);
+}
+
+/// Runs the prompt-draft coalescer with its caller-selected period.
+fn debounce_loop_with_period(handle: DraftHandle, writer: WriterHandle, period: Duration) {
+    debounce_loop_with_wait(handle, writer, |handle| {
+        let (mtx, cv) = handle.as_ref();
+        let g = locked(mtx);
+        let (g, _timed_out) = cv
+            .wait_timeout_while(g, period, |s| !s.done)
+            .expect(MUTEX_POISONED);
+        !(g.done && g.pending.is_none())
+    });
+}
+
+/// Runs the prompt-draft coalescer and delegates the post-send boundary wait.
+///
+/// Production waits one debounce period; tests use an explicit boundary to
+/// verify ordering without treating wall-clock scheduling as behavior.
+pub(crate) fn debounce_loop_with_wait(
+    handle: DraftHandle,
+    writer: WriterHandle,
+    mut wait_after_send: impl FnMut(&DraftHandle) -> bool,
+) {
     let (mtx, cv) = &*handle;
     loop {
         // Wait for a draft to send, or shutdown.
@@ -700,14 +734,7 @@ fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
             // and the input loop will notice on its next write.
             let _ = send_event(&writer, &Event::UiPromptDraft(draft));
         }
-        // Coalesce subsequent typing into one event per window. Wake
-        // early on shutdown so we don't spend a second sleeping after
-        // the user already typed `:quit`.
-        let g = locked(mtx);
-        let (g, _timed_out) = cv
-            .wait_timeout_while(g, DRAFT_DEBOUNCE, |s| !s.done)
-            .expect(MUTEX_POISONED);
-        if g.done && g.pending.is_none() {
+        if !wait_after_send(&handle) {
             return;
         }
     }
@@ -738,6 +765,7 @@ pub(crate) fn queue_prompt_draft_snapshot(
 ) {
     let (mtx, cv) = handle;
     if let Ok(mut g) = mtx.lock() {
+        let text = g.send_content.then_some(text);
         g.pending = Some((
             g.epoch,
             UiPromptDraft {
@@ -1131,7 +1159,13 @@ pub(crate) fn run_chat(
     }
 
     handle.redraw();
-    let draft_handle: DraftHandle = Arc::new((Mutex::new(DraftSlot::default()), Condvar::new()));
+    let draft_handle: DraftHandle = Arc::new((
+        Mutex::new(DraftSlot {
+            send_content: settings.send_prompt_draft_content,
+            ..DraftSlot::default()
+        }),
+        Condvar::new(),
+    ));
     let active_session_state = Arc::new(Mutex::new(session_id.to_owned()));
 
     // Event renderer thread — drains the channel and renders via
@@ -3078,10 +3112,8 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn update_draft(&self) {
-        // Trailing-edge debounce: stash the latest buffer
-        // contents and wake the debounce thread; it will
-        // coalesce a typing burst into one `UiPromptDraft`
-        // per `DRAFT_DEBOUNCE` window.
+        // Queue the first change immediately, then coalesce later changes into
+        // one `UiPromptDraft` per `DRAFT_DEBOUNCE` window.
         let text = self.term.handle().get_buffer();
         let target_agent_id = self.selected_side_agent_id();
         queue_prompt_draft_snapshot(

@@ -662,17 +662,22 @@ intent.
   dispatches the prompt. The required id is the target; textual mentions do not
   route. Other accepted requests do not mutate navigation. The harness translates
   accepted requests into durable `agent.prompt_submitted` facts.
-- **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
-  current draft buffer. Defaults to transient and is used for "user is alive" signals
-  (e.g. notification idle reset), not persisted. Carries the viewed
+- **`ui.prompt_draft`** — A first snapshot is emitted immediately, then later
+  edits are coalesced to at most one snapshot per second. The event defaults to
+  transient and is used for "user is alive" signals (e.g. notification idle
+  reset). The interactive CLI explicitly sends `persist=true`, so accepted
+  drafts receive run-local sequencing, live broadcast, and best-effort
+  `events.jsonl` publication, but the harness excludes them from semantic
+  stores and historical replay for either persistence value. The CLI omits
+  prompt content by default;
+  set `send_prompt_draft_content: true` in `cli.yaml` or a `cli.d` layer to
+  include the full current buffer. Carries the viewed
   `target_agent_id` when the draft belongs to an existing agent transcript;
   modern producers must set it in that case. Absence means the draft is
   session-level/unscoped, normally the start-new-agent prompt. Legacy peers whose
   payloads predate this field also decode as absent, so future restore/sync
   consumers must not infer the current agent from absence. Only an attached
-  socket UI may publish one. The CLI currently sends `persist=true`,
-  but the harness preserves that metadata while excluding drafts from semantic
-  stores and historical replay for either value.
+  socket UI may publish one.
 - **`ui.focus_changed`** — Attached terminal UI reports focus gained/lost for a
   session when terminal focus events are available. It is a live subscriber
   observation, not transcript truth; Tau currently has no first-party focus

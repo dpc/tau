@@ -10,7 +10,7 @@ fn draft(text: &str) -> Event {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         target_agent_id: None,
-        text: text.to_owned(),
+        text: Some(text.to_owned()),
     })
 }
 

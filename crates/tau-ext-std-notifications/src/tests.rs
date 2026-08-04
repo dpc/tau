@@ -2165,8 +2165,8 @@ fn long_summary_result_is_truncated_before_template_rendering() {
     handle.join().expect("ext thread");
 }
 
-/// Trailing-edge typing pings (`UiPromptDraft`) arriving during
-/// the `WaitingIdle` window must extend the deadline so the
+/// Immediate-then-periodic coalesced typing pings (`UiPromptDraft`) arriving
+/// during the `WaitingIdle` window must extend the deadline so the
 /// idle notification doesn't fire while the user is still
 /// composing. Without this, a slow typer would get the
 /// "what were you working on?" notification mid-sentence.
@@ -2220,7 +2220,7 @@ fn prompt_draft_extends_idle_deadline() {
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
                 target_agent_id: None,
-                text: format!("partial draft {i}"),
+                text: Some(format!("partial draft {i}")),
             }))
             .expect("write");
         writer.flush().expect("flush");
@@ -2313,7 +2313,7 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            text: "typing while summary is in flight".into(),
+            text: Some("typing while summary is in flight".into()),
         }))
         .expect("write");
     writer.flush().expect("flush");
@@ -2884,7 +2884,7 @@ fn config_reload_clears_pending_idle_hooks() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            text: "still typing".to_owned(),
+            text: Some("still typing".to_owned()),
         }))
         .expect("write draft");
     writer.write_frame(&disconnect_frame(None)).expect("write");

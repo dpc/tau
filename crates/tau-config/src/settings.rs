@@ -131,6 +131,12 @@ pub struct CliSettings {
     /// Use a bar-shaped cursor in the CLI. When false, use a steady
     /// block cursor instead.
     pub bar_cursor: bool,
+    /// Whether prompt-draft liveness events include the current prompt buffer.
+    ///
+    /// This static `cli.yaml` setting defaults to false. It is intentionally
+    /// not a runtime `:set` option because prompt drafts can reach live
+    /// subscribers and best-effort diagnostic logs.
+    pub send_prompt_draft_content: bool,
     /// Symbol shown before the input prompt and queued prompts.
     pub prompt_symbol: String,
     /// Symbol shown before submitted prompts in the transcript.

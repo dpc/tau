@@ -39,16 +39,20 @@ requires a separate approved interface or persistence change.
 
 ## Prompt draft
 
-A draft carries the attached session, optional viewed agent, and full current
-prompt buffer. Modern producers use `Some(agent_id)` for an existing viewed
-transcript and `None` for an unscoped or new-agent draft. Absence must not be
-reinterpreted as the current agent.
+A draft carries the attached session, optional viewed agent, and optional full
+current prompt buffer. The interactive CLI defaults to content-free drafts;
+`send_prompt_draft_content: true` in layered `cli.yaml`/`cli.d` config includes
+the full current buffer. `None` is omitted from the wire representation rather
+than serialized as `null`. Modern producers use `Some(agent_id)` for an existing
+viewed transcript and `None` for an unscoped or new-agent draft. Absence must
+not be reinterpreted as the current agent.
 
-The CLI emits a trailing-edge snapshot at most once per second and invalidates
-stale pending snapshots when the target changes or submission advances the
-draft epoch. `std-notifications` is the only first-party subscriber: it treats
-the event solely as typing liveness and ignores session, target, and text while
-extending eligible idle deadlines.
+The CLI emits its first snapshot immediately and then coalesces later edits to
+at most one snapshot per second. It invalidates stale pending snapshots when
+the target changes or submission advances the draft epoch. `std-notifications`
+is the only first-party subscriber: it treats the event solely as typing
+liveness and ignores session, target, and text while extending eligible idle
+deadlines.
 
 ## Focus
 
@@ -64,5 +68,5 @@ policy under the trusted same-UID UI boundary.
 
 This specification implements only the UI liveness row of
 [SPEC-peer-event-publication](SPEC-peer-event-publication.md).
-It does not change DTOs, draft semantics, terminal focus handling, the general
-publisher envelope, or any state-changing or dedicated UI request row.
+It does not change terminal focus handling, the general publisher envelope, or
+any state-changing or dedicated UI request row.

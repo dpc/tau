@@ -348,6 +348,36 @@ fn published_line_preserves_enriched_token_usage() {
     );
 }
 
+/// Ensures best-effort published draft rows inherit the wire contract: default
+/// liveness rows omit prompt text, while explicitly supplied content remains
+/// available for diagnostic use.
+#[test]
+fn published_prompt_draft_rows_omit_or_preserve_opt_in_content() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open");
+    let session_id = SessionId::parse("s1").expect("session id");
+    let absent = Event::UiPromptDraft(tau_proto::UiPromptDraft {
+        session_id: session_id.clone(),
+        target_agent_id: None,
+        text: None,
+    });
+    let contentful = Event::UiPromptDraft(tau_proto::UiPromptDraft {
+        session_id,
+        target_agent_id: None,
+        text: Some("explicit content".to_owned()),
+    });
+
+    log.log_published_event(None, &absent, UnixMicros::now())
+        .expect("log content-free draft");
+    log.log_published_event(None, &contentful, UnixMicros::now())
+        .expect("log contentful draft");
+
+    let lines = read_lines(log.path());
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0]["event"]["payload"].get("text").is_none());
+    assert_eq!(lines[1]["event"]["payload"]["text"], "explicit content");
+}
+
 #[test]
 fn published_line_compacts_long_strings() {
     let td = tempfile::tempdir().expect("tempdir");

@@ -57,6 +57,7 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
 {
     let scenario = scenario();
     let fixture = GateFixture::new_multi_agent(&scenario, Path::new(FAKE_PROVIDER))?;
+    fixture.enable_prompt_draft_content()?;
     let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let socket = fixture.headless_socket();
     let daemon = HeadlessProcess::spawn(
@@ -364,7 +365,7 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// Waits for the exact debounced source-side prompt-draft liveness fact.
+/// Waits for the exact opt-in source-side prompt-draft liveness fact.
 fn wait_draft(
     observer: &mut SideObserver,
     text: &str,
@@ -373,7 +374,7 @@ fn wait_draft(
     observer.recv_until(deadline, |observed| {
         matches!(
             &observed.event,
-            tau_proto::Event::UiPromptDraft(draft) if draft.text == text
+            tau_proto::Event::UiPromptDraft(draft) if draft.text.as_deref() == Some(text)
         )
     })?;
     Ok(())

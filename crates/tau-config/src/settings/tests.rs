@@ -494,6 +494,26 @@ fn cli_settings_theme_override() {
     assert_eq!(s.theme, CliTheme::Named("tau-plain-light".to_owned()));
 }
 
+/// Ensures prompt-draft content stays disabled by default and that a normal
+/// cli.d layer can explicitly enable it for one CLI process.
+#[test]
+fn cli_settings_prompt_draft_content_defaults_false_and_layers() {
+    assert!(!CliSettings::built_in().send_prompt_draft_content);
+
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::create_dir_all(dir.join("cli.d")).expect("create cli.d");
+    std::fs::write(
+        dir.join("cli.d").join("10-send-draft-content.yaml"),
+        "send_prompt_draft_content: true\n",
+    )
+    .expect("write drop-in");
+
+    let settings = load_cli_settings_in(&dirs_with_config(dir)).expect("load settings");
+
+    assert!(settings.send_prompt_draft_content);
+}
+
 /// Ensures typos in top-level cli.yaml keys fail instead of being ignored.
 #[test]
 fn cli_settings_reject_unknown_top_level_fields() {

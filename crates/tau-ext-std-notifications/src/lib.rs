@@ -662,7 +662,7 @@ fn subscribed_events() -> [tau_proto::EventName; 20] {
         tau_proto::EventName::SESSION_AGENT_UNLOADED,
         tau_proto::EventName::SESSION_SHUTDOWN,
         tau_proto::EventName::AGENT_START_ACCEPTED,
-        // Trailing-edge debounced typing pings from the UI bump the idle
+        // Immediate-then-periodic coalesced typing pings from the UI bump the idle
         // deadline so the desktop notification doesn't fire mid-sentence.
         tau_proto::EventName::UI_PROMPT_DRAFT,
         tau_proto::EventName::TOOL_RESULT,
