@@ -11160,6 +11160,91 @@ fn tool_started_renders_pending_until_provider_progress() {
     sync(&handle);
     assert!(vt.screen_contains(80, "read semantic.rs"));
 }
+
+/// Ensures shell-command duration chips retain both an explicit timeout and the
+/// provider's effective default after the running call becomes a history row.
+#[test]
+fn shell_command_duration_shows_effective_timeout() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started(
+            "shell-default",
+            "gpt_shell",
+            CborValue::Map(vec![(
+                CborValue::Text("command".into()),
+                CborValue::Text("sleep 300".into()),
+            )]),
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "shell-default".into(),
+            tool_name: tau_proto::ToolName::new("gpt_shell"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "sleep 300".into(),
+                mode: "rw".into(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".into(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(207_000_000),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started(
+            "shell-explicit",
+            "gpt_shell",
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("command".into()),
+                    CborValue::Text("sleep 400".into()),
+                ),
+                (
+                    CborValue::Text("timeout".into()),
+                    CborValue::Integer(300.into()),
+                ),
+            ]),
+        ),
+        tau_proto::UnixMicros::new(210_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "shell-explicit".into(),
+            tool_name: tau_proto::ToolName::new("gpt_shell"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Null,
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "sleep 400".into(),
+                mode: "rw".into(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".into(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(416_000_000),
+    );
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "gpt_shell rw sleep 300 206/120s ok"));
+    assert!(vt.screen_contains(100, "gpt_shell rw sleep 400 206/300s ok"));
+}
+
 #[test]
 fn backgrounded_tool_stays_visibly_running_until_background_result() {
     let (_term, handle, vt) = setup(80, 24);
@@ -11262,7 +11347,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     );
     sync(&handle);
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(vt.screen_contains(80, "shell ro sleep 10 3s ok"));
+    assert!(vt.screen_contains(80, "shell ro sleep 10 3/120s ok"));
     assert!(vt.screen_contains(80, "1/1"));
 }
 
@@ -11359,7 +11444,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
     );
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "shell rw printf hello 1s ok"));
+    assert!(vt.screen_contains(100, "shell rw printf hello 1/120s ok"));
     assert!(
         vt.screen_text(100)
             .iter()
@@ -11946,7 +12031,7 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
         .find(|row| row.contains("shell "))
         .expect("bounded shell header");
     assert!(header.contains('┄'), "{header:?}");
-    assert!(header.contains(" 1s ok"), "{header:?}");
+    assert!(header.contains(" 1/120s ok"), "{header:?}");
     assert!(!header.contains(args), "{header:?}");
     assert!(
         vt.screen_text(100).iter().any(|row| row.trim() == payload),
@@ -11961,7 +12046,7 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
         .find(|row| row.contains("shell "))
         .expect("bounded compact shell header");
     assert!(header.contains('┄'), "{header:?}");
-    assert!(header.contains(" 1s ok"), "{header:?}");
+    assert!(header.contains(" 1/120s ok"), "{header:?}");
     assert!(
         !vt.screen_text(100).iter().any(|row| row.trim() == payload),
         "compact mode should continue hiding payload bodies"

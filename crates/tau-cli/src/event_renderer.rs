@@ -109,6 +109,40 @@ fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Option<Blocker
     action
 }
 
+/// Returns the effective timeout for a built-in shell invocation.
+///
+/// Shell providers enforce a 120-second default when the agent omits
+/// `timeout`. This narrow presentation projection retains that declared limit
+/// so the generic duration chip can show elapsed time against the actual
+/// command budget without changing the provider display protocol.
+fn effective_shell_timeout(started: &tau_proto::ToolStarted) -> Option<Duration> {
+    const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+    if !matches!(started.tool_name.as_str(), "shell" | "gpt_shell") {
+        return None;
+    }
+    let CborValue::Map(entries) = &started.arguments else {
+        return None;
+    };
+
+    let mut timeout = None;
+    for (key, value) in entries {
+        if !matches!(key, CborValue::Text(key) if key == "timeout") {
+            continue;
+        }
+        let CborValue::Integer(value) = value else {
+            return None;
+        };
+        let Ok(value) = u64::try_from(*value) else {
+            return None;
+        };
+        if timeout.replace(value).is_some() {
+            return None;
+        }
+    }
+    Some(Duration::from_secs(timeout.unwrap_or(DEFAULT_TIMEOUT_SECS)))
+}
+
 /// Projects a blocker display through the action-only presentation boundary.
 fn sanitize_blocker_display(
     display: &mut ToolCallDisplay,
@@ -1209,6 +1243,9 @@ struct ToolCallState {
     started_at: Option<Instant>,
     /// Harness log timestamp for final duration chips.
     recorded_started_at: Option<UnixMicros>,
+    /// Effective shell timeout retained from the tool start for duration
+    /// presentation. `None` leaves non-shell tool duration chips unchanged.
+    effective_shell_timeout: Option<Duration>,
     /// Summary block for the assistant tool batch this call belongs
     /// to. `None` for stray events without a preceding tool-call
     /// announcement.
@@ -3174,6 +3211,7 @@ impl EventRenderer {
                         freeze_multiline_payloads,
                         &mut display,
                         duration,
+                        state.effective_shell_timeout,
                     );
                     state.live_display = Some(display.clone());
                     Some(display)
@@ -6491,9 +6529,10 @@ impl EventRenderer {
         }
         let is_blocker = started.tool_name.as_str() == BLOCKER_TOOL_NAME;
         let blocker_action = blocker_action_descriptor(started);
+        let effective_shell_timeout = effective_shell_timeout(started);
         let mut display = pending_tool_call_display(started.tool_name.as_str());
         sanitize_blocker_display(&mut display, is_blocker, blocker_action);
-        Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
+        Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO, effective_shell_timeout);
         let live_block = self.render_tool_history_block(&display);
         let live_id = self.handle.new_block(
             format!("tool-call-live:{}:{}", started.tool_name, started.call_id),
@@ -6519,6 +6558,7 @@ impl EventRenderer {
         });
         state.blocker_action = blocker_action;
         state.is_blocker = is_blocker;
+        state.effective_shell_timeout = effective_shell_timeout;
         state.block_id = Some(live_id);
         state.live_display = Some(display);
         state.started_at = Some(Instant::now());
@@ -6600,9 +6640,16 @@ impl EventRenderer {
                 };
                 sanitize_blocker_display(&mut display, state.is_blocker, state.blocker_action);
                 if Self::use_static_live_duration(freeze_multiline_payloads, &display) {
-                    Self::upsert_static_tool_duration_suffix(&mut display);
+                    Self::upsert_static_tool_duration_suffix(
+                        &mut display,
+                        state.effective_shell_timeout,
+                    );
                 } else if let Some(duration) = Self::live_tool_duration(state) {
-                    Self::upsert_tool_duration_suffix(&mut display, duration);
+                    Self::upsert_tool_duration_suffix(
+                        &mut display,
+                        duration,
+                        state.effective_shell_timeout,
+                    );
                 }
                 state.live_display = Some(display.clone());
                 update = Some((block_id, display));
@@ -6644,7 +6691,11 @@ impl EventRenderer {
                 continue;
             };
             let mut display = display.clone();
-            Self::upsert_tool_duration_suffix(&mut display, duration);
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                state.effective_shell_timeout,
+            );
             if state
                 .live_display
                 .as_ref()
@@ -6694,11 +6745,12 @@ impl EventRenderer {
         freeze_multiline_payloads: bool,
         display: &mut ToolCallDisplay,
         duration: Option<Duration>,
+        timeout: Option<Duration>,
     ) {
         if Self::use_static_live_duration(freeze_multiline_payloads, display) {
-            Self::upsert_static_tool_duration_suffix(display);
+            Self::upsert_static_tool_duration_suffix(display, timeout);
         } else if let Some(duration) = duration {
-            Self::upsert_tool_duration_suffix(display, duration);
+            Self::upsert_tool_duration_suffix(display, duration, timeout);
         }
     }
 
@@ -6728,14 +6780,26 @@ impl EventRenderer {
         state.started_at.map(|started_at| started_at.elapsed())
     }
 
-    fn upsert_tool_duration_suffix(display: &mut ToolCallDisplay, duration: Duration) {
-        let suffix = tool_duration_suffix(duration);
+    fn upsert_tool_duration_suffix(
+        display: &mut ToolCallDisplay,
+        duration: Duration,
+        timeout: Option<Duration>,
+    ) {
+        let mut suffix = tool_duration_suffix(duration);
+        if let Some(timeout) = timeout {
+            suffix.text = format!("{}/{}s", duration.as_secs(), timeout.as_secs());
+        }
         Self::upsert_tool_duration_suffix_segment(display, suffix);
     }
 
-    fn upsert_static_tool_duration_suffix(display: &mut ToolCallDisplay) {
+    fn upsert_static_tool_duration_suffix(
+        display: &mut ToolCallDisplay,
+        timeout: Option<Duration>,
+    ) {
         let mut suffix = tool_duration_suffix(Duration::ZERO);
-        suffix.text = "-s".to_owned();
+        suffix.text = timeout
+            .map(|timeout| format!("-/{}s", timeout.as_secs()))
+            .unwrap_or_else(|| "-s".to_owned());
         Self::upsert_tool_duration_suffix_segment(display, suffix);
     }
 
@@ -6839,7 +6903,11 @@ impl EventRenderer {
         };
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(&mut display, duration);
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                prior.effective_shell_timeout,
+            );
         }
         let diff = (!is_blocker)
             .then(|| Self::tool_result_diff(result))
@@ -6895,7 +6963,11 @@ impl EventRenderer {
         };
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(&mut display, duration);
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                prior.effective_shell_timeout,
+            );
         }
         let diff = (!is_blocker)
             .then(|| Self::tool_result_diff(&result))
@@ -6985,7 +7057,11 @@ impl EventRenderer {
         };
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(&mut display, duration);
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                prior.effective_shell_timeout,
+            );
         }
         self.record_tool_summary_result(
             prior.summary_block_id,
@@ -7027,7 +7103,11 @@ impl EventRenderer {
         };
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(&mut display, duration);
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                prior.effective_shell_timeout,
+            );
         }
         self.record_tool_summary_result(
             prior.summary_block_id,
@@ -7077,7 +7157,11 @@ impl EventRenderer {
         let is_blocker = prior.is_blocker || cancelled.tool_name.as_str() == BLOCKER_TOOL_NAME;
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(&mut display, duration);
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                prior.effective_shell_timeout,
+            );
         }
         self.record_tool_summary_result(prior.summary_block_id, None, None, true);
         self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-cancelled");

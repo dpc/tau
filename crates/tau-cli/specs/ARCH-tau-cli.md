@@ -56,6 +56,11 @@ too narrow for both show no ambiguous header rather than hiding whether a call
 succeeded or failed. Expanded payload and diff bodies remain ordinary detail
 rows below the one-row header and hide with an essential header that cannot
 fit, while compact and summary modes keep their existing visibility semantics.
+The built-in `shell` and `gpt_shell` tools are the narrow presentation exception:
+the CLI reads their start arguments solely to retain the configured `timeout`
+(or the shell provider's 120-second default) and renders their duration chip as
+`elapsed/timeout`s. It does not interpret any other shell argument or alter
+generic tool-header behavior.
 The bundled Swarm `blocker` tool is the narrow exception to otherwise generic
 tool-header projection: its structured start argument contributes only the
 validated `add`, `cancel`, or `list` action label. The CLI retains that safe
