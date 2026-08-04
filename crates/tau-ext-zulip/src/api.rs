@@ -198,10 +198,31 @@ impl HttpZulipClient {
             .map_err(|_| ApiError::Unavailable)?;
         self.read_json(response, false)
     }
+
+    fn current_user(&self, cfg: &RuntimeConfig) -> Result<(u64, Option<String>), ApiError> {
+        let response = self
+            .agent
+            .get(&format!("{}/users/me", cfg.api_base))
+            .header("Authorization", &Self::auth(cfg))
+            .call()
+            .map_err(|_| ApiError::Unavailable)?;
+        let value = self.read_json(response, false)?;
+        let user_id = value
+            .get("user_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ApiError::MalformedResponse)?;
+        let full_name = value
+            .get("full_name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .map(str::to_owned);
+        Ok((user_id, full_name))
+    }
 }
 
 impl ZulipClient for HttpZulipClient {
     fn register_queue(&self, cfg: &RuntimeConfig) -> Result<EventQueue, ApiError> {
+        let (bot_user_id, bot_full_name) = self.current_user(cfg)?;
         let value = self.post_form(
             cfg,
             "register",
@@ -210,6 +231,10 @@ impl ZulipClient for HttpZulipClient {
                     "event_types".to_owned(),
                     "[\"message\",\"update_message\",\"delete_message\",\"reaction\"]".to_owned(),
                 ),
+                // Zulip includes its recommended long-poll timeout in the
+                // initial `realm` state. Fetch identity separately to avoid
+                // loading the complete realm user directory.
+                ("fetch_event_types".to_owned(), "[\"realm\"]".to_owned()),
                 ("all_public_streams".to_owned(), "false".to_owned()),
                 ("apply_markdown".to_owned(), "false".to_owned()),
             ],
@@ -224,20 +249,6 @@ impl ZulipClient for HttpZulipClient {
             .get("last_event_id")
             .and_then(serde_json::Value::as_i64)
             .ok_or(ApiError::MalformedResponse)?;
-        let bot_user_id = value
-            .get("user_id")
-            .and_then(serde_json::Value::as_u64)
-            .or_else(|| {
-                value
-                    .get("zulip_user_id")
-                    .and_then(serde_json::Value::as_u64)
-            })
-            .ok_or(ApiError::MalformedResponse)?;
-        let bot_full_name = value
-            .get("full_name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty() && value.len() <= 256)
-            .map(str::to_owned);
         let longpoll_seconds = value
             .get("event_queue_longpoll_timeout_seconds")
             .and_then(serde_json::Value::as_u64)

@@ -481,56 +481,92 @@ fn mutations_emit_immutable_reports_and_delete_revokes() {
     );
 }
 
-/// The production HTTP client sends Basic auth, requests raw Markdown events,
-/// bounds responses, and never places credentials in the URL.
+/// Read exactly one complete HTTP request from a loopback client connection.
+fn read_http_request(socket: &mut impl Read) -> String {
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0; 2048];
+        let count = socket.read(&mut chunk).expect("read request");
+        bytes.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        if header_end + 4 + content_length <= bytes.len() {
+            return String::from_utf8_lossy(&bytes).to_string();
+        }
+    }
+}
+
+/// The production client fetches its own bounded identity before registering,
+/// requests only the realm metadata needed to bound long polls, sends
+/// credentials only through Basic authentication, and keeps the identity key
+/// and complete realm user directory off the wire.
 #[test]
 fn http_register_uses_basic_auth_and_native_queue_api() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
     let address = listener.local_addr().expect("address");
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().expect("accept request");
-        socket
+        let (mut identity_socket, _) = listener.accept().expect("accept identity request");
+        identity_socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("timeout");
-        let mut bytes = Vec::new();
-        loop {
-            let mut chunk = [0; 2048];
-            let count = socket.read(&mut chunk).expect("read request");
-            bytes.extend_from_slice(&chunk[..count]);
-            let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
-                continue;
-            };
-            let headers = String::from_utf8_lossy(&bytes[..header_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            if header_end + 4 + content_length <= bytes.len() {
-                break;
-            }
-        }
-        let request = String::from_utf8_lossy(&bytes).to_string();
-        assert!(request.starts_with("POST /api/v1/register "));
+        let identity_request = read_http_request(&mut identity_socket);
+        assert!(identity_request.starts_with("GET /api/v1/users/me "));
         assert!(
-            request
+            identity_request
                 .to_ascii_lowercase()
                 .contains("authorization: basic ym90qgv4yw1wbguudgvzddp0b3atc2vjcmv0")
         );
-        assert!(request.contains("apply_markdown=false"));
+        let identity_body = r#"{"result":"success","user_id":99,"full_name":"Bridge Bot"}"#;
+        write!(identity_socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}", identity_body.len(), identity_body).expect("respond with identity");
+
+        let (mut register_socket, _) = listener.accept().expect("accept register request");
+        register_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let register_request = read_http_request(&mut register_socket);
+        assert!(register_request.starts_with("POST /api/v1/register "));
         assert!(
-            !request
+            register_request
+                .to_ascii_lowercase()
+                .contains("authorization: basic ym90qgv4yw1wbguudgvzddp0b3atc2vjcmv0")
+        );
+        assert!(register_request.contains("apply_markdown=false"));
+        let (_, form) = register_request
+            .split_once("\r\n\r\n")
+            .expect("request contains header boundary");
+        let form: BTreeMap<_, _> = url::form_urlencoded::parse(form.as_bytes())
+            .into_owned()
+            .collect();
+        assert!(
+            form.get("fetch_event_types")
+                .is_some_and(|value| value == "[\"realm\"]"),
+            "registration must request the `realm` section containing the \
+             long-poll timeout"
+        );
+        assert!(
+            !form.values().any(|value| value.contains("realm_user")),
+            "registration must not load the complete realm user directory"
+        );
+        assert!(
+            !register_request
                 .lines()
                 .next()
                 .expect("request line")
                 .contains("top-secret")
         );
-        let body = r#"{"result":"success","queue_id":"opaque-q","last_event_id":5,"user_id":99,"event_queue_longpoll_timeout_seconds":90}"#;
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("respond");
-        request
+        let register_body = r#"{"result":"success","queue_id":"opaque-q","last_event_id":5,"event_queue_longpoll_timeout_seconds":90}"#;
+        write!(register_socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}", register_body.len(), register_body).expect("respond with queue");
+        (identity_request, register_request)
     });
     let mut config = cfg();
     config.api_base = format!("http://{address}/api/v1");
@@ -538,8 +574,11 @@ fn http_register_uses_basic_auth_and_native_queue_api() {
         .register_queue(&config)
         .expect("register queue");
     assert_eq!(queue.queue_id, "opaque-q");
-    let request = server.join().expect("server");
-    assert!(!request.contains("queue-secret"));
+    assert_eq!(queue.bot_user_id, 99);
+    assert_eq!(queue.bot_full_name.as_deref(), Some("Bridge Bot"));
+    let (identity_request, register_request) = server.join().expect("server");
+    assert!(!identity_request.contains("queue-secret"));
+    assert!(!register_request.contains("queue-secret"));
 }
 
 /// The production client long-polls the native events endpoint with an opaque
