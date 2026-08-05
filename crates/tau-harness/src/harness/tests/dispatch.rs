@@ -983,8 +983,111 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
     h.shutdown().expect("shutdown");
 }
 
-/// A failed initial prompt is rejected before durable activation while an
-/// independently correlated ordinary B remains retryable after surface repair.
+/// An eager initial prompt must wait for its late-installed per-agent context
+/// generation before strict shell-workdir rendering and durable submission.
+#[test]
+fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.resolving_initial_extension_collisions = true;
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("context-race-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-context-race".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("render after workdir context".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-context-race".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create agent with queued initial prompt");
+    let agent_id = h
+        .session_loaded_agents
+        .iter()
+        .next()
+        .cloned()
+        .expect("created agent");
+    let cid = h
+        .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+        .expect("created runtime agent");
+    set_test_agent_context_wait(
+        &mut h,
+        agent_id.clone(),
+        path_std_collections::HashSet::from([crate::test_connection_id("late-workdir-context")]),
+    );
+    h.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("context-race-message")
+                .expect("message id"),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: agent_id.clone(),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            message: "later durable message wake".to_owned(),
+        }),
+    );
+
+    h.resolving_initial_extension_collisions = false;
+    h.try_advance_queue();
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt.initial_prompt_correlation.is_some())
+    );
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.ctx_id.as_deref() == Some("prompt-context-race")
+    )));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptFailed(failed) if failed.request_id == "create-context-race"
+    )));
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
+    );
+
+    publish_shell_workdir_context(
+        &mut h,
+        &agent_id,
+        "workdir",
+        "core-shell",
+        "default",
+        "/srv/context-ready",
+        "available",
+    );
+    finish_test_agent_context_wait(&mut h, &agent_id);
+    h.try_advance_queue();
+
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(prompt.ctx_id.as_deref(), Some("prompt-context-race"));
+    assert!(prompt.system_prompt.contains("/srv/context-ready"));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptFailed(failed) if failed.request_id == "create-context-race"
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A failed initial prompt is rejected before durable activation after context
+/// readiness while an independently correlated ordinary B remains retryable
+/// after surface repair.
 #[test]
 fn failed_create_prompt_preflight_preserves_later_prompt() {
     let td = TempDir::new().expect("tempdir");
@@ -1050,6 +1153,23 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
 
     h.resolving_initial_extension_collisions = false;
     h.try_advance_queue();
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt.initial_prompt_correlation.is_some())
+    );
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptFailed(failed) if failed.request_id == "create-watermark-a"
+    )));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.ctx_id.as_deref() == Some("prompt-watermark-a")
+    )));
+    finish_test_agent_context_wait(&mut h, &agent_id);
+    h.try_advance_queue();
     assert!(!h.pending_initial_prompt_correlations.contains_key(&cid));
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
@@ -1057,25 +1177,17 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
             if failed.request_id == "create-watermark-a"
                 && failed.ctx_id == "prompt-watermark-a"
     )));
-    assert!(event_log_events(&h).iter().all(|event| !matches!(
-        event,
-        Event::AgentPromptSubmitted(submitted)
-            if submitted.ctx_id.as_deref() == Some("prompt-watermark-a")
-    )));
     h.dispatch_prompt_for_agent(
         &cid,
         PendingPrompt::user("independent B".to_owned())
             .with_ctx_id(Some("prompt-watermark-b".to_owned())),
     )
-    .expect("commit B behind A");
+    .expect("commit B after A terminal");
     let activation_b = h
         .pending_publish_idle_dispatches
         .back()
         .and_then(|dispatch| dispatch.activation_through)
         .expect("B committed watermark");
-
-    finish_test_agent_context_wait(&mut h, &agent_id);
-    h.drain_publish_idle_dispatches();
     assert!(
         h.pending_publish_idle_dispatches
             .iter()

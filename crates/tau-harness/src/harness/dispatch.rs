@@ -247,10 +247,18 @@ impl Harness {
                 return;
             }
 
-            let has_durable_activation = self.agents.get(&agent_id).is_some_and(|agent| {
-                agent.pending_replay_activation
-                    || self.has_ready_message_wake_on_selected_branch(&agent_id)
+            let has_ready_initial_prompt = self.agents.get(&agent_id).is_some_and(|agent| {
+                agent
+                    .pending_prompts
+                    .iter()
+                    .find(|prompt| !prompt.is_passive_background_completion())
+                    .is_some_and(|prompt| prompt.initial_prompt_correlation.is_some())
             });
+            let has_durable_activation = !has_ready_initial_prompt
+                && self.agents.get(&agent_id).is_some_and(|agent| {
+                    agent.pending_replay_activation
+                        || self.has_ready_message_wake_on_selected_branch(&agent_id)
+                });
             if has_durable_activation {
                 let _ = self.ensure_agent_id_for_agent(&agent_id);
                 if self
@@ -401,6 +409,12 @@ impl Harness {
                         conv.activation_dispatch,
                         crate::agent::ActivationDispatchState::None
                     )
+                    && (conv
+                        .pending_prompts
+                        .iter()
+                        .find(|prompt| !prompt.is_passive_background_completion())
+                        .is_none_or(|prompt| prompt.initial_prompt_correlation.is_none())
+                        || self.agent_initialization_ready_for(agent_id))
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
                     && !self.agent_has_open_foreground_tool_round(agent_id)
             })

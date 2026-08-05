@@ -17645,6 +17645,21 @@ impl Harness {
         self.agent_context_ready_for_loaded_agent(&agent_id)
     }
 
+    /// Returns whether one new agent has frozen the exact initialization
+    /// generation that its eager initial prompt must render against.
+    pub(crate) fn agent_initialization_ready_for(&self, cid: &AgentId) -> bool {
+        let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_ref())
+            .map(|agent_id| tau_proto::AgentId::parse(agent_id.as_str()).expect("agent id"))
+        else {
+            return false;
+        };
+        self.frozen_agent_discovery.contains_key(&agent_id)
+            && !self.pending_agent_discovery.contains_key(&agent_id)
+    }
+
     /// Returns whether the durable agent tree has one unfinished foreground
     /// provider tool round on any branch.
     pub(crate) fn agent_has_open_foreground_tool_round(&self, cid: &AgentId) -> bool {

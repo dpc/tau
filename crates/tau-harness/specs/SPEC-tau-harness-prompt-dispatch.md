@@ -235,6 +235,13 @@ Prompt dispatch is blocked while the target agent has a pending discovery
 initialization. Prompt assembly reads model-visible skills and tool lookup from
 the frozen snapshot and materializes the reducer's latest AGENTS.md
 initialization side-state once as a user context block outside transcript nodes.
+New-agent eager initial prompts remain in the harness-owned preprocessing queue
+until that exact initialization freezes, including the interval before a
+per-agent wait is installed. Strict system-prompt rendering and render preflight
+run only after every required per-agent context provider reports readiness; no
+missing-context fallback weakens template validation. Once ready, that accepted
+initial prompt remains ahead of later replay activations and message wakes, so
+the first provider turn preserves acceptance order.
 See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
