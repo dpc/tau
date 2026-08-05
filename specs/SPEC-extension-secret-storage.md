@@ -59,6 +59,13 @@ valid named binding from the one-shot source snapshot, and under one Secret lock
 publishes the resulting typed records. Configure later uses that retained
 settings generation instead of rereading the directory.
 
+The built-in provider validates every filename and full profile in that
+Configure generation before retaining parsed settings or publishing models. One
+invalid entry rejects the complete generation through a bounded, redacted
+`ConfigError`; the extension publishes neither models nor `Ready`, and the
+harness applies its existing required/optional startup and replayable-notice
+policy. Rejection does not mutate or migrate the persisted settings.
+
 An actually unavailable or undeclared bound source replaces the old materialization with
 an empty API-key record, suppresses that profile, and produces a mandatory
 source-name-only warning. Direct-entry and keyless records have no binding and

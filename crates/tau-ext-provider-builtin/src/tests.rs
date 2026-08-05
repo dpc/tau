@@ -127,6 +127,183 @@ fn provider_settings_credential_reference_is_authoritative_and_exact() {
     }
 }
 
+fn configured_chat_completions_settings(provider: &str, extra: serde_json::Value) -> Vec<u8> {
+    let mut settings = serde_json::json!({
+        "kind": "chat_completions",
+        "models": [{"id": "deepseek-chat"}],
+        "credential": {
+            "kind": "api_key",
+            "secret_path": format!("providers/{provider}/api-key.json")
+        }
+    });
+    settings
+        .as_object_mut()
+        .expect("test settings object")
+        .extend(extra.as_object().expect("test extra object").clone());
+    serde_json::to_vec(&settings).expect("serialize test settings")
+}
+
+fn run_provider_configure(
+    settings_files: BTreeMap<String, Vec<u8>>,
+) -> (
+    Result<(), Box<dyn Error>>,
+    Vec<tau_proto::HarnessInputMessage>,
+) {
+    let mut input = Vec::new();
+    {
+        let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::Configure(
+                tau_proto::Configure {
+                    tool_prefix: None,
+                    config: tau_proto::CborValue::Map(Vec::new()),
+                    instance_name: tau_proto::ExtensionName::parse("provider-builtin")
+                        .expect("extension name"),
+                    state_dir: None,
+                    secrets: BTreeMap::new(),
+                    settings_files,
+                },
+            ))
+            .expect("encode Configure");
+        writer.flush().expect("flush Configure");
+    }
+    let output = SharedTraceWriter::default();
+    let result = run(Cursor::new(input), output.clone());
+    (result, decode_frames(&output.bytes()))
+}
+
+/// Proves one invalid profile rejects the complete initial settings generation
+/// instead of retaining valid profiles parsed before the failure.
+#[test]
+fn provider_settings_snapshot_validation_is_atomic() {
+    let valid = configured_chat_completions_settings("valid", serde_json::json!({}));
+    let invalid = configured_chat_completions_settings(
+        "deepseek",
+        serde_json::json!({"api_key_secret": "legacy-secret-name"}),
+    );
+    let error = try_load_settings_profiles(vec![
+        (ProviderName::new("valid"), valid),
+        (ProviderName::new("deepseek"), invalid),
+    ])
+    .expect_err("legacy credential field must reject the complete snapshot");
+
+    assert_eq!(error.provider, ProviderName::new("deepseek"));
+    assert_eq!(
+        error.reason,
+        ProviderSettingsValidationReason::CredentialFieldsPresent
+    );
+}
+
+/// Proves invalid initial provider settings become one typed configuration
+/// rejection and cannot publish partial models or cross the Ready boundary.
+#[test]
+fn invalid_provider_configure_emits_config_error_without_models_or_ready() {
+    let valid = configured_chat_completions_settings("alpha", serde_json::json!({}));
+    let invalid = configured_chat_completions_settings(
+        "deepseek",
+        serde_json::json!({"api_key_secret": "legacy-secret-name"}),
+    );
+    let (result, frames) = run_provider_configure(BTreeMap::from([
+        ("alpha.json".to_owned(), valid),
+        ("deepseek.json".to_owned(), invalid),
+    ]));
+
+    assert!(
+        result.is_err(),
+        "rejected startup must not enter the runtime loop"
+    );
+    let errors = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::ConfigError(error) => Some(error.message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        errors,
+        vec![
+            "provider profile 'deepseek' has invalid credential-free settings: credential fields are forbidden"
+        ]
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+    assert!(!frames.iter().any(|frame| {
+        matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ProviderModelsDeclared(_))
+        )
+    }));
+}
+
+/// Proves configuration diagnostics expose only the validated provider identity
+/// and closed reason, never malformed settings values or path-like input.
+#[test]
+fn invalid_provider_configure_error_is_redacted() {
+    let settings = configured_chat_completions_settings(
+        "deepseek",
+        serde_json::json!({
+            "api_key_secret": "credential-value-sentinel",
+            "base_url": "/private/provider/path-sentinel"
+        }),
+    );
+    let (_, frames) =
+        run_provider_configure(BTreeMap::from([("deepseek.json".to_owned(), settings)]));
+    let diagnostic = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::ConfigError(error) => Some(error.message.as_str()),
+            _ => None,
+        })
+        .expect("ConfigError");
+
+    assert!(diagnostic.contains("deepseek"));
+    assert!(diagnostic.contains("credential fields are forbidden"));
+    assert!(!diagnostic.contains("credential-value-sentinel"));
+    assert!(!diagnostic.contains("/private/provider/path-sentinel"));
+}
+
+/// Proves a valid complete settings snapshot still publishes every configured
+/// model and reaches Ready after strict validation.
+#[test]
+fn valid_provider_configure_publishes_models_and_ready() {
+    let settings = configured_chat_completions_settings("deepseek", serde_json::json!({}));
+    let (result, frames) =
+        run_provider_configure(BTreeMap::from([("deepseek.json".to_owned(), settings)]));
+
+    result.expect("valid provider startup");
+    assert!(frames.iter().any(|frame| {
+        matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ProviderModelsDeclared(declaration)
+                        if declaration
+                            .models
+                            .iter()
+                            .any(|model| {
+                                model.id.provider.as_str() == "deepseek"
+                                    && model.id.model.as_str() == "deepseek-chat"
+                            })
+                )
+        )
+    }));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+    );
+}
+
 /// Cloneable in-memory sink used to inspect structured tracing output.
 #[derive(Clone, Default)]
 struct SharedTraceWriter {

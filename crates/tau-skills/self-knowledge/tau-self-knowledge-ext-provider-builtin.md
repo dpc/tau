@@ -81,6 +81,15 @@ Missing or malformed credentials exclude the profile. Runtime reloads credential
 at prompt boundaries and refreshes ChatGPT OAuth records with compare-and-swap,
 so a losing refresher never retries a rotated token.
 
+Initial Configure validates the complete bounded provider settings snapshot
+before retaining parsed profiles or publishing models. An invalid filename or
+profile, including legacy or inline credential fields, rejects the whole snapshot:
+the extension publishes neither models nor Ready and the harness emits one
+mandatory replayable warning. Invalid-filename warnings expose no raw filename;
+profile-validation warnings may identify only the already-validated provider
+name and a closed reason. Neither form exposes paths or settings values. Startup
+does not mutate or migrate the rejected settings.
+
 The profile kinds route to three deliberately separate wire backends.
 `chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE
 `/chat/completions` adapter, including Function tools and semantic transcript

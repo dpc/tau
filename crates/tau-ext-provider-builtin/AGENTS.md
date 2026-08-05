@@ -3,7 +3,8 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 # tau-ext-provider-builtin
 
 Read the applicable Linked Specs under `specs/` and the applicable trust-boundary records under `specs/` before changing provider profile ownership/model publication, prompt worker/cancellation/retry behavior, diagnostics/persistence boundaries, event-driven worker wakeups, or this crate's testing boundary.
-Read `SECURITY.md` before changing quota credentials, epochs, refresh scheduling,
-or worker-to-main-loop quota reconciliation.
+Read `SECURITY.md` before changing settings validation, startup model
+publication, prompt-time profile loading, quota credentials, epochs, refresh
+scheduling, or worker-to-main-loop quota reconciliation.
 
 After major changes to this extension's features, tool/action behavior, configuration options, provider/runtime behavior, or user-visible capabilities, update the built-in self-knowledge skill `tau-self-knowledge-ext-provider-builtin` and user-facing provider docs (`docs/providers.md`, `FEATURES.md` as applicable) so Tau and the docs accurately explain the current extension behavior.

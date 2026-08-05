@@ -84,8 +84,8 @@ const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
 const DEFAULT_RESPONSES_LITE_COMPATIBILITY: bool = false;
 
-/// Immutable credential-free provider settings captured from initial Configure.
-type SettingsSnapshot = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
+/// Parsed, immutable provider settings accepted by initial Configure.
+type SettingsSnapshot = Arc<Mutex<BuiltinProviderProfiles>>;
 
 #[cfg(test)]
 fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
@@ -1052,7 +1052,7 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
         settings,
         credentials,
     } = store.snapshot(extension_instance)?;
-    let profiles = load_settings_profiles(settings);
+    let profiles = load_settings_profiles_lossy(settings);
     if profiles.providers.is_empty() {
         println!("No provider profiles configured.");
         return Ok(());
@@ -1387,25 +1387,82 @@ fn provider_setup_payload(
     })
 }
 
-fn load_settings_profiles(files: Vec<(ProviderName, Vec<u8>)>) -> BuiltinProviderProfiles {
+/// Closed, redacted reason that one credential-free provider profile is
+/// invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderSettingsValidationReason {
+    /// The settings bytes are not JSON.
+    InvalidJson,
+    /// The JSON root is not an object.
+    NotObject,
+    /// The object retains a legacy or inline credential field.
+    CredentialFieldsPresent,
+    /// The credential reference violates the shared closed schema.
+    InvalidCredentialReference,
+    /// The remaining provider-specific fields do not match a built-in profile.
+    InvalidProfile,
+    /// The credential slot does not match the provider profile kind.
+    CredentialKindMismatch,
+}
+
+impl std::fmt::Display for ProviderSettingsValidationReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidJson => "settings are not valid JSON",
+            Self::NotObject => "settings must be an object",
+            Self::CredentialFieldsPresent => "credential fields are forbidden",
+            Self::InvalidCredentialReference => "credential reference is invalid",
+            Self::InvalidProfile => "provider-specific settings are invalid",
+            Self::CredentialKindMismatch => {
+                "credential kind does not match the provider profile kind"
+            }
+        })
+    }
+}
+
+/// Bounded startup diagnostic carrying only a validated provider name and a
+/// closed validation reason.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderSettingsValidationError {
+    /// Logical provider profile name from the validated settings filename.
+    provider: ProviderName,
+    /// Closed reason that cannot retain raw settings, paths, or values.
+    reason: ProviderSettingsValidationReason,
+}
+
+impl std::fmt::Display for ProviderSettingsValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "provider profile '{}' has invalid credential-free settings: {}",
+            self.provider, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ProviderSettingsValidationError {}
+
+fn try_load_settings_profiles(
+    files: Vec<(ProviderName, Vec<u8>)>,
+) -> Result<BuiltinProviderProfiles, ProviderSettingsValidationError> {
     let mut profiles = BuiltinProviderProfiles::default();
     for (name, contents) in files {
-        match parse_settings_profile(&name, &contents) {
-            Ok((profile, credential_path, named_api_key)) => {
-                profiles
-                    .credential_paths
-                    .insert(name.clone(), credential_path);
-                if named_api_key {
-                    profiles.named_api_key_profiles.insert(name.clone());
-                }
-                profiles.providers.insert(name, profile);
-            }
+        insert_settings_profile(&mut profiles, name, &contents)?;
+    }
+    Ok(profiles)
+}
+
+fn load_settings_profiles_lossy(files: Vec<(ProviderName, Vec<u8>)>) -> BuiltinProviderProfiles {
+    let mut profiles = BuiltinProviderProfiles::default();
+    for (name, contents) in files {
+        match insert_settings_profile(&mut profiles, name, &contents) {
+            Ok(()) => {}
             Err(error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    provider = %name,
-                    error = %error,
-                    "skipping invalid credential-free provider settings"
+                    provider = %error.provider,
+                    reason = %error.reason,
+                    "skipping invalid provider settings while listing profiles"
                 );
             }
         }
@@ -1413,15 +1470,64 @@ fn load_settings_profiles(files: Vec<(ProviderName, Vec<u8>)>) -> BuiltinProvide
     profiles
 }
 
+fn insert_settings_profile(
+    profiles: &mut BuiltinProviderProfiles,
+    name: ProviderName,
+    contents: &[u8],
+) -> Result<(), ProviderSettingsValidationError> {
+    let (profile, credential_path, named_api_key) = parse_settings_profile(&name, contents)
+        .map_err(|reason| ProviderSettingsValidationError {
+            provider: name.clone(),
+            reason,
+        })?;
+    profiles
+        .credential_paths
+        .insert(name.clone(), credential_path);
+    if named_api_key {
+        profiles.named_api_key_profiles.insert(name.clone());
+    }
+    profiles.providers.insert(name, profile);
+    Ok(())
+}
+
+fn validate_configure_settings(
+    settings: &BTreeMap<String, Vec<u8>>,
+) -> ClientResult<BuiltinProviderProfiles> {
+    let mut files = Vec::with_capacity(settings.len());
+    for (file_name, contents) in settings {
+        let Some(stem) = file_name.strip_suffix(".json") else {
+            return Err(ClientError::handler(
+                "provider settings snapshot contains an invalid filename",
+            ));
+        };
+        let name = ProviderName::try_new(stem.to_owned()).map_err(|_| {
+            ClientError::handler("provider settings snapshot contains an invalid filename")
+        })?;
+        files.push((name, contents.clone()));
+    }
+    try_load_settings_profiles(files).map_err(|error| ClientError::handler(error.to_string()))
+}
+
 fn parse_settings_profile(
     name: &ProviderName,
     contents: &[u8],
-) -> Result<(BuiltinProviderProfile, tau_proto::ExtensionDataPath, bool), Box<dyn Error>> {
-    let mut value: serde_json::Value = serde_json::from_slice(contents)?;
+) -> Result<
+    (BuiltinProviderProfile, tau_proto::ExtensionDataPath, bool),
+    ProviderSettingsValidationReason,
+> {
+    let mut value: serde_json::Value = serde_json::from_slice(contents)
+        .map_err(|_| ProviderSettingsValidationReason::InvalidJson)?;
     let object = value
         .as_object_mut()
-        .ok_or("provider settings must be an object")?;
-    let reference = parse_provider_credential_reference(name, object)?;
+        .ok_or(ProviderSettingsValidationReason::NotObject)?;
+    if object.contains_key("auth")
+        || object.contains_key("api_key")
+        || object.contains_key("api_key_secret")
+    {
+        return Err(ProviderSettingsValidationReason::CredentialFieldsPresent);
+    }
+    let reference = parse_provider_credential_reference(name, object)
+        .map_err(|_| ProviderSettingsValidationReason::InvalidCredentialReference)?;
     object
         .remove("credential")
         .expect("validated reference must be present");
@@ -1433,7 +1539,8 @@ fn parse_settings_profile(
             object.insert("api_key".to_owned(), serde_json::json!(""));
         }
     }
-    let profile: BuiltinProviderProfile = serde_json::from_value(value)?;
+    let profile: BuiltinProviderProfile = serde_json::from_value(value)
+        .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;
     let profile_matches_kind = matches!(
         (&profile, reference.slot()),
         (
@@ -1447,7 +1554,7 @@ fn parse_settings_profile(
         )
     );
     if !profile_matches_kind {
-        return Err("provider credential kind does not match provider settings kind".into());
+        return Err(ProviderSettingsValidationReason::CredentialKindMismatch);
     }
     Ok((
         profile,
@@ -1594,25 +1701,17 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let settings_snapshot = Arc::new(Mutex::new(BTreeMap::new()));
+    let settings_snapshot = Arc::new(Mutex::new(BuiltinProviderProfiles::default()));
     let profile_snapshot = Arc::clone(&settings_snapshot);
     run_inner_with_configured_settings(
         reader,
         writer,
         BuiltinProviderProfiles::default(),
         move || {
-            let settings = profile_snapshot
+            profile_snapshot
                 .lock()
-                .expect("lock provider settings snapshot");
-            let files = settings
-                .iter()
-                .filter_map(|(name, contents)| {
-                    let stem = name.strip_suffix(".json")?;
-                    let name = ProviderName::try_new(stem.to_owned()).ok()?;
-                    Some((name, contents.clone()))
-                })
-                .collect();
-            load_settings_profiles(files)
+                .expect("lock provider settings snapshot")
+                .clone()
         },
         settings_snapshot,
     )
@@ -1750,7 +1849,7 @@ where
         },
         RuntimeStartup {
             profiles: startup_profiles,
-            settings_snapshot: Arc::new(Mutex::new(BTreeMap::new())),
+            settings_snapshot: Arc::new(Mutex::new(BuiltinProviderProfiles::default())),
             publish_models_after_configure: false,
         },
     )
@@ -1770,7 +1869,7 @@ struct RuntimeExecutors {
 struct RuntimeStartup {
     /// Profiles used by test-only static model publication.
     profiles: BuiltinProviderProfiles,
-    /// Immutable credential-free settings snapshot from initial Configure.
+    /// Parsed, immutable settings accepted by initial Configure.
     settings_snapshot: SettingsSnapshot,
     /// Whether production must defer model publication until Configure
     /// resolution.
@@ -1799,7 +1898,7 @@ where
         executors,
         RuntimeStartup {
             profiles: startup_profiles,
-            settings_snapshot: Arc::new(Mutex::new(BTreeMap::new())),
+            settings_snapshot: Arc::new(Mutex::new(BuiltinProviderProfiles::default())),
             publish_models_after_configure: false,
         },
     )
@@ -1925,14 +2024,13 @@ where
                     return Ok(());
                 }
                 configured = true;
+                let profiles = validate_configure_settings(&cx.configure.settings_files)?;
                 *settings_snapshot
                     .lock()
-                    .expect("lock provider settings snapshot") =
-                    cx.configure.settings_files.clone();
+                    .expect("lock provider settings snapshot") = profiles.clone();
                 if !publish_models_after_configure {
                     return Ok(());
                 }
-                let profiles = cx.state.load_profiles();
                 cx.state
                     .set_startup_responses_modes(profiles.startup_responses_modes());
                 cx.handle

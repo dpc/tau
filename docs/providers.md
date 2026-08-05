@@ -320,6 +320,12 @@ reference, never OAuth tokens or API keys. The runtime loads the typed
 version-zero credential before model publication and at prompt boundaries.
 Credential rotation therefore takes effect without restart; settings changes
 require restart. Missing or malformed credentials exclude that provider.
+Initial Configure validates the complete bounded settings snapshot before
+retaining it or publishing any model. One invalid filename or profile—including
+legacy `api_key_secret`, inline API keys, or mixed credential fields—rejects the
+whole snapshot, publishes no models or Ready, and produces one mandatory,
+replayable, redacted configuration warning. Re-register the invalid profile;
+startup does not rewrite or migrate persisted settings.
 
 `tau provider add [KIND]` accepts exactly `chatgpt`, `chat-completions`,
 `responses`, or `openrouter`; without `KIND` it presents those same choices in

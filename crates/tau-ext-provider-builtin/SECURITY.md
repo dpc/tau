@@ -59,6 +59,17 @@ Unavailable, malformed, wrong-kind, or wrong-version records exclude the
 provider. Diagnostics may identify provider names and safe error categories but
 never secret paths, values, or host filesystem paths.
 
+Initial Configure validates every filename and full provider profile before
+retaining one parsed immutable snapshot or publishing models. One invalid entry
+rejects the complete snapshot through exactly one bounded `ConfigError`; the
+extension publishes neither models nor `Ready`. Invalid-filename diagnostics
+expose no raw filename. Profile-validation diagnostics may identify only the
+already-validated provider name and a closed reason. Neither form exposes paths,
+raw settings, or values. Prompt-time loading clones the already-validated
+snapshot before credential hydration, so it cannot reparse or log malformed
+persisted settings. Preserve that invariant if runtime reconfiguration or
+snapshot mutation is introduced.
+
 Named API-key sources are setup/startup authorities, not runtime credential
 inputs. Setup resolves the exact configured declaration only while holding the
 provider-settings instance lock, then takes the Secret lock, publishes the typed
