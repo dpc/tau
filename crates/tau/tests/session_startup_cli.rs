@@ -1,6 +1,6 @@
-use std::process::Command;
-
 mod support;
+
+use std::process::Command;
 
 use support::isolated_tau_command;
 

@@ -1,12 +1,11 @@
+mod support;
+
 use std::ffi as path_std_ffi;
 use std::path::Path;
 use std::process::{Command as path_std_process_Command, Output};
 
-use tempfile::TempDir;
-
-mod support;
-
 use support::isolated_tau_command;
+use tempfile::TempDir;
 
 fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
     preview_at(home.path(), environment, args)

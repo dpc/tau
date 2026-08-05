@@ -47,12 +47,16 @@ pub(super) struct ShellRuntime {
     shutdown_generation: Arc<AtomicU64>,
     lock_manager: DirLockManager,
     cwd_state: CwdState,
+    /// Identifies whether startup cwd comes from the process or a test fixture,
+    /// so production freezes the process cwd only after initial configuration.
     startup_cwd_source: StartupCwdSource,
     start_agent_owners: HashMap<String, tau_proto::AgentId>,
     runtime_started: bool,
 }
 
 impl ShellRuntime {
+    /// Creates a production runtime that freezes the process startup cwd during
+    /// initial configuration.
     pub(super) fn new(
         tx: Output,
         config: ExtConfig,
@@ -68,6 +72,8 @@ impl ShellRuntime {
     }
 
     #[cfg(any(test, feature = "echo-agent"))]
+    /// Creates a fixture runtime with a test-owned startup cwd instead of
+    /// reading the process cwd.
     pub(super) fn new_for_test_harness(
         tx: Output,
         config: ExtConfig,
