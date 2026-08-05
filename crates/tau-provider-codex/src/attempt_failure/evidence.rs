@@ -66,8 +66,8 @@ pub(crate) enum TransportFailureKind {
     Read,
     /// The WebSocket writer failed.
     Send,
-    /// A periodic keepalive write failed.
-    Keepalive,
+    /// A periodic transport-only WebSocket control-ping write failed.
+    WebSocketControlPing,
     /// No provider frame arrived before the idle deadline.
     IdleTimeout,
     /// The WebSocket upgrade failed.
@@ -127,7 +127,7 @@ impl TransportFailureKind {
             }) => "binary_frame",
             Self::Read => "websocket_read",
             Self::Send => "websocket_send",
-            Self::Keepalive => "websocket_keepalive",
+            Self::WebSocketControlPing => "websocket_control_ping",
             Self::IdleTimeout => "response_idle_timeout",
             Self::Upgrade => "websocket_upgrade",
             Self::Outbound => "outbound",
@@ -376,7 +376,9 @@ impl AttemptFailureEvidence {
                 }) => "Provider sent an unexpected WebSocket binary frame".to_owned(),
                 TransportFailureKind::Read => "WebSocket read failed".to_owned(),
                 TransportFailureKind::Send => "WebSocket send failed".to_owned(),
-                TransportFailureKind::Keepalive => "WebSocket keepalive failed".to_owned(),
+                TransportFailureKind::WebSocketControlPing => {
+                    "WebSocket control ping failed".to_owned()
+                }
                 TransportFailureKind::IdleTimeout => "Provider response timed out".to_owned(),
                 TransportFailureKind::Upgrade => "WebSocket upgrade failed".to_owned(),
                 TransportFailureKind::Outbound => "Provider connection failed".to_owned(),

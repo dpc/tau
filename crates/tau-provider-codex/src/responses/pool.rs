@@ -1276,7 +1276,7 @@ pub fn run_prewarm_through_shared_pool(
 ///
 /// - Transport-level closes: tungstenite raised `ConnectionClosed`,
 ///   `AlreadyClosed`, or an IO break; the server sent a close frame mid-stream;
-///   keepalive ping or turn-send failed write-side.
+///   WebSocket control ping or turn-send failed write-side.
 /// - Task-supervision failures: the per-conn reader or writer task exited or
 ///   got aborted — the socket they owned is gone.
 /// - Server-level stale-chain and connection-limit codes retire the socket and

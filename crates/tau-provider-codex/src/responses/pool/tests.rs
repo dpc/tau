@@ -1621,10 +1621,10 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     );
 }
 
-/// A cached connection dies mid-turn (keepalive timeout / TCP reset). If
-/// the request has a `previous_response_id`, the pool must reopen a fresh
-/// WS socket, strip the stale chain id, and leave the replacement socket in
-/// the pool so later turns regain cache warmth.
+/// A cached connection dies mid-turn (WebSocket control-ping timeout / TCP
+/// reset). If the request has a `previous_response_id`, the pool must reopen a
+/// fresh WS socket, strip the stale chain id, and leave the replacement socket
+/// in the pool so later turns regain cache warmth.
 #[test]
 fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     let (addr, server) = spawn_fake_codex_server();
@@ -1863,7 +1863,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
 /// classified recoverable so the silent-reconnect path catches
 /// it. The old narrow allow-list (`"ws closed"` /
 /// `"previous_response"` / `"response not found"`) silently
-/// missed `"ws writer task gone"` and `"ws keepalive failed:
+/// missed `"ws writer task gone"` and `"websocket_control_ping failed:
 /// ..."` after the tokio-tungstenite refactor — a dead cached
 /// socket would then leak its error to the user instead of
 /// being reopened transparently. Guards against re-tightening.
@@ -1875,7 +1875,7 @@ fn all_run_turn_error_shapes_are_recoverable() {
         "stream error: ws writer task gone",
         "stream error: ws reader task gone",
         "stream error: ws send failed: Connection closed normally",
-        "stream error: ws keepalive failed: IO error: broken pipe",
+        "stream error: websocket_control_ping failed: IO error: broken pipe",
         "stream error: Previous response not found",
         "stream error: previous_response_id expired",
         "stream error: response not found",
@@ -2036,7 +2036,7 @@ struct ServerState {
     /// Fault injection. When `Some`, the worker for a matching
     /// connection drops the socket with a 1011 close frame
     /// instead of serving the offending turn — mimicking the
-    /// "keepalive ping timeout" the live Codex server produces
+    /// WebSocket control-ping timeout the live Codex server produces
     /// when its idle reaper fires. Tests use this to exercise
     /// the silent-reconnect path.
     fault: Option<MidStreamCloseFault>,
@@ -2244,7 +2244,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                     gate.arrive_and_wait();
                 }
                 if fault_now.is_some() {
-                    // Mimic the live Codex 1011 keepalive-timeout
+                    // Mimic the live Codex 1011 WebSocket-control-ping timeout
                     // drop: send a close frame and bail without
                     // streaming the response body. Client side
                     // sees `Message::Close` → `LlmError(0, "stream

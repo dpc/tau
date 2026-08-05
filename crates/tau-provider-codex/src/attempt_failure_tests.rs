@@ -365,6 +365,28 @@ fn pre_upgrade_capture_distinguishes_zero_dispatch_from_repair_upgrade() {
     assert_eq!(repair["wire"]["repair_used"], true);
 }
 
+/// Ensures a scheduled WebSocket control ping remains a transport-only failure
+/// in both persisted metrics and live diagnostics, rather than being confused
+/// with an inference or prompt-cache operation.
+#[test]
+fn websocket_control_ping_failure_is_unambiguously_transport_only() {
+    let evidence = AttemptFailureEvidence::transport(
+        TransportPhase::ResponseStream,
+        true,
+        TransportFailureKind::WebSocketControlPing,
+    );
+    let record = capture_record(&evidence, true, 1, false).expect("control-ping capture");
+
+    assert_eq!(record["transport"]["kind"], "websocket_control_ping");
+    assert_eq!(
+        evidence
+            .live_detail("loaded-secret", None)
+            .expect("transport-only live detail")
+            .as_str(),
+        "WebSocket control ping failed"
+    );
+}
+
 /// Regression: every closed transport phase/kind must serialize a stable local
 /// label without falling back to raw library text.
 #[test]
@@ -388,9 +410,9 @@ fn transport_capture_labels_cover_closed_failure_matrix() {
         ),
         (
             TransportPhase::ResponseStream,
-            TransportFailureKind::Keepalive,
+            TransportFailureKind::WebSocketControlPing,
             true,
-            json!({"phase":"response_stream","kind":"websocket_keepalive","ws_close_code":null,
+            json!({"phase":"response_stream","kind":"websocket_control_ping","ws_close_code":null,
                 "ws_close_reason":{"present":false,"utf8_bytes":0,"unicode_scalars":0},
                 "clean_eof":false,"frame_bytes":null}),
         ),

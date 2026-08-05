@@ -2,7 +2,8 @@
 
 Parser and streaming changes use focused event, delta, snapshot, and golden-request
 tests. WebSocket changes cover pool identity, reservation and release, reconnect,
-idle timeout, typed cancellation, and abort wakeups without short polling.
+transport-only `websocket_control_ping` control frames, idle timeout, typed
+cancellation, and abort wakeups without short polling.
 
 Local peers join the production upgrade, request lowering, background tasks, frame
 parsing, and typed error mapping. They bind only loopback, use synthetic

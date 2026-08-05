@@ -21,13 +21,14 @@
 //! Threading model: each connection has two tokio tasks behind the
 //! scenes — a reader looping on `stream.next()` and a writer
 //! draining an outbound channel + driving a periodic client-side
-//! ping. The pings keep the upstream's keepalive timer happy
-//! (default 25 s; the live Codex server reaps with a 1011
+//! WebSocket control ping. The control pings keep the upstream's keepalive
+//! timer happy (default 25 s; the live Codex server reaps with a 1011
 //! "keepalive ping timeout" close when no client pong has been seen
-//! recently). The sync [`WsConn`] type holds the channel handles —
-//! `run_turn` is sync, owned by the provider's main loop, and just
-//! marshals envelopes to the writer task and pulls events back from
-//! the reader.
+//! recently). They are transport control frames, not Responses requests, so
+//! they cannot run inference or refresh a prompt cache. The sync [`WsConn`]
+//! type holds the channel handles — `run_turn` is sync, owned by the provider's
+//! main loop, and just marshals envelopes to the writer task and pulls events
+//! back from the reader.
 
 use std::future::Future;
 use std::sync::{Arc, mpsc as std_mpsc};
@@ -65,7 +66,7 @@ use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 /// one-line change.
 pub const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
 
-/// How often the writer task sends an unsolicited client `Ping`.
+/// How often the writer task sends an unsolicited WebSocket control `Ping`.
 ///
 /// The live Codex server reaps idle connections with a 1011
 /// "keepalive ping timeout" close when its own ping cycle goes
@@ -79,9 +80,12 @@ pub const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
 /// Doubles as a flush trigger: `tungstenite` queues an outgoing
 /// `Pong` whenever the reader half processes a server `Ping`, but
 /// the queued bytes only leave the wire on the next sink write.
-/// Periodic client pings ensure pongs don't sit buffered for a full
+/// Periodic WebSocket control pings ensure pongs don't sit buffered for a full
 /// turn boundary.
-const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
+///
+/// This is transport-only: it sends no Responses envelope, performs no
+/// inference, and cannot refresh a prompt cache.
+const WEBSOCKET_CONTROL_PING_INTERVAL: Duration = Duration::from_secs(25);
 
 /// How long one WS turn may go without any provider event before Tau treats
 /// the socket as wedged and returns a retryable WebSocket error to the caller.
@@ -291,7 +295,7 @@ impl WsConn {
                 sink,
                 outbound_rx,
                 inbound_tx.clone(),
-                KEEPALIVE_PING_INTERVAL,
+                WEBSOCKET_CONTROL_PING_INTERVAL,
             ))
             .abort_handle();
 
@@ -1003,7 +1007,8 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
 }
 
 /// Writer task. Drains outbound commands and emits periodic client
-/// pings to keep the upstream's keepalive timer happy. Exits when
+/// WebSocket control pings to keep the upstream's keepalive timer happy. These
+/// frames are transport-only and never carry a Responses request. Exits when
 /// the command channel is closed (WsConn was dropped) or when the
 /// sink errors (server hung up mid-write); on the latter, signals
 /// the failure through `inbound_tx` so a sync `run_turn` waiting on
@@ -1046,25 +1051,25 @@ async fn write_loop(
             _ = ticker.tick() => {
                 match sink.send(Message::Ping(Vec::new().into())).await {
                     Ok(()) => {
-                        // Pings are 25 s apart — info isn't spammy at
+                        // WebSocket control pings are 25 s apart — info isn't spammy at
                         // that cadence, and a runtime log that suddenly
                         // *stops* showing them is the clearest signal
                         // that the writer task is stuck (and that the
                         // upstream's reap timer is therefore counting
                         // down toward a 1011 close). When we're confident
-                        // the keepalive path is solid, demote to debug.
+                        // the WebSocket control-ping path is solid, demote to debug.
                         tracing::info!(
                             target: crate::LOG_TARGET,
-                            "ws keepalive ping sent",
+                            "websocket_control_ping sent",
                         );
                     }
                     Err(_) => {
                         tracing::warn!(
                             target: crate::LOG_TARGET,
-                            "ws keepalive ping failed — writer task exiting, next turn will reopen",
+                            "websocket_control_ping failed — writer task exiting, next turn will reopen",
                         );
                         let _ = inbound_tx.send(InboundEvent::Error {
-                            kind: crate::attempt_failure::TransportFailureKind::Keepalive,
+                            kind: crate::attempt_failure::TransportFailureKind::WebSocketControlPing,
                         });
                         return;
                     }

@@ -42,6 +42,9 @@ transport. There is no surface or transport selector and no HTTP/SSE inference
 fallback. Capability, connection-limit, and retryable WebSocket failures surface
 to the outer logical-prompt scheduler rather than replaying the prompt over HTTP.
 HTTPS remains supported for OAuth, quota acquisition, and unary compaction.
+The writer sends a 25-second `websocket_control_ping` WebSocket control frame
+only to keep an idle transport path alive. It is not a Responses envelope, never
+starts inference, and cannot refresh a prompt cache.
 
 The extension supplies opaque resolved credentials and startup-stable mode/model
 configuration to one `CodexRuntime`. Public backend outcomes are finite and
