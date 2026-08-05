@@ -784,12 +784,12 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
 fn agent_fzf_output_parses_one_row() {
     assert_eq!(
         parse_agent_fzf_output(
-            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n"
+            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\tdisplay\n"
                 .to_vec()
         )
         .expect("valid output"),
         Some(
-            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle"
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle"
                 .to_owned()
         )
     );
@@ -812,9 +812,9 @@ fn agent_fzf_output_rejects_malformed_selection() {
 #[test]
 fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
     let rows = concat!(
-        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00\tworking\ttrace parser\n",
-        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1\tblocked\tawait review\n",
-        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-\tunreported\t-\n",
+        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00/$.00\tworking\ttrace parser\n",
+        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1/$4.3\tblocked\tawait review\n",
+        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-/-\tunreported\t-\n",
     );
     let formatted = format_agent_picker_rows(rows, 100).expect("valid picker rows");
     let formatted_rows = formatted.lines().collect::<Vec<_>>();
@@ -826,15 +826,15 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
         .collect::<Vec<_>>();
     assert_eq!(
         displays[0].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["agent-a", "working", "$.00"]
+        ["agent-a", "working", "$.00/$.00"]
     );
     assert_eq!(
         displays[1].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["agent-longer", "blocked", "$2.1"]
+        ["agent-longer", "blocked", "$2.1/$4.3"]
     );
     assert_eq!(
         displays[2].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["é", "unreported", "-"]
+        ["é", "unreported", "-/-"]
     );
     for display in &displays {
         assert!(display_width(display) <= 96);
@@ -961,12 +961,12 @@ test "$4" = "--no-multi"
 test "$5" = "--no-hscroll"
 test "$6" = "--prompt=agent> "
 cat >/dev/null
-printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n'"#,
+printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\tdisplay\n'"#,
     );
 
     let selected = run_agent_fzf_command_with_ownership(
         program.as_os_str(),
-        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n",
+        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\tdisplay\n",
         AGENT_PICKER_TIMEOUT,
         ProcessOwnership::ProcessGroup,
         || Ok(()),
@@ -976,7 +976,7 @@ printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\
     assert_eq!(
         selected.as_deref(),
         Some(
-            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle"
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle"
         )
     );
 }
@@ -1107,7 +1107,7 @@ fn agent_picker_timeout_resumes_terminal_and_kills_descendants() {
     let error = term
         .pick_agent_row_with_command_and_terminal(
             program.as_os_str(),
-            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\n",
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\n",
             path_std_time::Duration::from_millis(100),
             ProcessOwnership::ProcessGroup,
             AgentPickerHooks {

@@ -379,6 +379,16 @@ client.
 
 The harness validates provider prompt ownership and derives public routing identity, but providers retain streaming and response-throughput authority under [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md). Public stats are content-free and transient; they never become transcript, editor, prompt-stdin, or final-response content.
 
+The harness owns an active-session `AgentCreatorTopology` and separate
+`AgentCostLedger`. Topology accepts only authenticated same-session
+`AgentStarted.creator = AgentCreator::Agent` edges, preserves the first valid
+edge, and retains relationships through individual runtime retirement.
+`parent_agent`, remote provenance, and legacy missing creators contribute no
+edge. Accepted response usage increments self cost and every creator ancestor's
+inclusive subtree cost with saturation; costs reset at rollover while resume
+re-seeds only loaded creation edges. Complete transient stats snapshots update
+the changed agent and each loaded creator ancestor.
+
 ## Agent navigation authority
 
 Current-session runtime owns loaded-agent navigation modes alongside membership

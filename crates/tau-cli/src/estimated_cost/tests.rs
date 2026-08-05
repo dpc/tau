@@ -7,10 +7,26 @@ fn agent_cost_projection_records_snapshots_and_clears() {
     let projection = AgentCostProjection::default();
     let agent_id = tau_proto::AgentId::parse("agent-a").expect("valid agent id");
     let cost = EstimatedApiCost::from_picodollars(2_140_000_000_000);
-    projection.record(agent_id.clone(), cost);
-    assert_eq!(projection.snapshot().get(&agent_id), Some(&cost));
+    let snapshot = AgentCostSnapshot::new(cost, cost);
+    projection.record(agent_id.clone(), snapshot);
+    assert_eq!(projection.snapshot().get(&agent_id), Some(&snapshot));
     projection.clear();
     assert!(projection.snapshot().is_empty());
+}
+
+/// Preserves availability and independently compact-formats self and subtree
+/// costs so an absent stats snapshot never appears as a known zero.
+#[test]
+fn compact_cost_pairs_preserve_component_availability() {
+    let self_cost = EstimatedApiCost::from_picodollars(3 * PICODOLLARS_PER_CENT);
+    let subtree_cost = EstimatedApiCost::from_picodollars(21 * PICODOLLARS_PER_CENT);
+    assert_eq!(
+        format_snapshot(Some(AgentCostSnapshot::new(self_cost, subtree_cost))),
+        "$.03/$.21"
+    );
+    assert_eq!(format_snapshot(None), "-/-");
+    assert_eq!(format_compact_pair(Some(self_cost), None), "$.03/-");
+    assert_eq!(format_compact_pair(None, Some(subtree_cost)), "-/-");
 }
 
 fn dollars(value: u64) -> EstimatedApiCost {

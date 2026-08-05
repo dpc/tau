@@ -236,12 +236,10 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
 /// Formats picker rows with canonical runtime cost and work status appended.
 pub(crate) fn format_picker_rows(
     agents: &[SessionAgentListEntry],
-    cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<tau_proto::EstimatedApiCost>,
+    cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<crate::estimated_cost::AgentCostSnapshot>,
 ) -> String {
     format_rows_with(agents, |agent| {
-        let cost = cost_for_agent(&agent.agent_id)
-            .map(crate::estimated_cost::format_compact)
-            .unwrap_or_else(dash);
+        let cost = crate::estimated_cost::format_snapshot(cost_for_agent(&agent.agent_id));
         let (phase, title) = agent.work_status.as_ref().map_or_else(
             || ("-".to_owned(), dash()),
             |status| {

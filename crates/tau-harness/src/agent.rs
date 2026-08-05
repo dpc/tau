@@ -392,9 +392,6 @@ pub(crate) struct Agent {
     /// agent has used. Computed from `context_input_tokens` and the
     /// model's window size; `None` when the window is unknown.
     pub(crate) context_percent_used: Option<u8>,
-    /// Runtime-lifetime estimated equivalent API cost accumulated from accepted
-    /// provider usage records.
-    pub(crate) estimated_api_cost: tau_proto::EstimatedApiCost,
     /// Named context-size alerts already emitted for the current usage climb.
     /// An alert becomes eligible again after usage falls back to or below its
     /// threshold or context accounting is reset.
@@ -763,7 +760,6 @@ impl Agent {
             context_usage_model: None,
             context_cached_tokens: None,
             context_percent_used: None,
-            estimated_api_cost: tau_proto::EstimatedApiCost::default(),
             fired_context_size_alerts: HashSet::new(),
             result_dedup: ResultDedupMap::new(),
             loop_guard: LoopGuardState::default(),

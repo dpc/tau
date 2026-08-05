@@ -229,9 +229,13 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   disable; late subscribers receive only current non-empty snapshots.
 - **`agent.stats_updated`** — Transient, content-free operational snapshot for
   one loaded agent: runtime state, current/cumulative tool counters, and latest
-  context usage, plus runtime-only estimated equivalent API cost and current
-  canonical work-status phase/title. It replaces the old delegation-specific
-  progress stream.
+  context usage, plus runtime-only self and inclusive authenticated-creator
+  subtree estimated equivalent API costs and current canonical work-status
+  phase/title. Creator-subtree membership follows only same-session
+  `AgentStarted.creator = AgentCreator::Agent`, never metadata
+  `parent_agent`; both costs reset on session/runtime reset. A descendant
+  increment publishes a complete snapshot for it and each loaded creator
+  ancestor. It replaces the old delegation-specific progress stream.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
   Canceling exact ordinary checkpointed inference also releases its runtime
@@ -906,7 +910,11 @@ context without restarting timers or live fanout.
 
 `agent.stats_updated` is a transient, must-pass, immutable complete operational
 snapshot for one loaded agent. Its required `navigation_mode` is independent of
-`runtime_state`; it also carries the current canonical work-status phase/title.
+`runtime_state`; it also carries the current canonical work-status phase/title,
+self-only `estimated_api_cost`, and inclusive
+`creator_subtree_estimated_api_cost`. The subtree field defaults to zero when
+decoding older peers and, like every stats field, is transient rather than
+journaled.
 Current snapshots are delivered during catch-up before replay completion.
 
 UI clients request absolute `set_active`, `set_active_auto`, or `set_suspended`

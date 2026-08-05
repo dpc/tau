@@ -3432,7 +3432,7 @@ fn with_agent_roster<E: std::fmt::Display>(
 fn resolve_agent_picker(
     agents: Vec<tau_proto::SessionAgentListEntry>,
     filter: crate::list_agents::AgentPickerFilter,
-    cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<tau_proto::EstimatedApiCost>,
+    cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<crate::estimated_cost::AgentCostSnapshot>,
     pick: impl FnOnce(&str) -> Result<Option<String>, String>,
     refresh: impl FnOnce() -> Option<Vec<tau_proto::SessionAgentListEntry>>,
     session_is_current: impl FnOnce() -> bool,

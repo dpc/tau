@@ -2904,6 +2904,10 @@ pub struct AgentStatsUpdated {
     /// Runtime-lifetime estimated equivalent API cost for this agent.
     #[serde(default)]
     pub estimated_api_cost: crate::EstimatedApiCost,
+    /// Runtime-lifetime inclusive cost for this agent and authenticated creator
+    /// descendants observed by the current harness.
+    #[serde(default)]
+    pub creator_subtree_estimated_api_cost: crate::EstimatedApiCost,
 }
 /// A modality that a provider route can accept as prompt input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

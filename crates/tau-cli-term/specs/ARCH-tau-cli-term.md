@@ -28,7 +28,8 @@ Bounded subprocess execution lives in `src/bounded_command.rs`.
   child.
 - The built-in agent picker starts `fzf` directly with fixed arguments and
   bounded stdin/stdout. It appends one terminal-width-aware, Unicode-width
-  presentation field to each stable TSV row, asks `fzf` to show only that field,
+  presentation field to each stable TSV row, including the nine-character-wide
+  `$self/$subtree` cost pair, asks `fzf` to show only that field,
   and removes it from the accepted row. It uses foreground process-group
   ownership and the same raw-mode pause/resume guard as other
   terminal-releasing actions; agent/session interpretation remains in `tau-cli`.

@@ -22,11 +22,13 @@ without surrounding them with heavy chrome. It includes:
   display settings; and
 - built-in dark and light themes plus user-defined JSON5 themes.
 
-The bottom status includes each selected agent's compact runtime estimate of
-equivalent USD API cost. Tau prices each accepted usage record against the model
-that served it, uses a documented GPT-5.6 fallback for unpriced models, and resets
-the estimate with the harness runtime. It is deliberately an eyeballed comparison,
-not provider billing reconciliation.
+The bottom status includes each selected agent's compact runtime
+`$self/$subtree` equivalent-USD API-cost estimate. The subtree follows only
+authenticated same-session agent creators, retains completed descendants, and
+resets with the active session/runtime. Tau prices each accepted usage record against
+the model that served it and uses a documented GPT-5.6 fallback for unpriced
+models. It is deliberately an eyeballed comparison, not provider billing
+reconciliation.
 
 Sessions can be detached and reattached while work continues. Durable agent
 transcripts survive restarts and retain alternate branches when you rewind.

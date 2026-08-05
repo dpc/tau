@@ -389,6 +389,7 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
             tools: Default::default(),
             context: Default::default(),
             estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
         })
     };
 

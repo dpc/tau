@@ -313,10 +313,10 @@ parent-before-child TSV ordering, and escaping. The C-b binding and
 `:pick-agent` command invoke the active picker; `:pick-agent-all` invokes the
 all-agent picker. Both invoke `fzf` directly through `tau-cli-term`, which
 projects width-aware aligned display columns, including each agent's canonical
-cumulative estimated cost when available and its current canonical work-status
+self/inclusive creator-subtree estimated cost pair when available and its current canonical work-status
 phase and title, without changing stable row identity. Membership and work status
 come from the fresh roster RPC, while cost comes from the input
-loop's latest renderer-processed `agent.stats_updated` projection. The cost may
+loop's latest renderer-processed `agent.stats_updated` projection. The pair may
 therefore be absent or lag the roster; the picker neither creates an atomic
 cross-source snapshot nor locally reprices usage.
 Active filtering uses navigation mode plus runtime eligibility

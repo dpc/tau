@@ -2,19 +2,39 @@
 
 use tau_proto::EstimatedApiCost;
 
+/// Complete self and authenticated-creator-subtree costs from one stats
+/// snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AgentCostSnapshot {
+    /// Cost directly incurred by this agent.
+    self_cost: EstimatedApiCost,
+    /// Inclusive cost incurred by this agent and its authenticated descendants.
+    creator_subtree_cost: EstimatedApiCost,
+}
+
+impl AgentCostSnapshot {
+    /// Builds a complete cost pair from a harness-owned stats snapshot.
+    pub(crate) fn new(self_cost: EstimatedApiCost, creator_subtree_cost: EstimatedApiCost) -> Self {
+        Self {
+            self_cost,
+            creator_subtree_cost,
+        }
+    }
+}
+
 /// Thread-safe latest canonical cumulative cost projection keyed by agent.
 #[derive(Clone, Default)]
 pub(crate) struct AgentCostProjection {
-    /// Latest harness-authored cumulative cost keyed by canonical agent id.
+    /// Latest complete harness-authored cost pair keyed by canonical agent id.
     costs: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<tau_proto::AgentId, EstimatedApiCost>>,
+        std::sync::Mutex<std::collections::HashMap<tau_proto::AgentId, AgentCostSnapshot>>,
     >,
 }
 
 impl AgentCostProjection {
-    /// Records the latest harness-authored cumulative cost for an agent.
-    pub(crate) fn record(&self, agent_id: tau_proto::AgentId, cost: EstimatedApiCost) {
-        crate::locked(&self.costs).insert(agent_id, cost);
+    /// Records the latest complete harness-authored cost pair for an agent.
+    pub(crate) fn record(&self, agent_id: tau_proto::AgentId, costs: AgentCostSnapshot) {
+        crate::locked(&self.costs).insert(agent_id, costs);
     }
 
     /// Clears all costs when the renderer changes sessions.
@@ -25,7 +45,7 @@ impl AgentCostProjection {
     /// Takes a coherent snapshot for one picker interaction.
     pub(crate) fn snapshot(
         &self,
-    ) -> std::collections::HashMap<tau_proto::AgentId, EstimatedApiCost> {
+    ) -> std::collections::HashMap<tau_proto::AgentId, AgentCostSnapshot> {
         crate::locked(&self.costs).clone()
     }
 }
@@ -68,6 +88,32 @@ pub(crate) fn format_compact(cost: EstimatedApiCost) -> String {
     }
     let millions = rounded_units(picodollars, PICODOLLARS_PER_MILLION_DOLLARS);
     format!("${millions}m")
+}
+
+/// Renders independently compact-formatted self and inclusive costs.
+#[must_use]
+pub(crate) fn format_compact_pair(
+    self_cost: Option<EstimatedApiCost>,
+    creator_subtree_cost: Option<EstimatedApiCost>,
+) -> String {
+    match (self_cost, creator_subtree_cost) {
+        (Some(self_cost), Some(creator_subtree_cost)) => format!(
+            "{}/{}",
+            format_compact(self_cost),
+            format_compact(creator_subtree_cost)
+        ),
+        (Some(self_cost), None) => format!("{}/-", format_compact(self_cost)),
+        (None, _) => "-/-".to_owned(),
+    }
+}
+
+/// Renders a complete cost snapshot or the unavailable pair.
+#[must_use]
+pub(crate) fn format_snapshot(costs: Option<AgentCostSnapshot>) -> String {
+    let (self_cost, creator_subtree_cost) = costs
+        .map(|costs| (Some(costs.self_cost), Some(costs.creator_subtree_cost)))
+        .unwrap_or((None, None));
+    format_compact_pair(self_cost, creator_subtree_cost)
 }
 
 fn rounded_units(value: u64, unit: u64) -> u64 {

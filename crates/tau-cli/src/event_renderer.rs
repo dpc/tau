@@ -22,6 +22,7 @@ use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
 use crate::chat::cold_attach_stager::ShellStartPresentation;
 use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
+use crate::estimated_cost::AgentCostSnapshot;
 use crate::markdown_render::{
     MarkdownStreamCache, markdown_block_with_osc8, markdown_prefixed_block_with_osc8,
     markdown_prefixed_streaming_block_with_osc8, markdown_prompt_block_with_osc8,
@@ -2126,8 +2127,13 @@ impl EventRenderer {
         }
         self.agent_stats
             .insert(updated.agent_id.to_string(), updated.clone());
-        self.agent_estimated_api_costs
-            .record(updated.agent_id.clone(), updated.estimated_api_cost);
+        self.agent_estimated_api_costs.record(
+            updated.agent_id.clone(),
+            AgentCostSnapshot::new(
+                updated.estimated_api_cost,
+                updated.creator_subtree_estimated_api_cost,
+            ),
+        );
         self.render_model_status_if_present();
         if self.current_agent_id.as_deref() == Some(updated.agent_id.as_str()) {
             self.refresh_prompt_placeholder();
@@ -3481,19 +3487,19 @@ impl EventRenderer {
             );
         }
         if let Some(agent_id) = self.current_agent_id.as_deref() {
-            let cost = self
-                .agent_stats
-                .get(agent_id)
-                .map_or_else(tau_proto::EstimatedApiCost::default, |stats| {
-                    stats.estimated_api_cost
-                });
+            let costs = self.agent_stats.get(agent_id).map(|stats| {
+                AgentCostSnapshot::new(
+                    stats.estimated_api_cost,
+                    stats.creator_subtree_estimated_api_cost,
+                )
+            });
             line.push(
                 StatusElement::EstimatedCost.priority(),
                 right,
                 status_chip(
                     &self.theme,
                     names::STATUS_CONTEXT,
-                    crate::estimated_cost::format_compact(cost),
+                    crate::estimated_cost::format_snapshot(costs),
                 ),
             );
         }

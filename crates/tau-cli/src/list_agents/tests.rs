@@ -2,6 +2,7 @@ use std::os::unix::net as path_std_os_unix_net;
 use std::{io as path_std_io, time as path_std_time};
 
 use super::*;
+use crate::estimated_cost::AgentCostSnapshot;
 
 /// The direct roster request boundary must reject invalid controlled session
 /// identifiers before attempting socket I/O.
@@ -170,9 +171,13 @@ fn picker_rows_append_canonical_cost_and_status() {
     let unavailable = entry("unavailable", None, Some(3));
     let output = format_picker_rows(&[zero, nonzero, unavailable], |agent_id| {
         match agent_id.as_str() {
-            "zero" => Some(tau_proto::EstimatedApiCost::default()),
-            "nonzero" => Some(tau_proto::EstimatedApiCost::from_picodollars(
-                2_140_000_000_000,
+            "zero" => Some(AgentCostSnapshot::new(
+                tau_proto::EstimatedApiCost::default(),
+                tau_proto::EstimatedApiCost::default(),
+            )),
+            "nonzero" => Some(AgentCostSnapshot::new(
+                tau_proto::EstimatedApiCost::from_picodollars(2_140_000_000_000),
+                tau_proto::EstimatedApiCost::from_picodollars(4_280_000_000_000),
             )),
             _ => None,
         }
@@ -184,9 +189,9 @@ fn picker_rows_append_canonical_cost_and_status() {
     assert_eq!(
         extras,
         [
-            vec!["$.00", "unreported", "-"],
-            vec!["$2.1", "working", r"verify \\ picker\\u{202E} rows"],
-            vec!["-", "unreported", "-"],
+            vec!["$.00/$.00", "unreported", "-"],
+            vec!["$2.1/$4.3", "working", r"verify \\ picker\\u{202E} rows"],
+            vec!["-/-", "unreported", "-"],
         ]
     );
 }

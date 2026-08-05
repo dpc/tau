@@ -4439,6 +4439,7 @@ fn agent_stats_does_not_overwrite_display_name() {
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
 
@@ -4471,6 +4472,7 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
             tools: tau_proto::AgentToolStats::default(),
             context: tau_proto::AgentContextStats::default(),
             estimated_api_cost: cost,
+            creator_subtree_estimated_api_cost: Default::default(),
             work_status: Default::default(),
         })
     };
@@ -4480,7 +4482,13 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&stats("s1", "agent-a"));
-    assert_eq!(projection.snapshot().get(&agent_id("agent-a")), Some(&cost));
+    assert_eq!(
+        projection.snapshot().get(&agent_id("agent-a")),
+        Some(&crate::estimated_cost::AgentCostSnapshot::new(
+            cost,
+            tau_proto::EstimatedApiCost::default(),
+        ))
+    );
     renderer.handle(&stats("s2", "foreign"));
     assert!(!projection.snapshot().contains_key(&agent_id("foreign")));
 
@@ -4490,7 +4498,13 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
     }));
     assert!(projection.snapshot().is_empty());
     renderer.handle(&stats("s2", "agent-b"));
-    assert_eq!(projection.snapshot().get(&agent_id("agent-b")), Some(&cost));
+    assert_eq!(
+        projection.snapshot().get(&agent_id("agent-b")),
+        Some(&crate::estimated_cost::AgentCostSnapshot::new(
+            cost,
+            tau_proto::EstimatedApiCost::default(),
+        ))
+    );
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s3"),
@@ -4498,7 +4512,13 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
     }));
     assert!(projection.snapshot().is_empty());
     renderer.handle(&stats("s3", "agent-c"));
-    assert_eq!(projection.snapshot().get(&agent_id("agent-c")), Some(&cost));
+    assert_eq!(
+        projection.snapshot().get(&agent_id("agent-c")),
+        Some(&crate::estimated_cost::AgentCostSnapshot::new(
+            cost,
+            tau_proto::EstimatedApiCost::default(),
+        ))
+    );
 }
 
 /// Ensures prompt echoes, transcript facts, and terminal events never replace
@@ -4537,6 +4557,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -4581,6 +4602,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     let navigation = renderer.agent_navigation();
@@ -4652,6 +4674,7 @@ fn apply_test_navigation_mode(renderer: &mut EventRenderer, mode: tau_proto::Age
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
 }
@@ -4752,6 +4775,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     renderer.switch_agent("worker-1".to_owned());
@@ -4804,6 +4828,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
@@ -4862,6 +4887,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     renderer.handle(&Event::AgentPromptSubmitted(prompt.clone()));
@@ -4907,6 +4933,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
@@ -5146,6 +5173,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     sync(&handle);
@@ -7599,7 +7627,7 @@ fn focused_agent_context_usage_event_replaces_unknown_context_window() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row");
-    assert!(status_row.ends_with("#12k/200k $.00"));
+    assert!(status_row.ends_with("#12k/200k -/-"));
     assert!(!status_row.contains("#-/200k"));
 }
 
@@ -7706,7 +7734,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .find(|row| row.contains("@main"))
         .expect("status row after main response");
     assert!(
-        status_row.ends_with("%0/2 #12k/200k $.00 Q!"),
+        status_row.ends_with("%0/2 #12k/200k -/- Q!"),
         "unexpected status row: {status_row:?}"
     );
 
@@ -7742,7 +7770,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after tool result");
-    assert!(status_row.ends_with("%1/2 #12k/200k $.00 Q!"));
+    assert!(status_row.ends_with("%1/2 #12k/200k -/- Q!"));
 
     // Regression coverage for turn visibility: once an extension/sub-agent
     // prompt becomes active, it must not steal the main transcript's tool chip;
@@ -7764,7 +7792,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .find(|row| row.contains("@main"))
         .expect("status row after side prompt starts");
     assert!(
-        status_row.ends_with("%1/2 @1 #12k/200k $.00 Q!"),
+        status_row.ends_with("%1/2 @1 #12k/200k -/- Q!"),
         "unexpected status row: {status_row:?}"
     );
     assert!(status_row.contains('%'));
@@ -7786,7 +7814,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after second main tool result during side turn");
-    assert!(status_row.ends_with("%2/2 @1 #12k/200k $.00 Q!"));
+    assert!(status_row.ends_with("%2/2 @1 #12k/200k -/- Q!"));
     assert!(status_row.contains('%'));
 
     // Main tool completions that arrive while a side conversation is active
@@ -7801,7 +7829,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after main prompt resumes");
-    assert!(status_row.ends_with("%2/2 @1 #12k/200k $.00 Q!"));
+    assert!(status_row.ends_with("%2/2 @1 #12k/200k -/- Q!"));
 
     // The main agent's final no-tool response ends the tool-using turn and
     // hides the chip while preserving context stats.
@@ -7815,7 +7843,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after final main response");
-    assert!(status_row.ends_with("@1 #12k/200k $.00 Q!"));
+    assert!(status_row.ends_with("@1 #12k/200k -/- Q!"));
     assert!(!status_row.contains('%'));
 
     // Starting a new user task in the same session also keeps the chip hidden
@@ -7835,7 +7863,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after next prompt");
-    assert!(status_row.ends_with("@1 #12k/200k $.00 Q!"));
+    assert!(status_row.ends_with("@1 #12k/200k -/- Q!"));
     assert!(!status_row.contains('%'));
 
     renderer.apply_setting("show-ui-io", "true");
@@ -7855,7 +7883,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         .expect("status row with optional diagnostics");
     assert!(
         status_row.ends_with(&format!(
-            "@1 #12k/200k $.00 io ↑1K ↓2K {full_render_count} Q!"
+            "@1 #12k/200k -/- io ↑1K ↓2K {full_render_count} Q!"
         )),
         "unexpected status row: {status_row:?}"
     );
@@ -7886,12 +7914,13 @@ fn model_status_shows_selected_agent_estimated_cost() {
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(2_140_000_000_000),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     sync(&handle);
 
     assert!(vt.screen_contains(40, "@main"));
-    assert!(vt.screen_contains(40, "$2.1"));
+    assert!(vt.screen_contains(40, "$2.1/$.00"));
 }
 
 /// Estimated cost yields to the selected-agent identity under status-line width
@@ -8497,7 +8526,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row during delegate side conversation");
-    assert!(status_row.ends_with("%0/1 @1 #12k/200k $.00"));
+    assert!(status_row.ends_with("%0/1 @1 #12k/200k -/-"));
 
     // Generic watched-agent stats no longer mutate the parent tool status chip.
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
@@ -8511,6 +8540,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     sync(&handle);
@@ -8520,7 +8550,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .find(|row| row.contains("#12k/200k"))
         .expect("status row after watched-agent stats");
     assert!(status_row.contains("@main"));
-    assert!(status_row.ends_with("%0/1 @1 #12k/200k $.00"));
+    assert!(status_row.ends_with("%0/1 @1 #12k/200k -/-"));
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
         call_id: "delegate-call".into(),
@@ -8547,7 +8577,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after delegate cancellation");
-    assert!(status_row.ends_with("@1 #12k/200k $.00"));
+    assert!(status_row.ends_with("@1 #12k/200k -/-"));
 }
 
 #[test]
@@ -9848,6 +9878,7 @@ fn watched_agent_stats_redraws_status_row() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
 
@@ -10112,6 +10143,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     sync(&handle);
@@ -10134,6 +10166,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
     sync(&handle);
@@ -10203,6 +10236,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
 
@@ -10281,6 +10315,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             tools: Default::default(),
             context: Default::default(),
             estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
         })
     };
     let watch_status = |message_id: &str, phase, title: Option<&str>| {
@@ -12871,6 +12906,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
             percent_used: Some(67),
         },
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     };
     let status = tau_proto::AgentWatchWorkStatusNotification {

@@ -282,6 +282,7 @@ fn session_switch_clears_incarnation_state_before_replay() {
             tools: tau_proto::AgentToolStats::default(),
             context: tau_proto::AgentContextStats::default(),
             estimated_api_cost: tau_proto::EstimatedApiCost::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
         }),
         Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
             session_id: "old".parse().expect("session ID"),
@@ -340,6 +341,7 @@ fn stats_watches_and_unload_converge_projection() {
             tools: tau_proto::AgentToolStats::default(),
             context: tau_proto::AgentContextStats::default(),
             estimated_api_cost: tau_proto::EstimatedApiCost::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
         }),
         Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
             session_id: session_id.clone(),

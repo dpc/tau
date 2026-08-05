@@ -136,12 +136,16 @@ uncached input, `$.50` cached input, and `$30` output per million tokens. This
 fallback intentionally applies to local and free models too.
 
 The harness applies the serving model's prices to each accepted usage record and
-accumulates a runtime-only estimate per loaded agent. If a provider reports total
-input without cached-token detail, Tau treats all input as uncached. The status
-chip is an **estimated equivalent API cost**, not a bill: it ignores cache writes,
+accumulates a runtime-only self estimate per loaded agent and an inclusive
+creator-subtree estimate through authenticated same-session
+`AgentStarted.creator` agent edges. Metadata `parent_agent` never creates cost
+membership; completed descendants remain included until session rollover. If a
+provider reports total input without cached-token detail, Tau treats all input
+as uncached. The status chip renders the independently compact-formatted pair
+`$self/$subtree`; it is an **estimated equivalent API cost**, not a bill: it ignores cache writes,
 long-context and other tiers, batch or service discounts, regional and negotiated
-pricing, subscriptions, and private-route accounting. It resets when the agent is
-loaded into a new harness runtime and is not reconstructed from durable history.
+pricing, subscriptions, and private-route accounting. It resets with the active
+session/runtime and is not reconstructed from durable history.
 The display rounds aggressively to fit `$` plus three characters (`$.03`, `$2.1`,
 `$23`, `$12k`).
 

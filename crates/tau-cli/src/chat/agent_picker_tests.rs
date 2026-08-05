@@ -1,6 +1,7 @@
 use std::cell as path_std_cell;
 
 use super::{AgentPickerResolution, resolve_agent_picker, with_agent_roster};
+use crate::estimated_cost::AgentCostSnapshot;
 use crate::list_agents as path_crate_list_agents;
 
 fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::SessionAgentListEntry {
@@ -41,7 +42,7 @@ fn picker_orchestration_revalidates_with_initiating_category() {
         assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
         assert!(
             rows.lines()
-                .all(|row| row.ends_with("\t$.00\tworking\tshipping picker status"))
+                .all(|row| row.ends_with("\t$.00/$.00\tworking\tshipping picker status"))
         );
         Ok(Some("auto\tlive\trunning\tactive_auto".to_owned()))
     };
@@ -49,7 +50,12 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     let active = resolve_agent_picker(
         vec![running.clone(), other.clone()],
         path_crate_list_agents::AgentPickerFilter::Active,
-        |_| Some(tau_proto::EstimatedApiCost::default()),
+        |_| {
+            Some(AgentCostSnapshot::new(
+                tau_proto::EstimatedApiCost::default(),
+                tau_proto::EstimatedApiCost::default(),
+            ))
+        },
         pick_auto,
         || Some(vec![idle.clone(), other.clone()]),
         || true,
@@ -63,7 +69,12 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     let all = resolve_agent_picker(
         vec![running, other.clone()],
         path_crate_list_agents::AgentPickerFilter::All,
-        |_| Some(tau_proto::EstimatedApiCost::default()),
+        |_| {
+            Some(AgentCostSnapshot::new(
+                tau_proto::EstimatedApiCost::default(),
+                tau_proto::EstimatedApiCost::default(),
+            ))
+        },
         pick_auto,
         || Some(vec![idle, other]),
         || true,

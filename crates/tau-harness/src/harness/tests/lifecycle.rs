@@ -9,7 +9,8 @@ use tau_config::secret_sources::SecretSources;
 use tau_config::settings::BuiltinComponentIdentity;
 
 use super::*;
-use crate::agent::PendingPrompt;
+use crate::agent::{Agent, PendingPrompt};
+use crate::agent_creator_topology::RecordCreatorOutcome;
 use crate::event::SUPERVISED_CLEANUP_GRACE;
 use crate::extension::{
     ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process, spawn_supervised,
@@ -60,6 +61,190 @@ fn synchronous_debug_log_poison_prevents_reenable() {
     assert!(
         !replacement_dir.exists(),
         "poison must reject replacement before touching its path"
+    );
+}
+
+/// Session rollover discards runtime-only creator topology and cost totals
+/// rather than carrying descendant accounting into the next session.
+#[test]
+fn session_rollover_resets_creator_subtree_cost_accounting() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut harness = echo_harness(td.path()).expect("harness");
+    let parent = tau_proto::AgentId::parse("parent").expect("test parent id");
+    let child = tau_proto::AgentId::parse("child").expect("test child id");
+    assert_eq!(
+        harness.creator_topology.record(
+            child.clone(),
+            Some(&tau_proto::AgentCreator::Agent {
+                session_id: harness.current_session_id.clone(),
+                agent_id: parent.clone(),
+            }),
+            &harness.current_session_id,
+        ),
+        RecordCreatorOutcome::Recorded
+    );
+    harness.cost_ledger.add_increment(
+        &child,
+        tau_proto::EstimatedApiCost::from_picodollars(9),
+        &harness.creator_topology,
+    );
+    assert_eq!(
+        harness
+            .cost_ledger
+            .creator_subtree_cost(&parent)
+            .as_picodollars(),
+        9
+    );
+
+    harness
+        .switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert_eq!(
+        harness
+            .cost_ledger
+            .creator_subtree_cost(&parent)
+            .as_picodollars(),
+        0
+    );
+    assert_eq!(
+        harness.cost_ledger.add_increment(
+            &child,
+            tau_proto::EstimatedApiCost::from_picodollars(1),
+            &harness.creator_topology,
+        ),
+        vec![child]
+    );
+}
+
+/// A child response refreshes complete self/subtree snapshots for the child and
+/// every still-loaded authenticated creator ancestor without changing self
+/// cost.
+#[test]
+fn descendant_cost_increment_publishes_loaded_creator_snapshots() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut harness = echo_harness(td.path()).expect("harness");
+    let parent = tau_proto::AgentId::parse("parent").expect("test parent id");
+    let child = tau_proto::AgentId::parse("child").expect("test child id");
+    for agent_id in [&parent, &child] {
+        let mut agent = Agent::new(
+            agent_id.clone(),
+            harness.mint_agent_runtime_incarnation(),
+            harness.current_session_id.clone(),
+            tau_proto::PromptOriginator::User,
+            None,
+            None,
+        );
+        agent.agent_id = Some(agent_id.to_string());
+        harness.agents.insert(agent_id.clone(), agent);
+        harness
+            .agent_navigation_modes
+            .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Active);
+    }
+    assert_eq!(
+        harness.creator_topology.record(
+            child.clone(),
+            Some(&tau_proto::AgentCreator::Agent {
+                session_id: harness.current_session_id.clone(),
+                agent_id: parent.clone(),
+            }),
+            &harness.current_session_id,
+        ),
+        RecordCreatorOutcome::Recorded
+    );
+
+    harness.add_estimated_cost_increment(
+        &child,
+        tau_proto::EstimatedApiCost::from_picodollars(9),
+        None,
+    );
+
+    let snapshots = event_log_events(&harness)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStatsUpdated(stats) => Some(stats),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].agent_id, child);
+    assert_eq!(snapshots[0].estimated_api_cost.as_picodollars(), 9);
+    assert_eq!(
+        snapshots[0]
+            .creator_subtree_estimated_api_cost
+            .as_picodollars(),
+        9
+    );
+    assert_eq!(snapshots[1].agent_id, parent);
+    assert_eq!(snapshots[1].estimated_api_cost.as_picodollars(), 0);
+    assert_eq!(
+        snapshots[1]
+            .creator_subtree_estimated_api_cost
+            .as_picodollars(),
+        9
+    );
+}
+
+/// Loading an existing durable child after runtime topology reset re-seeds its
+/// authenticated creator edge, so later cost still reaches an absent parent.
+#[test]
+fn existing_agent_load_reseeds_creator_cost_topology() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut harness = echo_harness(td.path()).expect("harness");
+    let parent = tau_proto::AgentId::parse("parent").expect("test parent id");
+    let child = tau_proto::AgentId::parse("child").expect("test child id");
+    let started = |agent_id: tau_proto::AgentId, creator| {
+        Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id,
+            creator,
+            parent_agent: None,
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        })
+    };
+    harness
+        .append_direct_agent_semantic_event(
+            parent.as_str(),
+            tau_core::AgentEventParent::InheritHead,
+            started(parent.clone(), Some(tau_proto::AgentCreator::User)),
+        )
+        .expect("persist parent creation");
+    harness
+        .append_direct_agent_semantic_event(
+            child.as_str(),
+            tau_core::AgentEventParent::InheritHead,
+            started(
+                child.clone(),
+                Some(tau_proto::AgentCreator::Agent {
+                    session_id: harness.current_session_id.clone(),
+                    agent_id: parent.clone(),
+                }),
+            ),
+        )
+        .expect("persist child creation");
+    harness.creator_topology = Default::default();
+    let mut child_runtime = Agent::new(
+        child.clone(),
+        harness.mint_agent_runtime_incarnation(),
+        harness.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    child_runtime.agent_id = Some(child.to_string());
+    harness.agents.insert(child.clone(), child_runtime);
+
+    harness.ensure_loaded_agent_for_agent(&child, child.as_str());
+
+    assert_eq!(
+        harness.cost_ledger.add_increment(
+            &child,
+            tau_proto::EstimatedApiCost::from_picodollars(4),
+            &harness.creator_topology,
+        ),
+        vec![child, parent]
     );
 }
 

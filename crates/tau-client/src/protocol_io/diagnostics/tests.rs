@@ -399,6 +399,7 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     };
     let stats_message = || {
@@ -475,6 +476,7 @@ fn protocol_io_meter_separates_equality_caches_by_attach_and_delivery_kind() {
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     };
     meter.record_downlink_frame(&HarnessOutputMessage::deliver_replay(

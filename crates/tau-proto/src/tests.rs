@@ -1231,6 +1231,7 @@ fn representative_events() -> Vec<Event> {
             },
             context: AgentContextStats::default(),
             estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
             work_status: Default::default(),
         }),
         Event::SessionStarted(SessionStarted {
@@ -4240,6 +4241,7 @@ fn agent_stats_updated_serde_round_trip() {
             percent_used: Some(21),
         },
         estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
     };
     let value =
         serde_json::to_value(Event::AgentStatsUpdated(update.clone())).expect("serialize stats");
@@ -4249,6 +4251,32 @@ fn agent_stats_updated_serde_round_trip() {
     assert_eq!(value["payload"]["work_status"]["title"], "trace lifecycle");
     let round_trip = serde_json::from_value::<Event>(value).expect("decode stats");
     assert_eq!(round_trip, Event::AgentStatsUpdated(update));
+}
+
+/// Decodes a legacy complete stats snapshot without the transient subtree field
+/// as known zero so mixed-version protocol peers remain wire compatible.
+#[test]
+fn agent_stats_updated_defaults_missing_creator_subtree_cost() {
+    let event = serde_json::json!({
+        "event": "agent.stats_updated",
+        "payload": {
+            "session_id": "session_123",
+            "agent_id": "engineer_child",
+            "work_status": { "phase": "unreported" },
+            "navigation_mode": "active",
+            "runtime_state": "idle",
+            "tools": { "in_flight": 0, "started_total": 0 },
+            "context": {},
+            "estimated_api_cost": 7
+        }
+    });
+    let Event::AgentStatsUpdated(stats) =
+        serde_json::from_value(event).expect("legacy stats decode")
+    else {
+        panic!("expected agent stats");
+    };
+    assert_eq!(stats.estimated_api_cost.as_picodollars(), 7);
+    assert_eq!(stats.creator_subtree_estimated_api_cost.as_picodollars(), 0);
 }
 
 /// Work-status serde accepts every approved phase/title shape and preserves its

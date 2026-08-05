@@ -73,6 +73,8 @@ use crate::agent::{
     Agent, AgentTurnState, InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger,
     LoopTurnSignature, PendingCancel, PendingPrompt,
 };
+use crate::agent_cost_ledger::AgentCostLedger;
+use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
@@ -2303,6 +2305,11 @@ pub struct Harness {
     /// Runtime event sequencer. Replay for reconnecting clients is rebuilt from
     /// semantic state instead of retained event payloads.
     pub(crate) event_log: std::sync::Arc<EventLog>,
+    /// Authenticated creator relationships retained for the active harness
+    /// session.
+    creator_topology: AgentCreatorTopology,
+    /// Runtime-only self and creator-subtree estimated-cost totals.
+    cost_ledger: AgentCostLedger,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
     pub(crate) client_writers:
@@ -3232,6 +3239,8 @@ impl Harness {
             seen_retry_prompt_requests: HashSet::new(),
             seen_retry_prompt_request_order: VecDeque::new(),
             event_log: EventLog::new(),
+            creator_topology: AgentCreatorTopology::default(),
+            cost_ledger: AgentCostLedger::default(),
             client_writers: HashMap::new(),
             external_message_peers: HashSet::new(),
             pending_external_message_auth: HashMap::new(),
@@ -5688,9 +5697,76 @@ impl Harness {
         parent: tau_core::AgentEventParent,
         event: Event,
     ) -> Result<tau_core::AgentAppendOutcome, HarnessError> {
-        self.agent_store
+        let creation = match &event {
+            Event::AgentStarted(started) => Some(started.clone()),
+            _ => None,
+        };
+        let outcome = self
+            .agent_store
             .append_agent_event_at(agent_id, None, parent, event, tau_proto::UnixMicros::now())
-            .map_err(HarnessError::AgentStore)
+            .map_err(HarnessError::AgentStore)?;
+        if let Some(started) = creation {
+            self.record_agent_creator_topology(&started);
+        }
+        Ok(outcome)
+    }
+
+    /// Folds one committed creation fact into the runtime-only creator graph.
+    fn record_agent_creator_topology(&mut self, started: &tau_proto::AgentStarted) {
+        let outcome = self.creator_topology.record(
+            started.agent_id.clone(),
+            started.creator.as_ref(),
+            &self.current_session_id,
+        );
+        match outcome {
+            RecordCreatorOutcome::Recorded => {
+                self.cost_ledger
+                    .attach_existing_subtree(&started.agent_id, &self.creator_topology);
+            }
+            RecordCreatorOutcome::AlreadyRecorded
+            | RecordCreatorOutcome::NoCreatorEdge
+            | RecordCreatorOutcome::ForeignSession => {}
+            RecordCreatorOutcome::RejectedSelf => {
+                tracing::warn!(
+                    target: "tau_harness",
+                    agent_id = %started.agent_id,
+                    "ignoring self-referential authenticated agent creator"
+                );
+            }
+            RecordCreatorOutcome::RejectedCycle => {
+                tracing::warn!(
+                    target: "tau_harness",
+                    agent_id = %started.agent_id,
+                    "ignoring cyclic authenticated agent creator"
+                );
+            }
+            RecordCreatorOutcome::Conflict { existing_creator } => {
+                tracing::warn!(
+                    target: "tau_harness",
+                    agent_id = %started.agent_id,
+                    %existing_creator,
+                    "ignoring conflicting authenticated agent creator"
+                );
+            }
+        }
+    }
+
+    /// Seeds the current runtime topology from one validated loaded creation
+    /// fact.
+    fn seed_agent_creator_topology(&mut self, agent_id: &AgentId, agent_id_string: &str) {
+        let creation = self
+            .agent_store
+            .agent_events(agent_id_string)
+            .ok()
+            .and_then(|events| match events.first().map(|entry| &entry.event) {
+                Some(Event::AgentStarted(started)) if started.agent_id == *agent_id => {
+                    Some(started.clone())
+                }
+                _ => None,
+            });
+        if let Some(creation) = creation {
+            self.record_agent_creator_topology(&creation);
+        }
     }
 
     /// Select and append the canonical journal record for one stamped fact.
@@ -18543,6 +18619,7 @@ impl Harness {
     fn agent_stats_snapshot(&self, cid: &AgentId) -> Option<AgentStatsUpdated> {
         let agent = self.agents.get(cid)?;
         let agent_id = agent.agent_id.as_ref()?;
+        let stable_agent_id = crate::parse_agent_id(agent_id);
         let context_window = agent.context_input_tokens.and_then(|_| {
             self.model_for_agent_role(agent)
                 .as_ref()
@@ -18550,7 +18627,7 @@ impl Harness {
         });
         Some(AgentStatsUpdated {
             session_id: self.current_session_id.clone(),
-            agent_id: crate::parse_agent_id(agent_id),
+            agent_id: stable_agent_id.clone(),
             work_status: tau_proto::SessionAgentWorkStatus::new(
                 agent.work_status.phase(),
                 agent.work_status.title().map(ToOwned::to_owned),
@@ -18558,7 +18635,7 @@ impl Harness {
             .expect("harness work status is canonical"),
             navigation_mode: self
                 .agent_navigation_modes
-                .get(&crate::parse_agent_id(agent_id))
+                .get(&stable_agent_id)
                 .copied()
                 .unwrap_or_else(|| {
                     tracing::error!(
@@ -18579,7 +18656,10 @@ impl Harness {
                 context_window,
                 percent_used: agent.context_percent_used,
             },
-            estimated_api_cost: agent.estimated_api_cost,
+            estimated_api_cost: self.cost_ledger.self_cost(&stable_agent_id),
+            creator_subtree_estimated_api_cost: self
+                .cost_ledger
+                .creator_subtree_cost(&stable_agent_id),
         })
     }
 
@@ -20823,6 +20903,8 @@ impl Harness {
         // the new session do not inherit the previous transcript's
         // cumulative totals.
         self.current_session_state = CurrentSessionState::default();
+        self.creator_topology = AgentCreatorTopology::default();
+        self.cost_ledger = AgentCostLedger::default();
 
         // Drop agents from the previous bound session. New user agents are
         // created explicitly by `UiCreateAgent`/first prompt in the new session.
@@ -22364,6 +22446,7 @@ impl Harness {
                 .agent(agent_id.as_str())
                 .and_then(|tree| tree.head());
             let cid: AgentId = crate::parse_agent_id(&agent_id_string);
+            self.seed_agent_creator_topology(&cid, agent_id.as_str());
             let meta = self
                 .agent_store
                 .agent_meta(agent_id.as_str())
@@ -23655,6 +23738,11 @@ impl Harness {
                     notify_watchers: false,
                 }),
             );
+        } else {
+            // Existing identities can become loaded after cold rehydration. Fold
+            // their already-validated immutable creation fact now, rather than
+            // losing creator cost propagation until another daemon resume.
+            self.seed_agent_creator_topology(&agent_id_proto, agent_id);
         }
         // New agents reached this point only after their creation record
         // committed; existing agents already have validated journal identity.
@@ -26498,15 +26586,25 @@ impl Harness {
         let increment = tau_proto::EstimatedApiCost::for_usage(usage, rates);
         response.estimated_api_cost_rates = Some(rates);
         response.estimated_api_cost_increment = Some(increment);
-        if let Some(agent) = self.agents.get_mut(cid) {
-            agent.estimated_api_cost = tau_proto::EstimatedApiCost::from_picodollars(
-                agent
-                    .estimated_api_cost
-                    .as_picodollars()
-                    .saturating_add(increment.as_picodollars()),
-            );
+        self.add_estimated_cost_increment(cid, increment, source);
+    }
+
+    /// Accounts for one accepted response increment and publishes affected live
+    /// snapshots.
+    fn add_estimated_cost_increment(
+        &mut self,
+        cid: &AgentId,
+        increment: tau_proto::EstimatedApiCost,
+        source: Option<&tau_proto::ConnectionId>,
+    ) {
+        let changed_agents = self
+            .cost_ledger
+            .add_increment(cid, increment, &self.creator_topology);
+        for changed_agent_id in changed_agents {
+            if self.agents.contains_key(&changed_agent_id) {
+                self.emit_agent_stats_updated_from(&changed_agent_id, source);
+            }
         }
-        self.emit_agent_stats_updated_from(cid, source);
     }
 
     fn attach_finished_response_compaction_usage(

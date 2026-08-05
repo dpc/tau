@@ -258,3 +258,10 @@ authorized effect is local connection control rather than event publication.
 `ui_tree_request` is a flat message carrying the session and optional target
 agent; the harness returns its rendered tree only to the requesting UI as one
 multiline notice. `ui.navigate_tree` remains a distinct state-changing event.
+
+`agent.stats_updated` remains a transient complete runtime snapshot. Its
+`estimated_api_cost` is self-only; its defaulted
+`creator_subtree_estimated_api_cost` is the inclusive current-harness
+authenticated-agent-creator total. Both reset with runtime/session state and
+never become journal facts; new decoders synthesize zero when older payloads
+omit the defaulted subtree field.

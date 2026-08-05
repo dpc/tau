@@ -78,9 +78,9 @@ const AGENT_PICKER_COLUMNS: [AgentPickerColumn; 8] = [
     },
     AgentPickerColumn {
         source_field: 10,
-        minimum_width: 4,
-        preferred_width: 4,
-        max_width: 4,
+        minimum_width: 9,
+        preferred_width: 9,
+        max_width: 9,
     },
     AgentPickerColumn {
         source_field: 12,
