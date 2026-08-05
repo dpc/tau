@@ -2497,6 +2497,51 @@ fn basic_prompt_payload() -> PromptPayload<'static> {
     }
 }
 
+/// Ensures private Responses appends the newest context after its existing
+/// provider-visible context while retaining stable declarations.
+#[test]
+fn responses_request_appends_context_after_existing_provider_input() {
+    let config = chain_test_config();
+    let tools = [tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("lookup"),
+        model_visible_name: None,
+        description: Some("Look up one value.".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+            "additionalProperties": false,
+        })),
+        format: None,
+    }];
+    let stable_context = context(&[user_text("first stable turn")]);
+    let stable_payload = PromptPayload {
+        system_prompt: "stable system authority",
+        context: stable_context,
+        tools: &tools,
+        ..basic_prompt_payload()
+    };
+    let stable = serde_json::to_value(build_request(&config, &stable_payload, None))
+        .expect("serialize stable request");
+
+    let next_context = context(&[
+        user_text("first stable turn"),
+        user_text("newest volatile turn"),
+    ]);
+    let next_payload = PromptPayload {
+        context: next_context,
+        ..stable_payload
+    };
+    let next = serde_json::to_value(build_request(&config, &next_payload, None))
+        .expect("serialize next request");
+    let stable_input = stable["input"].as_array().expect("stable input");
+    let next_input = next["input"].as_array().expect("next input");
+    assert_eq!(&next_input[..stable_input.len()], stable_input);
+    assert_eq!(next["instructions"], stable["instructions"]);
+    assert_eq!(next["tools"], stable["tools"]);
+}
+
 struct TestAbortWaker;
 
 impl crate::TurnAbortWaker for TestAbortWaker {}

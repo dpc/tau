@@ -1248,6 +1248,167 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+fn cache_prefix_prompt() -> tau_proto::AgentPromptCreated {
+    let mut prompt = minimal_prompt();
+    prompt.system_prompt = "stable system authority".to_owned();
+    prompt.tools.push(tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("lookup"),
+        model_visible_name: None,
+        description: Some("Look up one value.".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+            "additionalProperties": false,
+        })),
+        format: None,
+    });
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text {
+                        text: "first stable turn".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            },
+        ));
+    prompt
+}
+
+/// Ensures local correlation changes, appended history, and call suppression
+/// retain the existing public Responses lowering needed for prefix reuse.
+#[test]
+fn responses_request_keeps_stable_lowering_for_local_changes() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 0,
+        transport: Transport::Sse,
+    };
+    let model = AttemptModel {
+        id: ModelName::new("test-model"),
+    };
+    let prompt = cache_prefix_prompt();
+
+    let stable = build_request(&prompt, &config, &model).expect("stable request");
+    let stable_bytes = serde_json::to_vec(&stable).expect("serialize stable request");
+
+    let mut irrelevant = prompt.clone();
+    irrelevant.agent_prompt_id = "responses-next".parse().expect("prompt id");
+    irrelevant.session_id = "session-next".parse().expect("session id");
+    irrelevant.share_user_cache_key = true;
+    assert_eq!(
+        serde_json::to_vec(
+            &build_request(&irrelevant, &config, &model).expect("irrelevant request")
+        )
+        .expect("serialize"),
+        stable_bytes,
+        "local correlation fields must not perturb provider bytes"
+    );
+
+    let mut next_turn = prompt.clone();
+    next_turn
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text {
+                        text: "newest volatile turn".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            },
+        ));
+    let next = build_request(&next_turn, &config, &model).expect("next request");
+    let stable_json = serde_json::to_value(&stable).expect("serialize stable structure");
+    let next_json = serde_json::to_value(&next).expect("serialize next structure");
+    let stable_input = stable_json["input"].as_array().expect("stable input");
+    let next_input = next_json["input"].as_array().expect("next input");
+    assert_eq!(&next_input[..stable_input.len()], stable_input);
+    assert_eq!(next.instructions, stable.instructions);
+    assert_eq!(next.tools, stable.tools);
+
+    let mut disabled = prompt.clone();
+    disabled.tool_choice = tau_proto::ToolChoice::None;
+    let disabled = build_request(&disabled, &config, &model).expect("disabled request");
+    assert_eq!(disabled.tools, stable.tools);
+    assert_eq!(disabled.tool_choice.as_deref(), Some("none"));
+}
+
+/// Ensures provider-visible model, authority, schema, and effort changes do
+/// not accidentally reuse public Responses request lowering for another
+/// identity.
+#[test]
+fn responses_request_exposes_provider_visible_identity_changes() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 0,
+        transport: Transport::Sse,
+    };
+    let model = AttemptModel {
+        id: ModelName::new("test-model"),
+    };
+    let prompt = cache_prefix_prompt();
+    let stable_bytes =
+        serde_json::to_vec(&build_request(&prompt, &config, &model).expect("request"))
+            .expect("serialize");
+
+    let mut changed_system = prompt.clone();
+    changed_system.system_prompt.push('!');
+    assert_ne!(
+        serde_json::to_vec(
+            &build_request(&changed_system, &config, &model).expect("changed system request")
+        )
+        .expect("serialize"),
+        stable_bytes
+    );
+
+    let mut changed_tool = prompt.clone();
+    changed_tool.tools[0].parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": {"key": {"type": "integer"}},
+    }));
+    assert_ne!(
+        serde_json::to_vec(
+            &build_request(&changed_tool, &config, &model).expect("changed tool request")
+        )
+        .expect("serialize"),
+        stable_bytes
+    );
+
+    let mut changed_effort = prompt.clone();
+    changed_effort.model_params.effort = tau_proto::Effort::High;
+    assert_ne!(
+        serde_json::to_vec(
+            &build_request(&changed_effort, &config, &model).expect("changed effort request")
+        )
+        .expect("serialize"),
+        stable_bytes
+    );
+
+    let changed_model = AttemptModel {
+        id: ModelName::new("other-model"),
+    };
+    assert_ne!(
+        serde_json::to_vec(
+            &build_request(&prompt, &config, &changed_model).expect("changed model request")
+        )
+        .expect("serialize"),
+        stable_bytes
+    );
+}
+
 fn prompt_with_replayed_user_text() -> tau_proto::AgentPromptCreated {
     let mut prompt = minimal_prompt();
     prompt

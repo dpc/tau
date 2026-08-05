@@ -8,6 +8,28 @@ recovery-disposition fields are ignored.
 A provider is a normal Tau extension that exposes models and executes prompts.
 The harness does not own provider-specific LLM execution; provider extensions are the model executors.
 
+## Prompt-cache prefix stability
+
+Tau keeps each backend's provider-visible request meaning stable whenever only
+local prompt correlation changes or a newest conversation turn is appended.
+System/developer authority, ordered history, full tool definitions and schemas,
+and supported reasoning/thinking settings remain unchanged; new context follows
+the preceding history. When an existing backend accepts `tool_choice: "none"`,
+Tau retains the full tool-definition list and uses that selector rather than
+removing definitions solely to disable calls for one turn. This preserves tool
+visibility and authorization while presenting stable request structure to
+automatic provider caches.
+
+This improves cache eligibility only; each provider controls matching,
+breakpoints, residency, and hits. Model identity, system/developer
+instructions, tool order or schema, reasoning/thinking configuration, image
+details, and provider-specific extra request fields remain provider-visible and
+may affect matching when they change. Generic backends replay their complete
+semantic transcript. Only private Responses stale-anchor repair can replace
+suffix chaining with full replay, and it does so only after its exact upstream
+anchor proof fails. Tau does not add cache keepalive requests, scheduling, or
+cache persistence to obtain a hit.
+
 ## Proxy and certificate policy
 
 Built-in provider networking snapshots `http_proxy`/`HTTP_PROXY`,

@@ -599,6 +599,122 @@ fn prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+fn cache_prefix_prompt() -> tau_proto::AgentPromptCreated {
+    let mut prompt = prompt();
+    prompt.system_prompt = "stable system authority".to_owned();
+    prompt.tools.push(tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("lookup"),
+        model_visible_name: None,
+        description: Some("Look up one value.".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+            "additionalProperties": false,
+        })),
+        format: None,
+    });
+    prompt
+}
+
+/// Ensures local correlation changes, appended history, and call suppression
+/// retain the existing provider-visible lowering needed for prefix reuse.
+#[test]
+fn chat_request_keeps_stable_lowering_for_local_changes() {
+    let provider = provider();
+    let config = resolved_provider(&provider);
+    let model = &provider.models[0];
+    let created = cache_prefix_prompt();
+
+    let stable = build_request(&config, model, &created);
+    let stable_bytes = serde_json::to_vec(&stable).expect("serialize stable request");
+
+    let mut irrelevant = created.clone();
+    irrelevant.agent_prompt_id = "ap-next".parse().expect("prompt id");
+    irrelevant.session_id = "session-next".parse().expect("session id");
+    irrelevant.share_user_cache_key = true;
+    assert_eq!(
+        serde_json::to_vec(&build_request(&config, model, &irrelevant)).expect("serialize"),
+        stable_bytes,
+        "correlation and legacy cache-sharing fields must not perturb provider bytes"
+    );
+
+    let mut next_turn = created.clone();
+    next_turn
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text {
+                        text: "newest volatile turn".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            },
+        ));
+    let next_request = build_request(&config, model, &next_turn);
+    assert_eq!(
+        next_request.messages[..stable.messages.len()],
+        stable.messages,
+        "new conversation content must follow the stable system/history prefix"
+    );
+    assert_eq!(next_request.tools, stable.tools);
+
+    let mut disabled = created.clone();
+    disabled.tool_choice = ToolChoice::None;
+    let disabled_request = build_request(&config, model, &disabled);
+    assert_eq!(disabled_request.tools, stable.tools);
+    assert_eq!(disabled_request.tool_choice, Some("none"));
+}
+
+/// Ensures provider-visible model, authority, schema, and effort changes do
+/// not accidentally reuse the request lowering for a different identity.
+#[test]
+fn chat_request_exposes_provider_visible_identity_changes() {
+    let provider = provider();
+    let config = resolved_provider(&provider);
+    let model = &provider.models[0];
+    let created = cache_prefix_prompt();
+    let stable_bytes =
+        serde_json::to_vec(&build_request(&config, model, &created)).expect("serialize");
+
+    let mut changed_system = created.clone();
+    changed_system.system_prompt.push('!');
+    assert_ne!(
+        serde_json::to_vec(&build_request(&config, model, &changed_system)).expect("serialize"),
+        stable_bytes
+    );
+
+    let mut changed_tool = created.clone();
+    changed_tool.tools[0].parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": {"key": {"type": "integer"}},
+    }));
+    assert_ne!(
+        serde_json::to_vec(&build_request(&config, model, &changed_tool)).expect("serialize"),
+        stable_bytes
+    );
+
+    let mut changed_effort = created.clone();
+    changed_effort.model_params.effort = tau_proto::Effort::High;
+    assert_ne!(
+        serde_json::to_vec(&build_request(&config, model, &changed_effort)).expect("serialize"),
+        stable_bytes
+    );
+
+    let changed_model = AttemptModel {
+        id: ModelName::new("other-model"),
+    };
+    assert_ne!(
+        serde_json::to_vec(&build_request(&config, &changed_model, &created)).expect("serialize"),
+        stable_bytes
+    );
+}
+
 /// Ensures real request, successful-response, and HTTP-error producers submit
 /// the expected metadata through the shared compressed-capture job boundary.
 #[test]
