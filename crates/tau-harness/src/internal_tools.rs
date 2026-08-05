@@ -158,6 +158,16 @@ impl<'a> InternalToolHost<'a> {
         }
     }
 
+    /// Normalize an activating-input wait timeout against this harness's
+    /// validated configuration.
+    pub fn normalized_wait_timeout_minutes(
+        &self,
+        arguments: &CborValue,
+    ) -> Result<Option<u64>, String> {
+        self.harness
+            .normalized_input_wait_timeout_minutes(arguments)
+    }
+
     /// Return a cloned snapshot of skills discovered by the harness.
     pub fn discovered_skills(&self, conversation_id: &AgentId) -> Vec<InternalSkill> {
         let skills = self

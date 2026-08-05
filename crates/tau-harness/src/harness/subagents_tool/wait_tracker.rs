@@ -23,7 +23,10 @@ use super::WAIT_TOOL_NAME;
 const MAX_WAIT_TERMINAL_TOMBSTONES: usize = 1024;
 const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
 const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
-const MAX_INPUT_WAIT_MINUTES: i128 = 24 * 60;
+const DEFAULT_INPUT_WAIT_TIMEOUT_BOUNDS: (u64, u64) = (
+    tau_config::settings::DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES,
+    tau_config::settings::DEFAULT_WAIT_TIMEOUT_MAXIMUM_MINUTES,
+);
 
 /// Render the normalized input-wait timeout for tool display state.
 pub(super) fn wait_timeout_args(timeout: Duration) -> String {
@@ -234,8 +237,9 @@ pub(super) struct WaitCancel {
 }
 
 /// Runtime wait state machine and bounded durable-correlation cache.
-#[derive(Default)]
 pub(super) struct WaitTracker {
+    /// Inclusive effective bounds for activating-input wait durations.
+    input_wait_timeout_bounds: (u64, u64),
     /// Runtime state by display call ID.
     calls: HashMap<ToolCallId, WaitCallState>,
     /// Exact waiters by source display call ID.
@@ -260,7 +264,38 @@ pub(super) struct WaitTracker {
     terminal_order: VecDeque<ToolCallId>,
 }
 
+impl Default for WaitTracker {
+    fn default() -> Self {
+        Self::with_input_wait_timeout_bounds(DEFAULT_INPUT_WAIT_TIMEOUT_BOUNDS)
+    }
+}
+
 impl WaitTracker {
+    /// Creates a wait tracker with validated inclusive activating-input bounds.
+    pub(super) fn with_input_wait_timeout_bounds(input_wait_timeout_bounds: (u64, u64)) -> Self {
+        debug_assert!(0 < input_wait_timeout_bounds.0);
+        debug_assert!(input_wait_timeout_bounds.0 <= input_wait_timeout_bounds.1);
+        Self {
+            input_wait_timeout_bounds,
+            calls: HashMap::new(),
+            waiters: HashMap::new(),
+            any_waiters: HashMap::new(),
+            input_waiters: HashMap::new(),
+            claimed_waits: HashMap::new(),
+            call_owners: HashMap::new(),
+            call_tool_names: HashMap::new(),
+            call_refs: HashMap::new(),
+            terminal_observations: HashMap::new(),
+            completion_order: VecDeque::new(),
+            terminal_order: VecDeque::new(),
+        }
+    }
+
+    /// Returns the inclusive activating-input bounds used to parse new waits.
+    pub(super) fn input_wait_timeout_bounds(&self) -> (u64, u64) {
+        self.input_wait_timeout_bounds
+    }
+
     /// Return owners that currently have at least one installed, unclaimed
     /// wait.
     pub(super) fn installed_wait_owners(&self) -> HashSet<AgentId> {
@@ -509,7 +544,7 @@ impl WaitTracker {
             wait_observation,
             registration: None,
         };
-        let target = match parse_wait_args(arguments) {
+        let target = match parse_wait_args_with_bounds(arguments, self.input_wait_timeout_bounds) {
             Ok(target) => target,
             Err(message) => {
                 let reply = wait_error_reply(call_id, tool_name, message, Some(arguments.clone()))
@@ -530,7 +565,22 @@ impl WaitTracker {
             WaitTarget::Exact(target) => self.start_exact_wait(target, wait),
             WaitTarget::AnyBackground => self.start_any_wait(owner.clone(), wait),
             WaitTarget::AnyInput(timeout) => {
-                self.start_input_wait(owner.clone(), wait, now + timeout, timeout)
+                let Some(deadline) = now.checked_add(timeout) else {
+                    let reply = wait_error_reply(
+                        call_id,
+                        tool_name,
+                        "input wait deadline exceeds monotonic clock range".to_owned(),
+                        Some(arguments.clone()),
+                    )
+                    .with_settlement(
+                        &wait,
+                        tau_proto::ToolWaitOutcome::Rejected {
+                            reason: tau_proto::WaitRejectionReason::InvalidArguments,
+                        },
+                    );
+                    return WaitStart::reply(reply);
+                };
+                self.start_input_wait(owner.clone(), wait, deadline, timeout)
             }
         }
     }
@@ -1905,7 +1955,16 @@ fn original_tool_call_id_entry(original_call_id: &ToolCallId) -> (CborValue, Cbo
 
 /// Parse mutually exclusive exact, bare-background, or activating-input
 /// arguments.
+#[cfg(test)]
 pub(super) fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
+    parse_wait_args_with_bounds(arguments, DEFAULT_INPUT_WAIT_TIMEOUT_BOUNDS)
+}
+
+/// Parses mutually exclusive wait modes with inclusive activating-input bounds.
+pub(super) fn parse_wait_args_with_bounds(
+    arguments: &CborValue,
+    input_wait_timeout_bounds: (u64, u64),
+) -> Result<WaitTarget, String> {
     let CborValue::Map(entries) = arguments else {
         return Err("arguments must be an object".to_owned());
     };
@@ -1959,7 +2018,10 @@ pub(super) fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, Strin
             if minutes < 1 {
                 return Err("`timeout_minutes` must be at least 1".to_owned());
             }
-            let effective_minutes = minutes.min(MAX_INPUT_WAIT_MINUTES) as u64;
+            let effective_minutes = minutes.clamp(
+                i128::from(input_wait_timeout_bounds.0),
+                i128::from(input_wait_timeout_bounds.1),
+            ) as u64;
             Ok(WaitTarget::AnyInput(Duration::from_secs(
                 effective_minutes * 60,
             )))
@@ -1978,8 +2040,9 @@ pub(super) fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, Strin
 /// malformed, conflicting, repeated, or otherwise unsupported.
 pub(super) fn normalized_wait_timeout_minutes_inner(
     arguments: &CborValue,
+    input_wait_timeout_bounds: (u64, u64),
 ) -> Result<Option<u64>, String> {
-    match parse_wait_args(arguments)? {
+    match parse_wait_args_with_bounds(arguments, input_wait_timeout_bounds)? {
         WaitTarget::AnyInput(timeout) => Ok(Some(timeout.as_secs() / 60)),
         _ => Ok(None),
     }

@@ -26,7 +26,7 @@ use tau_proto::{
 pub(crate) use wait_tracker::PendingWaitSettlement;
 use wait_tracker::{
     WaitReply, WaitReplyKind, WaitRequest, WaitTarget, WaitTracker,
-    normalized_wait_timeout_minutes_inner, parse_wait_args, wait_error_reply,
+    normalized_wait_timeout_minutes_inner, parse_wait_args_with_bounds, wait_error_reply,
     wait_input_available_reply, wait_interrupted_any_reply, wait_interrupted_reply,
     wait_timeout_args,
 };
@@ -129,11 +129,29 @@ pub(crate) const WAIT_TOOL_NAME: &str = "wait";
 ///
 /// An absent `timeout_minutes` selects background-completion waiting and
 /// returns `None`. A positive integer selects activating-input waiting and is
-/// clamped to 1,440 minutes. Zero, negative, non-integer, unknown, or
-/// conflicting arguments return an error rather than choosing a wait mode
-/// implicitly.
+/// clamped to the built-in configuration bounds. Zero, negative, non-integer,
+/// unknown, or conflicting arguments return an error rather than choosing a
+/// wait mode implicitly.
 pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u64>, String> {
-    normalized_wait_timeout_minutes_inner(arguments)
+    normalized_wait_timeout_minutes_with_bounds(
+        arguments,
+        (
+            tau_config::settings::DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES,
+            tau_config::settings::DEFAULT_WAIT_TIMEOUT_MAXIMUM_MINUTES,
+        ),
+    )
+}
+
+/// Returns the normalized effective input-wait timeout using inclusive
+/// configuration bounds in whole minutes.
+///
+/// An absent `timeout_minutes` remains a background-completion wait and returns
+/// `None`.
+pub(crate) fn normalized_wait_timeout_minutes_with_bounds(
+    arguments: &CborValue,
+    input_wait_timeout_bounds: (u64, u64),
+) -> Result<Option<u64>, String> {
+    normalized_wait_timeout_minutes_inner(arguments, input_wait_timeout_bounds)
 }
 #[cfg(test)]
 pub(crate) const MESSAGE_TOOL_NAME: &str = "message";
@@ -141,6 +159,16 @@ pub(crate) const MESSAGE_TOOL_NAME: &str = "message";
 pub(crate) struct SubagentToolState {
     /// State used by the wait tool to track background completions.
     wait_tracker: WaitTracker,
+}
+
+impl SubagentToolState {
+    /// Creates state whose activating-input waits use the supplied inclusive
+    /// timeout bounds in whole minutes.
+    pub(crate) fn with_input_wait_timeout_bounds(input_wait_timeout_bounds: (u64, u64)) -> Self {
+        Self {
+            wait_tracker: WaitTracker::with_input_wait_timeout_bounds(input_wait_timeout_bounds),
+        }
+    }
 }
 
 static NEXT_AGENT_MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -281,6 +309,21 @@ fn next_agent_message_id(sender_id: &AgentId) -> tau_proto::AgentMessageId {
 }
 
 impl Harness {
+    /// Returns the inclusive effective bounds for activating-input `wait`
+    /// calls.
+    pub(crate) fn input_wait_timeout_bounds(&self) -> (u64, u64) {
+        self.subagents.wait_tracker.input_wait_timeout_bounds()
+    }
+
+    /// Normalize an activating-input wait timeout with this harness's validated
+    /// configuration.
+    pub(crate) fn normalized_input_wait_timeout_minutes(
+        &self,
+        arguments: &CborValue,
+    ) -> Result<Option<u64>, String> {
+        normalized_wait_timeout_minutes_with_bounds(arguments, self.input_wait_timeout_bounds())
+    }
+
     #[cfg(test)]
     pub(crate) fn register_harness_tools(&mut self) {
         self.install_internal_tool_handlers(vec![std::sync::Arc::new(TestBuiltinTools)]);
@@ -2155,7 +2198,10 @@ impl Harness {
                 .retain_call_ref(call_id.clone(), call_ref);
         }
         self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
-        let parsed = parse_wait_args(&call.arguments);
+        let parsed = parse_wait_args_with_bounds(
+            &call.arguments,
+            self.subagents.wait_tracker.input_wait_timeout_bounds(),
+        );
         let wait_observation = call.call_ref.map(|_| tau_proto::ObservationId::random());
         let observed_mode = match &parsed {
             Ok(WaitTarget::Exact(target)) => self

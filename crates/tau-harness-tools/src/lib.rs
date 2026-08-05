@@ -125,7 +125,21 @@ impl BuiltinState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
+        self.initial_display_with_timeout(
+            call,
+            tau_harness::normalized_wait_timeout_minutes(&call.arguments)
+                .ok()
+                .flatten(),
+        )
+    }
+
+    fn initial_display_with_timeout(
+        &self,
+        call: &AgentToolCall,
+        input_wait_timeout_minutes: Option<u64>,
+    ) -> Option<ToolUseState> {
         let (args, status_text, payload) = match call.name.as_str() {
             SKILL_TOOL_NAME => {
                 let needles = extract_skill_search_queries(&call.arguments).unwrap_or_default();
@@ -146,7 +160,7 @@ impl BuiltinState {
                 (args, tau_proto::PROGRESS_INDICATOR_TEXT, None)
             }
             WAIT_TOOL_NAME => (
-                self.wait_initial_display_args(&call.arguments),
+                self.wait_initial_display_args(&call.arguments, input_wait_timeout_minutes),
                 tau_proto::PROGRESS_INDICATOR_TEXT,
                 None,
             ),
@@ -181,8 +195,12 @@ impl BuiltinState {
         })
     }
 
-    fn wait_initial_display_args(&self, arguments: &CborValue) -> String {
-        if let Ok(Some(minutes)) = tau_harness::normalized_wait_timeout_minutes(arguments) {
+    fn wait_initial_display_args(
+        &self,
+        arguments: &CborValue,
+        input_wait_timeout_minutes: Option<u64>,
+    ) -> String {
+        if let Some(minutes) = input_wait_timeout_minutes {
             return format!("{minutes}m");
         }
         wait_target_call_id(arguments)
@@ -258,7 +276,12 @@ impl InternalToolHandler for BuiltinTools {
                 let display = {
                     let mut state = self.state.lock().expect("builtin tool state poisoned");
                     state.record_tool_started(call.id.clone(), visible_tool_name.clone());
-                    state.initial_display(&call)
+                    state.initial_display_with_timeout(
+                        &call,
+                        host.normalized_wait_timeout_minutes(&call.arguments)
+                            .ok()
+                            .flatten(),
+                    )
                 };
                 if let Some(display) = display {
                     host.publish_tool_progress(
@@ -2051,7 +2074,7 @@ fn cancel_tool_spec() -> ToolSpec {
 }
 
 fn wait_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for completion of a background tool call owned by this conversation with `tool_call_id`, for the next completed background call with `wait({})`, or until activating input addressed to this agent is available with `wait({\"timeout_minutes\":N})`. Input waits accept positive integer minutes, silently cap values above 1,440, and do not consume a background result or the input; the actual input arrives separately in the next model round. When waiting for any background call, the result includes an `original_tool_call_id` header identifying the completed call. Already-finished matching results and already-queued activating input return immediately. Tau will notify you via marked internal messages about background calls completing; `wait({})` consumes one completion and suppresses that completion notice.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. When set, wait for this conversation's specific background tool call."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. Values above 1,440 are treated as 1,440. Mutually exclusive with tool_call_id."}},"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(WAIT_TOOL_NAME), model_visible_name: None, description: Some("Wait for completion of a background tool call owned by this conversation with `tool_call_id`, for the next completed background call with `wait({})`, or until activating input addressed to this agent is available with `wait({\"timeout_minutes\":N})`. Input waits accept positive integer minutes, silently clamp to the configured `harness.yaml` effective bounds (five through 1,440 minutes by default), and do not consume a background result or the input; the actual input arrives separately in the next model round. When waiting for any background call, the result includes an `original_tool_call_id` header identifying the completed call. Already-finished matching results and already-queued activating input return immediately. Tau will notify you via marked internal messages about background calls completing; `wait({})` consumes one completion and suppresses that completion notice.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"tool_call_id":{"type":"string","description":"Optional. When set, wait for this conversation's specific background tool call."},"timeout_minutes":{"type":"integer","minimum":1,"description":"Wait up to this many minutes for activating input addressed to this agent. The harness silently clamps this to configured effective bounds. Mutually exclusive with tool_call_id."}},"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn compact_tool_spec() -> ToolSpec {

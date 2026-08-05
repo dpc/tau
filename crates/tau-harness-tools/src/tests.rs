@@ -265,7 +265,8 @@ fn wait_call(target_call_id: &str) -> AgentToolCall {
 }
 
 /// The model-facing wait contract bounds only input waits, advertises the
-/// silent cap without schema-rejecting larger values, and preserves `{}`.
+/// configured silent clamp without schema-rejecting larger values, and
+/// preserves `{}`.
 #[test]
 fn wait_spec_documents_optional_non_consuming_input_mode() {
     let spec = wait_tool_spec();
@@ -287,13 +288,13 @@ fn wait_spec_documents_optional_non_consuming_input_mode() {
         parameters["properties"]["timeout_minutes"]["description"]
             .as_str()
             .expect("timeout description")
-            .contains("above 1,440 are treated as 1,440")
+            .contains("silently clamps this to configured effective bounds")
     );
     assert!(parameters["properties"].get("any_input").is_none());
     assert!(parameters.get("required").is_none());
     let description = spec.description.expect("wait description");
     assert!(description.contains("`wait({\"timeout_minutes\":N})`"));
-    assert!(description.contains("cap values above 1,440"));
+    assert!(description.contains("five through 1,440 minutes by default"));
     assert!(description.contains("do not consume"));
 }
 
@@ -1199,6 +1200,13 @@ fn wait_initial_display_shows_normalized_input_timeout() {
     );
     assert_eq!(
         state
+            .initial_display(&timeout_call(1))
+            .expect("floor-clamped wait display")
+            .args,
+        "5m"
+    );
+    assert_eq!(
+        state
             .initial_display(&timeout_call(1_000_000))
             .expect("capped wait display")
             .args,
@@ -1227,7 +1235,7 @@ fn wait_initial_display_shows_normalized_input_timeout() {
             CborValue::Integer(7.into()),
         ),
     ]);
-    assert_eq!(state.wait_initial_display_args(&invalid), "");
+    assert_eq!(state.wait_initial_display_args(&invalid, None), "");
 }
 
 /// The message tool progress display must keep the recipient inline and put

@@ -78,6 +78,20 @@ Use `tau init` to generate config files.
 
 Use `tau provider add` to create or replace built-in provider profiles, including ChatGPT/Codex, OpenAI-compatible Chat Completions, and OpenRouter profiles; edit `harness.yaml` for harness-owned roles, defaults, and extension settings.
 
+`wait({"timeout_minutes": N})` silently clamps its activating-input deadline to
+the global `harness.yaml` bounds. The defaults trade small waits for fewer model
+rounds while preserving immediate input delivery:
+
+```yaml
+wait_timeout_minimum_minutes: 5
+wait_timeout_maximum_minutes: 1440
+```
+
+Both bounds are positive, inclusive whole minutes, and the maximum cannot
+exceed 65,535 minutes because wait registrations persist their effective value
+as `u16`. The minimum cannot exceed the maximum. Argument-free and exact
+background-result waits do not use these bounds.
+
 By default, `tau` starts the harness daemon and the CLI UI.
 
 To explore other entry points, run `tau -h`.

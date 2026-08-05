@@ -2997,6 +2997,8 @@ struct HarnessBaseParts {
     role_overrides: HashMap<String, tau_config::settings::AgentRole>,
     /// Harness-owned declarative tool tag policy.
     tool_policy: tau_config::settings::ToolPolicy,
+    /// Inclusive effective bounds for activating-input `wait` calls.
+    input_wait_timeout_bounds: (u64, u64),
     /// Initially selected role name.
     selected_role: String,
     /// Initially selected model, if any provider metadata can resolve one.
@@ -3359,7 +3361,9 @@ impl Harness {
             background_completion_targets: HashMap::new(),
             canceled_prompts: HashSet::new(),
             pending_start_agent_requests: VecDeque::new(),
-            subagents: SubagentToolState::default(),
+            subagents: SubagentToolState::with_input_wait_timeout_bounds(
+                parts.input_wait_timeout_bounds,
+            ),
             dirs: parts.dirs,
         }
     }
@@ -3587,6 +3591,7 @@ impl Harness {
             custom_prompts,
             role_overrides,
             tool_policy: harness_settings.tool_policy.clone(),
+            input_wait_timeout_bounds: harness_settings.wait_timeout_bounds(),
             selected_role,
             selected_model,
             agent_id_template: harness_settings.agent_id_template.clone(),
@@ -4078,6 +4083,7 @@ impl Harness {
             custom_prompts,
             role_overrides: parts.roles.role_overrides,
             tool_policy: parts.harness_settings.tool_policy.clone(),
+            input_wait_timeout_bounds: parts.harness_settings.wait_timeout_bounds(),
             selected_role: parts.roles.selected_role,
             selected_model: parts.roles.selected_model,
             agent_id_template: parts.harness_settings.agent_id_template.clone(),
@@ -20896,7 +20902,8 @@ impl Harness {
         self.enqueued_standalone_inference_checkpoints.clear();
         self.pending_publish_idle_dispatches.clear();
         self.clear_session_agent_context();
-        self.subagents = SubagentToolState::default();
+        self.subagents =
+            SubagentToolState::with_input_wait_timeout_bounds(self.input_wait_timeout_bounds());
 
         // Token and context accounting are session-scoped. Reset them
         // before `SessionStarted` so clients recreating status UI for
@@ -21305,7 +21312,7 @@ impl Harness {
                 self.tool_agents.insert(call.call_id.clone(), cid.clone());
                 let display = (call.name.as_str() == "wait")
                     .then(|| {
-                        normalized_wait_timeout_minutes(&call.arguments)
+                        self.normalized_input_wait_timeout_minutes(&call.arguments)
                             .ok()
                             .flatten()
                     })

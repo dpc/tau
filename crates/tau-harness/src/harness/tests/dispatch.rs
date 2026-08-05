@@ -21789,6 +21789,58 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
     h.shutdown().expect("shutdown");
 }
 
+/// Runtime construction carries configured input-wait bounds through the
+/// internal-tool facade, session rollover, and the actual wait registration.
+#[test]
+fn configured_input_wait_bounds_survive_rollover_and_drive_wait_registration() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let config_dir = state_dir.join("config");
+    path_std_fs::create_dir_all(&config_dir).expect("config directory");
+    path_std_fs::write(
+        config_dir.join("harness.yaml"),
+        "wait_timeout_minimum_minutes: 7\nwait_timeout_maximum_minutes: 9\n",
+    )
+    .expect("configured wait bounds");
+
+    let mut h = echo_harness(&state_dir).expect("start");
+    let input_wait_arguments = CborValue::Map(vec![(
+        CborValue::Text("timeout_minutes".to_owned()),
+        CborValue::Integer(1.into()),
+    )]);
+    assert_eq!(h.input_wait_timeout_bounds(), (7, 9));
+    assert_eq!(
+        path_crate_internal_tools::InternalToolHost::new(&mut h)
+            .normalized_wait_timeout_minutes(&input_wait_arguments),
+        Ok(Some(7))
+    );
+
+    h.switch_session(
+        test_session_id("configured-wait-bounds"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
+    assert_eq!(h.input_wait_timeout_bounds(), (7, 9));
+
+    let cid = ensure_test_user_agent(&mut h);
+    let call = AgentToolCall {
+        call_ref: None,
+        id: "configured-wait-bounds".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: input_wait_arguments,
+    };
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    let now = path_std_time::Instant::now();
+    h.handle_wait_tool_call_at(&cid, &call, ToolName::new("wait"), now)
+        .expect("register configured input wait");
+    assert_eq!(
+        h.next_input_wait_deadline(),
+        now.checked_add(path_std_time::Duration::from_secs(7 * 60))
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Manual compaction may claim the sole installed input wait, but it must first
 /// commit one canonical cancellation that closes the provider tool round.
 /// A later provider compaction failure cannot resurrect that cancelled wait.

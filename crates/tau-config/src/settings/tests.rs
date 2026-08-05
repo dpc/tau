@@ -300,6 +300,87 @@ fn diagnostic_retention_has_independent_default_and_disable() {
     assert_eq!(disabled.diagnostic_retention(), None);
 }
 
+/// Ensures activating-input waits ship with a five-minute floor and retain the
+/// established 1,440-minute ceiling unless users override both bounds.
+#[test]
+fn wait_timeout_bounds_default_and_override() {
+    let built_in = HarnessSettings::built_in();
+    assert_eq!(built_in.wait_timeout_bounds(), (5, 1_440));
+
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "wait_timeout_minimum_minutes: 7\nwait_timeout_maximum_minutes: 11\n",
+    )
+    .expect("write harness config");
+
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load overridden bounds");
+    assert_eq!(settings.wait_timeout_bounds(), (7, 11));
+}
+
+/// Ensures an inverted activating-input wait range fails configuration loading
+/// instead of creating contradictory silent-clamping behavior.
+#[test]
+fn wait_timeout_bounds_reject_minimum_above_maximum() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "wait_timeout_minimum_minutes: 12\nwait_timeout_maximum_minutes: 11\n",
+    )
+    .expect("write invalid harness config");
+
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("inverted wait bounds must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("wait_timeout_minimum_minutes must not exceed")
+    );
+}
+
+/// Ensures activating-input bounds fit the persisted u16-minute wait metadata
+/// instead of silently truncating a longer configured deadline.
+#[test]
+fn wait_timeout_bounds_reject_maximum_above_wait_metadata_range() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        format!(
+            "wait_timeout_minimum_minutes: 1\nwait_timeout_maximum_minutes: {}\n",
+            u64::from(u16::MAX) + 1
+        ),
+    )
+    .expect("write invalid harness config");
+
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("out-of-range wait maximum must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("wait_timeout_maximum_minutes must not exceed")
+    );
+}
+
+/// Ensures the largest timeout representable by persisted wait metadata remains
+/// a valid global maximum.
+#[test]
+fn wait_timeout_bounds_accept_maximum_wait_metadata_range() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        format!(
+            "wait_timeout_minimum_minutes: 1\nwait_timeout_maximum_minutes: {}\n",
+            u16::MAX
+        ),
+    )
+    .expect("write maximum harness config");
+
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load maximum bounds");
+    assert_eq!(settings.wait_timeout_bounds(), (1, u64::from(u16::MAX)));
+}
+
 /// Ensures tag policy patterns support exact and terminal-prefix matching while
 /// rejecting middle globs that would make policy behavior ambiguous.
 #[test]
@@ -870,6 +951,15 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             }
         }
     });
+    let root = value.as_object_mut().expect("root map");
+    root.insert(
+        "waitTimeoutMinimumMinutes".to_owned(),
+        serde_json::Value::from(5),
+    );
+    root.insert(
+        "waitTimeoutMaximumMinutes".to_owned(),
+        serde_json::Value::from(1_440),
+    );
     for pointer in [
         "/agents/roleGroups/engineer",
         "/agents/roleGroups/engineer/roles/engineer",
@@ -904,6 +994,11 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     normalize_harness_config_value(&mut value, "test").expect("normalize");
 
     assert!(value.get("custom_prompts").is_some());
+    assert_eq!(value["wait_timeout_minimum_minutes"], serde_json::json!(5));
+    assert_eq!(
+        value["wait_timeout_maximum_minutes"],
+        serde_json::json!(1440)
+    );
     assert!(value.get("tool_policy").is_some());
     assert!(
         value
@@ -954,6 +1049,8 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     let cases = [
         ("customPrompts", "custom_prompts"),
         ("toolPolicy", "tool_policy"),
+        ("waitTimeoutMinimumMinutes", "wait_timeout_minimum_minutes"),
+        ("waitTimeoutMaximumMinutes", "wait_timeout_maximum_minutes"),
         ("agents.enabled", "agents.enable"),
         ("extensions.work.toolPrefix", "extensions.work.tool_prefix"),
         ("agents.defaultRole", "agents.default_role"),

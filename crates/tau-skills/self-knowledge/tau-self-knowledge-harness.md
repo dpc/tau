@@ -111,8 +111,10 @@ Embedded helpers such as `run_embedded_message` do not create a daemon socket. T
 conversation, and `wait({"tool_call_id":"..."})` consumes that exact call.
 `wait({"timeout_minutes":N})` instead waits for activating input without
 consuming either input or background results. `N` must be a positive integer;
-values above 1,440 minutes are silently capped at 1,440. `timeout_minutes` and
-`tool_call_id` are mutually exclusive.
+`harness.yaml` silently clamps it to the inclusive
+`wait_timeout_minimum_minutes` and `wait_timeout_maximum_minutes` bounds (five
+and 1,440 minutes by default). `timeout_minutes` and `tool_call_id` are
+mutually exclusive.
 
 
 ## Manual compaction tools

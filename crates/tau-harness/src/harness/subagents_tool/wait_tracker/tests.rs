@@ -535,7 +535,7 @@ fn installed_wait_modes_emit_exact_registration_metadata() {
     assert_eq!(
         start.registration.expect("input registration").1.mode,
         tau_proto::ToolWaitMode::ActivatingInput {
-            effective_timeout_minutes: 1
+            effective_timeout_minutes: 5
         }
     );
 
@@ -825,13 +825,13 @@ fn wait_args_reject_non_string_and_empty_tool_call_id() {
     );
 }
 
-/// Input waits accept positive whole minutes, cap at 1,440 minutes before
-/// conversion, reject ambiguous or malformed forms, and explicitly diagnose the
-/// removed boolean.
+/// Input waits accept positive whole minutes, clamp to the default five through
+/// 1,440-minute range before conversion, reject ambiguous or malformed forms,
+/// and explicitly diagnose the removed boolean.
 #[test]
 fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
     for (minutes, effective) in [
-        (1, 1),
+        (1, 5),
         (1_439, 1_439),
         (1_440, 1_440),
         (1_441, 1_440),
@@ -922,6 +922,103 @@ fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
     );
 }
 
+/// Ensures the shipped five-minute floor changes only the no-input deadline:
+/// activating input still settles a requested one-minute wait immediately.
+#[test]
+fn default_input_wait_floor_preserves_early_activation() {
+    let now = Instant::now();
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    let start = tracker.handle_wait_invoke_at(
+        &owner,
+        "wait-floor".into(),
+        wait_tool_name(),
+        &wait_args_input(1),
+        now,
+        observation(),
+    );
+
+    assert!(start.reply.is_none());
+    assert_eq!(
+        tracker.next_input_wait_deadline(),
+        Some(now + Duration::from_secs(5 * 60))
+    );
+    let replies = tracker.activate_waits_for(&owner, tau_proto::ObservationId::random());
+    assert_eq!(replies.len(), 1);
+    let (result, display) =
+        reply_result_with_display(replies.into_iter().next().expect("activation reply"));
+    assert_eq!(
+        result,
+        CborValue::Map(vec![(
+            CborValue::Text("input_available".to_owned()),
+            CborValue::Bool(true),
+        )])
+    );
+    assert_eq!(display.expect("input display").args, "5m");
+    assert_eq!(tracker.next_input_wait_deadline(), None);
+}
+
+/// Ensures a configured range clamps requests at both ends while leaving
+/// argument-free background-result waits on their existing path.
+#[test]
+fn configured_input_wait_bounds_clamp_both_ends_without_affecting_background_waits() {
+    let now = Instant::now();
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::with_input_wait_timeout_bounds((7, 9));
+
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &owner,
+                "wait-low".into(),
+                wait_tool_name(),
+                &wait_args_input(1),
+                now,
+                observation(),
+            )
+            .reply
+            .is_none()
+    );
+    assert_eq!(
+        tracker.next_input_wait_deadline(),
+        Some(now + Duration::from_secs(7 * 60))
+    );
+    assert_eq!(
+        tracker
+            .activate_waits_for(&owner, tau_proto::ObservationId::random())
+            .len(),
+        1
+    );
+
+    assert!(
+        tracker
+            .handle_wait_invoke_at(
+                &owner,
+                "wait-high".into(),
+                wait_tool_name(),
+                &wait_args_input(10),
+                now,
+                observation(),
+            )
+            .reply
+            .is_none()
+    );
+    assert_eq!(
+        tracker.next_input_wait_deadline(),
+        Some(now + Duration::from_secs(9 * 60))
+    );
+
+    let background = start_reply(tracker.handle_wait_invoke_at(
+        &owner,
+        "wait-background".into(),
+        wait_tool_name(),
+        &wait_args_empty(),
+        now,
+        observation(),
+    ));
+    assert_eq!(reply_error(background).0, NO_BACKGROUND_WAIT_CANDIDATES);
+}
+
 /// Activating input completes only the addressed agent's input waiter, leaves
 /// another agent's waiter untouched, and never copies input content into the
 /// bounded input-wait result.
@@ -956,7 +1053,7 @@ fn activating_input_wakes_only_target_owned_waits() {
         )])
     );
     let display = display.expect("input-available display");
-    assert_eq!(display.args, "1m");
+    assert_eq!(display.args, "5m");
     assert_eq!(display.status, ToolUseStatus::Success);
 
     let other_replies = tracker.activate_waits_for(&other, tau_proto::ObservationId::random());
@@ -982,7 +1079,7 @@ fn duplicate_input_wait_is_rejected_without_replacing_first() {
         "existing input wait for this agent already in progress"
     );
     let display = display.expect("duplicate wait display");
-    assert_eq!(display.args, "1m");
+    assert_eq!(display.args, "5m");
     assert_eq!(display.status, ToolUseStatus::Error);
     let replies = tracker.activate_waits_for(&owner, tau_proto::ObservationId::random());
     assert_eq!(replies.len(), 1);
@@ -1055,7 +1152,7 @@ fn input_wait_deadlines_are_ordered_and_expire_exactly_once() {
     let first = conv("first");
     let first_peer = conv("first-peer");
     let second = conv("second");
-    let mut tracker = WaitTracker::default();
+    let mut tracker = WaitTracker::with_input_wait_timeout_bounds((1, 1_440));
     assert!(
         tracker
             .handle_wait_invoke_at(
@@ -1207,7 +1304,7 @@ fn expired_input_wait_cannot_be_activated_later() {
     );
     assert_eq!(
         tracker
-            .expire_input_waits(now + Duration::from_secs(60))
+            .expire_input_waits(now + Duration::from_secs(5 * 60))
             .len(),
         1
     );
@@ -1240,7 +1337,7 @@ fn input_timeout_does_not_consume_later_background_completion() {
     );
     assert_eq!(
         tracker
-            .expire_input_waits(now + Duration::from_secs(60))
+            .expire_input_waits(now + Duration::from_secs(5 * 60))
             .len(),
         1
     );

@@ -33,6 +33,11 @@ use tau_proto::{
 
 const BUILT_IN_CLI_YAML: &str = include_str!("../config/built-in.cli.yaml");
 const BUILT_IN_CLI_BINDINGS_YAML: &str = include_str!("../config/built-in.cli-bindings.yaml");
+
+/// Built-in lower effective bound for activating-input `wait` tool calls.
+pub const DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES: u64 = 5;
+/// Built-in upper effective bound for activating-input `wait` tool calls.
+pub const DEFAULT_WAIT_TIMEOUT_MAXIMUM_MINUTES: u64 = 1_440;
 const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yaml");
 /// Default model-visible instruction for a context-size alert.
 const DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE: &str =
@@ -624,6 +629,12 @@ pub struct HarnessSettings {
     /// Number of days to keep non-authoritative session diagnostic files.
     /// Set to `0` to disable diagnostic cleanup.
     pub diagnostic_retention_days: u64,
+    /// Lowest effective activating-input wait timeout accepted from the `wait`
+    /// tool, measured in whole minutes.
+    pub wait_timeout_minimum_minutes: u64,
+    /// Highest effective activating-input wait timeout accepted from the `wait`
+    /// tool, measured in whole minutes.
+    pub wait_timeout_maximum_minutes: u64,
 
     /// Extension table, keyed by name. Built-in entries (`provider-builtin`,
     /// `core-shell`) come pre-baked at the harness level; anything the
@@ -695,6 +706,12 @@ struct HarnessSettingsWire {
     session_retention_days: u64,
     /// Non-authoritative session diagnostic retention in days.
     diagnostic_retention_days: u64,
+    /// Lowest effective activating-input wait timeout in whole minutes.
+    #[serde(alias = "waitTimeoutMinimumMinutes")]
+    wait_timeout_minimum_minutes: u64,
+    /// Highest effective activating-input wait timeout in whole minutes.
+    #[serde(alias = "waitTimeoutMaximumMinutes")]
+    wait_timeout_maximum_minutes: u64,
     /// Configured extension entries.
     extensions: HashMap<String, ExtensionEntry>,
     #[serde(default, alias = "customPrompts")]
@@ -781,6 +798,8 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
             diagnostic_retention_days: wire.diagnostic_retention_days,
+            wait_timeout_minimum_minutes: wire.wait_timeout_minimum_minutes,
+            wait_timeout_maximum_minutes: wire.wait_timeout_maximum_minutes,
             extensions: wire.extensions,
             default_role: wire.agents.default_role,
             roles: HashMap::new(),
@@ -793,6 +812,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
+        settings
+            .validate_wait_timeout_bounds()
+            .map_err(D::Error::custom)?;
         let mut effective_agent_defaults = AgentRole::default();
         effective_agent_defaults.apply_patch(&agent_defaults);
         settings.apply_agent_defaults_to_roles(&agent_defaults);
@@ -1536,6 +1558,38 @@ impl HarnessSettings {
         s.remove_disabled_roles();
         s.apply_agent_globals_to_roles();
         s
+    }
+
+    /// Return the configured inclusive effective bounds for activating-input
+    /// `wait` calls, in whole minutes.
+    #[must_use]
+    pub fn wait_timeout_bounds(&self) -> (u64, u64) {
+        (
+            self.wait_timeout_minimum_minutes,
+            self.wait_timeout_maximum_minutes,
+        )
+    }
+
+    fn validate_wait_timeout_bounds(&self) -> Result<(), String> {
+        if self.wait_timeout_minimum_minutes < 1 {
+            return Err("wait_timeout_minimum_minutes must be at least 1".to_owned());
+        }
+        if self.wait_timeout_maximum_minutes < 1 {
+            return Err("wait_timeout_maximum_minutes must be at least 1".to_owned());
+        }
+        if u64::from(u16::MAX) < self.wait_timeout_maximum_minutes {
+            return Err(format!(
+                "wait_timeout_maximum_minutes must not exceed {}",
+                u16::MAX
+            ));
+        }
+        if self.wait_timeout_maximum_minutes < self.wait_timeout_minimum_minutes {
+            return Err(
+                "wait_timeout_minimum_minutes must not exceed wait_timeout_maximum_minutes"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
     fn apply_role_group_overrides(
@@ -2954,6 +3008,20 @@ fn normalize_harness_config_value(
     };
     normalize_alias_key(map, "customPrompts", "custom_prompts", source, "root")?;
     normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
+    normalize_alias_key(
+        map,
+        "waitTimeoutMinimumMinutes",
+        "wait_timeout_minimum_minutes",
+        source,
+        "root",
+    )?;
+    normalize_alias_key(
+        map,
+        "waitTimeoutMaximumMinutes",
+        "wait_timeout_maximum_minutes",
+        source,
+        "root",
+    )?;
     if let Some(serde_json::Value::Object(extensions)) = map.get_mut("extensions") {
         for (extension_name, extension) in extensions {
             if let serde_json::Value::Object(extension) = extension {
@@ -3298,6 +3366,8 @@ fn canonical_top_level_key(key: &str) -> &str {
     match key {
         "customPrompts" => "custom_prompts",
         "toolPolicy" => "tool_policy",
+        "waitTimeoutMinimumMinutes" => "wait_timeout_minimum_minutes",
+        "waitTimeoutMaximumMinutes" => "wait_timeout_maximum_minutes",
         _ => key,
     }
 }

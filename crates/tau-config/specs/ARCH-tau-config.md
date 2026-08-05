@@ -71,6 +71,14 @@ cleanup of non-authoritative session JSONL and provider request/response
 captures and defaults to fourteen days; zero disables only that shared
 diagnostic cleanup.
 
+`wait_timeout_minimum_minutes` and `wait_timeout_maximum_minutes` bound the
+effective activating-input `wait({"timeout_minutes": N})` deadline. They are
+inclusive positive whole-minute values, default to five and 1,440 respectively,
+and reject an inverted range during configuration loading. The maximum cannot
+exceed 65,535 minutes because the persisted wait registration represents its
+effective timeout as `u16`. They do not affect argument-free or exact
+background-result waits.
+
 `tau-config::provider_debug_capture` owns the dependency-neutral provider
 capture basename contract shared by provider writers and harness retention:
 canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid
