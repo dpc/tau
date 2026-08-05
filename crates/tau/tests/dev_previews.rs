@@ -187,9 +187,49 @@ fn print_prompt_omits_conditionally_empty_extension_fragment() {
             "fake preview identity must remain deterministic"
         );
     }
-    assert_eq!(baseline.stdout, from_environment.stdout);
     assert_eq!(baseline.stdout, cli_disabled.stdout);
     assert_eq!(baseline.stdout, empty_environment.stdout);
+    assert_ne!(baseline.stdout, from_environment.stdout);
+    assert!(
+        String::from_utf8_lossy(&from_environment.stdout).contains("### Shell workdirs"),
+        "{:?}",
+        from_environment.stdout
+    );
+}
+
+/// Ensures prompt previews initialize an ephemeral agent through extension
+/// context readiness before strict role templates read its shell workdir.
+#[test]
+fn print_prompt_supplies_workdir_context_to_strict_role_template() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    std::fs::create_dir_all(config_dir.join("prompts")).expect("create prompts directory");
+    std::fs::write(
+        config_dir.join("prompts/workdir.hbs"),
+        "{{#each agent_context.workdir}}preview workdir: {{value.path}}{{/each}}\n",
+    )
+    .expect("write strict workdir template");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        "agents:\n  role_groups:\n    engineer:\n      roles:\n        engineer:\n          prompt_override: workdir\n",
+    )
+    .expect("write harness config");
+
+    let output = preview(
+        &home,
+        Some("core-shell"),
+        &["--role", "engineer", "dev", "print-prompt"],
+    );
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&format!(
+            "preview workdir: {}",
+            home.path().join("work").display()
+        )),
+        "{:?}",
+        output.stdout
+    );
 }
 
 /// Proves tool previews expose a disabled-by-default extension from the public

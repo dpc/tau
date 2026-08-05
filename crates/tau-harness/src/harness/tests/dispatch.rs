@@ -11,9 +11,9 @@ use super::*;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
-    BackgroundCompletionPromptMode, PendingTool, RestoredCheckpointAuthority, STATUS_REMINDER,
-    agent_message_activation_class, background_completion_prompt,
-    extension_disconnected_background_tool_call_error_message,
+    BackgroundCompletionPromptMode, PendingRenderedPrompt, PendingTool,
+    RestoredCheckpointAuthority, STATUS_REMINDER, agent_message_activation_class,
+    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, self_compaction_terminal_prompt,
     unavailable_tool_error_message, working_status_reminder,
@@ -523,6 +523,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
         .try_build_system_prompt_for_role_and_agent(
             &role,
             Some(&agent_id),
+            Some(&agent_id),
             &with_agent_start,
             model.as_ref(),
             false,
@@ -555,6 +556,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
     let rendered = h
         .try_build_system_prompt_for_role_and_agent(
             &role,
+            Some(&agent_id),
             Some(&agent_id),
             &without_agent_start,
             model.as_ref(),
@@ -592,6 +594,7 @@ fn hidden_delegate_roles_are_omitted_from_catalog_but_remain_explicitly_callable
     let rendered = h
         .try_build_system_prompt_for_role_and_agent(
             &role,
+            Some(&agent_id),
             Some(&agent_id),
             &tools,
             model.as_ref(),
@@ -1617,6 +1620,7 @@ fn render_shell_workdir_prompt(h: &Harness, agent_id: &tau_proto::AgentId) -> St
     let specs = h.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
     h.try_build_system_prompt_for_role_and_agent(
         role_name,
+        Some(agent_id),
         Some(agent_id),
         &specs,
         model.as_ref(),
@@ -34211,6 +34215,66 @@ fn request_rendered_prompt(
             _ => None,
         })
         .expect("rendered prompt result")
+}
+
+/// Cancelling a disconnected preview requester must discard its waiting
+/// ephemeral agent so a context provider that never becomes ready cannot leak
+/// runtime routes or deferred response state.
+#[test]
+fn disconnect_cancels_pending_rendered_preview() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let requester = crate::test_connection_id("preview-disconnect-requester");
+    let _frames = connect_test_client(&mut h, requester.as_str(), tau_proto::ClientKind::Ui);
+    let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.pending_rendered_prompts.insert(
+        agent_id.clone(),
+        vec![PendingRenderedPrompt::Prompt {
+            connection_id: requester.clone(),
+            request_id: "preview-disconnect".to_owned(),
+            role: h.selected_role.clone(),
+            enable_agents_md: false,
+        }],
+    );
+
+    h.handle_disconnect_at(&requester, Instant::now());
+
+    assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
+    assert!(
+        h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .is_none()
+    );
+}
+
+/// Replacing a session must cancel previews that are still waiting for
+/// extension context, rather than retaining an unanswerable response entry.
+#[test]
+fn session_switch_cancels_pending_rendered_preview() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.pending_rendered_prompts.insert(
+        agent_id.clone(),
+        vec![PendingRenderedPrompt::System {
+            connection_id: crate::test_connection_id("preview-switch-requester"),
+            request_id: "preview-switch".to_owned(),
+            role: h.selected_role.clone(),
+        }],
+    );
+
+    h.switch_session(
+        "preview-replacement".parse().expect("session id"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
+
+    assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
+    assert!(
+        h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .is_none()
+    );
 }
 
 #[test]

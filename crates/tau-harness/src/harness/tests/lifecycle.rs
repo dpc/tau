@@ -3009,8 +3009,9 @@ fn provider_model_parallel_capability_flows_into_prompt_rendering() {
     h.selected_model = Some(model);
 
     let normal = h.build_system_prompt_for_role(&h.selected_role);
+    let preview_agent_id = crate::parse_agent_id("preview-context");
     let preview = h
-        .build_system_prompt_for_role_preview(&h.selected_role)
+        .build_system_prompt_for_role_preview(&h.selected_role, &preview_agent_id)
         .expect("preview prompt");
 
     assert!(normal.contains("at most one tool call"));
