@@ -32,6 +32,7 @@ use super::chat::{
     should_send_draft_snapshot,
 };
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
+use super::tool_render::format_context_token_count;
 use super::{cli as path_super_cli, transcript_markers};
 
 /// Dynamic action IDs use the bounded ASCII short-ID producer shape accepted by
@@ -50,6 +51,65 @@ fn action_short_id_producer_stays_within_invocation_id_grammar() {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
         );
+    }
+}
+
+/// Context-size magnitudes retain useful precision at small scales, round
+/// half-up at each width boundary, and promote instead of growing past three
+/// numeric columns.
+#[test]
+fn context_size_formatter_rounds_and_promotes_within_three_numeric_columns() {
+    for (tokens, expected) in [
+        (0, "0"),
+        (999, "999"),
+        (1_000, "1.0k"),
+        (4_600, "4.6k"),
+        (9_949, "9.9k"),
+        (9_950, "10k"),
+        (99_499, "99k"),
+        (99_500, "100k"),
+        (353_400, "353k"),
+        (999_499, "999k"),
+        (999_500, "1.0m"),
+    ] {
+        assert_eq!(format_context_token_count(tokens), expected);
+    }
+
+    for (unit, suffix, next_suffix) in [
+        (1_000_000, "m", "b"),
+        (1_000_000_000, "b", "t"),
+        (1_000_000_000_000, "t", "q"),
+    ] {
+        let small_boundary = 10 * unit - unit / 20;
+        let medium_boundary = 100 * unit - unit / 2;
+        let promotion_boundary = 1_000 * unit - unit / 2;
+        assert_eq!(
+            format_context_token_count(small_boundary),
+            format!("10{suffix}")
+        );
+        assert_eq!(
+            format_context_token_count(medium_boundary),
+            format!("100{suffix}")
+        );
+        assert_eq!(
+            format_context_token_count(promotion_boundary),
+            format!("1.0{next_suffix}")
+        );
+    }
+
+    for tokens in [
+        1_000,
+        9_950,
+        99_500,
+        999_500,
+        9_950_000,
+        99_500_000,
+        999_500_000,
+        u64::MAX,
+    ] {
+        let rendered = format_context_token_count(tokens);
+        let numeric = rendered.trim_end_matches(|character: char| character.is_ascii_alphabetic());
+        assert!(numeric.chars().count() <= 3, "{rendered}");
     }
 }
 
@@ -6972,7 +7032,7 @@ fn model_status_uses_symbol_prefixed_chips() {
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {
-            input_tokens: Some(12_000),
+            input_tokens: Some(353_400),
             cached_tokens: None,
             percent_used: Some(6),
         },
@@ -6985,7 +7045,7 @@ fn model_status_uses_symbol_prefixed_chips() {
         .find(|row| row.contains("+engineer"))
         .expect("status row");
     assert!(status_row.starts_with("+engineer ~high"));
-    assert!(status_row.ends_with("#12k/200k"));
+    assert!(status_row.ends_with("#353k/200k"));
     assert!(!vt.screen_contains(80, "=test/model"));
     assert!(!vt.screen_contains(80, "v=high"));
     assert!(!vt.screen_contains(80, "ctx:"));
@@ -12862,18 +12922,28 @@ fn delegate_completion_keeps_input_stats_for_empty_output() {
     assert_eq!(display.status_text, "ok");
 }
 
+/// Context counters use the status bar's compact magnitude policy without
+/// changing the broader token-progress formatting policy.
 #[test]
 fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
 
     let display = ToolUseState {
         args: "[research]".into(),
-        progress_counters: vec![ProgressCounter {
-            label: Some("ctx".into()),
-            unit: ProgressUnit::Tokens,
-            complete: Some(133_400),
-            total: Some(200_000),
-        }],
+        progress_counters: vec![
+            ProgressCounter {
+                label: Some("ctx".into()),
+                unit: ProgressUnit::Tokens,
+                complete: Some(133_400),
+                total: Some(200_000),
+            },
+            ProgressCounter {
+                label: Some("tokens".into()),
+                unit: ProgressUnit::Tokens,
+                complete: Some(133_400),
+                total: Some(200_000),
+            },
+        ],
         status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
@@ -12883,7 +12953,11 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["#133.4k/200k", tau_proto::PROGRESS_INDICATOR_TEXT]
+        vec![
+            "#133k/200k",
+            "tokens: 133.4k/200k",
+            tau_proto::PROGRESS_INDICATOR_TEXT,
+        ]
     );
 }
 
@@ -12939,12 +13013,12 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         vec!["(review)", "working", "review changes", "running"]
     );
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["%2/3", "#133.4k/200k"]);
+    assert_eq!(texts, vec!["%2/3", "#133k/200k"]);
 
     let block = render_tool_block(&theme, &display);
     assert_eq!(
         priority_header_text(&block, 100),
-        "@engineer_1 (review) working review changes running %2/3 #133.4k/200k"
+        "@engineer_1 (review) working review changes running %2/3 #133k/200k"
     );
     let running = priority_header_cells(&block, 100)[0].clone();
     assert_eq!(

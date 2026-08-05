@@ -33,10 +33,10 @@ use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolLineSegment, ToolStatus, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
-    config_profile_block, diff_payload_counts, extension_status_block, format_token_count,
-    pending_tool_call_display, render_action_output_block, render_compaction_block,
-    render_diff_tool_block, render_harness_notice, render_multi_diff_tool_block,
-    render_shell_block, render_tool_block, render_tool_use_state,
+    config_profile_block, diff_payload_counts, extension_status_block, format_context_token_count,
+    format_token_count, pending_tool_call_display, render_action_output_block,
+    render_compaction_block, render_diff_tool_block, render_harness_notice,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
     render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
     streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
     tool_duration_suffix, ui_dir_block,
@@ -3872,15 +3872,15 @@ impl EventRenderer {
         ) {
             (_, Some(input), Some(window)) => Some(format!(
                 "{}/{}",
-                format_token_count(input),
-                format_token_count(window)
+                format_context_token_count(input),
+                format_context_token_count(window)
             )),
             (Some(percent), _, Some(window)) => {
-                Some(format!("{percent}%/{}", format_token_count(window)))
+                Some(format!("{percent}%/{}", format_context_token_count(window)))
             }
             (Some(percent), _, None) => Some(format!("{percent}%")),
-            (None, Some(input), None) => Some(format_token_count(input)),
-            (None, None, Some(window)) => Some(format!("-/{}", format_token_count(window))),
+            (None, Some(input), None) => Some(format_context_token_count(input)),
+            (None, None, Some(window)) => Some(format!("-/{}", format_context_token_count(window))),
             (None, None, None) => None,
         }
     }

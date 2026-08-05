@@ -277,6 +277,48 @@ pub(crate) fn format_token_count(tokens: u64) -> String {
     format!("{whole}.{tenth}m")
 }
 
+/// Formats a context-size magnitude in at most three numeric columns.
+///
+/// Values below one thousand remain exact. Larger values round half up: values
+/// below ten of a unit retain one decimal, values through 999 use whole units,
+/// and a rounded thousand promotes to the next unit.
+pub(crate) fn format_context_token_count(tokens: u64) -> String {
+    const UNITS: &[(u64, &str)] = &[
+        (1_000, "k"),
+        (1_000_000, "m"),
+        (1_000_000_000, "b"),
+        (1_000_000_000_000, "t"),
+        (1_000_000_000_000_000, "q"),
+        (1_000_000_000_000_000_000, "e"),
+    ];
+
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+
+    let first_unit = UNITS
+        .iter()
+        .rposition(|(unit, _)| *unit <= tokens)
+        .expect("values below one thousand returned above");
+    for (index, &(unit, suffix)) in UNITS.iter().enumerate().skip(first_unit) {
+        let tenths = rounded_units(tokens, unit / 10);
+        if tenths < 100 {
+            return format!("{}.{}{}", tenths / 10, tenths % 10, suffix);
+        }
+
+        let whole = rounded_units(tokens, unit);
+        if whole < 1_000 || index + 1 == UNITS.len() {
+            return format!("{whole}{suffix}");
+        }
+    }
+
+    unreachable!("the exa unit covers every u64 token count")
+}
+
+fn rounded_units(value: u64, unit: u64) -> u64 {
+    u64::try_from((u128::from(value) + u128::from(unit / 2)) / u128::from(unit)).unwrap_or(u64::MAX)
+}
+
 /// Semantic style for one compact tool-line segment.
 #[derive(Clone, Copy)]
 pub(crate) enum ToolStatus {
@@ -623,6 +665,13 @@ fn is_agent_id_chip(chip: &str) -> bool {
 }
 
 fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolLineSegment {
+    let format_context_or_token_count = |tokens| {
+        if counter.label.as_deref() == Some("ctx") {
+            format_context_token_count(tokens)
+        } else {
+            format_token_count(tokens)
+        }
+    };
     let body = match counter.unit {
         tau_proto::ProgressUnit::Count => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{c}/{t}"),
@@ -631,15 +680,19 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolLineSegm
             (None, None) => "-".to_owned(),
         },
         tau_proto::ProgressUnit::Percent => match (counter.complete, counter.total) {
-            (Some(p), Some(t)) => format!("{p}%/{}", format_token_count(t)),
+            (Some(p), Some(t)) => format!("{p}%/{}", format_context_or_token_count(t)),
             (Some(p), None) => format!("{p}%"),
-            (None, Some(t)) => format!("-%/{}", format_token_count(t)),
+            (None, Some(t)) => format!("-%/{}", format_context_or_token_count(t)),
             (None, None) => "-%".to_owned(),
         },
         tau_proto::ProgressUnit::Tokens => match (counter.complete, counter.total) {
-            (Some(c), Some(t)) => format!("{}/{}", format_token_count(c), format_token_count(t)),
-            (Some(c), None) => format_token_count(c),
-            (None, Some(t)) => format!("-/{}", format_token_count(t)),
+            (Some(c), Some(t)) => format!(
+                "{}/{}",
+                format_context_or_token_count(c),
+                format_context_or_token_count(t)
+            ),
+            (Some(c), None) => format_context_or_token_count(c),
+            (None, Some(t)) => format!("-/{}", format_context_or_token_count(t)),
             (None, None) => "-".to_owned(),
         },
     };
