@@ -5753,10 +5753,10 @@ impl Harness {
 
     /// Seeds the current runtime topology from one validated loaded creation
     /// fact.
-    fn seed_agent_creator_topology(&mut self, agent_id: &AgentId, agent_id_string: &str) {
+    fn seed_agent_creator_topology(&mut self, agent_id: &AgentId) {
         let creation = self
             .agent_store
-            .agent_events(agent_id_string)
+            .agent_events(agent_id.as_str())
             .ok()
             .and_then(|events| match events.first().map(|entry| &entry.event) {
                 Some(Event::AgentStarted(started)) if started.agent_id == *agent_id => {
@@ -22446,7 +22446,7 @@ impl Harness {
                 .agent(agent_id.as_str())
                 .and_then(|tree| tree.head());
             let cid: AgentId = crate::parse_agent_id(&agent_id_string);
-            self.seed_agent_creator_topology(&cid, agent_id.as_str());
+            self.seed_agent_creator_topology(&agent_id);
             let meta = self
                 .agent_store
                 .agent_meta(agent_id.as_str())
@@ -23742,7 +23742,7 @@ impl Harness {
             // Existing identities can become loaded after cold rehydration. Fold
             // their already-validated immutable creation fact now, rather than
             // losing creator cost propagation until another daemon resume.
-            self.seed_agent_creator_topology(&agent_id_proto, agent_id);
+            self.seed_agent_creator_topology(&agent_id_proto);
         }
         // New agents reached this point only after their creation record
         // committed; existing agents already have validated journal identity.

@@ -1,5 +1,8 @@
 //! Authenticated creator relationships between agents in one harness session.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::{HashMap, HashSet};
 
 use tau_proto::{AgentCreator, AgentId, SessionId};
@@ -109,6 +112,3 @@ impl AgentCreatorTopology {
         false
     }
 }
-
-#[cfg(test)]
-mod tests;

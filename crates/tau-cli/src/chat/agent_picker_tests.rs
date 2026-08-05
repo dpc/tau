@@ -28,10 +28,10 @@ fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::Session
     }
 }
 
-/// A running automatic agent forwards canonical status into picker rows before
-/// fresh-snapshot revalidation; becoming idle preserves selection/draft in the
-/// active picker, while the all-agent picker retains its category and selects
-/// it.
+/// Both picker paths project a creator's independent zero self estimate and
+/// nonzero descendant estimate before fresh-snapshot revalidation; becoming
+/// idle preserves selection/draft in the active picker, while the all-agent
+/// picker retains its category and selects it.
 #[test]
 fn picker_orchestration_revalidates_with_initiating_category() {
     let running = auto_entry(tau_proto::AgentRuntimeState::Running);
@@ -42,20 +42,19 @@ fn picker_orchestration_revalidates_with_initiating_category() {
         assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
         assert!(
             rows.lines()
-                .all(|row| row.ends_with("\t$.00/$.00\tworking\tshipping picker status"))
+                .all(|row| row.ends_with("\t$.00/$2.1\tworking\tshipping picker status"))
         );
         Ok(Some("auto\tlive\trunning\tactive_auto".to_owned()))
     };
+    let creator_cost = AgentCostSnapshot::new(
+        tau_proto::EstimatedApiCost::default(),
+        tau_proto::EstimatedApiCost::from_picodollars(2_140_000_000_000),
+    );
 
     let active = resolve_agent_picker(
         vec![running.clone(), other.clone()],
         path_crate_list_agents::AgentPickerFilter::Active,
-        |_| {
-            Some(AgentCostSnapshot::new(
-                tau_proto::EstimatedApiCost::default(),
-                tau_proto::EstimatedApiCost::default(),
-            ))
-        },
+        |_| Some(creator_cost),
         pick_auto,
         || Some(vec![idle.clone(), other.clone()]),
         || true,
@@ -69,12 +68,7 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     let all = resolve_agent_picker(
         vec![running, other.clone()],
         path_crate_list_agents::AgentPickerFilter::All,
-        |_| {
-            Some(AgentCostSnapshot::new(
-                tau_proto::EstimatedApiCost::default(),
-                tau_proto::EstimatedApiCost::default(),
-            ))
-        },
+        |_| Some(creator_cost),
         pick_auto,
         || Some(vec![idle, other]),
         || true,

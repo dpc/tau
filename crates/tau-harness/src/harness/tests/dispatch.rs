@@ -29103,6 +29103,110 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
     h.shutdown().expect("shutdown");
 }
 
+/// An accepted child provider response charges the child self estimate and its
+/// loaded authenticated creator's inclusive subtree estimate before publishing
+/// both complete stats snapshots.
+#[test]
+fn accepted_provider_usage_updates_creator_cost_stats() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let _delegate = connect_test_tool(&mut h, "conn-delegate");
+    let parent_cid = ensure_test_user_agent(&mut h);
+    let parent_id = durable_agent_id_for_conversation(&h, &parent_cid);
+    h.tool_agents.insert("creator-cost-call".into(), parent_cid);
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-delegate"),
+        StartAgentRequest {
+            parent_agent: None,
+            query_id: "creator-cost-child".to_owned(),
+            instruction: "charge this child".to_owned(),
+            role: None,
+            input_stats: Default::default(),
+            tool_call_id: Some("creator-cost-call".into()),
+            task_name: Some("charged child".to_owned()),
+        },
+    )
+    .expect("start authenticated child");
+    let child_cid = ext_query_cid(&h, "creator-cost-child").expect("child conversation");
+    let child_id = durable_agent_id_for_conversation(&h, &child_cid);
+
+    let model = tau_proto::ModelId::from("provider/charged");
+    let mut model_info = provider_model_info(model.clone(), 1_000_000);
+    model_info.est_uncached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
+    h.provider_model_info.insert(model.clone(), model_info);
+    let prompt_id = h.agents[&child_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("child provider prompt");
+    let captured_rates = h.provider_model_info[&model].estimated_api_cost_rates();
+    h.prompt_estimated_cost_rates
+        .insert(prompt_id.clone(), captured_rates);
+    let usage = tau_proto::ProviderTokenUsage {
+        model: Some(model),
+        prompt_sent_tokens: 1_000_000,
+        prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
+        response_received_tokens: 0,
+        stats: Default::default(),
+    };
+    let mut response = provider_text_response(&prompt_id, child_id.clone(), "charged");
+    response.usage = Some(usage.clone());
+    h.handle_provider_response_finished(response)
+        .expect("accept provider response");
+
+    let child_stats = h.agent_stats_snapshot(&child_id).expect("child stats");
+    let parent_stats = h.agent_stats_snapshot(&parent_id).expect("parent stats");
+    let expected = tau_proto::EstimatedApiCost::from_picodollars(2_000_000_000_000);
+    assert_eq!(child_stats.estimated_api_cost, expected);
+    assert_eq!(child_stats.creator_subtree_estimated_api_cost, expected);
+    assert_eq!(parent_stats.estimated_api_cost, Default::default());
+    assert_eq!(parent_stats.creator_subtree_estimated_api_cost, expected);
+    let published = event_log_events(&h);
+    let canonical = published
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderResponseFinished(response) if response.agent_prompt_id == prompt_id => {
+                Some(response)
+            }
+            _ => None,
+        })
+        .expect("canonical accepted response");
+    let canonical_usage = canonical.usage.as_ref().expect("canonical response usage");
+    assert_eq!(canonical_usage.prompt_sent_tokens, usage.prompt_sent_tokens);
+    assert_eq!(
+        canonical_usage.prompt_cached_tokens,
+        usage.prompt_cached_tokens
+    );
+    assert_eq!(
+        canonical_usage.response_received_tokens,
+        usage.response_received_tokens
+    );
+    assert_eq!(canonical.estimated_api_cost_rates, Some(captured_rates));
+    assert_eq!(canonical.estimated_api_cost_increment, Some(expected));
+    assert!(
+        published
+            .iter()
+            .any(|event| matches!(event, Event::AgentStatsUpdated(stats)
+                if stats.agent_id == child_id
+                    && stats.estimated_api_cost == expected
+                    && stats.creator_subtree_estimated_api_cost == expected
+            ))
+    );
+    assert!(
+        published
+            .iter()
+            .any(|event| matches!(event, Event::AgentStatsUpdated(stats)
+                if stats.agent_id == parent_id
+                    && stats.estimated_api_cost == Default::default()
+                    && stats.creator_subtree_estimated_api_cost == expected
+            ))
+    );
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn rejected_pre_dispatch_tool_attempt_counts_once_in_agent_stats() {
     let td = TempDir::new().expect("tempdir");

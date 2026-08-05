@@ -7889,10 +7889,10 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     );
 }
 
-/// The selected agent's runtime estimate renders as its own compact status
-/// element and repaints from generic agent stats.
+/// The selected creator renders independent self and inclusive descendant
+/// estimates from the complete stats snapshot rather than collapsing them.
 #[test]
-fn model_status_shows_selected_agent_estimated_cost() {
+fn model_status_shows_selected_creator_cost_pair() {
     let (_term, handle, vt) = setup(40, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -7913,14 +7913,16 @@ fn model_status_shows_selected_agent_estimated_cost() {
         runtime_state: tau_proto::AgentRuntimeState::Idle,
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
-        estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(2_140_000_000_000),
-        creator_subtree_estimated_api_cost: Default::default(),
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(
+            2_140_000_000_000,
+        ),
         work_status: Default::default(),
     }));
     sync(&handle);
 
     assert!(vt.screen_contains(40, "@main"));
-    assert!(vt.screen_contains(40, "$2.1/$.00"));
+    assert!(vt.screen_contains(40, "$.00/$2.1"));
 }
 
 /// Estimated cost yields to the selected-agent identity under status-line width

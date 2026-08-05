@@ -1,5 +1,8 @@
 //! Runtime-only self and authenticated-creator-subtree cost accounting.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 
 use tau_proto::{AgentId, EstimatedApiCost};
@@ -71,6 +74,3 @@ impl AgentCostLedger {
         );
     }
 }
-
-#[cfg(test)]
-mod tests;
