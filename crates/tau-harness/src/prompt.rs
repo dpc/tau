@@ -72,6 +72,11 @@ pub(crate) struct RolePromptTemplateContext<'a> {
     /// Durable agent id whose prompt is being rendered, when the render targets
     /// a concrete agent instead of a role-only preview.
     pub(crate) agent_id: Option<&'a tau_proto::AgentId>,
+    /// Canonical current directory captured when the harness process started.
+    ///
+    /// This session-wide path remains separate from per-agent shell workdir
+    /// context, which extensions publish under `agent_context`.
+    pub(crate) session_cwd: Option<&'a std::path::Path>,
     /// Conditional provenance rule for selected exact-sentinel context.
     pub(crate) exact_sentinel_boundary_rule: Option<&'a str>,
 }
@@ -155,6 +160,7 @@ impl<'a> RolePromptTemplateContext<'a> {
             role_name,
             role_group: role_name,
             agent_id: None,
+            session_cwd: None,
             exact_sentinel_boundary_rule: None,
         }
     }
@@ -165,6 +171,7 @@ impl<'a> RolePromptTemplateContext<'a> {
             role_name,
             role_group: role_name,
             agent_id: Some(agent_id),
+            session_cwd: None,
             exact_sentinel_boundary_rule: None,
         }
     }
@@ -172,6 +179,13 @@ impl<'a> RolePromptTemplateContext<'a> {
     /// Supply the configured group containing this role.
     pub(crate) fn with_role_group(mut self, role_group: &'a str) -> Self {
         self.role_group = role_group;
+        self
+    }
+
+    /// Supply the canonical current directory captured for this harness
+    /// session.
+    pub(crate) fn with_session_cwd(mut self, session_cwd: &'a std::path::Path) -> Self {
+        self.session_cwd = Some(session_cwd);
         self
     }
 
@@ -313,6 +327,9 @@ fn prompt_template_data(
         "role": {
             "name": context.role_name,
             "group": context.role_group,
+        },
+        "session": {
+            "cwd": context.session_cwd.map(|path| path.display().to_string()),
         },
         "agent_id": context.agent_id.map(ToString::to_string),
         "skills": prompt_template_skills(skills),

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::{borrow as path_std_borrow, collections as path_std_collections};
 
 use tau_proto::{
@@ -86,6 +87,25 @@ fn custom_system_template_receives_exact_sentinel_rule() {
         PromptCapabilities::default(),
     );
     assert_eq!(prompt, format!("RULE={rule}"));
+}
+
+/// Session cwd comes from the harness startup path, not the mutable,
+/// extension-provided workdir owned by a particular agent.
+#[test]
+fn template_session_cwd_is_distinct_from_agent_workdir() {
+    let prompt = build_system_prompt_with_template_context(
+        "{{session.cwd}} {{#each agent_context.cwd}}{{value}}{{/each}}",
+        &path_std_collections::HashMap::new(),
+        &[],
+        serde_json::json!({
+            "cwd": [
+                { "extension_name": "tau-ext-shell", "value": "/agent/workdir" }
+            ]
+        }),
+        RolePromptTemplateContext::for_role("engineer")
+            .with_session_cwd(Path::new("/harness/session")),
+    );
+    assert_eq!(prompt, "/harness/session /agent/workdir");
 }
 
 /// Provider summaries cover every tagged state, while long-delay summaries and

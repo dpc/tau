@@ -53,6 +53,9 @@ Prompt fragments can use:
 - `role.group` — stable configured role-group name from the
   `agents.role_groups.<name>` key containing the current role. For an ungrouped
   role, this equals `role.name`.
+- `session.cwd` — canonical current directory captured when the harness started.
+  This session-wide startup path does not change when an agent changes its shell
+  workdir.
 - `cwd` — durable agent working directory as a string, or `""` when rendering without a target agent.
 - `working_directory.present` — boolean indicating whether `cwd` is available.
 - `working_directory.path` — same path as `cwd`.
@@ -111,6 +114,19 @@ agents:
       text: |-
         {{#if (eq working_directory.path "/home/dpc/lab/tau-agent")}}
         You are at the Tau repository root.
+        {{/if}}
+```
+
+Session-directory conditional:
+
+```yaml
+agents:
+  prompt_fragments:
+    - name: project.session-root
+      priority: 80
+      text: |-
+        {{#if (eq session.cwd "/home/dpc/lab")}}
+        The harness started in the lab directory.
         {{/if}}
 ```
 

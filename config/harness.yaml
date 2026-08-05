@@ -8,9 +8,11 @@
 # Optional prompt fragments applied to every role. Fragments are rendered as
 # Handlebars templates and sorted by priority together with role-, tool-, and
 # extension-provided fragments. Templates can use `agent_id` when rendering a
-# concrete agent prompt, `cwd`, `working_directory` (`present`, `path`,
-# `basename`, `ancestors`), `eq`, and `starts_with` for project-specific
-# conditionals. `tau dev print-prompt` role previews use the stable fake
+# concrete agent prompt, `session.cwd`, `cwd`, `working_directory` (`present`,
+# `path`, `basename`, `ancestors`), `eq`, and `starts_with` for project-specific
+# conditionals. `session.cwd` is the harness process directory captured at
+# startup; `cwd` and `working_directory` instead describe the mutable per-agent
+# shell workdir. `tau dev print-prompt` role previews use the stable fake
 # `dev-preview-agent` id, but reusable agent-id text should still be guarded
 # with `{{#if agent_id}}`. Priorities below
 # 100 render before generated context such as skills and AGENTS.md.

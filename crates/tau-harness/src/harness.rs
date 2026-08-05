@@ -24402,6 +24402,7 @@ impl Harness {
             None => RolePromptTemplateContext::for_role(role_name),
         }
         .with_role_group(&role_group)
+        .with_session_cwd(&self.project_root)
         .with_exact_sentinel_boundary_rule(
             contains_exact_sentinel_envelope.then_some(EXACT_SENTINEL_BOUNDARY_RULE),
         );

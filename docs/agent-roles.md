@@ -51,6 +51,18 @@ word `{{agent_id}}` however they want. `tau dev print-prompt` and
 `tau dev print-system-prompt` use the stable fake `dev-preview-agent` id so
 role previews show the full template.
 
+Templates receive `session.cwd` as the canonical current directory captured when
+the harness started. This is a session-wide startup value. It differs from `cwd`
+and `working_directory`, which describe extension-published, per-agent shell
+workdir state and can change through the `workdir` tool. For example, match the
+session path directly without enumerating agent context:
+
+```handlebars
+{{#if (eq session.cwd "/home/dpc/lab")}}
+Apply these instructions outside the excluded project.
+{{/if}}
+```
+
 Templates also receive sparse, deterministic runtime capabilities:
 
 ```handlebars
