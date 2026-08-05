@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 
 use tau_proto::SecretValue;
 
@@ -26,6 +27,8 @@ pub(crate) struct ExtConfig {
     pub(crate) direct_messages: Option<DirectMessageConfig>,
     /// Maximum UTF-8 bytes accepted for inbound and outbound text.
     pub(crate) max_message_bytes: Option<usize>,
+    /// Recover newly created messages missed while the extension was offline.
+    pub(crate) offline_message_catch_up: bool,
 }
 
 /// Configured presentation alias for one Zulip user.
@@ -141,6 +144,10 @@ pub(crate) struct RuntimeConfig {
     pub(crate) max_message_bytes: usize,
     /// Secret-derived key for non-reversible descriptive identifiers.
     pub(crate) id_key: [u8; 32],
+    /// Whether durable newly-created-message catch-up is enabled.
+    pub(crate) offline_message_catch_up: bool,
+    /// Harness-assigned extension state directory.
+    pub(crate) state_dir: Option<PathBuf>,
 }
 
 impl ExtConfig {
@@ -271,6 +278,8 @@ impl ExtConfig {
             receive_direct_messages,
             max_message_bytes,
             id_key,
+            offline_message_catch_up: self.offline_message_catch_up,
+            state_dir: None,
         })
     }
 }

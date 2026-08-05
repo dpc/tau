@@ -6,6 +6,7 @@
 //! `PeerCapability::MessageBridge`.
 
 mod api;
+mod checkpoint;
 mod config;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,6 +18,7 @@ use std::thread::Builder as ThreadBuilder;
 use std::time::Duration;
 
 use api::{ApiError, EventQueue, HttpZulipClient, NativeRoute, ZulipClient};
+use checkpoint::CheckpointRuntime;
 use config::{ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
 use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
 use tau_proto::{
@@ -181,6 +183,8 @@ struct State {
     owners: HashMap<String, MessageOwner>,
     /// FIFO for bounded owner eviction.
     owner_order: VecDeque<String>,
+    /// Durable catch-up state, opened only while the opt-in feature is active.
+    checkpoint: Option<CheckpointRuntime>,
 }
 
 impl State {
@@ -219,6 +223,16 @@ impl State {
         self.recent_ids.clear();
         self.recent_set.clear();
         self.registration_generation = self.registration_generation.wrapping_add(1);
+        self.checkpoint = None;
+    }
+
+    fn unregister_agent(&mut self, agent_id: &AgentId) {
+        self.registered_agents.remove(agent_id);
+        self.owners.retain(|_, owner| &owner.agent_id != agent_id);
+        if self.registered_agents.is_empty() {
+            self.queue = None;
+            self.checkpoint = None;
+        }
     }
 }
 
@@ -417,16 +431,10 @@ impl Extension {
             .transpose()
             .ok()
             .flatten()
-            .map(|enabled| {
+            .map(|_enabled| {
                 let mut state = self.state.lock();
                 state.registration_generation = state.registration_generation.wrapping_add(1);
-                state.registered_agents.remove(&invoke.agent_id);
-                state
-                    .owners
-                    .retain(|_, owner| owner.agent_id != invoke.agent_id);
-                if !enabled && state.registered_agents.is_empty() {
-                    state.queue = None;
-                }
+                state.unregister_agent(&invoke.agent_id);
                 let epoch = state.registration_generation;
                 self.state.changed.notify_all();
                 epoch
@@ -518,6 +526,25 @@ impl Extension {
         } else {
             None
         };
+        let checkpoint = if needs_queue && cfg.offline_message_catch_up {
+            let Some(state_dir) = cfg.state_dir.as_deref() else {
+                return tool_error(
+                    invoke,
+                    "offline Zulip catch-up requires harness extension state_dir".to_owned(),
+                );
+            };
+            match CheckpointRuntime::open(state_dir, &cfg.id_key) {
+                Ok(checkpoint) => Some(checkpoint),
+                Err(_) => {
+                    return tool_error(
+                        invoke,
+                        "Zulip message checkpoint is unavailable or already in use".to_owned(),
+                    );
+                }
+            }
+        } else {
+            None
+        };
         let mut state = self.state.lock();
         if state.config_generation != generation
             || state.registration_generation != registration_generation
@@ -530,6 +557,9 @@ impl Extension {
         }
         if let Some(queue) = queue {
             state.queue = Some(queue);
+        }
+        if let Some(checkpoint) = checkpoint {
+            state.checkpoint = Some(checkpoint);
         }
         state.registered_agents.insert(invoke.agent_id.clone());
         state
@@ -866,7 +896,6 @@ impl Extension {
         }
         match kind {
             "message" => self.process_message(
-                event_id,
                 &event,
                 generation,
                 registration_generation,
@@ -900,7 +929,6 @@ impl Extension {
 
     fn process_message(
         &self,
-        event_id: i64,
         event: &serde_json::Value,
         generation: u64,
         registration_generation: u64,
@@ -934,7 +962,7 @@ impl Extension {
             {
                 return;
             }
-            if !state.insert_recent(format!("message:{native_id}:{event_id}")) {
+            if !state.insert_recent(format!("message:{native_id}")) {
                 return;
             }
             let cfg = state.config.clone().expect("active queue config");
@@ -974,15 +1002,91 @@ impl Extension {
             Some(conversation.fact()),
             normalized,
         ));
-        if !self.output.emit_message_report(report) {
-            return;
+        if let Some(checkpoint) = state.checkpoint.as_mut() {
+            checkpoint.submitted(native_id, fact_id.clone());
         }
         state.insert_owner(MessageOwner {
-            agent_id,
-            fact_id,
+            agent_id: agent_id.clone(),
+            fact_id: fact_id.clone(),
             native_message_id: native_id,
-            conversation,
+            conversation: conversation.clone(),
         });
+        if !self.output.emit_message_report(report) {
+            if let Some(checkpoint) = state.checkpoint.as_mut() {
+                checkpoint.retry(native_id);
+            }
+            state.owners.remove(fact_id.as_str());
+            state.recent_set.remove(&format!("message:{native_id}"));
+            state
+                .recent_ids
+                .retain(|key| key != &format!("message:{native_id}"));
+        }
+    }
+
+    fn observe_created_message(
+        &self,
+        event: serde_json::Value,
+        generation: u64,
+        registration_generation: u64,
+        bot_user_id: u64,
+        bot_full_name: Option<&str>,
+    ) {
+        let message = event.get("message").unwrap_or(&event);
+        let Some(native_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
+            self.process_event(
+                event,
+                generation,
+                registration_generation,
+                bot_user_id,
+                bot_full_name,
+            );
+            return;
+        };
+        {
+            let mut state = self.state.lock();
+            let Some(checkpoint) = state.checkpoint.as_mut() else {
+                drop(state);
+                self.process_event(
+                    event,
+                    generation,
+                    registration_generation,
+                    bot_user_id,
+                    bot_full_name,
+                );
+                return;
+            };
+            if !checkpoint.begin(native_id) {
+                return;
+            }
+        }
+        self.process_event(
+            event,
+            generation,
+            registration_generation,
+            bot_user_id,
+            bot_full_name,
+        );
+        let mut state = self.state.lock();
+        let fact_id = state
+            .owners
+            .values()
+            .find(|owner| owner.native_message_id == native_id)
+            .map(|owner| owner.fact_id.clone());
+        let was_processed = state.recent_set.contains(&format!("message:{native_id}"));
+        if let Some(checkpoint) = state.checkpoint.as_mut() {
+            if let Some(fact_id) = fact_id {
+                checkpoint.submitted(native_id, fact_id);
+            } else if was_processed {
+                checkpoint.filtered(native_id);
+            } else {
+                checkpoint.retry(native_id);
+            }
+        }
+        if let Some(checkpoint) = state.checkpoint.as_mut()
+            && let Err(error) = checkpoint.advance()
+        {
+            tracing::warn!(target: LOG_TARGET, category = %error, "Zulip checkpoint write failed");
+        }
     }
 
     fn process_mutation(
@@ -1143,6 +1247,154 @@ impl Extension {
         state.clear_authority();
         self.state.changed.notify_all();
     }
+
+    fn catch_up_messages(
+        &self,
+        cfg: &RuntimeConfig,
+        queue: &EventQueue,
+        generation: u64,
+        registration_generation: u64,
+    ) -> Result<(), ApiError> {
+        const PAGE_SIZE: usize = 100;
+
+        let initial_position = self
+            .state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .and_then(CheckpointRuntime::position);
+        let retry_position = self
+            .state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .and_then(CheckpointRuntime::retry_position);
+        if let Some(retry_position) = retry_position {
+            let page = self
+                .client
+                .get_messages_after(cfg, retry_position.saturating_sub(1), 1)?;
+            let Some(message) = page.messages.into_iter().find(|message| {
+                message.get("id").and_then(serde_json::Value::as_u64) == Some(retry_position)
+            }) else {
+                return Err(ApiError::MalformedResponse);
+            };
+            self.observe_created_message(
+                serde_json::json!({"id": retry_position, "type": "message", "message": message}),
+                generation,
+                registration_generation,
+                queue.bot_user_id,
+                queue.bot_full_name.as_deref(),
+            );
+            return Ok(());
+        }
+        let exhausted;
+        if let Some(mut after) = initial_position {
+            if self
+                .state
+                .lock()
+                .checkpoint
+                .as_ref()
+                .is_some_and(CheckpointRuntime::has_outstanding)
+            {
+                return Ok(());
+            }
+            let page = self.client.get_messages_after(cfg, after, PAGE_SIZE)?;
+            if page.messages.is_empty() && !page.found_newest {
+                return Err(ApiError::MalformedResponse);
+            }
+            for message in page.messages {
+                let native_id = message
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or(ApiError::MalformedResponse)?;
+                if native_id <= after {
+                    return Err(ApiError::MalformedResponse);
+                }
+                after = native_id;
+                self.observe_created_message(
+                    serde_json::json!({"id": native_id, "type": "message", "message": message}),
+                    generation,
+                    registration_generation,
+                    queue.bot_user_id,
+                    queue.bot_full_name.as_deref(),
+                );
+            }
+            exhausted = page.found_newest;
+        } else {
+            exhausted = true;
+            let baseline = self.client.newest_message_id(cfg)?.unwrap_or(0);
+            let events = self
+                .client
+                .get_events_now(cfg, &queue.queue_id, queue.last_event_id)?;
+            let mut last_event_id = queue.last_event_id;
+            for event in events {
+                if let Some(event_id) = event.get("id").and_then(serde_json::Value::as_i64) {
+                    last_event_id = last_event_id.max(event_id);
+                }
+                if event.get("type").and_then(serde_json::Value::as_str) == Some("message") {
+                    self.observe_created_message(
+                        event,
+                        generation,
+                        registration_generation,
+                        queue.bot_user_id,
+                        queue.bot_full_name.as_deref(),
+                    );
+                }
+            }
+            let mut state = self.state.lock();
+            if let Some(checkpoint) = state.checkpoint.as_mut() {
+                checkpoint.baseline(baseline);
+            }
+            if let Some(current) = state
+                .queue
+                .as_mut()
+                .filter(|current| current.queue_id == queue.queue_id)
+            {
+                current.last_event_id = last_event_id;
+            }
+            if let Some(checkpoint) = state.checkpoint.as_mut()
+                && let Err(error) = checkpoint.advance()
+            {
+                tracing::warn!(target: LOG_TARGET, category = %error, "Zulip checkpoint write failed");
+            }
+        }
+        let mut state = self.state.lock();
+        if let Some(checkpoint) = state.checkpoint.as_mut() {
+            checkpoint.set_more_history(!exhausted);
+        }
+        Ok(())
+    }
+
+    fn wait_for_checkpoint_progress(&self, generation: u64, registration_generation: u64) {
+        let state = self.state.lock();
+        if state
+            .checkpoint
+            .as_ref()
+            .is_some_and(CheckpointRuntime::has_outstanding)
+        {
+            drop(
+                self.state
+                    .changed
+                    .wait_while(state, |state| {
+                        !state.shutdown_requested
+                            && state.config_generation == generation
+                            && state.registration_generation == registration_generation
+                            && state
+                                .checkpoint
+                                .as_ref()
+                                .is_some_and(CheckpointRuntime::has_outstanding)
+                    })
+                    .unwrap_or_else(|error| error.into_inner()),
+            );
+        } else {
+            drop(
+                self.state
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(100))
+                    .unwrap_or_else(|error| error.into_inner()),
+            );
+        }
+    }
 }
 
 /// Inbound immutable mutation category.
@@ -1179,6 +1431,52 @@ fn worker_loop(ext: Arc<Extension>) {
                 state.registration_generation,
             )
         };
+        {
+            let mut state = ext.state.lock();
+            if let Some(checkpoint) = state.checkpoint.as_mut()
+                && let Err(error) = checkpoint.advance()
+            {
+                tracing::warn!(target: LOG_TARGET, category = %error, "Zulip checkpoint write failed");
+                drop(state);
+                wait_for_lifecycle_change(
+                    &ext,
+                    generation,
+                    registration_generation,
+                    INITIAL_RECONNECT_BACKOFF,
+                );
+                continue;
+            }
+        }
+        if ext
+            .state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .is_some_and(CheckpointRuntime::catch_up_needed)
+            && let Err(error) =
+                ext.catch_up_messages(&cfg, &queue, generation, registration_generation)
+        {
+            tracing::warn!(target: LOG_TARGET, category = error.diagnostic(), "Zulip message catch-up failed");
+            wait_for_lifecycle_change(
+                &ext,
+                generation,
+                registration_generation,
+                INITIAL_RECONNECT_BACKOFF,
+            );
+            continue;
+        }
+        {
+            let state = ext.state.lock();
+            if state
+                .checkpoint
+                .as_ref()
+                .is_some_and(CheckpointRuntime::catch_up_needed)
+            {
+                drop(state);
+                ext.wait_for_checkpoint_progress(generation, registration_generation);
+                continue;
+            }
+        }
         match ext.client.get_events(
             &cfg,
             &queue.queue_id,
@@ -1196,13 +1494,23 @@ fn worker_loop(ext: Arc<Extension>) {
                         continue;
                     }
                     last_id = id;
-                    ext.process_event(
-                        event,
-                        generation,
-                        registration_generation,
-                        queue.bot_user_id,
-                        queue.bot_full_name.as_deref(),
-                    );
+                    if event.get("type").and_then(serde_json::Value::as_str) == Some("message") {
+                        ext.observe_created_message(
+                            event,
+                            generation,
+                            registration_generation,
+                            queue.bot_user_id,
+                            queue.bot_full_name.as_deref(),
+                        );
+                    } else {
+                        ext.process_event(
+                            event,
+                            generation,
+                            registration_generation,
+                            queue.bot_user_id,
+                            queue.bot_full_name.as_deref(),
+                        );
+                    }
                 }
                 let mut state = ext.state.lock();
                 if state.config_generation == generation
@@ -1266,8 +1574,13 @@ fn handle_queue_expiry(
         }
         state.queue = None;
     }
-    ext.output
-        .notice("Zulip event queue expired; reconnecting live. Messages may have been missed.");
+    if cfg.offline_message_catch_up {
+        ext.output
+            .notice("Zulip event queue expired; reconnecting before created-message catch-up.");
+    } else {
+        ext.output
+            .notice("Zulip event queue expired; reconnecting live. Messages may have been missed.");
+    }
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     loop {
         let queue = ext.client.register_queue(cfg);
@@ -1281,6 +1594,9 @@ fn handle_queue_expiry(
         match queue {
             Ok(queue) => {
                 state.queue = Some(queue);
+                if let Some(checkpoint) = state.checkpoint.as_mut() {
+                    checkpoint.set_more_history(true);
+                }
                 ext.state.changed.notify_all();
                 return;
             }
@@ -1536,7 +1852,8 @@ fn configure_initial(
     runtime: &mut tau_client::ManualExtensionRuntime<ZulipRuntime>,
 ) -> Result<ToolNames, Box<dyn Error>> {
     let cfg: ExtConfig = configure.config.deserialized()?;
-    let cfg = cfg.validate(&configure.secrets)?;
+    let mut cfg = cfg.validate(&configure.secrets)?;
+    cfg.state_dir = configure.state_dir.clone();
     let names = ToolNames::from_scope(runtime.handle().tool_name_scope()?)?;
     runtime.state_mut().ext.tool_names = names.clone();
     runtime
@@ -1551,7 +1868,11 @@ fn handle_configure(runtime: &ZulipRuntime, configure: tau_proto::Configure) {
         .config
         .deserialized::<ExtConfig>()
         .map_err(|error| error.to_string())
-        .and_then(|cfg| cfg.validate(&configure.secrets));
+        .and_then(|cfg| cfg.validate(&configure.secrets))
+        .map(|mut cfg| {
+            cfg.state_dir = configure.state_dir.clone();
+            cfg
+        });
     match result {
         Ok(cfg) => runtime.ext.apply_config(cfg, configure.instance_name),
         Err(error) => {
@@ -1565,6 +1886,24 @@ fn handle_configure(runtime: &ZulipRuntime, configure: tau_proto::Configure) {
 
 fn handle_live_event(runtime: &ZulipRuntime, event: Event) {
     match event {
+        Event::MessageDelivered(fact) => {
+            let mut state = runtime.ext.state.lock();
+            if state
+                .publisher_name
+                .as_ref()
+                .is_none_or(|publisher| publisher.as_str() != fact.publisher_extension_id.as_str())
+            {
+                return;
+            }
+            if let Some(checkpoint) = state.checkpoint.as_mut()
+                && checkpoint.acknowledge(&fact.message_id)
+            {
+                if let Err(error) = checkpoint.advance() {
+                    tracing::warn!(target: LOG_TARGET, category = %error, "Zulip checkpoint write failed");
+                }
+                runtime.ext.state.changed.notify_all();
+            }
+        }
         Event::AgentDisplayNameSet(value) => {
             runtime
                 .ext
@@ -1585,13 +1924,7 @@ fn handle_live_event(runtime: &ZulipRuntime, event: Event) {
         }
         Event::SessionAgentUnloaded(value) => {
             let mut state = runtime.ext.state.lock();
-            state.registered_agents.remove(&value.agent_id);
-            state
-                .owners
-                .retain(|_, owner| owner.agent_id != value.agent_id);
-            if state.registered_agents.is_empty() {
-                state.queue = None;
-            }
+            state.unregister_agent(&value.agent_id);
             state.registration_generation = state.registration_generation.wrapping_add(1);
             runtime.ext.state.changed.notify_all();
         }
@@ -1610,6 +1943,7 @@ fn send_startup(
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
     ])?;
     for tool in [
         register_spec(names),

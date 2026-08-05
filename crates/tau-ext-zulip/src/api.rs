@@ -45,6 +45,14 @@ pub(crate) struct SentMessage {
     pub(crate) message_id: u64,
 }
 
+/// One bounded ascending Zulip message-history page.
+pub(crate) struct MessagePage {
+    /// Messages returned after the requested anchor.
+    pub(crate) messages: Vec<serde_json::Value>,
+    /// Whether this page reaches the server's current newest message.
+    pub(crate) found_newest: bool,
+}
+
 /// Bounded provider failure category without response bodies or credentials.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ApiError {
@@ -207,6 +215,23 @@ pub(crate) trait ZulipClient: Send + Sync + 'static {
         last_event_id: i64,
         request_timeout: Duration,
     ) -> Result<Vec<serde_json::Value>, ApiError>;
+    /// Fetch currently queued events without waiting for a future event.
+    fn get_events_now(
+        &self,
+        cfg: &RuntimeConfig,
+        queue_id: &str,
+        last_event_id: i64,
+    ) -> Result<Vec<serde_json::Value>, ApiError>;
+    /// Fetch one bounded ascending page of messages newer than a native ID.
+    fn get_messages_after(
+        &self,
+        cfg: &RuntimeConfig,
+        after: u64,
+        limit: usize,
+    ) -> Result<MessagePage, ApiError>;
+    /// Fetch the newest currently visible native message ID for first-use
+    /// baselining.
+    fn newest_message_id(&self, cfg: &RuntimeConfig) -> Result<Option<u64>, ApiError>;
     /// Send one Markdown message to a frozen route.
     fn send_message(
         &self,
@@ -351,6 +376,43 @@ impl HttpZulipClient {
             .map(str::to_owned);
         Ok((user_id, full_name))
     }
+
+    fn get_messages(
+        &self,
+        cfg: &RuntimeConfig,
+        anchor: &str,
+        num_before: usize,
+        num_after: usize,
+        include_anchor: bool,
+        max_messages: usize,
+    ) -> Result<MessagePage, ApiError> {
+        let request = self
+            .agent
+            .get(&format!("{}/messages", cfg.api_base))
+            .header("Authorization", &Self::auth(cfg))
+            .query("anchor", anchor)
+            .query("num_before", num_before.to_string())
+            .query("num_after", num_after.to_string())
+            .query("include_anchor", include_anchor.to_string())
+            .query("apply_markdown", "false");
+        let response = request.call().map_err(|_| ApiError::unavailable())?;
+        let value = self.read_json(response, ResponseContext::Ordinary)?;
+        let messages = value
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(ApiError::MalformedResponse)?;
+        if max_messages < messages.len() {
+            return Err(ApiError::MalformedResponse);
+        }
+        let found_newest = value
+            .get("found_newest")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or(ApiError::MalformedResponse)?;
+        Ok(MessagePage {
+            messages: messages.clone(),
+            found_newest,
+        })
+    }
 }
 
 impl ZulipClient for HttpZulipClient {
@@ -431,6 +493,61 @@ impl ZulipClient for HttpZulipClient {
             return Err(ApiError::QueueExpired);
         }
         Ok(events.clone())
+    }
+
+    fn get_events_now(
+        &self,
+        cfg: &RuntimeConfig,
+        queue_id: &str,
+        last_event_id: i64,
+    ) -> Result<Vec<serde_json::Value>, ApiError> {
+        let response = self
+            .agent
+            .get(&format!("{}/events", cfg.api_base))
+            .header("Authorization", &Self::auth(cfg))
+            .query("queue_id", queue_id)
+            .query("last_event_id", last_event_id.to_string())
+            .query("dont_block", "true")
+            .call()
+            .map_err(|_| ApiError::unavailable())?;
+        let value = self.read_json(response, ResponseContext::QueuePoll)?;
+        let events = value
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .filter(|events| events.len() <= 4096)
+            .ok_or(ApiError::MalformedResponse)?;
+        Ok(events.clone())
+    }
+
+    fn get_messages_after(
+        &self,
+        cfg: &RuntimeConfig,
+        after: u64,
+        limit: usize,
+    ) -> Result<MessagePage, ApiError> {
+        if limit == 0 || 100 < limit {
+            return Err(ApiError::MalformedResponse);
+        }
+        self.get_messages(cfg, after.to_string().as_str(), 0, limit, false, limit)
+    }
+
+    fn newest_message_id(&self, cfg: &RuntimeConfig) -> Result<Option<u64>, ApiError> {
+        let page = self.get_messages(cfg, "newest", 1, 0, true, 2)?;
+        if !page.found_newest {
+            return Err(ApiError::MalformedResponse);
+        }
+        let mut newest = None;
+        for message in page.messages {
+            let message_id = message
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(ApiError::MalformedResponse)?;
+            if newest.is_some_and(|previous| message_id <= previous) {
+                return Err(ApiError::MalformedResponse);
+            }
+            newest = Some(message_id);
+        }
+        Ok(newest)
     }
 
     fn send_message(

@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::*;
-use crate::api::{RejectedOperation, SentMessage, ZulipClient};
+use crate::api::{MessagePage, RejectedOperation, SentMessage, ZulipClient};
 
 /// Cloneable in-memory sink used to inspect tracing output.
 #[derive(Clone, Default)]
@@ -46,6 +46,16 @@ struct FakeClient {
     register_started: Mutex<Option<mpsc::Sender<()>>>,
     /// Optional gate delaying queue registration completion.
     register_release: Mutex<Option<mpsc::Receiver<()>>>,
+    /// Deterministic visible message history.
+    history: Mutex<Vec<serde_json::Value>>,
+    /// Events returned by the startup nonblocking queue drain.
+    queued_events: Mutex<Vec<serde_json::Value>>,
+    /// Requested history page sizes and anchors.
+    history_requests: Mutex<Vec<(u64, usize)>>,
+    /// Optional server completion marker for deterministic pagination tests.
+    history_found_newest: Mutex<Option<bool>>,
+    /// Exact next history page used for malformed-page tests.
+    history_page: Mutex<Option<MessagePage>>,
 }
 
 impl ZulipClient for FakeClient {
@@ -86,6 +96,64 @@ impl ZulipClient for FakeClient {
         _request_timeout: Duration,
     ) -> Result<Vec<serde_json::Value>, ApiError> {
         Err(ApiError::unavailable())
+    }
+
+    fn get_events_now(
+        &self,
+        _cfg: &RuntimeConfig,
+        _queue_id: &str,
+        _last_event_id: i64,
+    ) -> Result<Vec<serde_json::Value>, ApiError> {
+        Ok(std::mem::take(
+            &mut *self.queued_events.lock().expect("queued events lock"),
+        ))
+    }
+
+    fn get_messages_after(
+        &self,
+        _cfg: &RuntimeConfig,
+        after: u64,
+        limit: usize,
+    ) -> Result<MessagePage, ApiError> {
+        self.history_requests
+            .lock()
+            .expect("history requests lock")
+            .push((after, limit));
+        if let Some(page) = self.history_page.lock().expect("history page lock").take() {
+            return Ok(page);
+        }
+        let messages = self
+            .history
+            .lock()
+            .expect("history lock")
+            .iter()
+            .filter(|message| {
+                message
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|id| after < id)
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        Ok(MessagePage {
+            messages,
+            found_newest: self
+                .history_found_newest
+                .lock()
+                .expect("history completion lock")
+                .unwrap_or(true),
+        })
+    }
+
+    fn newest_message_id(&self, _cfg: &RuntimeConfig) -> Result<Option<u64>, ApiError> {
+        Ok(self
+            .history
+            .lock()
+            .expect("history lock")
+            .iter()
+            .filter_map(|message| message.get("id").and_then(serde_json::Value::as_u64))
+            .max())
     }
 
     fn send_message(
@@ -135,6 +203,8 @@ fn cfg() -> RuntimeConfig {
         receive_direct_messages: true,
         max_message_bytes: 1024,
         id_key: [7; 32],
+        offline_message_catch_up: false,
+        state_dir: None,
     }
 }
 
@@ -164,6 +234,21 @@ fn validated_config(conversations: serde_json::Value) -> Result<RuntimeConfig, S
         ),
     ]);
     config.validate(&secrets)
+}
+
+/// Catch-up must remain opt-in so existing configurations preserve live-only
+/// behavior without acquiring persistent state.
+#[test]
+fn offline_message_catch_up_defaults_to_disabled() {
+    let config = validated_config(serde_json::json!([{
+        "alias": "ops",
+        "stream_id": 7,
+        "topic": "deploy",
+        "receive": "all_messages"
+    }]))
+    .expect("valid config");
+    assert!(!config.offline_message_catch_up);
+    assert!(config.state_dir.is_none());
 }
 
 fn agent_id() -> AgentId {
@@ -205,6 +290,360 @@ fn extension_with_config(
         state.registration_generation = 1;
     }
     (ext, rx, client)
+}
+
+/// First use establishes a baseline without replay; a later bounded history
+/// page waits for the canonical self-echo before advancing past an admitted
+/// message while safely completing a filtered successor.
+#[test]
+fn offline_catch_up_baselines_filters_and_advances_on_canonical_echo() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut config = cfg();
+    config.offline_message_catch_up = true;
+    config.state_dir = Some(directory.path().to_path_buf());
+    let (ext, rx, client) = extension_with_config(config.clone());
+    client
+        .history
+        .lock()
+        .expect("history lock")
+        .push(serde_json::json!({
+            "id": 10, "sender_id": 42, "content": "old",
+            "type": "stream", "stream_id": 7, "subject": "deploy",
+            "flags": ["mentioned"]
+        }));
+    ext.state.lock().checkpoint =
+        Some(CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint"));
+    let queue = ext.state.lock().queue.clone().expect("queue");
+    ext.catch_up_messages(&config, &queue, 1, 1)
+        .expect("baseline");
+    assert!(rx.try_recv().is_err(), "baseline must not replay history");
+    assert_eq!(
+        ext.state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint")
+            .position(),
+        Some(10)
+    );
+
+    client.history.lock().expect("history lock").extend([
+        serde_json::json!({
+            "id": 11, "sender_id": 42, "content": "allowed",
+            "type": "stream", "stream_id": 7, "subject": "deploy",
+            "flags": ["mentioned"]
+        }),
+        serde_json::json!({
+            "id": 12, "sender_id": 77, "content": "blocked",
+            "type": "stream", "stream_id": 7, "subject": "deploy",
+            "flags": ["mentioned"]
+        }),
+    ]);
+    ext.state
+        .lock()
+        .checkpoint
+        .as_mut()
+        .expect("checkpoint")
+        .set_more_history(true);
+    ext.catch_up_messages(&config, &queue, 1, 1)
+        .expect("catch-up");
+    let HarnessInputMessage::Emit(report) = rx.recv().expect("admitted report") else {
+        panic!("expected report");
+    };
+    let Event::MessageDeliveredReported(delivered) = *report.event else {
+        panic!("expected delivered report");
+    };
+    assert_eq!(delivered.text, "allowed");
+    assert_eq!(
+        ext.state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint")
+            .position(),
+        Some(10),
+        "filtered successor must not skip an unacknowledged admitted message"
+    );
+
+    let runtime = ZulipRuntime { ext };
+    handle_live_event(
+        &runtime,
+        Event::MessageDelivered(
+            delivered.with_publisher(
+                tau_proto::MessagePublisherId::parse("std-zulip").expect("publisher"),
+            ),
+        ),
+    );
+    assert_eq!(
+        runtime
+            .ext
+            .state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint")
+            .position(),
+        Some(12)
+    );
+    assert_eq!(
+        client
+            .history_requests
+            .lock()
+            .expect("history requests lock")
+            .last(),
+        Some(&(10, 100))
+    );
+}
+
+/// Partial unregister retains checkpoint-owned echo correlation independently
+/// of reply-owner eviction, while last unregister releases the identity lock.
+#[test]
+fn unregister_preserves_pending_echo_and_releases_last_owner_lock() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut state = State::default();
+    let first = agent_id();
+    let second = AgentId::parse("second").expect("second agent");
+    state
+        .registered_agents
+        .extend([first.clone(), second.clone()]);
+    let mut checkpoint =
+        CheckpointRuntime::open(directory.path(), &[9; 32]).expect("checkpoint runtime");
+    assert!(checkpoint.begin(20));
+    let fact_id = MessageFactId::new("pending-fact");
+    checkpoint.submitted(20, fact_id.clone());
+    state.checkpoint = Some(checkpoint);
+
+    state.unregister_agent(&first);
+    let checkpoint = state.checkpoint.as_mut().expect("partial state retained");
+    assert!(checkpoint.acknowledge(&fact_id));
+    checkpoint.advance().expect("advance after owner eviction");
+    assert_eq!(checkpoint.position(), Some(20));
+
+    state.unregister_agent(&second);
+    assert!(state.checkpoint.is_none());
+    assert!(
+        CheckpointRuntime::open(directory.path(), &[9; 32]).is_ok(),
+        "last unregister must release the identity-scoped lock"
+    );
+}
+
+/// A closed extension-to-harness writer must retain the failed created message
+/// as an ordered retry barrier, including before a first-use baseline.
+#[test]
+fn failed_report_submission_blocks_baseline_checkpoint() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut config = cfg();
+    config.offline_message_catch_up = true;
+    config.state_dir = Some(directory.path().to_path_buf());
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+    let ext = Extension::new(Arc::new(FakeClient::default()), tx, ToolNames::logical());
+    ext.apply_config(config.clone(), publisher());
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id());
+        state.queue = Some(EventQueue {
+            queue_id: "queue".to_owned(),
+            last_event_id: 0,
+            bot_user_id: 99,
+            bot_full_name: Some("Tau Bot".to_owned()),
+            poll_request_timeout: Duration::from_secs(1),
+        });
+        state.registration_generation = 1;
+        state.checkpoint =
+            Some(CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint"));
+    }
+    ext.observe_created_message(
+        serde_json::json!({
+            "id": 11, "type": "message", "message": {
+                "id": 11, "sender_id": 42, "content": "retry me",
+                "type": "stream", "stream_id": 7, "subject": "deploy",
+                "flags": ["mentioned"]
+            }
+        }),
+        1,
+        1,
+        99,
+        Some("Tau Bot"),
+    );
+    let mut state = ext.state.lock();
+    let checkpoint = state.checkpoint.as_mut().expect("checkpoint");
+    assert_eq!(checkpoint.retry_position(), Some(11));
+    checkpoint.baseline(12);
+    checkpoint.advance().expect("blocked no-op");
+    assert_eq!(checkpoint.position(), None);
+}
+
+/// One activation fetches at most one 100-message page and preserves the
+/// server's unfinished marker for the next bounded activation.
+#[test]
+fn catch_up_pagination_is_bounded_and_resumable() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut config = cfg();
+    config.offline_message_catch_up = true;
+    config.state_dir = Some(directory.path().to_path_buf());
+    let (ext, _rx, client) = extension_with_config(config.clone());
+    client
+        .history
+        .lock()
+        .expect("history lock")
+        .extend((1..=150).map(|id| {
+            serde_json::json!({
+                "id": id, "sender_id": 77, "content": "filtered",
+                "type": "stream", "stream_id": 7, "subject": "deploy",
+                "flags": ["mentioned"]
+            })
+        }));
+    *client
+        .history_found_newest
+        .lock()
+        .expect("history completion lock") = Some(false);
+    let mut checkpoint =
+        CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint");
+    checkpoint.baseline(0);
+    checkpoint.advance().expect("initial position");
+    ext.state.lock().checkpoint = Some(checkpoint);
+    let queue = ext.state.lock().queue.clone().expect("queue");
+
+    ext.catch_up_messages(&config, &queue, 1, 1)
+        .expect("bounded page");
+    assert_eq!(
+        client
+            .history_requests
+            .lock()
+            .expect("history requests lock")
+            .as_slice(),
+        &[(0, 100)]
+    );
+    let state = ext.state.lock();
+    let checkpoint = state.checkpoint.as_ref().expect("checkpoint");
+    assert_eq!(checkpoint.position(), Some(100));
+    assert!(checkpoint.catch_up_needed());
+}
+
+/// A terminal page still must contain strictly increasing numeric IDs; the
+/// completion marker cannot turn malformed provider data into a skipped gap.
+#[test]
+fn catch_up_rejects_malformed_terminal_page() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut config = cfg();
+    config.offline_message_catch_up = true;
+    config.state_dir = Some(directory.path().to_path_buf());
+    let (ext, _rx, client) = extension_with_config(config.clone());
+    *client.history_page.lock().expect("history page lock") = Some(MessagePage {
+        messages: vec![serde_json::json!({"id": "not-numeric"})],
+        found_newest: true,
+    });
+    let mut checkpoint =
+        CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint");
+    checkpoint.baseline(0);
+    checkpoint.advance().expect("initial position");
+    ext.state.lock().checkpoint = Some(checkpoint);
+    let queue = ext.state.lock().queue.clone().expect("queue");
+    assert!(matches!(
+        ext.catch_up_messages(&config, &queue, 1, 1),
+        Err(ApiError::MalformedResponse)
+    ));
+    assert_eq!(
+        ext.state
+            .lock()
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint")
+            .position(),
+        Some(0)
+    );
+}
+
+/// A message visible in both the first baseline history snapshot and the
+/// already-registered live queue is delivered once rather than skipped or
+/// replayed twice.
+#[test]
+fn first_baseline_merges_startup_live_history_overlap() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut config = cfg();
+    config.offline_message_catch_up = true;
+    config.state_dir = Some(directory.path().to_path_buf());
+    let (ext, rx, client) = extension_with_config(config.clone());
+    let message = serde_json::json!({
+        "id": 11, "sender_id": 42, "content": "during startup",
+        "type": "stream", "stream_id": 7, "subject": "deploy",
+        "flags": ["mentioned"]
+    });
+    client.history.lock().expect("history lock").extend([
+        serde_json::json!({
+            "id": 10, "sender_id": 42, "content": "old history",
+            "type": "stream", "stream_id": 7, "subject": "deploy",
+            "flags": ["mentioned"]
+        }),
+        message.clone(),
+    ]);
+    client
+        .queued_events
+        .lock()
+        .expect("queued events lock")
+        .push(serde_json::json!({"id": 50, "type": "message", "message": message}));
+    ext.state.lock().checkpoint =
+        Some(CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint"));
+    let queue = ext.state.lock().queue.clone().expect("queue");
+    ext.catch_up_messages(&config, &queue, 1, 1)
+        .expect("baseline merge");
+
+    let HarnessInputMessage::Emit(report) = rx.recv().expect("startup live report") else {
+        panic!("expected report");
+    };
+    let Event::MessageDeliveredReported(delivered) = *report.event else {
+        panic!("expected delivered report");
+    };
+    assert_eq!(delivered.text, "during startup");
+    assert!(rx.try_recv().is_err(), "history overlap must deduplicate");
+}
+
+/// Lost and spurious notifications must not release acknowledgement
+/// backpressure; the correlated echo changes the lock-held predicate and wakes
+/// the worker without polling.
+#[test]
+fn checkpoint_wait_uses_echo_predicate_without_polling() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let (ext, _rx, _client) = extension_with_config(cfg());
+    let ext = Arc::new(ext);
+    let fact_id = MessageFactId::new("waited-fact");
+    let mut checkpoint = CheckpointRuntime::open(directory.path(), &[12; 32]).expect("checkpoint");
+    assert!(checkpoint.begin(1));
+    checkpoint.submitted(1, fact_id.clone());
+    ext.state.lock().checkpoint = Some(checkpoint);
+
+    let held = ext.state.lock();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = Arc::clone(&ext);
+    let thread = std::thread::spawn(move || {
+        started_tx.send(()).expect("started");
+        worker.wait_for_checkpoint_progress(1, 1);
+        done_tx.send(()).expect("done");
+    });
+    started_rx.recv().expect("waiter started");
+    ext.state.changed.notify_all();
+    drop(held);
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+        "a lost or spurious notification must not bypass the pending echo"
+    );
+
+    let mut state = ext.state.lock();
+    assert!(
+        state
+            .checkpoint
+            .as_mut()
+            .expect("checkpoint")
+            .acknowledge(&fact_id)
+    );
+    ext.state.changed.notify_all();
+    drop(state);
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("echo wakes waiter");
+    thread.join().expect("waiter");
 }
 
 fn tool(name: &str, fields: Vec<(&str, CborValue)>) -> ToolStarted {
@@ -959,6 +1398,137 @@ fn users_me_rejection(status: &str, headers: &str, code: &str) -> ApiError {
         .expect_err("identity rejection");
     server.join().expect("server");
     error
+}
+
+/// History requests must use Zulip's anchor pagination shape rather than an
+/// unsupported comparison narrow, and must honor the server completion marker.
+#[test]
+fn http_history_uses_anchor_pagination_without_id_narrow() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept history request");
+        let request = read_http_request(&mut socket);
+        let request_line = request.lines().next().expect("request line");
+        assert!(request_line.starts_with("GET /api/v1/messages?"));
+        let query = request_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|target| target.split_once('?'))
+            .map(|(_, query)| query)
+            .expect("query");
+        let fields: BTreeMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(fields.get("anchor").map(String::as_str), Some("41"));
+        assert_eq!(fields.get("num_before").map(String::as_str), Some("0"));
+        assert_eq!(fields.get("num_after").map(String::as_str), Some("100"));
+        assert_eq!(
+            fields.get("include_anchor").map(String::as_str),
+            Some("false")
+        );
+        assert!(!fields.contains_key("narrow"));
+        let body = r#"{"result":"success","messages":[{"id":42}],"found_newest":true}"#;
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("history response");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+    let page = HttpZulipClient::default()
+        .get_messages_after(&config, 41, 100)
+        .expect("history page");
+    assert!(page.found_newest);
+    assert_eq!(page.messages[0]["id"], 42);
+    server.join().expect("server");
+}
+
+/// The production client must reject a provider page larger than the requested
+/// bound even when the provider marks it terminal.
+#[test]
+fn http_history_rejects_oversized_provider_page() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept history request");
+        let _request = read_http_request(&mut socket);
+        let body = serde_json::json!({
+            "result": "success",
+            "messages": (1..=101).map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>(),
+            "found_newest": true
+        })
+        .to_string();
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("history response");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+    assert!(matches!(
+        HttpZulipClient::default().get_messages_after(&config, 0, 100),
+        Err(ApiError::MalformedResponse)
+    ));
+    server.join().expect("server");
+}
+
+fn newest_history_result(
+    messages: serde_json::Value,
+    found_newest: bool,
+) -> Result<Option<u64>, ApiError> {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept newest request");
+        let request = read_http_request(&mut socket);
+        assert!(request.contains("anchor=newest"));
+        assert!(request.contains("include_anchor=true"));
+        let body = serde_json::json!({
+            "result": "success",
+            "messages": messages,
+            "found_newest": found_newest
+        })
+        .to_string();
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("newest response");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+    let result = HttpZulipClient::default().newest_message_id(&config);
+    server.join().expect("server");
+    result
+}
+
+/// First-use baselining must fail closed on malformed, non-increasing, or
+/// nonterminal newest pages; only a valid terminal empty page means no
+/// messages.
+#[test]
+fn newest_history_validation_cannot_fall_back_to_zero() {
+    assert!(matches!(
+        newest_history_result(serde_json::json!([{"id": "bad"}]), true),
+        Err(ApiError::MalformedResponse)
+    ));
+    assert!(matches!(
+        newest_history_result(serde_json::json!([{"id": 2}, {"id": 1}]), true),
+        Err(ApiError::MalformedResponse)
+    ));
+    assert!(matches!(
+        newest_history_result(serde_json::json!([{"id": 2}]), false),
+        Err(ApiError::MalformedResponse)
+    ));
+    assert_eq!(
+        newest_history_result(serde_json::json!([]), true).expect("valid empty newest page"),
+        None
+    );
 }
 
 /// The production client fetches its own bounded identity before registering,

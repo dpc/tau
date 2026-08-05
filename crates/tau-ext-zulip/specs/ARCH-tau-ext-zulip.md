@@ -6,6 +6,10 @@ A registered agent creates a Zulip event queue using Basic bot auth on a bounded
 
 Zulip direct conversations derive from sorted participant IDs. Stream conversations derive from `(stream_id, topic)`, because topics are Zulip's native thread unit. Configured routes independently grant receive and proactive-send authority. Receive installs bounded source-bound reply/mutation authority only after local report submission. Tool calls resolve opaque references or configured aliases back to private native routes.
 
-Queue identity, cursor, registrations, recent IDs, message ownership, and routes are bounded process-local state. Reconfiguration, unregister, agent unload, and shutdown advance generations and retire affected authority. Queue loss starts from a fresh live tip and reports a possible gap; it never invents backlog recovery or durable queue state.
+Queue identity, cursor, registrations, recent IDs, message ownership, and routes are bounded process-local state. Reconfiguration, unregister, agent unload, and shutdown advance generations and retire affected authority. By default queue loss starts from a fresh live tip and reports a possible gap.
+
+Opt-in created-message catch-up registers the replacement live queue before bounded history retrieval. An identity-key-derived namespace stores only the native message high-water position with atomic replacement and exclusive process ownership. First use establishes a current baseline without historical replay. Later history and live creates merge by native message ID; offline mutations are not synthesized. The extension advances the highest completed observed prefix only after its own correlated canonical `message.delivered` fact returns through ordinary post-persistence subscription delivery. Filter changes do not rescan before the stored position.
+
+The user approved these persistence, ordering, recovery, and downpath-acknowledgement semantics for clank ticket `1k2c`, satisfying [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 Successful remote sends emit `message.sent_reported` before the terminal tool result. There is no remote/local transaction, durable outbox, automatic ambiguous retry, exactly-once guarantee, upload/download authority, or reconstruction of reply authority from replay.

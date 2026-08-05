@@ -20,3 +20,10 @@ for generic report canonicalization, persistence, replay, projection, and wake
 semantics. Live Zulip compatibility, failed queue-registration backoff, every
 configuration rejection, and other provider-specific error variants are not claimed
 by the hermetic suite.
+
+Checkpoint tests cover the default-disabled flag, first-use baseline,
+sender/route filtering, post-commit echo advancement, atomic replacement,
+checkpoint-write retry, report-submission barriers, unregister lifecycle,
+corruption rejection, namespace secrecy, and exclusive identity ownership.
+The fake history API and loopback request-shape test keep page sizes and Zulip
+anchor parameters deterministic.

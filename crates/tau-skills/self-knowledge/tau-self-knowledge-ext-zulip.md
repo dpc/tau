@@ -11,7 +11,17 @@ Configure `site`, `bot_email_secret`, `api_key_secret`, a stable `identity_key_s
 
 The disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react`; `tool_prefix` scopes all names and the group. Replies and reactions require opaque Tau-issued live references. Proactive sends require configured aliases; `zulip_send` accepts `topic` only for a discovered alias explicitly marked `agent_chosen_topic`, and `topic: ""` is Zulip general chat. Native stream, participant, message, queue, and credential values never become model authority.
 
-The extension emits generic message reports for creates, edits, deletes, reactions, and successful sends. Queue loss reconnects live and warns about a possible gap; it does not fetch missed backlog. Runtime references, dedupe, registrations, and cursors disappear on restart. The bridge is Markdown text-only and deliberately provides no file upload/download capability.
+The extension emits generic message reports for creates, edits, deletes,
+reactions, and successful sends. `offline_message_catch_up` defaults to false,
+preserving live-only reconnect behavior. When enabled, it registers a fresh live
+queue, retrieves bounded created-message history after an identity-scoped
+durable checkpoint, merges/deduplicates the live overlap, and advances only
+after its canonical delivered fact returns on the post-persistence downpath.
+First use establishes the current baseline without replay. Offline edits,
+deletes, and reactions are not recovered; filter changes do not rescan before
+the checkpoint. Crash recovery is at-least-once and can duplicate messages.
+Runtime references and registrations still disappear on restart. The bridge is
+Markdown text-only and deliberately provides no file upload/download capability.
 
 When Zulip rejects the initial or live-re-registration `users_me` or `register`
 request, the diagnostic keeps its authentication, rate-limit, invalid-request,

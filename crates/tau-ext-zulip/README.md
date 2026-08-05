@@ -19,6 +19,7 @@ extensions:
       bot_email_secret: zulip_bot_email
       api_key_secret: zulip_api_key
       identity_key_secret: zulip_identity_key
+      offline_message_catch_up: false
       allowed_user_ids: [42, 77]
       sender_aliases:
         - { user_id: 42, alias: dpc }
@@ -49,6 +50,22 @@ non-reversible publisher-domain sender, conversation, and message identifiers.
 Rotating it deliberately starts a new opaque identity namespace; existing facts
 remain unchanged, while new events no longer correlate to their old opaque IDs.
 
+`offline_message_catch_up` defaults to `false`, preserving live-only queue
+behavior. When enabled, the bridge registers a new live queue first, fetches
+newly created messages after its durable identity-scoped position in bounded
+pages, and deduplicates the history/live overlap. On the first enabled startup,
+it records the current position without replaying older messages. Later allowed
+and routed messages are delivered at least once; offline edits, deletes, and
+reactions are not recovered. The bridge advances only after observing its own
+canonical `message.delivered` fact on the post-persistence subscription downpath.
+A crash or failed checkpoint write can therefore duplicate a message but cannot
+advance past an uncommitted admitted message.
+
+The checkpoint filename uses a domain-separated keyed digest of the identity
+key, never the raw key. Atomic replacement protects against torn writes, and an
+identity-scoped process lock rejects concurrent owners. Changing filters or
+routes does not replay messages older than the stored position.
+
 Route aliases match `^[a-z][a-z0-9_-]{0,63}$`. Unknown configuration and tool fields fail closed. At most 64 aliases and 64 routes are accepted. HTTP is accepted only for loopback test servers; production sites require HTTPS.
 
 ## Routing and tools
@@ -71,7 +88,7 @@ Messages use Zulip Markdown with queue registration requesting `apply_markdown=f
 
 ## Delivery and reconnect behavior
 
-The queue cursor, duplicate cache, reply routes, message ownership, and registrations are bounded process-local state. Transient long-poll failures retry the same cursor with bounded backoff. Queue expiry registers a fresh live queue. Tau emits a content-free warning that a gap may have occurred and does not fetch or spend model work on a missed backlog. Cache eviction or restart may duplicate delivery; there is no cross-process exactly-once transaction.
+The queue cursor, duplicate cache, reply routes, message ownership, and registrations are bounded process-local state. Transient long-poll failures retry the same cursor with bounded backoff. Queue expiry registers a fresh live queue. With catch-up disabled, Tau emits a content-free warning and does not fetch missed backlog. With catch-up enabled, it resumes bounded created-message recovery from the durable position. Cache eviction, crash, or restart may duplicate delivery; there is no cross-process exactly-once transaction.
 
 Outbound calls make one bounded provider request and do not retry ambiguous sends or mutations, preventing an automatic duplicate remote effect. A timeout can still leave an unknown remote outcome. Configuration, registration, unload, and shutdown generations reject stale local completions; a remote effect may have completed before authority changed.
 
