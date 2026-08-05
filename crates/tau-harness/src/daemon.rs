@@ -691,8 +691,8 @@ pub fn run_embedded_message_with_test_provider(
 /// gated behind the `echo-agent` feature.
 #[cfg(any(test, feature = "echo-agent"))]
 fn echo_tools() -> Vec<crate::harness::InProcessTool> {
-    fn shell_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-        tau_ext_shell::run(r, w).map_err(|e| e.to_string())
+    fn shell_runner(r: UnixStream, w: UnixStream, project_root: PathBuf) -> Result<(), String> {
+        tau_ext_shell::run_for_test_harness(r, w, project_root).map_err(|e| e.to_string())
     }
     vec![crate::harness::InProcessTool {
         name: "shell",

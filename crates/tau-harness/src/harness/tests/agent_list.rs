@@ -232,6 +232,11 @@ fn roster_result_is_ui_only_and_requester_directed() {
 fn current_session_result_is_authoritative_ui_only_and_directed() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let expected_project_root = temp
+        .path()
+        .join("test-project")
+        .canonicalize()
+        .expect("isolated fixture project root");
     let requester = connect_test_client(&mut harness, "requester", tau_proto::ClientKind::Ui);
     let other_ui = connect_test_client(&mut harness, "other-ui", tau_proto::ClientKind::Ui);
     let tool = connect_test_client(&mut harness, "tool", tau_proto::ClientKind::Tool);
@@ -272,13 +277,9 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
             .any(|routed| matches!(
                 &routed.frame,
                 HarnessOutputMessage::CurrentSessionResult(result)
-                    if result.request_id == "current-1"
+                        if result.request_id == "current-1"
                         && result.session_id.as_str() == "s1"
-                        && result.project_root
-                            == std::env::current_dir()
-                                .expect("current directory")
-                                .canonicalize()
-                                .expect("canonical current directory")
+                        && result.project_root == expected_project_root
             ))
     );
     assert!(other_ui.lock().expect("other UI frames").is_empty());

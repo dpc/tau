@@ -95,7 +95,8 @@ fn resolve_config_in_uses_supplied_config_dir() {
         config_dir: Some(config_dir),
         state_dir: Some(tempdir.path().join("state")),
     };
-    let config = resolve_config_in(&dirs).expect("resolve config from supplied dirs");
+    let config =
+        resolve_config_in_without_environment(&dirs).expect("resolve config from supplied dirs");
 
     assert!(
         !config.extensions.contains_key("core-shell"),
@@ -428,13 +429,21 @@ fn resolve_extensions_cli_enable_unknown_extension_errors() {
         super::ResolveExtensionsError::UnknownCliOverride("missing".to_owned())
     );
 }
+/// Ensures malformed command-line configuration values fail against an explicit
+/// empty fixture instead of depending on the invoking user's profile.
 #[test]
-fn validate_cli_overrides_rejects_invalid_harness_config_override() {
+fn harness_config_cli_override_rejects_invalid_value_without_user_configuration() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
     let overrides = [
         HarnessConfigCliOverride::from_str("session_retention_days=abc").expect("override syntax"),
     ];
 
-    let err = validate_cli_overrides(&[], &[], &overrides).expect_err("wrong type fails");
+    let err = load_settings_for_cli_overrides_in(&dirs, None, &[], &overrides)
+        .expect_err("wrong type fails");
 
     let err = err.to_string();
     assert!(err.contains("invalid type"));

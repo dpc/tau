@@ -1,15 +1,15 @@
 use std::process::Command;
 
+mod support;
+
+use support::isolated_tau_command;
+
 /// Runs the exact public Tau binary with isolated state roots.
 fn tau_command(temp: &tempfile::TempDir) -> Command {
-    let mut command = Command::new(std::env::var("CARGO_BIN_EXE_tau").expect("tau binary"));
-    command
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .env("XDG_STATE_HOME", temp.path().join("state"))
-        .env("XDG_RUNTIME_DIR", temp.path().join("runtime"))
-        .env_remove("TAU_ENABLE_EXTENSIONS")
-        .env_remove("TAU_PROFILE");
-    command
+    isolated_tau_command(
+        std::env::var("CARGO_BIN_EXE_tau").expect("tau binary"),
+        temp.path(),
+    )
 }
 
 /// Removed startup flags fail at the public process boundary rather than

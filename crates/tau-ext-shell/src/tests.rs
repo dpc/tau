@@ -457,8 +457,13 @@ fn spawn_extension_with_exit_and_prefix(
         .expect("runtime reader clone should succeed");
     let (done_tx, done_rx) = path_std_sync::mpsc::channel();
     thread::spawn(move || {
-        let result = run_impl(reader_stream, runtime_stream)
-            .map_err(|error| format!("extension should run: {error}"));
+        let result = run_impl(
+            reader_stream,
+            runtime_stream,
+            DiscoverySourcePolicy::Environment,
+            RuntimeCwdSource::Process,
+        )
+        .map_err(|error| format!("extension should run: {error}"));
         let _ = done_tx.send(result);
     });
     let reader = EventReader::new(BufReader::new(
@@ -1457,7 +1462,13 @@ fn initial_dir_lock_override_is_final_before_ready() {
     input_writer.flush().expect("flush input");
     let output = SharedWriter::default();
     let written = output.clone();
-    run_impl(path_std_io::Cursor::new(input), output).expect("run shell");
+    run_impl(
+        path_std_io::Cursor::new(input),
+        output,
+        DiscoverySourcePolicy::Environment,
+        RuntimeCwdSource::Process,
+    )
+    .expect("run shell");
 
     let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut frames = Vec::new();
@@ -2916,6 +2927,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         &output,
         &cwd_state,
         false,
+        DiscoverySourcePolicy::Environment,
     );
 
     loop {
@@ -9509,7 +9521,11 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
 #[test]
 fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
     let (tx, rx) = path_std_sync::mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-live-error-cwd").expect("agent id");
 
     runtime

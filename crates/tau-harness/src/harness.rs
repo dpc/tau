@@ -2661,7 +2661,7 @@ pub(crate) type ProviderRunner = fn(UnixStream, UnixStream) -> Result<(), String
 #[cfg(any(test, feature = "echo-agent"))]
 pub(crate) struct InProcessTool {
     pub(crate) name: &'static str,
-    pub(crate) runner: fn(UnixStream, UnixStream) -> Result<(), String>,
+    pub(crate) runner: fn(UnixStream, UnixStream, PathBuf) -> Result<(), String>,
 }
 
 /// Decode the provider-only HumanUi wrapper for the semantic echo test
@@ -3393,7 +3393,6 @@ impl Harness {
             storage_mode,
             internal_tool_handlers,
         } = startup;
-        let project_root = std::env::current_dir()?.canonicalize()?;
         let launch = HarnessSessionLaunch {
             reason: eager_session_start_reason,
             storage_mode,
@@ -3401,6 +3400,22 @@ impl Harness {
         .validate()?;
         let storage_mode = launch.storage_mode;
         let state_dir = state_dir.into();
+        let project_root = if storage_mode.is_memory_only() {
+            if state_dir.is_dir() {
+                state_dir.canonicalize()?
+            } else {
+                state_dir
+                    .parent()
+                    .ok_or_else(|| {
+                        HarnessError::Participant("test state directory has no parent".to_owned())
+                    })?
+                    .canonicalize()?
+            }
+        } else {
+            let project_root = state_dir.join("test-project");
+            std::fs::create_dir_all(&project_root)?;
+            project_root.canonicalize()?
+        };
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
         let (tx, rx) = mpsc::channel();
         let bus = EventBus::new();
@@ -3456,7 +3471,13 @@ impl Harness {
 
         // Caller-supplied in-process tools.
         for tool in tools {
-            let tool_spawn = spawn_in_process(tool.name, ClientKind::Tool, tool.runner, &tx)?;
+            let project_root = project_root.clone();
+            let tool_spawn = spawn_in_process(
+                tool.name,
+                ClientKind::Tool,
+                move |reader, writer| (tool.runner)(reader, writer, project_root),
+                &tx,
+            )?;
             let conn_id = tool_spawn.connection_id.clone();
             extension_connects.push(ExtensionConnectCommand {
                 entry: ExtensionEntry {
@@ -3485,7 +3506,8 @@ impl Harness {
             });
         }
 
-        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
+        let (harness_settings, harness_settings_error) =
+            load_harness_settings_without_environment_or_warn(&dirs);
         let system_prompt_templates = load_system_prompt_templates(dirs.config_dir.as_deref());
         let LoadedRoles {
             roles: available_roles,
@@ -3541,7 +3563,7 @@ impl Harness {
             rx,
             bus,
             state_dir: state_dir.clone(),
-            ignore_startup_environment: false,
+            ignore_startup_environment: true,
             store,
             agent_store,
             storage_mode,

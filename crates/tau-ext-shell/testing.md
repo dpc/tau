@@ -91,3 +91,7 @@ and canonical-directory cycle detection.
 Protocol coverage feeds deterministic complete session and correlated per-agent
 skill/AGENTS.md snapshots and asserts `persist=false` metadata plus
 snapshot-before-context-before-readiness ordering.
+Harness test-provider fixtures use the `echo-agent`-gated empty discovery policy;
+their child-process regression poisons `HOME` with a user skill and verifies the
+fixture does not discover it. Production extension runners always use environment
+discovery.

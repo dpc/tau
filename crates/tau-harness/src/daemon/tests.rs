@@ -1,6 +1,7 @@
 use std::io::BufReader;
 use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
+use std::process::Command as path_std_process_Command;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{collections as path_std_collections, fs, io as path_std_io, thread};
@@ -11,6 +12,66 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::harness::Harness;
+
+/// Ensures the reusable embedded echo fixture does not discover caller-owned
+/// skills through the in-process shell extension.
+#[test]
+fn embedded_echo_fixture_ignores_ambient_discovery() {
+    let ambient_home = TempDir::new().expect("ambient home");
+    let ambient_skill_dir = ambient_home
+        .path()
+        .join(".config/agents/skills/ambient-shell-skill");
+    fs::create_dir_all(&ambient_skill_dir).expect("ambient skill directory");
+    fs::write(
+        ambient_skill_dir.join("SKILL.md"),
+        "---\nname: ambient-shell-skill\ndescription: ambient fixture\n---\n",
+    )
+    .expect("ambient skill");
+
+    let output = path_std_process_Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "daemon::tests::embedded_echo_fixture_ignores_ambient_discovery_child",
+        ])
+        .env("HOME", ambient_home.path())
+        .env("XDG_CONFIG_HOME", ambient_home.path().join(".config"))
+        .output()
+        .expect("run isolated fixture child");
+    assert!(
+        output.status.success(),
+        "fixture child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Exercises the public echo fixture with an ambient skill that would otherwise
+/// enable the configured role.
+#[test]
+#[ignore = "run only through the isolated parent regression"]
+fn embedded_echo_fixture_ignores_ambient_discovery_child() {
+    let temp = TempDir::new().expect("fixture root");
+    let config_dir = temp.path().join("config");
+    fs::create_dir_all(&config_dir).expect("fixture config directory");
+    fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: ambient-role
+  role_groups:
+    fixture:
+      roles:
+        ambient-role:
+          required_skills: [ambient-shell-skill]
+"#,
+    )
+    .expect("fixture harness configuration");
+
+    let error = run_embedded_message_with_echo(temp.path(), "fixture-session", "hello")
+        .expect_err("fixture must not discover the ambient skill");
+    assert!(error.to_string().contains("role `ambient-role` disabled"));
+}
 
 /// Runtime harness startup captures one canonical directory identity so symlink
 /// aliases and parent components cannot leak into live-session responses.

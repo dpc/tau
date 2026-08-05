@@ -1,5 +1,6 @@
 use std::time as path_std_time;
 
+use super::super::DiscoverySourcePolicy;
 use super::*;
 
 /// Ensures ToolCancelRequest reaches already-running cancellable tool
@@ -8,7 +9,11 @@ use super::*;
 #[test]
 fn tool_cancel_request_signals_registered_running_call() {
     let (tx, _rx) = mpsc::channel();
-    let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let call_id = tau_proto::ToolCallId::new("running-find");
     let (cancel_tx, cancel_rx) = mpsc::channel();
     runtime
@@ -31,7 +36,11 @@ fn tool_cancel_request_signals_registered_running_call() {
 #[test]
 fn shutdown_signals_registered_running_call() {
     let (tx, _rx) = mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let call_id = tau_proto::ToolCallId::new("running-grep");
     let (cancel_tx, cancel_rx) = mpsc::channel();
     runtime
@@ -52,7 +61,11 @@ fn shutdown_signals_registered_running_call() {
 #[test]
 fn replayed_cwd_metadata_folds_without_emitting_until_live_agent_load() {
     let (tx, rx) = mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-replay-cwd").expect("agent id");
     let cwd = std::env::current_dir().expect("current dir");
 
@@ -141,7 +154,11 @@ fn replayed_cwd_metadata_folds_without_emitting_until_live_agent_load() {
 #[test]
 fn malformed_replayed_workdir_is_retained_without_default_seeding() {
     let (tx, rx) = mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-invalid-workdir").expect("agent id");
     runtime
         .handle_event(
@@ -223,7 +240,11 @@ fn malformed_replayed_workdir_is_retained_without_default_seeding() {
 #[test]
 fn invalid_workdir_user_shell_failure_is_command_local() {
     let (tx, rx) = mpsc::channel();
-    let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-invalid-user-shell").expect("agent id");
     runtime.cwd_state.set_invalid(agent_id.clone());
     runtime
@@ -254,7 +275,11 @@ fn invalid_workdir_user_shell_failure_is_command_local() {
 #[test]
 fn user_shell_before_workdir_replay_fails_without_spawning() {
     let (tx, rx) = mpsc::channel();
-    let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-replay-pending-shell").expect("agent id");
     runtime.cwd_state.set_pending_ready(
         agent_id.clone(),
@@ -289,7 +314,11 @@ fn user_shell_before_workdir_replay_fails_without_spawning() {
 #[test]
 fn shutdown_clears_reserved_workdir_setter_without_extension_terminal() {
     let (tx, rx) = mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-reserved-setter").expect("agent id");
     let invoke = tau_proto::ToolStarted {
         call_id: tau_proto::ToolCallId::new("reserved-setter"),
@@ -318,7 +347,11 @@ fn shutdown_clears_reserved_workdir_setter_without_extension_terminal() {
 #[test]
 fn workdir_reservation_commit_phase_is_linearized() {
     let (tx, _rx) = mpsc::channel();
-    let runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-linearized-setter").expect("agent id");
     let invoke = tau_proto::ToolStarted {
         call_id: tau_proto::ToolCallId::new("x".repeat(1024)),
@@ -382,7 +415,11 @@ fn workdir_reservation_commit_phase_is_linearized() {
 #[test]
 fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
     let (tx, rx) = mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
     let agent_id = tau_proto::AgentId::parse("agent-cancel-setter").expect("agent id");
     let invoke = tau_proto::ToolStarted {
         call_id: tau_proto::ToolCallId::new("cancel-setter"),
@@ -444,7 +481,11 @@ fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
 #[test]
 fn session_shutdown_keeps_scheduler_for_later_sessions() {
     let (tx, _rx) = mpsc::channel();
-    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
 
     runtime
         .handle_event(

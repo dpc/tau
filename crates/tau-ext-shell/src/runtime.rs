@@ -15,11 +15,12 @@ use tau_proto::{
 use tracing::debug;
 
 use super::{
-    UiShellScheduleContext, apply_started_cwd_metadata, apply_working_directory, cwd_context_event,
-    cwd_notice_event, dir_lock_tool_spec, dispatch_action_invoke, dispatch_session_agent_loaded,
-    dispatch_session_started, invalid_cwd_context_event, is_shell_tool,
-    publish_agent_discovery_snapshot_for, schedule_tool_started, schedule_ui_shell_command,
-    send_tool_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
+    DiscoverySourcePolicy, UiShellScheduleContext, apply_started_cwd_metadata,
+    apply_working_directory, cwd_context_event, cwd_notice_event, dir_lock_tool_spec,
+    dispatch_action_invoke, dispatch_session_agent_loaded, dispatch_session_started,
+    invalid_cwd_context_event, is_shell_tool, publish_agent_discovery_snapshot_for,
+    schedule_tool_started, schedule_ui_shell_command, send_tool_failure,
+    send_ui_shell_saturated_failure, with_lock_wait_duration,
 };
 use crate::Output;
 use crate::config::ExtConfig;
@@ -27,8 +28,18 @@ use crate::cwd_state::CwdState;
 use crate::dir_lock::DirLockManager;
 use crate::scheduler::WorkScheduler;
 
+#[derive(Clone, Copy)]
+enum StartupCwdSource {
+    Process,
+    #[cfg(any(test, feature = "echo-agent"))]
+    Fixture,
+}
+
 pub(super) struct ShellRuntime {
     config: ExtConfig,
+    /// Whether session discovery may read process HOME and working-directory
+    /// inputs.
+    discovery_policy: DiscoverySourcePolicy,
     scheduler: Option<WorkScheduler>,
     tx: Output,
     running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
@@ -36,21 +47,60 @@ pub(super) struct ShellRuntime {
     shutdown_generation: Arc<AtomicU64>,
     lock_manager: DirLockManager,
     cwd_state: CwdState,
+    startup_cwd_source: StartupCwdSource,
     start_agent_owners: HashMap<String, tau_proto::AgentId>,
     runtime_started: bool,
 }
 
 impl ShellRuntime {
-    pub(super) fn new(tx: Output, config: ExtConfig) -> Self {
+    pub(super) fn new(
+        tx: Output,
+        config: ExtConfig,
+        discovery_policy: DiscoverySourcePolicy,
+    ) -> Self {
+        Self::new_with_cwd_state(
+            tx,
+            config,
+            discovery_policy,
+            CwdState::new(),
+            StartupCwdSource::Process,
+        )
+    }
+
+    #[cfg(any(test, feature = "echo-agent"))]
+    pub(super) fn new_for_test_harness(
+        tx: Output,
+        config: ExtConfig,
+        discovery_policy: DiscoverySourcePolicy,
+        fixture_cwd: PathBuf,
+    ) -> Self {
+        Self::new_with_cwd_state(
+            tx,
+            config,
+            discovery_policy,
+            CwdState::new_with_startup_cwd(fixture_cwd),
+            StartupCwdSource::Fixture,
+        )
+    }
+
+    fn new_with_cwd_state(
+        tx: Output,
+        config: ExtConfig,
+        discovery_policy: DiscoverySourcePolicy,
+        cwd_state: CwdState,
+        startup_cwd_source: StartupCwdSource,
+    ) -> Self {
         Self {
             config,
+            discovery_policy,
             scheduler: Some(WorkScheduler::new(tx.clone(), Default::default())),
             tx,
             running_calls: Arc::new(Mutex::new(HashMap::new())),
             running_ui_commands: Arc::new(Mutex::new(HashMap::new())),
             shutdown_generation: Arc::new(AtomicU64::new(0)),
             lock_manager: DirLockManager::default(),
-            cwd_state: CwdState::new(),
+            cwd_state,
+            startup_cwd_source,
             start_agent_owners: HashMap::new(),
             runtime_started: false,
         }
@@ -118,9 +168,11 @@ impl ShellRuntime {
         if let Err(message) = apply_working_directory(&self.config, &cfg, self.runtime_started) {
             return Err(tau_client::ClientError::handler(message));
         }
-        self.cwd_state
-            .freeze_process_startup_cwd()
-            .map_err(tau_client::ClientError::handler)?;
+        if matches!(self.startup_cwd_source, StartupCwdSource::Process) {
+            self.cwd_state
+                .freeze_process_startup_cwd()
+                .map_err(tau_client::ClientError::handler)?;
+        }
         if let Err(message) = self.lock_manager.configure(&cfg.dir_lock) {
             return Err(tau_client::ClientError::handler(message));
         }
@@ -161,10 +213,16 @@ impl ShellRuntime {
                 self.handle_tool_started(invoke, &local_tool_name, is_replay)?;
             }
             Event::SessionStarted(started) => {
-                dispatch_session_started(started, &self.tx);
+                dispatch_session_started(started, &self.tx, self.discovery_policy);
             }
             Event::SessionAgentLoaded(loaded) => {
-                dispatch_session_agent_loaded(loaded, &self.tx, &self.cwd_state, true);
+                dispatch_session_agent_loaded(
+                    loaded,
+                    &self.tx,
+                    &self.cwd_state,
+                    true,
+                    self.discovery_policy,
+                );
             }
             Event::SessionAgentUnloaded(unloaded) => {
                 if !is_replay {
@@ -454,6 +512,7 @@ impl ShellRuntime {
             done.agent_id.clone(),
             initialization_id.clone(),
             &self.tx,
+            self.discovery_policy,
         );
         if done.error.is_some() {
             self.cwd_state.take_pending_ready(&done.agent_id);

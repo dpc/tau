@@ -8,6 +8,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::Command as path_std_process_Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs as path_std_fs, thread};
@@ -1084,8 +1085,8 @@ fn echo_harness_with_dirs_and_start_reason(
     dirs: tau_config::settings::TauDirs,
     start_reason: tau_proto::SessionStartReason,
 ) -> Result<Harness, HarnessError> {
-    fn shell_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
-        tau_ext_shell::run(r, w).map_err(|e| e.to_string())
+    fn shell_runner(r: UnixStream, w: UnixStream, project_root: PathBuf) -> Result<(), String> {
+        tau_ext_shell::run_for_test_harness(r, w, project_root).map_err(|e| e.to_string())
     }
     let mut h = Harness::new_with_provider(
         state_dir,
@@ -1101,9 +1102,9 @@ fn echo_harness_with_dirs_and_start_reason(
     )?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
-    // Keep the generic echo helper independent from the repository AGENTS.md
-    // files discovered by ext-shell from the test process cwd. Readiness and
-    // AGENTS.md injection tests add their own deterministic context directly.
+    // Keep the generic echo helper independent from any test fixture discovery.
+    // Readiness and AGENTS.md injection tests add their own deterministic
+    // context directly.
     h.discovered_agents_files.clear();
     // Do not let shell's startup context-provider registration defer unrelated
     // prompt dispatch assertions; readiness-specific tests register providers
@@ -1122,6 +1123,115 @@ fn echo_harness_with_dirs_and_start_reason(
         h.finalize_agent_discovery(&agent_id)?;
     }
     Ok(h)
+}
+
+/// Ensures the shared in-process provider fixture ignores poisoned startup
+/// transports and uses only its explicitly supplied directories. The parent
+/// process runs the ignored child so changing process-wide environment cannot
+/// race parallel unit tests.
+#[test]
+fn provider_harness_ignores_ambient_startup_environment() {
+    let ambient_home = TempDir::new().expect("ambient home");
+    let ambient_skill_dir = ambient_home
+        .path()
+        .join(".config/agents/skills/ambient-skill");
+    std::fs::create_dir_all(&ambient_skill_dir).expect("ambient skill directory");
+    std::fs::write(
+        ambient_skill_dir.join("SKILL.md"),
+        "---\nname: ambient-skill\ndescription: ambient fixture\n---\n",
+    )
+    .expect("ambient skill");
+    let ambient_cwd = ambient_home.path().join("ambient-cwd");
+    std::fs::create_dir(&ambient_cwd).expect("ambient working directory");
+    let output = path_std_process_Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "harness::tests::provider_harness_ignores_ambient_startup_environment_child",
+        ])
+        .env(tau_config::settings::TAU_PROFILE_ENV, "ambient-profile")
+        .env(crate::ROLE_CLI_OVERRIDES_ENV, r#"["ambient-role"]"#)
+        .env(
+            crate::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+            r#"["ambient-config"]"#,
+        )
+        .env(crate::STARTUP_ROLE_ENV, "ambient-role")
+        .env("HOME", ambient_home.path())
+        .env("XDG_CONFIG_HOME", ambient_home.path().join(".config"))
+        .env("XDG_STATE_HOME", ambient_home.path().join(".state"))
+        .env("XDG_RUNTIME_DIR", ambient_home.path().join(".runtime"))
+        .current_dir(&ambient_cwd)
+        .output()
+        .expect("run isolated fixture child");
+    assert!(
+        output.status.success(),
+        "fixture child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Runs the shared provider fixture with poisoned startup transport in a
+/// single-test child process and proves its explicit configuration wins.
+#[test]
+#[ignore = "run only through the isolated parent regression"]
+fn provider_harness_ignores_ambient_startup_environment_child() {
+    assert_eq!(
+        std::env::var(tau_config::settings::TAU_PROFILE_ENV).as_deref(),
+        Ok("ambient-profile")
+    );
+    let temp = TempDir::new().expect("tempdir");
+    let config_dir = temp.path().join("config");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("config directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: fixture
+  role_groups:
+    fixture:
+      roles:
+        fixture: {}
+"#,
+    )
+    .expect("fixture harness configuration");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    let mut harness = echo_harness_with_dirs("fixture-session", &state_dir, dirs)
+        .expect("fixture must ignore poisoned startup environment");
+    assert_eq!(harness.selected_role, "fixture");
+    assert_eq!(
+        harness.project_root,
+        state_dir
+            .join("test-project")
+            .canonicalize()
+            .expect("isolated test project root")
+    );
+    assert!(!harness.discovered_skills.contains_key("ambient-skill"));
+    assert!(harness.discovered_agents_files.is_empty());
+    let expected_project_root = harness.project_root.clone();
+    let outcome = harness
+        .send_user_message("fixture-session", "shell pwd", None)
+        .expect("shell command must run in the fixture project root");
+    assert!(
+        format!("{:?}", outcome.tool_results)
+            .contains(expected_project_root.to_string_lossy().as_ref()),
+        "shell pwd result must use the fixture project root"
+    );
+    let tree = agent_tree_for_conversation(&harness, &test_user_agent(&harness));
+    assert_eq!(
+        tree.metadata()
+            .get(&tau_proto::AgentMetadataKey::new("ext_shell_cwd"))
+            .map(|entry| &entry.value),
+        Some(&CborValue::Text(
+            expected_project_root.display().to_string()
+        ))
+    );
+    harness.shutdown().expect("shutdown");
 }
 
 fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {

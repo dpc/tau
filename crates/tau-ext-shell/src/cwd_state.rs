@@ -97,10 +97,21 @@ impl CwdState {
     /// Create state with the current process cwd captured as the provisional
     /// fallback.
     pub(crate) fn new() -> Self {
+        Self::with_startup_cwd(Self::read_process_startup_cwd())
+    }
+
+    /// Create state with an explicit fixture-owned fallback rather than the
+    /// invoking process's working directory.
+    #[cfg(any(test, feature = "echo-agent"))]
+    pub(crate) fn new_with_startup_cwd(cwd: PathBuf) -> Self {
+        Self::with_startup_cwd(Self::validate_startup_cwd(cwd))
+    }
+
+    fn with_startup_cwd(process_startup_cwd: Result<PathBuf, String>) -> Self {
         Self {
             instance_name: Arc::new(Mutex::new("core-shell".to_owned())),
             context_label: Arc::new(Mutex::new("default".to_owned())),
-            process_startup_cwd: Arc::new(Mutex::new(Self::read_process_startup_cwd())),
+            process_startup_cwd: Arc::new(Mutex::new(process_startup_cwd)),
             workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
             pending_ready_by_agent: Arc::new(Mutex::new(HashMap::new())),
             initialization_by_agent: Arc::new(Mutex::new(HashMap::new())),
@@ -163,9 +174,12 @@ impl CwdState {
     }
 
     fn read_process_startup_cwd() -> Result<PathBuf, String> {
-        let cwd = std::env::current_dir().map_err(|error| {
-            format!("failed to read ext-shell process working directory: {error}")
-        })?;
+        std::env::current_dir()
+            .map_err(|error| format!("failed to read ext-shell process working directory: {error}"))
+            .and_then(Self::validate_startup_cwd)
+    }
+
+    fn validate_startup_cwd(cwd: PathBuf) -> Result<PathBuf, String> {
         let cwd = cwd.canonicalize().map_err(|error| {
             format!(
                 "failed to canonicalize ext-shell process working directory {}: {error}",

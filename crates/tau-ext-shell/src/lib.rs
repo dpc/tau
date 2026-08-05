@@ -211,9 +211,33 @@ const LOCK_WAIT_DURATION_SECONDS_HEADER: &str = "lock_wait_duration_seconds";
 const XDG_USER_SKILL_SOURCE_PRECEDENCE: u32 = 0;
 const LEGACY_USER_SKILL_SOURCE_PRECEDENCE: u32 = 1;
 
+#[derive(Clone, Copy)]
+enum DiscoverySourcePolicy {
+    Environment,
+    #[cfg(any(test, feature = "echo-agent"))]
+    EmptyFixture,
+}
+
+impl DiscoverySourcePolicy {
+    const fn reads_environment(self) -> bool {
+        matches!(self, Self::Environment)
+    }
+}
+
+enum RuntimeCwdSource {
+    Process,
+    #[cfg(any(test, feature = "echo-agent"))]
+    Fixture(PathBuf),
+}
+
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    run_impl(std::io::stdin(), std::io::stdout())
+    run_impl(
+        std::io::stdin(),
+        std::io::stdout(),
+        DiscoverySourcePolicy::Environment,
+        RuntimeCwdSource::Process,
+    )
 }
 
 /// Runs the extension over arbitrary reader/writer streams.
@@ -225,7 +249,37 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    run_impl(reader, writer)
+    run_impl(
+        reader,
+        writer,
+        DiscoverySourcePolicy::Environment,
+        RuntimeCwdSource::Process,
+    )
+}
+
+/// Runs an in-process harness test extension without discovering caller-owned
+/// skills or `AGENTS.md` files.
+///
+/// Harness unit tests share one process, so they cannot safely rewrite
+/// process-wide HOME, XDG, or working-directory state. This entrypoint keeps
+/// their synthetic extension from reading those ambient discovery inputs while
+/// preserving the ordinary protocol and tool behavior.
+#[cfg(any(test, feature = "echo-agent"))]
+pub fn run_for_test_harness<R, W>(
+    reader: R,
+    writer: W,
+    fixture_cwd: PathBuf,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    run_impl(
+        reader,
+        writer,
+        DiscoverySourcePolicy::EmptyFixture,
+        RuntimeCwdSource::Fixture(fixture_cwd),
+    )
 }
 
 fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
@@ -823,7 +877,12 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     tools
 }
 
-fn run_impl<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
+fn run_impl<R, W>(
+    reader: R,
+    writer: W,
+    discovery_policy: DiscoverySourcePolicy,
+    runtime_cwd_source: RuntimeCwdSource,
+) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -832,8 +891,17 @@ where
     let mut runtime = tau_client::TauExtensionRunner::new(ShellExtension {
         initial_config: initial_config.clone(),
     })
-    .start_manual_loop_with_state(reader, writer, |handle| {
-        ShellRuntime::new(Output::client(handle), initial_config)
+    .start_manual_loop_with_state(reader, writer, |handle| match runtime_cwd_source {
+        RuntimeCwdSource::Process => {
+            ShellRuntime::new(Output::client(handle), initial_config, discovery_policy)
+        }
+        #[cfg(any(test, feature = "echo-agent"))]
+        RuntimeCwdSource::Fixture(fixture_cwd) => ShellRuntime::new_for_test_harness(
+            Output::client(handle),
+            initial_config,
+            discovery_policy,
+            fixture_cwd,
+        ),
     })?;
 
     let loop_result = run_shell_manual_loop(&mut runtime);
@@ -2127,9 +2195,17 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
     }
 }
 
-fn dispatch_session_started(started: SessionStarted, tx: &Output) {
+fn dispatch_session_started(
+    started: SessionStarted,
+    tx: &Output,
+    discovery_policy: DiscoverySourcePolicy,
+) {
     let session_id = started.session_id.clone();
-    dispatch_session_discovery_messages(session_id, build_session_started_messages(started), tx);
+    dispatch_session_discovery_messages(
+        session_id,
+        build_session_started_messages(started, discovery_policy),
+        tx,
+    );
 }
 
 /// Publish one ordered session-discovery batch followed by its readiness
@@ -2182,6 +2258,7 @@ fn dispatch_session_agent_loaded(
     tx: &Output,
     cwd_state: &CwdState,
     defer_default_until_replay_complete: bool,
+    discovery_policy: DiscoverySourcePolicy,
 ) {
     if defer_default_until_replay_complete {
         cwd_state.set_pending_ready(
@@ -2191,7 +2268,7 @@ fn dispatch_session_agent_loaded(
         );
         return;
     }
-    publish_agent_discovery_snapshot(&loaded, tx);
+    publish_agent_discovery_snapshot(&loaded, tx, discovery_policy);
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
         let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
             loaded.session_id.clone(),
@@ -2333,25 +2410,32 @@ fn is_echo_tool(_name: &str) -> bool {
     false
 }
 
-fn build_session_started_messages(_started: SessionStarted) -> Vec<HarnessInputMessage> {
+fn build_session_started_messages(
+    _started: SessionStarted,
+    discovery_policy: DiscoverySourcePolicy,
+) -> Vec<HarnessInputMessage> {
     let mut messages = Vec::new();
 
-    let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
-
-    let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
-    push_skill_diagnostic_requests(&mut messages, result.diagnostics);
-    let skills = result
-        .skills
-        .into_iter()
-        .map(discovery_skill_candidate)
-        .collect();
-    let agents_files = discover_session_agents_files()
-        .into_iter()
-        .map(|file| DiscoveryAgentsFile {
-            file_path: file.file_path,
-            content: file.content,
-        })
-        .collect();
+    let (skills, agents_files) = if discovery_policy.reads_environment() {
+        let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
+        let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
+        push_skill_diagnostic_requests(&mut messages, result.diagnostics);
+        let skills = result
+            .skills
+            .into_iter()
+            .map(discovery_skill_candidate)
+            .collect();
+        let agents_files = discover_session_agents_files()
+            .into_iter()
+            .map(|file| DiscoveryAgentsFile {
+                file_path: file.file_path,
+                content: file.content,
+            })
+            .collect();
+        (skills, agents_files)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     messages.push(HarnessInputMessage::emit_transient(
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             ExtensionSessionDiscoverySnapshotDeclared {
@@ -2395,12 +2479,17 @@ fn system_time_to_discovery_micros(time: std::time::SystemTime) -> Option<Discov
     }
 }
 
-fn publish_agent_discovery_snapshot(loaded: &SessionAgentLoaded, tx: &Output) {
+fn publish_agent_discovery_snapshot(
+    loaded: &SessionAgentLoaded,
+    tx: &Output,
+    discovery_policy: DiscoverySourcePolicy,
+) {
     publish_agent_discovery_snapshot_for(
         loaded.session_id.clone(),
         loaded.agent_id.clone(),
         loaded.agent_initialization_id.clone(),
         tx,
+        discovery_policy,
     );
 }
 
@@ -2409,12 +2498,13 @@ fn publish_agent_discovery_snapshot_for(
     agent_id: tau_proto::AgentId,
     agent_initialization_id: tau_proto::AgentInitializationId,
     tx: &Output,
+    discovery_policy: DiscoverySourcePolicy,
 ) {
     let session = SessionStarted {
         session_id: session_id.clone(),
         reason: tau_proto::SessionStartReason::Resume,
     };
-    let messages = build_session_started_messages(session);
+    let messages = build_session_started_messages(session, discovery_policy);
     for message in messages {
         match message {
             HarnessInputMessage::Emit(emit) => {

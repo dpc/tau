@@ -12,6 +12,13 @@ use tau_test_support::TestRuntime;
 #[test]
 fn socket_transport_supports_later_attached_end_to_end_clients() {
     let runtime = TestRuntime::new().expect("runtime should be created");
+    let fixture_project = runtime.state_dir.join("test-project");
+    std::fs::create_dir(&fixture_project).expect("fixture project directory");
+    std::fs::write(
+        fixture_project.join("Cargo.toml"),
+        "[package]\nname = \"socket-fixture\"\n",
+    )
+    .expect("fixture manifest");
     let daemon = runtime.spawn_daemon("session-1", Some(2));
     runtime
         .wait_until_ready(Duration::from_secs(2))

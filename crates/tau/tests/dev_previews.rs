@@ -1,8 +1,12 @@
 use std::ffi as path_std_ffi;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command as path_std_process_Command, Output};
 
 use tempfile::TempDir;
+
+mod support;
+
+use support::isolated_tau_command;
 
 fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
     preview_at(home.path(), environment, args)
@@ -10,23 +14,8 @@ fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
 
 fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
     let work = home.join("work");
-    let runtime = home.join(".runtime");
-    std::fs::create_dir_all(&work).expect("create preview cwd");
-    std::fs::create_dir_all(&runtime).expect("create preview runtime");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tau"));
-    command
-        .current_dir(work)
-        .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_STATE_HOME", home.join(".state"))
-        .env("XDG_CACHE_HOME", home.join(".cache"))
-        .env("XDG_DATA_HOME", home.join(".data"))
-        .env("XDG_RUNTIME_DIR", runtime)
-        .env_remove("TAU_ENABLE_EXTENSIONS")
-        .env_remove("TAU_PROFILE")
-        .env_remove(tau_harness::ROLE_CLI_OVERRIDES_ENV)
-        .env_remove(tau_harness::STARTUP_ROLE_ENV)
-        .args(args);
+    let mut command = isolated_tau_command(env!("CARGO_BIN_EXE_tau"), home);
+    command.current_dir(work).args(args);
     if let Some(environment) = environment {
         command.env("TAU_ENABLE_EXTENSIONS", environment);
     }
@@ -306,6 +295,125 @@ fn previews_use_configured_default_role_unless_overridden() {
     assert_eq!(tool_names(&explicit_tools), ["grep"]);
 }
 
+/// Ensures CLI subprocess fixtures clear inherited Tau profile, transport,
+/// secret, home, and XDG inputs before installing their private roots.
+#[test]
+fn preview_subprocesses_ignore_ambient_tau_environment() {
+    let ambient_home = TempDir::new().expect("ambient home");
+    let ambient_config_dir = ambient_home.path().join(".config/tau");
+    std::fs::create_dir_all(&ambient_config_dir).expect("ambient config directory");
+    std::fs::write(
+        ambient_config_dir.join("harness.yaml"),
+        "agents:\n  default_role: ambient-role\n",
+    )
+    .expect("ambient harness configuration");
+
+    let output = path_std_process_Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "preview_subprocesses_ignore_ambient_tau_environment_child",
+        ])
+        .env("TAU_PROFILE", "ambient-profile")
+        .env(tau_harness::ROLE_CLI_OVERRIDES_ENV, r#"["ambient-role"]"#)
+        .env(
+            tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+            r#"["ambient-config"]"#,
+        )
+        .env(tau_harness::STARTUP_ROLE_ENV, "ambient-role")
+        .env("TAU_SECRET_AMBIENT_REGRESSION", "must-not-be-forwarded")
+        .env("HOME", ambient_home.path())
+        .env("XDG_CONFIG_HOME", ambient_home.path().join(".config"))
+        .env("XDG_STATE_HOME", ambient_home.path().join(".state"))
+        .env("XDG_CACHE_HOME", ambient_home.path().join(".cache"))
+        .env("XDG_DATA_HOME", ambient_home.path().join(".data"))
+        .env("XDG_RUNTIME_DIR", ambient_home.path().join(".runtime"))
+        .output()
+        .expect("run isolated fixture child");
+    assert!(
+        output.status.success(),
+        "fixture child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Runs the private preview fixture beneath a poisoned parent environment.
+#[test]
+#[ignore = "run only through the isolated parent regression"]
+fn preview_subprocesses_ignore_ambient_tau_environment_child() {
+    for (key, value) in [
+        ("TAU_PROFILE", "ambient-profile"),
+        (tau_harness::ROLE_CLI_OVERRIDES_ENV, r#"["ambient-role"]"#),
+        (
+            tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+            r#"["ambient-config"]"#,
+        ),
+        (tau_harness::STARTUP_ROLE_ENV, "ambient-role"),
+        ("TAU_SECRET_AMBIENT_REGRESSION", "must-not-be-forwarded"),
+    ] {
+        assert_eq!(std::env::var(key).as_deref(), Ok(value));
+    }
+
+    let home = TempDir::new().expect("private home");
+    let clean_environment = isolated_tau_command(
+        std::env::current_exe().expect("test executable"),
+        home.path(),
+    )
+    .args([
+        "--ignored",
+        "--exact",
+        "preview_subprocesses_ignore_ambient_tau_environment_clean_child",
+    ])
+    .output()
+    .expect("run clean-environment fixture child");
+    assert!(
+        clean_environment.status.success(),
+        "clean environment child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&clean_environment.stdout),
+        String::from_utf8_lossy(&clean_environment.stderr)
+    );
+
+    let config_dir = home.path().join(".config/tau");
+    std::fs::create_dir_all(&config_dir).expect("private config directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+agents:
+  default_role: private-role
+  role_groups:
+    fixture:
+      roles:
+        private-role:
+          prompt_fragments:
+            - name: fixture.private
+              priority: 10
+              text: PRIVATE PREVIEW FIXTURE
+"#,
+    )
+    .expect("private harness configuration");
+
+    let output = preview(&home, None, &["dev", "print-prompt"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PRIVATE PREVIEW FIXTURE"));
+}
+
+/// Verifies the reusable subprocess helper removes every poisoned startup
+/// input.
+#[test]
+#[ignore = "run only through the isolated parent regression"]
+fn preview_subprocesses_ignore_ambient_tau_environment_clean_child() {
+    for key in [
+        "TAU_PROFILE",
+        tau_harness::ROLE_CLI_OVERRIDES_ENV,
+        tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+        tau_harness::STARTUP_ROLE_ENV,
+        "TAU_SECRET_AMBIENT_REGRESSION",
+    ] {
+        assert!(std::env::var(key).is_err(), "{key} leaked into fixture");
+    }
+}
+
 /// Proves tool previews expose a disabled-by-default extension from the public
 /// environment and apply later CLI disable/re-enable operations in argv order.
 #[test]
@@ -382,14 +490,7 @@ fn previews_reject_non_utf8_extension_environment() {
 
     for command_name in ["print-prompt", "print-tools"] {
         let home = TempDir::new().expect("temporary home");
-        let work = home.path().join("work");
-        std::fs::create_dir_all(&work).expect("create preview cwd");
-        let output = Command::new(env!("CARGO_BIN_EXE_tau"))
-            .current_dir(work)
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join(".config"))
-            .env("XDG_STATE_HOME", home.path().join(".state"))
-            .env_remove("TAU_PROFILE")
+        let output = isolated_tau_command(env!("CARGO_BIN_EXE_tau"), home.path())
             .env(
                 "TAU_ENABLE_EXTENSIONS",
                 path_std_ffi::OsString::from_vec(vec![0xff]),
