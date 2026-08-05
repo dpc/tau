@@ -3,6 +3,24 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use super::*;
+
+/// The serialized cache usage capability reaches the finite backend attempt
+/// without URL- or model-based inference.
+#[test]
+fn cache_usage_capability_lowers_explicitly() {
+    let compat: super::super::ChatCompletionsCompat =
+        serde_json::from_value(serde_json::json!({"cache_usage": "deep_seek"}))
+            .expect("declared DeepSeek compatibility");
+
+    assert_eq!(
+        lower_compat(compat).cache_usage,
+        tau_provider_chat_completions::CacheUsageCompat::DeepSeek
+    );
+    assert_eq!(
+        lower_compat(Default::default()).cache_usage,
+        tau_provider_chat_completions::CacheUsageCompat::None
+    );
+}
 use crate::chat_completions::{
     LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
 };

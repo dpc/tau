@@ -176,8 +176,9 @@ Legacy publishers that omit it decode as `true`; publishers serialize their
 effective value explicitly.
 
 `ProviderModelInfo` also carries optional fixed-point estimated USD prices per
-million uncached input, provider-reported cached input, and output tokens.
-Omitted categories resolve independently to the central GPT-5.6-equivalent
-fallback. These values are basic equivalent-API comparison metadata, not billing
-facts; provider declarations must reject negative, malformed, or over-precise
-decimals.
+million ordinary input, provider-reported cached reads, cache writes, output
+tokens, and cache token-hours. Omitted ordinary/read/output categories resolve
+independently to the central GPT-5.6-equivalent fallback. An omitted cache-write
+rate uses ordinary input; omitted storage has no charge. These values are basic
+equivalent-API comparison metadata, not billing facts; provider declarations
+must reject negative, malformed, or over-precise decimals.

@@ -1080,15 +1080,17 @@ fn model_info(
             .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
         est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
         est_cached_input_cost_1m_usd: Some(prices.cached_input),
+        est_cache_write_input_cost_1m_usd: prices.cache_write_input,
         est_output_cost_1m_usd: Some(prices.output),
+        est_cache_storage_cost_1m_token_hour_usd: prices.storage_per_million_token_hour,
     }
 }
 
 /// Basic standard-processing API prices from OpenAI's provider-owned table:
 /// <https://developers.openai.com/api/docs/pricing>.
 ///
-/// Tau deliberately ignores tiers, cache writes, batch discounts, and service
-/// variants. These values are estimates for equivalent API use even when the
+/// Tau deliberately ignores tiers, batch discounts, and service variants.
+/// These values are estimates for equivalent API use even when the
 /// actual ChatGPT route is subscription-backed.
 fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
     use tau_proto::{EstimatedApiCostRates, EstimatedUsdPerMillion as Price};
@@ -1105,7 +1107,11 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
     EstimatedApiCostRates {
         uncached_input: Price::from_micro_usd(uncached),
         cached_input: Price::from_micro_usd(cached),
+        cache_write_input: model
+            .starts_with("gpt-5.6")
+            .then(|| Price::from_micro_usd(uncached.saturating_mul(5) / 4)),
         output: Price::from_micro_usd(output),
+        storage_per_million_token_hour: None,
     }
 }
 

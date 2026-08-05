@@ -28,6 +28,95 @@ fn stream_usage_distinguishes_absent_from_zero() {
     assert_eq!(usage.response_received_tokens, 0);
 }
 
+/// Cache counters are ignored unless the configured route explicitly declares
+/// the matching OpenAI-compatible usage schema.
+#[test]
+fn cache_usage_requires_explicit_route_capability() {
+    let wire_usage = serde_json::json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "prompt_tokens_details": {
+            "cached_tokens": 80,
+            "cache_write_tokens": 10
+        }
+    });
+    let mut disabled = StreamState::new();
+    capture_usage(&mut disabled, &wire_usage);
+    let disabled = disabled.usage().expect("ordinary usage remains available");
+    assert_eq!(disabled.prompt_cached_tokens, 0);
+    assert_eq!(disabled.cache, None);
+
+    let mut enabled = StreamState::new_with_cache_usage(CacheUsageCompat::OpenAi);
+    capture_usage(&mut enabled, &wire_usage);
+    let enabled = enabled.usage().expect("explicit cache usage");
+    let cache = enabled.cache.expect("normalized cache observations");
+    assert_eq!(cache.read_tokens, Some(80));
+    assert_eq!(cache.write_tokens, Some(10));
+    assert_eq!(cache.avoided_prefill_tokens, Some(80));
+}
+
+/// An explicitly reported zero cache read remains distinguishable from a
+/// missing cache observation on a capable route.
+#[test]
+fn explicit_zero_cache_usage_remains_present() {
+    let mut state = StreamState::new_with_cache_usage(CacheUsageCompat::OpenAi);
+    capture_usage(
+        &mut state,
+        &serde_json::json!({
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }),
+    );
+
+    let cache = state
+        .usage()
+        .expect("explicit zero usage")
+        .cache
+        .expect("explicit zero cache observation");
+    assert_eq!(cache.read_tokens, Some(0));
+
+    let mut absent = StreamState::new_with_cache_usage(CacheUsageCompat::OpenAi);
+    capture_usage(
+        &mut absent,
+        &serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 1
+        }),
+    );
+    assert_eq!(
+        absent.usage().expect("ordinary usage").cache,
+        None,
+        "a capable route must not invent missing cache observations"
+    );
+}
+
+/// DeepSeek hit and miss fields use their declared schema and contradictory
+/// counters clamp deterministically in read-then-write-then-miss order.
+#[test]
+fn deepseek_cache_usage_normalizes_contradictory_counters() {
+    let mut state = StreamState::new_with_cache_usage(CacheUsageCompat::DeepSeek);
+    capture_usage(
+        &mut state,
+        &serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 90,
+            "prompt_cache_miss_tokens": 90
+        }),
+    );
+
+    let usage = state.usage().expect("DeepSeek usage");
+    let cache = usage.cache.expect("DeepSeek cache observations");
+    assert_eq!(cache.read_tokens, Some(90));
+    assert_eq!(cache.miss_tokens, Some(10));
+    assert_eq!(
+        cache.expiry_confidence,
+        Some(tau_proto::ProviderCacheExpiryConfidence::Probabilistic)
+    );
+    assert_eq!(cache.hit_ratio_millionths(), Some(900_000));
+}
+
 /// Ensures historical XML-escaped and current exact-close web results remain
 /// byte-for-byte intact on the Chat Completions native tool-result path.
 #[test]
@@ -77,6 +166,7 @@ fn provider() -> TestProvider {
             prompt_cache_key: true,
             reasoning_effort: true,
             max_completion_tokens: true,
+            cache_usage: CacheUsageCompat::None,
         },
     }
 }

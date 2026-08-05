@@ -120,6 +120,7 @@ fn reply_for_prompt(prompt: &AgentPromptCreated) -> StrictProviderReply {
             prompt_sent_tokens: 100,
             prompt_cached_tokens: 0,
             prompt_cache_read_ceiling_tokens: None,
+            cache: None,
             response_received_tokens: 1,
             stats: Default::default(),
         }),
@@ -167,7 +168,9 @@ fn write_startup(
                 standalone_compaction_threshold: Some(50),
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
+                est_cache_write_input_cost_1m_usd: Default::default(),
                 est_output_cost_1m_usd: Default::default(),
+                est_cache_storage_cost_1m_token_hour_usd: None,
             }],
         },
     )))?;

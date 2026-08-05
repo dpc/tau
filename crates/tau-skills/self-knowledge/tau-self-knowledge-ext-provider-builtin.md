@@ -133,16 +133,26 @@ declarations described above.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
 Compatible model entries may also set
-`est_uncached_input_cost_1m_usd`, `est_cached_input_cost_1m_usd`, and
-`est_output_cost_1m_usd` to non-negative decimal USD prices per million
-tokens. Use quoted decimal strings for fractional prices; integer JSON numbers
+`est_uncached_input_cost_1m_usd`, `est_cached_input_cost_1m_usd`,
+`est_cache_write_input_cost_1m_usd`, and `est_output_cost_1m_usd` to
+non-negative decimal USD prices per million tokens. They may set
+`est_cache_storage_cost_1m_token_hour_usd` per million token-hours. Use quoted
+decimal strings for fractional prices; integer JSON numbers
 are also accepted. Missing values resolve built-in default prices for known
 compatible model ids (currently `deepseek-v4-flash` from DeepSeek's standard API
 pricing) and otherwise use the central GPT-5.6-equivalent `$5`/`$.50`/`$30`
 fallback, including local and free models; explicit profile prices always take
 precedence. Hardcoded ChatGPT model values follow OpenAI's basic public API
-pricing table. The harness accumulates this deliberately rough equivalent-API
-estimate per agent for the current runtime only.
+pricing table. A missing write price uses ordinary input; missing storage usage
+or price contributes no storage charge. The harness accumulates ordinary input,
+cache reads, cache writes, output, and reported token-time storage into this
+deliberately rough equivalent-API estimate per agent for the current runtime
+only.
+
+Chat Completions cache counters are ignored by default. Set
+`compat.cache_usage` to `open_ai` or `deep_seek` only when the exact route uses
+that response schema. Unsupported Anthropic/Gemini-compatible cache details
+remain absent; the extension has no native cache-object lifecycle client.
 
 ChatGPT's full account quota snapshot is acquired best-effort from `/wham/usage`
 and reconciled with sparse in-band WebSocket `codex.rate_limits` observations

@@ -2911,6 +2911,7 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
         prompt_sent_tokens: input_tokens,
         prompt_cached_tokens: input_tokens / 2,
         prompt_cache_read_ceiling_tokens: None,
+        cache: None,
         response_received_tokens: 10,
         stats: Default::default(),
     });
@@ -5749,7 +5750,9 @@ fn provider_model_info(
         standalone_compaction_threshold: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
+        est_cache_write_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),
+        est_cache_storage_cost_1m_token_hour_usd: None,
     }
 }
 
@@ -8065,7 +8068,9 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                         tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
                     est_cached_input_cost_1m_usd:
                         tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
+                    est_cache_write_input_cost_1m_usd: None,
                     est_output_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
+                    est_cache_storage_cost_1m_token_hour_usd: None,
                 }],
             },
         )),
@@ -8102,7 +8107,9 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
             est_cached_input_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
+            est_cache_write_input_cost_1m_usd: None,
             est_output_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     );
     h.provider_model_routes.insert(
@@ -8243,7 +8250,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     standalone_compaction_threshold: None,
                     est_uncached_input_cost_1m_usd: Default::default(),
                     est_cached_input_cost_1m_usd: Default::default(),
+                    est_cache_write_input_cost_1m_usd: Default::default(),
                     est_output_cost_1m_usd: Default::default(),
+                    est_cache_storage_cost_1m_token_hour_usd: None,
                 }],
             },
         )),
@@ -8269,7 +8278,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     );
     h.provider_model_routes.insert(
@@ -8621,6 +8632,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -8756,6 +8768,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9314,6 +9327,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9546,6 +9560,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9613,6 +9628,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9699,6 +9715,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9764,6 +9781,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9810,6 +9828,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9880,6 +9899,7 @@ fn model_switch_invalidates_chain_anchor() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9959,6 +9979,7 @@ fn params_drift_invalidates_chain_anchor() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -10036,6 +10057,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -10127,6 +10149,7 @@ fn tools_drift_invalidates_chain_anchor() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -10216,6 +10239,7 @@ fn stable_params_preserve_chain_anchor() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -10284,6 +10308,7 @@ fn missing_response_id_leaves_chain_unset() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -10363,6 +10388,7 @@ fn queued_prompt_extends_completed_first_prompt() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -11674,6 +11700,7 @@ fn finished_response_injects_crossed_context_size_alert() {
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
         prompt_cache_read_ceiling_tokens: None,
+        cache: None,
         response_received_tokens: 2,
         stats: Default::default(),
     });
@@ -11765,6 +11792,7 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
         prompt_cache_read_ceiling_tokens: None,
+        cache: None,
         response_received_tokens: 2,
         stats: Default::default(),
     });
@@ -11814,6 +11842,7 @@ fn failed_response_does_not_inject_context_size_alert() {
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
         prompt_cache_read_ceiling_tokens: None,
+        cache: None,
         response_received_tokens: 0,
         stats: Default::default(),
     });
@@ -11863,6 +11892,7 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
         prompt_cache_read_ceiling_tokens: None,
+        cache: None,
         response_received_tokens: 1,
         stats: Default::default(),
     });
@@ -11913,6 +11943,7 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
         prompt_cache_read_ceiling_tokens: None,
+        cache: None,
         response_received_tokens: 1,
         stats: Default::default(),
     });
@@ -16490,7 +16521,9 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     );
 }
@@ -23093,6 +23126,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -23212,6 +23246,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -24358,6 +24393,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -24502,6 +24538,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -24661,6 +24698,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -24784,6 +24822,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -25003,6 +25042,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -25067,6 +25107,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -29122,6 +29163,7 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
             prompt_sent_tokens: 1_000_000,
             prompt_cached_tokens: 0,
             prompt_cache_read_ceiling_tokens: None,
+            cache: None,
             response_received_tokens: 0,
             stats: Default::default(),
         }),
@@ -29188,6 +29230,10 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
     let mut model_info = provider_model_info(model.clone(), 1_000_000);
     model_info.est_uncached_input_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
+    model_info.est_cached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(1);
+    model_info.est_cache_write_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(3);
     h.provider_model_info.insert(model.clone(), model_info);
     let prompt_id = h.agents[&child_cid]
         .in_flight_prompt
@@ -29199,8 +29245,15 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
     let usage = tau_proto::ProviderTokenUsage {
         model: Some(model),
         prompt_sent_tokens: 1_000_000,
-        prompt_cached_tokens: 0,
+        prompt_cached_tokens: 10,
         prompt_cache_read_ceiling_tokens: None,
+        cache: Some(Box::new(tau_proto::ProviderCacheUsage {
+            read_tokens: Some(100_000),
+            write_tokens: Some(900_000),
+            refresh_reason: Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest),
+            expiry_confidence: Some(tau_proto::ProviderCacheExpiryConfidence::Unknown),
+            ..Default::default()
+        })),
         response_received_tokens: 0,
         stats: Default::default(),
     };
@@ -29211,7 +29264,7 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
 
     let child_stats = h.agent_stats_snapshot(&child_id).expect("child stats");
     let parent_stats = h.agent_stats_snapshot(&parent_id).expect("parent stats");
-    let expected = tau_proto::EstimatedApiCost::from_picodollars(2_000_000_000_000);
+    let expected = tau_proto::EstimatedApiCost::from_picodollars(2_800_000_000_000);
     assert_eq!(child_stats.estimated_api_cost, expected);
     assert_eq!(child_stats.creator_subtree_estimated_api_cost, expected);
     assert_eq!(parent_stats.estimated_api_cost, Default::default());
@@ -29229,13 +29282,18 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
     let canonical_usage = canonical.usage.as_ref().expect("canonical response usage");
     assert_eq!(canonical_usage.prompt_sent_tokens, usage.prompt_sent_tokens);
     assert_eq!(
-        canonical_usage.prompt_cached_tokens,
-        usage.prompt_cached_tokens
-    );
-    assert_eq!(
         canonical_usage.response_received_tokens,
         usage.response_received_tokens
     );
+    assert_eq!(canonical_usage.prompt_cached_tokens, 100_000);
+    assert_eq!(
+        canonical_usage
+            .cache
+            .as_deref()
+            .and_then(|cache| cache.read_tokens),
+        Some(100_000)
+    );
+    assert_eq!(canonical_usage.stats.total.cached_tokens, 100_000);
     assert_eq!(canonical.estimated_api_cost_rates, Some(captured_rates));
     assert_eq!(canonical.estimated_api_cost_increment, Some(expected));
     assert!(
@@ -29477,6 +29535,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -29542,6 +29601,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -29615,6 +29675,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -29772,6 +29833,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -29831,6 +29893,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -29958,6 +30021,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -30022,6 +30086,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -30149,6 +30214,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -30208,6 +30274,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -33030,6 +33097,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
             prompt_sent_tokens: 999,
             prompt_cached_tokens: 111,
             prompt_cache_read_ceiling_tokens: None,
+            cache: None,
             response_received_tokens: 7,
             stats: Default::default(),
         }),

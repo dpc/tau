@@ -310,6 +310,7 @@ fn published_line_preserves_enriched_token_usage() {
             prompt_sent_tokens: 1000,
             prompt_cached_tokens: 800,
             prompt_cache_read_ceiling_tokens: None,
+            cache: None,
             response_received_tokens: 42,
             stats: tau_proto::TokenUsageStats::default(),
         }),

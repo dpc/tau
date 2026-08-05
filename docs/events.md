@@ -368,7 +368,11 @@ their selected models.
   reported all-zero usage record remains present zero. Harness-selected
   estimated cost rates and increment are present only with usage, and a
   calculated zero increment remains present zero. The nested cumulative usage
-  snapshot is presentation state, not durable accounting input.
+  snapshot is presentation state, not durable accounting input. Optional
+  privacy-redacted cache usage carries read/write/miss and token-time storage
+  observations, cacheable-prefix and avoided-prefill estimates, refresh reason,
+  and expiry confidence, but never prompt content or cache keys. Contradictory
+  token classes clamp against total input in read, write, then miss order.
   Successful responses and retryable attempts omit context-limit telemetry. Routed by the harness
   based on the originator.
 - **`provider.tool_result`** / **`provider.tool_error`** — Provider-facing

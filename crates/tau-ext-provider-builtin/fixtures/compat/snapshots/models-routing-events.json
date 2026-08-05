@@ -79,7 +79,7 @@
           ],
           "stop_reason": "end_turn",
           "usage": {
-            "prompt_cached_tokens": 4,
+            "prompt_cached_tokens": 0,
             "prompt_sent_tokens": 10,
             "response_received_tokens": 2,
             "stats": {
@@ -175,7 +175,7 @@
           ],
           "stop_reason": "end_turn",
           "usage": {
-            "prompt_cached_tokens": 4,
+            "prompt_cached_tokens": 0,
             "prompt_sent_tokens": 10,
             "response_received_tokens": 2,
             "stats": {
@@ -251,6 +251,12 @@
           "provider_response_id": "resp-compat",
           "stop_reason": "end_turn",
           "usage": {
+            "cache": {
+              "avoided_prefill_tokens": 4,
+              "expiry_confidence": "unknown",
+              "read_tokens": 4,
+              "refresh_reason": "ordinary_request"
+            },
             "prompt_cached_tokens": 4,
             "prompt_sent_tokens": 10,
             "response_received_tokens": 2,
@@ -287,6 +293,7 @@
         "max"
       ],
       "est_cached_input_cost_1m_usd": "0.5",
+      "est_cache_write_input_cost_1m_usd": "6.25",
       "est_output_cost_1m_usd": "30",
       "est_uncached_input_cost_1m_usd": "5",
       "id": "chatgpt/gpt-5.6-sol",
@@ -335,6 +342,7 @@
         "max"
       ],
       "est_cached_input_cost_1m_usd": "0.2",
+      "est_cache_write_input_cost_1m_usd": "2.5",
       "est_output_cost_1m_usd": "12",
       "est_uncached_input_cost_1m_usd": "2",
       "id": "chatgpt/gpt-5.6-terra",
@@ -383,6 +391,7 @@
         "max"
       ],
       "est_cached_input_cost_1m_usd": "0.02",
+      "est_cache_write_input_cost_1m_usd": "0.25",
       "est_output_cost_1m_usd": "1.2",
       "est_uncached_input_cost_1m_usd": "0.2",
       "id": "chatgpt/gpt-5.6-luna",

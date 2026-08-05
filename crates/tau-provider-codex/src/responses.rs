@@ -1368,6 +1368,15 @@ fn apply_terminal_event(state: &mut StreamState, event: &serde_json::Value) {
             })
             .or_else(|| event["usage"]["input_tokens_details"]["cached_tokens"].as_u64());
     }
+    if state.cache_write_tokens.is_none() {
+        state.cache_write_tokens = event
+            .get("response")
+            .and_then(|response| {
+                response["usage"]["input_tokens_details"]["cache_write_tokens"].as_u64()
+            })
+            .or_else(|| event["usage"]["input_tokens_details"]["cache_write_tokens"].as_u64())
+            .or_else(|| terminal_usage_u64(event, "cache_write_tokens"));
+    }
     if state.output_tokens.is_none() {
         state.output_tokens = terminal_usage_u64(event, "output_tokens");
     }

@@ -2990,9 +2990,15 @@ pub struct ProviderModelInfo {
     /// Estimated USD price per million provider-reported cached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cached_input_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million cache-write input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cache_write_input_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,
     /// Estimated USD price per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_output_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,
+    /// Estimated USD storage price per million token-hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cache_storage_cost_1m_token_hour_usd: Option<crate::EstimatedUsdPerMillionTokenHours>,
 }
 
 impl ProviderModelInfo {
@@ -3007,9 +3013,11 @@ impl ProviderModelInfo {
             cached_input: self
                 .est_cached_input_cost_1m_usd
                 .unwrap_or(crate::ESTIMATED_API_COST_FALLBACK.cached_input),
+            cache_write_input: self.est_cache_write_input_cost_1m_usd,
             output: self
                 .est_output_cost_1m_usd
                 .unwrap_or(crate::ESTIMATED_API_COST_FALLBACK.output),
+            storage_per_million_token_hour: self.est_cache_storage_cost_1m_token_hour_usd,
         }
     }
 }

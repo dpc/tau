@@ -1234,14 +1234,38 @@ fn append_text(message: &mut MessageItem, text: &str) {
 
 fn parse_usage(value: Option<&Value>) -> Option<ProviderTokenUsage> {
     let value = value?;
+    let input = value["input_tokens"].as_u64()?;
+    let reads = value
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64);
+    let writes = value
+        .pointer("/input_tokens_details/cache_write_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| value["cache_write_tokens"].as_u64());
+    let cache = (reads.is_some() || writes.is_some()).then(|| {
+        Box::new(
+            tau_proto::ProviderCacheUsage {
+                read_tokens: reads,
+                write_tokens: writes,
+                miss_tokens: None,
+                cacheable_prefix_tokens: None,
+                refresh_reason: Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest),
+                expiry_confidence: Some(tau_proto::ProviderCacheExpiryConfidence::Unknown),
+                avoided_prefill_tokens: reads,
+                storage_token_micros: None,
+            }
+            .normalized(input),
+        )
+    });
     Some(ProviderTokenUsage {
         model: None,
-        prompt_sent_tokens: value["input_tokens"].as_u64()?,
-        prompt_cached_tokens: value
-            .pointer("/input_tokens_details/cached_tokens")
-            .and_then(Value::as_u64)
+        prompt_sent_tokens: input,
+        prompt_cached_tokens: cache
+            .as_deref()
+            .and_then(|cache| cache.read_tokens)
             .unwrap_or(0),
         prompt_cache_read_ceiling_tokens: None,
+        cache,
         response_received_tokens: value["output_tokens"].as_u64()?,
         stats: Default::default(),
     })

@@ -1159,7 +1159,9 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
+            est_cache_write_input_cost_1m_usd: None,
             est_output_cost_1m_usd: None,
+            est_cache_storage_cost_1m_token_hour_usd: None,
         });
     }
     if models.is_empty() {
@@ -1183,7 +1185,9 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
                     supports_parallel_tool_calls: true,
                     est_uncached_input_cost_1m_usd: None,
                     est_cached_input_cost_1m_usd: None,
+                    est_cache_write_input_cost_1m_usd: None,
                     est_output_cost_1m_usd: None,
+                    est_cache_storage_cost_1m_token_hour_usd: None,
                 })
             })
         })

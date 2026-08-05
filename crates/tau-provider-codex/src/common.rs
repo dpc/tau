@@ -453,6 +453,8 @@ pub struct StreamState {
     pub(crate) output_items: Vec<OutputItemAccumulator>,
     pub(crate) input_tokens: Option<u64>,
     pub(crate) cached_tokens: Option<u64>,
+    /// Provider-reported cache-write input tokens.
+    pub(crate) cache_write_tokens: Option<u64>,
     /// Exact response-local cache-read ceiling established by request lowering.
     pub(crate) prompt_cache_read_ceiling_tokens: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
@@ -655,6 +657,7 @@ impl StreamState {
             output_items: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            cache_write_tokens: None,
             prompt_cache_read_ceiling_tokens: None,
             output_tokens: None,
             thinking: None,
@@ -1138,8 +1141,27 @@ impl StreamState {
             return None;
         }
         let input = self.input_tokens.unwrap_or(0);
-        let cached = self.cached_tokens.unwrap_or(0);
+        let cached = self.cached_tokens.unwrap_or(0).min(input);
         let output = self.output_tokens.unwrap_or(0);
+        let read_tokens = self.cached_tokens.map(|tokens| tokens.min(input));
+        let cache = (read_tokens.is_some()
+            || self.cache_write_tokens.is_some()
+            || self.prompt_cache_read_ceiling_tokens.is_some())
+        .then(|| {
+            Box::new(
+                tau_proto::ProviderCacheUsage {
+                    read_tokens,
+                    write_tokens: self.cache_write_tokens,
+                    miss_tokens: None,
+                    cacheable_prefix_tokens: self.prompt_cache_read_ceiling_tokens,
+                    refresh_reason: Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest),
+                    expiry_confidence: Some(tau_proto::ProviderCacheExpiryConfidence::Unknown),
+                    avoided_prefill_tokens: read_tokens,
+                    storage_token_micros: None,
+                }
+                .normalized(input),
+            )
+        });
         Some(ProviderTokenUsage {
             model: None,
             prompt_sent_tokens: input,
@@ -1147,6 +1169,7 @@ impl StreamState {
             prompt_cache_read_ceiling_tokens: (!self.stale_chain_fallback)
                 .then_some(self.prompt_cache_read_ceiling_tokens)
                 .flatten(),
+            cache,
             response_received_tokens: output,
             stats: Default::default(),
         })

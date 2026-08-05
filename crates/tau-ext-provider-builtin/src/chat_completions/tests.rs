@@ -294,7 +294,9 @@ fn unpriced_local_model_uses_central_fallback() {
             local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
+            est_cache_write_input_cost_1m_usd: None,
             est_output_cost_1m_usd: None,
+            est_cache_storage_cost_1m_token_hour_usd: None,
         }],
         ..ChatCompletionsProvider::default()
     };
@@ -348,7 +350,9 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
             local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
+            est_cache_write_input_cost_1m_usd: None,
             est_output_cost_1m_usd: None,
+            est_cache_storage_cost_1m_token_hour_usd: None,
         }],
         ..ChatCompletionsProvider::default()
     };
@@ -427,7 +431,9 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
             local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         }],
         ..ChatCompletionsProvider::default()
     };

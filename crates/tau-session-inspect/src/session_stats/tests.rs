@@ -74,7 +74,9 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     let rates = EstimatedApiCostRates {
         uncached_input: EstimatedUsdPerMillion::checked_from_usd(1).expect("rate"),
         cached_input: EstimatedUsdPerMillion::checked_from_usd(1).expect("rate"),
+        cache_write_input: None,
         output: EstimatedUsdPerMillion::checked_from_usd(1).expect("rate"),
+        storage_per_million_token_hour: None,
     };
     let mut events = vec![
         record(
@@ -146,6 +148,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                     prompt_sent_tokens: 100,
                     prompt_cached_tokens: 60,
                     prompt_cache_read_ceiling_tokens: None,
+                    cache: None,
                     response_received_tokens: 20,
                     stats: tau_proto::TokenUsageStats {
                         total: tau_proto::TokenUsageCounts {

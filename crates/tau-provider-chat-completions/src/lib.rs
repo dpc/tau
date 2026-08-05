@@ -114,6 +114,20 @@ pub struct AttemptCompat {
     pub reasoning_effort: bool,
     /// Use `max_completion_tokens` rather than `max_tokens`.
     pub max_completion_tokens: bool,
+    /// Explicit provider usage schema accepted from this route.
+    pub cache_usage: CacheUsageCompat,
+}
+
+/// Provider-specific cache usage wire schema selected by configuration.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CacheUsageCompat {
+    /// Ignore cache-specific usage fields.
+    #[default]
+    None,
+    /// Parse OpenAI-compatible cached-read and cache-write counters.
+    OpenAi,
+    /// Parse DeepSeek-compatible cache hit and miss counters.
+    DeepSeek,
 }
 
 /// Model wire identity for one attempt.
@@ -460,6 +474,9 @@ struct StreamState {
     tool_call_output_indices: HashMap<usize, usize>,
     input_tokens: Option<u64>,
     cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    cache_miss_tokens: Option<u64>,
+    cache_usage: CacheUsageCompat,
     output_tokens: Option<u64>,
     stop_reason: ProviderStopReason,
     repetition_guard: StreamRepetitionGuard,
@@ -468,7 +485,13 @@ struct StreamState {
 }
 
 impl StreamState {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::new_with_cache_usage(CacheUsageCompat::None)
+    }
+
+    /// Construct empty parser state for an explicitly enabled cache schema.
+    fn new_with_cache_usage(cache_usage: CacheUsageCompat) -> Self {
         Self {
             text: String::new(),
             thinking: String::new(),
@@ -478,6 +501,9 @@ impl StreamState {
             tool_call_output_indices: HashMap::new(),
             input_tokens: None,
             cached_tokens: None,
+            cache_write_tokens: None,
+            cache_miss_tokens: None,
+            cache_usage,
             output_tokens: None,
             stop_reason: ProviderStopReason::EndTurn,
             repetition_guard: StreamRepetitionGuard::new(),
@@ -649,13 +675,21 @@ impl StreamState {
             return None;
         }
         let input = self.input_tokens.unwrap_or(0);
-        let cached = self.cached_tokens.unwrap_or(0);
+        let cached = self.cached_tokens.unwrap_or(0).min(input);
         let output = self.output_tokens.unwrap_or(0);
+        let cache = normalize_cache_usage(
+            self.cache_usage,
+            input,
+            self.cached_tokens,
+            self.cache_write_tokens,
+            self.cache_miss_tokens,
+        );
         Some(ProviderTokenUsage {
             model: None,
             prompt_sent_tokens: input,
             prompt_cached_tokens: cached,
             prompt_cache_read_ceiling_tokens: None,
+            cache,
             response_received_tokens: output,
             stats: Default::default(),
         })
@@ -1023,7 +1057,7 @@ async fn chat_completions_stream_async(
             None => LlmError::HttpStatus(code, body),
         });
     }
-    let mut state = StreamState::new();
+    let mut state = StreamState::new_with_cache_usage(context.provider.compat.cache_usage);
     let mut raw_events = Vec::new();
     let mut pending = Vec::new();
     let mut last_event_at = Instant::now();
@@ -1928,7 +1962,55 @@ fn flush_pending_content(
 fn capture_usage(state: &mut StreamState, usage: &serde_json::Value) {
     state.input_tokens = usage["prompt_tokens"].as_u64();
     state.output_tokens = usage["completion_tokens"].as_u64();
-    state.cached_tokens = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
+    match state.cache_usage {
+        CacheUsageCompat::None => {}
+        CacheUsageCompat::OpenAi => {
+            state.cached_tokens = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
+            state.cache_write_tokens = usage["prompt_tokens_details"]["cache_write_tokens"]
+                .as_u64()
+                .or_else(|| usage["cache_write_tokens"].as_u64());
+        }
+        CacheUsageCompat::DeepSeek => {
+            state.cached_tokens = usage["prompt_cache_hit_tokens"].as_u64();
+            state.cache_miss_tokens = usage["prompt_cache_miss_tokens"].as_u64();
+        }
+    }
+}
+
+/// Normalize potentially contradictory provider cache counters against total
+/// input.
+fn normalize_cache_usage(
+    capability: CacheUsageCompat,
+    input: u64,
+    reads: Option<u64>,
+    writes: Option<u64>,
+    misses: Option<u64>,
+) -> Option<Box<tau_proto::ProviderCacheUsage>> {
+    if capability == CacheUsageCompat::None
+        || (reads.is_none() && writes.is_none() && misses.is_none())
+    {
+        return None;
+    }
+    Some(Box::new(
+        tau_proto::ProviderCacheUsage {
+            read_tokens: reads,
+            write_tokens: writes,
+            miss_tokens: misses,
+            cacheable_prefix_tokens: None,
+            refresh_reason: Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest),
+            expiry_confidence: Some(match capability {
+                CacheUsageCompat::DeepSeek => {
+                    tau_proto::ProviderCacheExpiryConfidence::Probabilistic
+                }
+                CacheUsageCompat::OpenAi | CacheUsageCompat::None => {
+                    tau_proto::ProviderCacheExpiryConfidence::Unknown
+                }
+            }),
+            avoided_prefill_tokens: reads,
+            storage_token_micros: None,
+        }
+        .normalized(input),
+    ))
 }
 
 fn bounded_provider_error(text: &str) -> String {

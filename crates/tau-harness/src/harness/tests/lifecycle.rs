@@ -518,7 +518,9 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         standalone_compaction_threshold: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
+        est_cache_write_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),
+        est_cache_storage_cost_1m_token_hour_usd: None,
     }
 }
 
@@ -6803,6 +6805,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -7177,6 +7180,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
                 prompt_cache_read_ceiling_tokens: None,
+                cache: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),

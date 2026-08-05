@@ -66,6 +66,20 @@ and response-local cost increment are present exactly when usage is present;
 otherwise all three accounting fields remain absent. The nested cumulative
 usage snapshot is never durable accounting input.
 
+Optional cache usage remains response-local, privacy-redacted metadata. The
+harness normalizes contradictory cache classes against authoritative total input
+in read, write, then miss order; independently bounds cacheable-prefix and
+avoided-prefill estimates; and preserves missing observations as missing.
+When nested cache usage reports a read count, that normalized count is the
+harness-owned cache-read authority for the legacy cached-input counter, session
+totals, cache-read ceiling validation, and cost. Without a nested read count,
+the legacy cached-input counter supplies the normalized read count; a wholly
+absent nested cache observation remains absent.
+Effective cost uses distinct ordinary-input, cached-read, cache-write, output,
+and provider-reported token-time storage classes. A missing write rate preserves
+the prior ordinary-input estimate, while missing storage usage or price adds no
+storage cost. Prompt content and provider cache keys never enter these facts.
+
 Provider-reported terminal usage may also carry an optional response-local
 prompt-cache-read ceiling. The harness preserves this assertion in the
 canonical response only when cached input is less than or equal to the ceiling

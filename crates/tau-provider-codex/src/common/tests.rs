@@ -1,4 +1,22 @@
 use super::*;
+
+/// Contradictory private-route cached input is clamped identically in the
+/// legacy counter and normalized cache observation.
+#[test]
+fn usage_clamps_legacy_and_nested_cache_reads_together() {
+    let mut state = StreamState::new();
+    state.input_tokens = Some(100);
+    state.cached_tokens = Some(200);
+    state.output_tokens = Some(0);
+
+    let usage = state.usage().expect("usage");
+
+    assert_eq!(usage.prompt_cached_tokens, 100);
+    assert_eq!(
+        usage.cache.as_deref().and_then(|cache| cache.read_tokens),
+        Some(100)
+    );
+}
 use crate::responses as path_crate_responses;
 
 /// Provider usage preserves an explicitly reported all-zero record while

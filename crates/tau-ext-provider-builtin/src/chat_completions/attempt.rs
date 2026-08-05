@@ -57,7 +57,10 @@ pub fn models_for_provider(
                     .est_uncached_input_cost_1m_usd
                     .or(builtin_uncached),
                 est_cached_input_cost_1m_usd: model.est_cached_input_cost_1m_usd.or(builtin_cached),
+                est_cache_write_input_cost_1m_usd: model.est_cache_write_input_cost_1m_usd,
                 est_output_cost_1m_usd: model.est_output_cost_1m_usd.or(builtin_output),
+                est_cache_storage_cost_1m_token_hour_usd: model
+                    .est_cache_storage_cost_1m_token_hour_usd,
             }
         })
         .collect()
@@ -85,13 +88,7 @@ pub fn run_prompt_attempt<W: std::io::Write>(
             .local_summary_compaction
             .and_then(|config| config.validated_for(model.context_window)),
         extra_body: provider.extra_body.clone(),
-        compat: tau_provider_chat_completions::AttemptCompat {
-            stream_options: compat.stream_options,
-            parallel_tool_calls: compat.parallel_tool_calls,
-            prompt_cache_key: compat.prompt_cache_key,
-            reasoning_effort: compat.reasoning_effort,
-            max_completion_tokens: compat.max_completion_tokens,
-        },
+        compat: lower_compat(compat),
     };
     let wire_model = tau_provider_chat_completions::AttemptModel {
         id: model.id.clone(),
@@ -210,6 +207,28 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                 progress: failure.progress,
             }
         }
+    }
+}
+
+/// Lower serialized route capabilities into one backend attempt.
+fn lower_compat(
+    compat: super::ChatCompletionsCompat,
+) -> tau_provider_chat_completions::AttemptCompat {
+    tau_provider_chat_completions::AttemptCompat {
+        stream_options: compat.stream_options,
+        parallel_tool_calls: compat.parallel_tool_calls,
+        prompt_cache_key: compat.prompt_cache_key,
+        reasoning_effort: compat.reasoning_effort,
+        max_completion_tokens: compat.max_completion_tokens,
+        cache_usage: match compat.cache_usage {
+            super::CacheUsageCompat::None => tau_provider_chat_completions::CacheUsageCompat::None,
+            super::CacheUsageCompat::OpenAi => {
+                tau_provider_chat_completions::CacheUsageCompat::OpenAi
+            }
+            super::CacheUsageCompat::DeepSeek => {
+                tau_provider_chat_completions::CacheUsageCompat::DeepSeek
+            }
+        },
     }
 }
 

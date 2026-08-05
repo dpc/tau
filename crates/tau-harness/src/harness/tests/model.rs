@@ -61,7 +61,9 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         standalone_compaction_threshold: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
+        est_cache_write_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),
+        est_cache_storage_cost_1m_token_hour_usd: None,
     }
 }
 
@@ -1153,7 +1155,9 @@ fn provider_model_metadata_drives_selection_state() {
                 standalone_compaction_threshold: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
+                est_cache_write_input_cost_1m_usd: Default::default(),
                 est_output_cost_1m_usd: Default::default(),
+                est_cache_storage_cost_1m_token_hour_usd: None,
             }],
         })),
     )
@@ -1206,7 +1210,9 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1226,7 +1232,9 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     ]);
 
@@ -1342,7 +1350,9 @@ fn role_without_effort_picks_middle_provider_effort() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1362,7 +1372,9 @@ fn role_without_effort_picks_middle_provider_effort() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     ]);
     let roles = path_std_collections::HashMap::from([(
@@ -1528,7 +1540,9 @@ fn role_missing_fields_use_model_defaults() {
         standalone_compaction_threshold: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
+        est_cache_write_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),
+        est_cache_storage_cost_1m_token_hour_usd: None,
     }]);
     let params = selected_params_for_role(&provider_models, &roles, "plain", &selected);
     assert_eq!(params.effort, Effort::Low);
@@ -1560,7 +1574,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1580,7 +1596,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     ]);
     let roles = path_std_collections::HashMap::from([(
@@ -1938,7 +1956,9 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1958,7 +1978,9 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     ]);
 
@@ -2027,7 +2049,9 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
         ProviderModelInfo {
             id: locked.clone(),
@@ -2047,7 +2071,9 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     ]);
 
@@ -2095,7 +2121,9 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -2115,7 +2143,9 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
+            est_cache_write_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),
+            est_cache_storage_cost_1m_token_hour_usd: None,
         },
     ]);
 
@@ -2168,7 +2198,9 @@ fn selected_params_use_runtime_role_fields() {
         standalone_compaction_threshold: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
+        est_cache_write_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),
+        est_cache_storage_cost_1m_token_hour_usd: None,
     }]);
 
     let params = selected_params_for_role(&provider_models, &roles, selected_role, &model);

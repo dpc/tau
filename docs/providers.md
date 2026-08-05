@@ -111,7 +111,9 @@ struct ProviderModelInfo {
     thinking_summaries: Vec<ThinkingSummary>,
     est_uncached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
     est_cached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
+    est_cache_write_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
     est_output_cost_1m_usd: Option<EstimatedUsdPerMillion>,
+    est_cache_storage_cost_1m_token_hour_usd: Option<EstimatedUsdPerMillionTokenHours>,
 }
 ```
 
@@ -124,8 +126,9 @@ lists contain `image`; omitted lists preserve legacy text-only behavior.
 system-prompt guidance truthful; it is not merely abstract model metadata.
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
 
-The three optional `est_*_cost_1m_usd` fields publish basic USD prices per
-million tokens. Decimal strings preserve fixed-point values on the provider wire;
+The optional `est_*_cost_1m_usd` fields publish USD prices for ordinary input,
+cached reads, cache writes, output, and cache storage per million token-hours.
+Decimal strings preserve fixed-point values on the provider wire;
 the built-in Chat Completions profile parser also accepts non-negative integer
 JSON numbers. Fractional configured prices must use decimal strings with at most
 six fractional digits so validation never rounds through binary floating point.
@@ -141,8 +144,12 @@ creator-subtree estimate through authenticated same-session
 `AgentStarted.creator` agent edges. Metadata `parent_agent` never creates cost
 membership; completed descendants remain included until session rollover. If a
 provider reports total input without cached-token detail, Tau treats all input
-as uncached. The status chip renders the independently compact-formatted pair
-`$self/$subtree`; it is an **estimated equivalent API cost**, not a bill: it ignores cache writes,
+as ordinary input. Explicit cache observations clamp to total input in read,
+write, then miss order. A missing cache-write price uses the ordinary-input
+price; storage contributes only when both token-time usage and a storage price
+are present. The status chip renders the independently compact-formatted pair
+`$self/$subtree`; it is an **estimated equivalent API cost**, not a bill. It
+accounts for reported cache writes and token-time storage but still ignores
 long-context and other tiers, batch or service discounts, regional and negotiated
 pricing, subscriptions, and private-route accounting. It resets with the active
 session/runtime and is not reconstructed from durable history.
@@ -308,6 +315,13 @@ reasoning/usage compatibility controls, and non-conflicting `extra_body` fields.
 The extension owns its serialized profiles, model publication, OpenRouter
 discovery, public stream sampling, retry scheduling, and provider events; the
 backend performs one finite typed attempt.
+
+Chat Completions profiles parse provider-specific cache counters only when
+`compat.cache_usage` explicitly selects `open_ai` or `deep_seek`; omission
+ignores cache-only fields while retaining ordinary input/output usage. Public
+Responses and private ChatGPT routes use their native OpenAI response shape.
+Anthropic/Gemini compatibility routes remain best-effort and expose no native
+cache parsing or object lifecycle.
 
 ### Scoped provider credentials
 

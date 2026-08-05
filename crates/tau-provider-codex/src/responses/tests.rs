@@ -19,6 +19,35 @@ use tau_proto::{
 use super::*;
 use crate::common::LlmError;
 
+/// Private Responses terminal usage keeps provider-reported cache writes
+/// separate from cached reads for equivalent-API accounting.
+#[test]
+fn terminal_usage_parses_cache_write_tokens() {
+    let mut state = StreamState::new();
+    apply_terminal_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp-cache-write",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 0,
+                    "input_tokens_details": {
+                        "cached_tokens": 60,
+                        "cache_write_tokens": 30
+                    }
+                }
+            }
+        }),
+    );
+
+    let usage = state.usage().expect("terminal usage");
+    let cache = usage.cache.expect("cache usage");
+    assert_eq!(cache.read_tokens, Some(60));
+    assert_eq!(cache.write_tokens, Some(30));
+}
+
 type AbortCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 type AbortCallbacks = std::sync::Arc<std::sync::Mutex<Vec<AbortCallback>>>;
 

@@ -1316,7 +1316,9 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
                         standalone_compaction_threshold: None,
                         est_uncached_input_cost_1m_usd: Default::default(),
                         est_cached_input_cost_1m_usd: Default::default(),
+                        est_cache_write_input_cost_1m_usd: Default::default(),
                         est_output_cost_1m_usd: Default::default(),
+                        est_cache_storage_cost_1m_token_hour_usd: None,
                     }],
                 },
             )))?;

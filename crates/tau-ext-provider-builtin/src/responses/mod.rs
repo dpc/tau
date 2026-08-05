@@ -65,9 +65,16 @@ pub struct ResponsesModel {
     /// Estimated USD price per million cached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million cache-write input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cache_write_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
     /// Estimated USD price per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_output_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+    /// Estimated USD storage price per million cache token-hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cache_storage_cost_1m_token_hour_usd:
+        Option<tau_proto::EstimatedUsdPerMillionTokenHours>,
 }
 
 /// A validated canonical set of public Responses reasoning-effort levels.
@@ -187,7 +194,10 @@ pub fn models_for_provider(
                 standalone_compaction_threshold: None,
                 est_uncached_input_cost_1m_usd: model.est_uncached_input_cost_1m_usd,
                 est_cached_input_cost_1m_usd: model.est_cached_input_cost_1m_usd,
+                est_cache_write_input_cost_1m_usd: model.est_cache_write_input_cost_1m_usd,
                 est_output_cost_1m_usd: model.est_output_cost_1m_usd,
+                est_cache_storage_cost_1m_token_hour_usd: model
+                    .est_cache_storage_cost_1m_token_hour_usd,
             }
         })
         .collect()

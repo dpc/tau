@@ -2976,6 +2976,7 @@ fn finished_response_with_usage(
             prompt_sent_tokens,
             prompt_cached_tokens,
             prompt_cache_read_ceiling_tokens: None,
+            cache: None,
             response_received_tokens,
             stats: tau_proto::TokenUsageStats {
                 total: tau_proto::TokenUsageCounts {

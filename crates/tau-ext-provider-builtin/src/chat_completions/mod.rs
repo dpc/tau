@@ -72,9 +72,16 @@ pub struct ChatCompletionsModel {
     /// Estimated USD price per million provider-reported cached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million provider cache-write tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cache_write_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
     /// Estimated USD price per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_output_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+    /// Estimated USD storage price per million provider cache token-hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cache_storage_cost_1m_token_hour_usd:
+        Option<tau_proto::EstimatedUsdPerMillionTokenHours>,
 }
 
 /// Explicit limits and serialization profile for Tau summary compaction.
@@ -164,6 +171,29 @@ pub struct ChatCompletionsCompat {
     /// Use `max_completion_tokens`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub max_completion_tokens: bool,
+    /// Explicit provider cache usage response schema.
+    #[serde(default, skip_serializing_if = "CacheUsageCompat::is_none")]
+    pub cache_usage: CacheUsageCompat,
+}
+
+/// Provider-specific cache usage wire schema enabled for a compatible route.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheUsageCompat {
+    /// Ignore cache-specific response fields.
+    #[default]
+    None,
+    /// Parse OpenAI-compatible cache read/write fields.
+    OpenAi,
+    /// Parse DeepSeek-compatible cache hit/miss fields.
+    DeepSeek,
+}
+
+impl CacheUsageCompat {
+    /// Return whether no cache usage schema is enabled.
+    fn is_none(value: &Self) -> bool {
+        matches!(value, Self::None)
+    }
 }
 
 impl Default for ChatCompletionsProvider {
@@ -190,6 +220,7 @@ impl ChatCompletionsCompat {
             prompt_cache_key: true,
             reasoning_effort: true,
             max_completion_tokens: true,
+            cache_usage: CacheUsageCompat::OpenAi,
         }
     }
 }

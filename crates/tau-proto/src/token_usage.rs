@@ -94,6 +94,9 @@ pub struct ProviderTokenUsage {
     /// `Some(0)` proves that no reportable cache-read opportunity existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_read_ceiling_tokens: Option<u64>,
+    /// Optional normalized provider-cache observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<Box<crate::ProviderCacheUsage>>,
     /// Output tokens received for this response.
     pub response_received_tokens: u64,
     /// Session-total and per-model token counters after this response.

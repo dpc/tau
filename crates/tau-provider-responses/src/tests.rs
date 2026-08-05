@@ -11,6 +11,27 @@ use tungstenite::handshake::server::Request as WebSocketRequest;
 
 use super::*;
 
+/// Public Responses usage preserves OpenAI cache reads and writes as separate
+/// normalized classes without exposing a cache key or prompt content.
+#[test]
+fn usage_parses_distinct_cache_read_and_write_classes() {
+    let usage = parse_usage(Some(&serde_json::json!({
+        "input_tokens": 100,
+        "output_tokens": 5,
+        "input_tokens_details": {
+            "cached_tokens": 70,
+            "cache_write_tokens": 20
+        }
+    })))
+    .expect("Responses usage");
+
+    assert_eq!(usage.prompt_cached_tokens, 70);
+    let cache = usage.cache.expect("cache usage");
+    assert_eq!(cache.read_tokens, Some(70));
+    assert_eq!(cache.write_tokens, Some(20));
+    assert_eq!(cache.avoided_prefill_tokens, Some(70));
+}
+
 /// DeepSeek-style reasoning must stream as full thinking immediately, then
 /// become a paired display item and durable opaque replay item at completion
 /// without displacing the ordinary assistant response.

@@ -888,7 +888,9 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
         local_summary_compaction: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
+        est_cache_write_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),
+        est_cache_storage_cost_1m_token_hour_usd: None,
     }
 }
 

@@ -958,6 +958,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
             prompt_sent_tokens: 1_000,
             prompt_cached_tokens: 1_100,
             prompt_cache_read_ceiling_tokens: None,
+            cache: None,
             response_received_tokens: 25,
             ..Default::default()
         }),

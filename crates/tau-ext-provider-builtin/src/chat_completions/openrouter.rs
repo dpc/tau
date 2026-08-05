@@ -119,6 +119,7 @@ impl OpenRouterProfile {
                 prompt_cache_key: false,
                 reasoning_effort: true,
                 max_completion_tokens: true,
+                cache_usage: super::CacheUsageCompat::None,
             },
         }
     }
@@ -280,13 +281,16 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             prompt_cache_key: false,
             reasoning_effort: supports_reasoning,
             max_completion_tokens: true,
+            cache_usage: super::CacheUsageCompat::None,
         }),
         tags: Vec::new(),
         supports_parallel_tool_calls: true,
         local_summary_compaction: None,
         est_uncached_input_cost_1m_usd: None,
         est_cached_input_cost_1m_usd: None,
+        est_cache_write_input_cost_1m_usd: None,
         est_output_cost_1m_usd: None,
+        est_cache_storage_cost_1m_token_hour_usd: None,
     })
 }
 

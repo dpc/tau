@@ -2753,7 +2753,9 @@ where
                 standalone_compaction_threshold: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
+                est_cache_write_input_cost_1m_usd: Default::default(),
                 est_output_cost_1m_usd: Default::default(),
+                est_cache_storage_cost_1m_token_hour_usd: None,
             }],
         }),
         false,
@@ -26529,8 +26531,21 @@ impl Harness {
             && (input_tokens.is_some() || cached_tokens.is_some() || output_tokens.is_some())
         {
             let sent_tokens = input_tokens.unwrap_or(0);
-            let cached_tokens = cached_tokens.unwrap_or(0);
+            let legacy_cached_tokens = cached_tokens.unwrap_or(0).min(sent_tokens);
             let received_tokens = output_tokens.unwrap_or(0);
+            let cache = response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.cache.as_deref())
+                .map(|cache| {
+                    let mut cache = *cache;
+                    cache.read_tokens = Some(cache.read_tokens.unwrap_or(legacy_cached_tokens));
+                    Box::new(cache.normalized(sent_tokens))
+                });
+            let cached_tokens = cache
+                .as_deref()
+                .and_then(|cache| cache.read_tokens)
+                .unwrap_or(legacy_cached_tokens);
             let cache_read_ceiling = validate_cache_read_ceiling(
                 sent_tokens,
                 cached_tokens,
@@ -26559,6 +26574,7 @@ impl Harness {
                 prompt_sent_tokens: sent_tokens,
                 prompt_cached_tokens: cached_tokens,
                 prompt_cache_read_ceiling_tokens: cache_read_ceiling,
+                cache,
                 response_received_tokens: received_tokens,
                 stats: self.current_session_state.token_usage.clone(),
             });

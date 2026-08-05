@@ -175,22 +175,76 @@ impl std::fmt::Display for InvalidEstimatedUsdPerMillion {
 
 impl std::error::Error for InvalidEstimatedUsdPerMillion {}
 
-/// The three basic token prices used for an equivalent API cost estimate.
+/// Estimated USD storage price for one million provider cache token-hours.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EstimatedUsdPerMillionTokenHours(EstimatedUsdPerMillion);
+
+impl EstimatedUsdPerMillionTokenHours {
+    /// Construct a whole-dollar storage price when it fits.
+    #[must_use]
+    pub const fn checked_from_usd(usd: u64) -> Option<Self> {
+        match EstimatedUsdPerMillion::checked_from_usd(usd) {
+            Some(price) => Some(Self(price)),
+            None => None,
+        }
+    }
+
+    /// Construct a storage price from its fixed-point microdollar
+    /// representation.
+    #[must_use]
+    pub const fn from_micro_usd(micro_usd: u64) -> Self {
+        Self(EstimatedUsdPerMillion::from_micro_usd(micro_usd))
+    }
+
+    /// Return the fixed-point microdollar representation.
+    #[must_use]
+    pub const fn as_micro_usd(self) -> u64 {
+        self.0.as_micro_usd()
+    }
+}
+
+impl std::str::FromStr for EstimatedUsdPerMillionTokenHours {
+    type Err = InvalidEstimatedUsdPerMillion;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
+impl std::fmt::Display for EstimatedUsdPerMillionTokenHours {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Equivalent-API rates for ordinary input, cache reads, cache writes, output,
+/// and cache token-time storage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EstimatedApiCostRates {
     /// Uncached input-token price per million tokens.
     pub uncached_input: EstimatedUsdPerMillion,
     /// Provider-reported cached input-token price per million tokens.
     pub cached_input: EstimatedUsdPerMillion,
+    /// Cache-write input-token price per million tokens.
+    ///
+    /// Absence prices writes as ordinary uncached input for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input: Option<EstimatedUsdPerMillion>,
     /// Output-token price per million tokens.
     pub output: EstimatedUsdPerMillion,
+    /// Cache storage price per million token-hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_per_million_token_hour: Option<EstimatedUsdPerMillionTokenHours>,
 }
 
 /// GPT-5.6-equivalent fallback used when model metadata omits explicit pricing.
 pub const ESTIMATED_API_COST_FALLBACK: EstimatedApiCostRates = EstimatedApiCostRates {
     uncached_input: EstimatedUsdPerMillion::from_micro_usd(5_000_000),
     cached_input: EstimatedUsdPerMillion::from_micro_usd(500_000),
+    cache_write_input: None,
     output: EstimatedUsdPerMillion::from_micro_usd(30_000_000),
+    storage_per_million_token_hour: None,
 };
 
 /// Runtime-only estimated equivalent API cost, stored in picodollars.
@@ -229,19 +283,55 @@ impl EstimatedApiCost {
     /// Calculate the cost increment for one response-local usage record.
     #[must_use]
     pub fn for_usage(usage: &ProviderTokenUsage, rates: EstimatedApiCostRates) -> Self {
-        let cached = usage.prompt_cached_tokens.min(usage.prompt_sent_tokens);
-        let uncached = usage.prompt_sent_tokens.saturating_sub(cached);
+        let reported_reads = usage
+            .cache
+            .as_deref()
+            .and_then(|cache| cache.read_tokens)
+            .unwrap_or(usage.prompt_cached_tokens);
+        let cached = reported_reads.min(usage.prompt_sent_tokens);
+        let write = usage
+            .cache
+            .as_deref()
+            .and_then(|cache| cache.write_tokens)
+            .unwrap_or(0)
+            .min(usage.prompt_sent_tokens.saturating_sub(cached));
+        let uncached = usage
+            .prompt_sent_tokens
+            .saturating_sub(cached)
+            .saturating_sub(write);
+        let write_rate = rates.cache_write_input.unwrap_or(rates.uncached_input);
         let increment = u128::from(uncached)
             .saturating_mul(u128::from(rates.uncached_input.as_micro_usd()))
             .saturating_add(
                 u128::from(cached).saturating_mul(u128::from(rates.cached_input.as_micro_usd())),
             )
+            .saturating_add(u128::from(write).saturating_mul(u128::from(write_rate.as_micro_usd())))
             .saturating_add(
                 u128::from(usage.response_received_tokens)
                     .saturating_mul(u128::from(rates.output.as_micro_usd())),
-            );
+            )
+            .saturating_add(storage_cost(usage, rates));
         Self(u64::try_from(increment).unwrap_or(u64::MAX))
     }
+}
+
+/// Calculate provider-reported token-time storage cost in picodollars.
+fn storage_cost(usage: &ProviderTokenUsage, rates: EstimatedApiCostRates) -> u128 {
+    const MICROS_PER_HOUR: u128 = 3_600_000_000;
+    let Some(token_micros) = usage
+        .cache
+        .as_deref()
+        .and_then(|cache| cache.storage_token_micros)
+    else {
+        return 0;
+    };
+    let Some(rate) = rates.storage_per_million_token_hour else {
+        return 0;
+    };
+    u128::from(token_micros.get())
+        .saturating_mul(u128::from(rate.as_micro_usd()))
+        .checked_div(MICROS_PER_HOUR)
+        .unwrap_or(u128::MAX)
 }
 
 #[cfg(test)]
