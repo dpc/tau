@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io as path_std_io;
 use std::io::ErrorKind;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 
 use tau_config::secret_sources::SecretSources;
 use tau_config::settings::BuiltinComponentIdentity;
@@ -7933,6 +7936,66 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
     assert!(!h.client_writers.contains_key(&socket_conn));
 }
 
+/// Writer that exposes completed protocol writes and flushes to lifecycle
+/// tests.
+struct RecordingWriter {
+    /// Bytes accepted by the writer.
+    committed: Arc<Mutex<Vec<u8>>>,
+    /// Number of completed flush calls.
+    flushes: usize,
+    /// Shared projection of `flushes`.
+    completed_flushes: Arc<AtomicUsize>,
+}
+
+/// Writer that holds one output write until a lifecycle test releases it.
+struct StalledWriter {
+    /// One-shot notification that the writer reached its blocking write.
+    started: Option<SyncSender<()>>,
+    /// Release signal for the blocked write.
+    release: Receiver<()>,
+}
+
+impl path_std_io::Write for StalledWriter {
+    fn write(&mut self, buf: &[u8]) -> path_std_io::Result<usize> {
+        if let Some(started) = self.started.take() {
+            started.send(()).expect("report stalled write");
+        }
+        self.release.recv().expect("release stalled write");
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Returns the validated encoded size carried beside a synthetic input frame.
+fn lifecycle_input_frame_bytes(message: &HarnessInputMessage) -> tau_proto::ProtocolMessageBytes {
+    tau_proto::ProtocolMessageBytes::new(
+        tau_proto::encode_message_to_vec(message)
+            .expect("encode lifecycle input")
+            .len() as u64,
+    )
+    .expect("lifecycle input frame is nonempty")
+}
+
+impl path_std_io::Write for RecordingWriter {
+    fn write(&mut self, buf: &[u8]) -> path_std_io::Result<usize> {
+        self.committed
+            .lock()
+            .expect("committed output")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        self.flushes += 1;
+        self.completed_flushes
+            .store(self.flushes, Ordering::Release);
+        Ok(())
+    }
+}
+
 /// Ensures startup failures after the initial UI is accepted are delivered
 /// through the connection's normal writer, avoiding unsynchronized side-channel
 /// writes to the same protocol stream.
@@ -7958,6 +8021,181 @@ fn accepted_initial_client_startup_error_uses_normal_writer() {
     let reason = disconnect.reason.expect("disconnect reason");
     assert!(reason.contains("harness startup failed"));
     assert!(reason.contains("post-accept startup failure"));
+}
+
+/// A rejected startup handshake must finish its queued disconnect write before
+/// teardown removes the writer and allows the harness process to exit.
+#[test]
+fn rejected_startup_handshake_flushes_disconnect_before_teardown() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let committed = Arc::new(Mutex::new(Vec::new()));
+    let completed_flushes = Arc::new(AtomicUsize::new(0));
+    let client_id = h
+        .accept_client_io(
+            path_std_io::empty(),
+            RecordingWriter {
+                committed: Arc::clone(&committed),
+                flushes: 0,
+                completed_flushes: Arc::clone(&completed_flushes),
+            },
+            ConnectionOrigin::Socket,
+        )
+        .expect("accept startup client");
+    let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
+
+    let error = h
+        .handle_startup_from_connection(
+            &client_id,
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("attach-ui"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: Some(requested.clone()),
+                capabilities: Default::default(),
+            }),
+        )
+        .expect_err("session mismatch terminates the startup handshake");
+
+    assert!(
+        error
+            .to_string()
+            .contains("disconnected during startup handshake")
+    );
+    assert!(h.bus.connection(&client_id).is_none());
+    assert!(!h.client_writers.contains_key(&client_id));
+    assert_eq!(completed_flushes.load(Ordering::Acquire), 2);
+    let output = committed.lock().expect("committed output").clone();
+    let mut reader = HarnessOutputReader::new(BufReader::new(output.as_slice()));
+    let message = reader
+        .read_message()
+        .expect("read handshake rejection")
+        .expect("handshake rejection");
+    let HarnessOutputMessage::Disconnect(disconnect) = message else {
+        panic!("expected disconnect frame");
+    };
+    let reason = disconnect.reason.expect("disconnect reason");
+    assert!(reason.contains(requested.as_str()));
+    assert!(reason.contains(h.current_session_id.as_str()));
+}
+
+/// A runtime handshake rejection must drain its terminal response before
+/// teardown while still accounting for the served socket client.
+#[test]
+fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let committed = Arc::new(Mutex::new(Vec::new()));
+    let completed_flushes = Arc::new(AtomicUsize::new(0));
+    let client_id = h
+        .accept_client_io(
+            path_std_io::empty(),
+            RecordingWriter {
+                committed: Arc::clone(&committed),
+                flushes: 0,
+                completed_flushes: Arc::clone(&completed_flushes),
+            },
+            ConnectionOrigin::Socket,
+        )
+        .expect("accept runtime client");
+    let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
+    let message = HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::test_extension_name("attach-ui"),
+        client_kind: tau_proto::ClientKind::Ui,
+        expected_session_id: Some(requested.clone()),
+        capabilities: Default::default(),
+    });
+    let frame_bytes = lifecycle_input_frame_bytes(&message);
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = true;
+
+    h.handle_runtime_connection_message(
+        client_id.clone(),
+        Box::new(message),
+        frame_bytes,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+    )
+    .expect("handle runtime rejection");
+
+    assert_eq!(served_clients, 1);
+    assert!(exit_on_disconnect);
+    assert!(h.bus.connection(&client_id).is_none());
+    assert!(!h.client_writers.contains_key(&client_id));
+    assert_eq!(completed_flushes.load(Ordering::Acquire), 2);
+    let output = committed.lock().expect("committed output").clone();
+    let mut reader = HarnessOutputReader::new(BufReader::new(output.as_slice()));
+    let message = reader
+        .read_message()
+        .expect("read runtime rejection")
+        .expect("runtime rejection");
+    let HarnessOutputMessage::Disconnect(disconnect) = message else {
+        panic!("expected disconnect frame");
+    };
+    let reason = disconnect.reason.expect("disconnect reason");
+    assert!(reason.contains(requested.as_str()));
+    assert!(reason.contains(h.current_session_id.as_str()));
+}
+
+/// A client-requested runtime disconnect must not wait behind stalled outbound
+/// data because the client did not request a terminal response.
+#[test]
+fn client_requested_disconnect_does_not_drain_stalled_writer() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::channel();
+    let client_id = h
+        .accept_client_io(
+            path_std_io::empty(),
+            StalledWriter {
+                started: Some(started_tx),
+                release: release_rx,
+            },
+            ConnectionOrigin::Socket,
+        )
+        .expect("accept runtime client");
+    h.bus
+        .send_to(
+            &client_id,
+            None,
+            HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some("queued before client close".to_owned()),
+            }),
+        )
+        .expect("queue output");
+    started_rx.recv().expect("writer reached stalled output");
+
+    let message = HarnessInputMessage::Disconnect(Disconnect { reason: None });
+    let frame_bytes = lifecycle_input_frame_bytes(&message);
+    let (handled_tx, handled_rx) = mpsc::channel();
+    let release_guard = std::thread::spawn(move || {
+        let handled_before_release = handled_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release_tx.send(()).expect("release stalled writer");
+        handled_before_release
+    });
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = true;
+
+    h.handle_runtime_connection_message(
+        client_id,
+        Box::new(message),
+        frame_bytes,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+    )
+    .expect("handle client-requested disconnect");
+    let _ = handled_tx.send(());
+    assert!(
+        release_guard.join().expect("release guard"),
+        "client-requested disconnect waited for stalled output"
+    );
+    assert_eq!(served_clients, 1);
+    assert!(exit_on_disconnect);
 }
 
 #[test]

@@ -1930,6 +1930,16 @@ pub(crate) enum AgentMessageRecipientStatus {
     Unknown,
 }
 
+/// Connection lifecycle requested by one handled client input message.
+enum ClientMessageDisposition {
+    /// Keep the client connected.
+    Continue,
+    /// Close without waiting for an outbound terminal response.
+    Close,
+    /// Drain the harness-authored terminal response before closing.
+    CloseAfterReply,
+}
+
 /// Initial UI transport owned by the harness process during startup.
 pub(crate) enum InitialClient {
     Stdio,
@@ -4284,7 +4294,7 @@ impl Harness {
         if matches!(&message, HarnessInputMessage::UiDebugEventStatsRequest(_))
             && !self.extensions.entries.contains_key(connection_id)
         {
-            let _keep = self.handle_client_message(connection_id, message)?;
+            let _disposition = self.handle_client_message_disposition(connection_id, message)?;
             self.take_pending_publish_error()?;
             return Ok(false);
         }
@@ -4297,8 +4307,16 @@ impl Harness {
                 if detach_requested {
                     self.startup_detach_requested = true;
                 }
-                let keep = self.handle_client_message(connection_id, message)?;
-                if !keep {
+                let disposition = self.handle_client_message_disposition(connection_id, message)?;
+                let close = match disposition {
+                    ClientMessageDisposition::Continue => false,
+                    ClientMessageDisposition::Close => true,
+                    ClientMessageDisposition::CloseAfterReply => {
+                        self.drain_client_writer(connection_id);
+                        true
+                    }
+                };
+                if close {
                     self.handle_disconnect(connection_id);
                     if self.startup_detach_requested {
                         false
@@ -9256,7 +9274,7 @@ impl Harness {
             HarnessInputMessage::UiDebugEventStatsRequest(_)
         ) && !self.extensions.entries.contains_key(&connection_id)
         {
-            let _keep = self.handle_client_message(&connection_id, *message)?;
+            let _disposition = self.handle_client_message_disposition(&connection_id, *message)?;
             return Ok(());
         }
         let origin = self
@@ -9270,8 +9288,17 @@ impl Harness {
                 if self.is_authorized_ui_detach_request(&connection_id, &message) {
                     *exit_on_disconnect = false;
                 }
-                let keep = self.handle_client_message(&connection_id, *message)?;
-                if !keep {
+                let disposition =
+                    self.handle_client_message_disposition(&connection_id, *message)?;
+                let close = match disposition {
+                    ClientMessageDisposition::Continue => false,
+                    ClientMessageDisposition::Close => true,
+                    ClientMessageDisposition::CloseAfterReply => {
+                        self.drain_client_writer(&connection_id);
+                        true
+                    }
+                };
+                if close {
                     self.handle_disconnect(&connection_id);
                     *served_clients += 1;
                 }
@@ -9376,16 +9403,20 @@ impl Harness {
                 reason: Some(format!("harness startup failed: {error}")),
             }),
         );
-        self.flush_initial_client_writer(client_id);
+        self.drain_client_writer(client_id);
     }
 
-    fn flush_initial_client_writer(&mut self, client_id: &ConnectionId) {
+    /// Waits until the connection writer processes every previously queued
+    /// frame or exits after an I/O failure.
+    ///
+    /// An absent or already-closed writer has no remaining queue to drain.
+    fn drain_client_writer(&self, client_id: &ConnectionId) {
         let Some(writer) = self.client_writers.get(client_id) else {
             return;
         };
         let (ack_tx, ack_rx) = mpsc::channel();
         if writer.send(WriterCommand::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+            let _ = ack_rx.recv();
         }
     }
 
@@ -14120,11 +14151,26 @@ impl Harness {
         }
     }
 
+    #[cfg(test)]
     fn handle_client_message(
         &mut self,
         client_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
+        self.handle_client_message_disposition(client_id, message)
+            .map(|disposition| match disposition {
+                ClientMessageDisposition::Continue => true,
+                ClientMessageDisposition::Close | ClientMessageDisposition::CloseAfterReply => {
+                    false
+                }
+            })
+    }
+
+    fn handle_client_message_disposition(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        message: HarnessInputMessage,
+    ) -> Result<ClientMessageDisposition, HarnessError> {
         match message {
             HarnessInputMessage::Hello(hello) => {
                 if let Err(error) = validate_protocol_version(&hello) {
@@ -14135,7 +14181,7 @@ impl Harness {
                             reason: Some(error.to_string()),
                         }),
                     );
-                    return Ok(false);
+                    return Ok(ClientMessageDisposition::CloseAfterReply);
                 }
                 if hello.client_kind != ClientKind::Ui && hello.expected_session_id.is_some() {
                     let _ = self.bus.send_to(
@@ -14147,7 +14193,7 @@ impl Harness {
                             ),
                         }),
                     );
-                    return Ok(false);
+                    return Ok(ClientMessageDisposition::CloseAfterReply);
                 }
                 if let Some(expected_session_id) = hello.expected_session_id {
                     if expected_session_id != self.current_session_id {
@@ -14163,7 +14209,7 @@ impl Harness {
                                 )),
                             }),
                         );
-                        return Ok(false);
+                        return Ok(ClientMessageDisposition::CloseAfterReply);
                     }
                     self.bus.send_to(
                         client_id,
@@ -14178,7 +14224,7 @@ impl Harness {
                 {
                     self.external_message_peers.insert(client_id.clone());
                 }
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::Subscribe(subscribe) => {
                 match self.complete_subscription(
@@ -14186,7 +14232,7 @@ impl Harness {
                     subscribe.historical_selectors,
                     subscribe.live_selectors,
                 ) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => Ok(ClientMessageDisposition::Continue),
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
                         let _ = self.bus.send_to(
                             client_id,
@@ -14195,27 +14241,27 @@ impl Harness {
                                 reason: Some(format!("subscription denied: {reason}")),
                             }),
                         );
-                        Ok(false)
+                        Ok(ClientMessageDisposition::CloseAfterReply)
                     }
                     Err(other) => Err(HarnessError::Route(other)),
                 }
             }
-            HarnessInputMessage::Disconnect(_) => Ok(false),
+            HarnessInputMessage::Disconnect(_) => Ok(ClientMessageDisposition::Close),
             HarnessInputMessage::GetAgentPromptCreated(request) => {
                 self.send_agent_prompt_created_result(client_id, request);
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::GetRenderedSystemPrompt(request) => {
                 self.send_rendered_system_prompt_result(client_id, request);
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::GetRenderedPrompt(request) => {
                 self.send_rendered_prompt_result(client_id, request);
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::GetRenderedToolDefinitions(request) => {
                 self.send_rendered_tool_definitions_result(client_id, request);
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::GetCurrentSession(request) => {
                 if self.is_ui_client(client_id) {
@@ -14231,28 +14277,28 @@ impl Harness {
                         ),
                     );
                 }
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::GetSessionAgentList(request) => {
                 if self.is_ui_client(client_id) {
                     self.send_session_agent_list_result(client_id, request);
                 }
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::UiDebugEventStatsRequest(request) => {
                 self.handle_ui_debug_event_stats_request(client_id, request);
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             // Connection-control behavior is applied only by startup/runtime
             // routing after exact attached-socket-UI authorization.
-            HarnessInputMessage::UiDetachRequest(_) => Ok(true),
+            HarnessInputMessage::UiDetachRequest(_) => Ok(ClientMessageDisposition::Continue),
             HarnessInputMessage::UiTreeRequest(request) => {
                 self.handle_ui_tree_request(client_id, request);
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::ExternalAgentMessage(request) => {
                 if !self.external_message_peers.contains(&client_id.clone()) {
-                    return Ok(true);
+                    return Ok(ClientMessageDisposition::Continue);
                 }
                 if let Some(result) =
                     self.start_external_agent_message_auth(client_id.clone(), request)
@@ -14263,11 +14309,11 @@ impl Harness {
                         HarnessOutputMessage::ExternalAgentMessageResult(result),
                     );
                 }
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::ExternalAgentMessageAuth(request) => {
                 if !self.external_message_peers.contains(&client_id.clone()) {
-                    return Ok(true);
+                    return Ok(ClientMessageDisposition::Continue);
                 }
                 let result = self.handle_external_agent_message_auth_request(request);
                 let _ = self.bus.send_to(
@@ -14275,11 +14321,11 @@ impl Harness {
                     None,
                     HarnessOutputMessage::ExternalAgentMessageAuthResult(result),
                 );
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::PeerSessionProbe(request) => {
                 if !self.external_message_peers.contains(&client_id.clone()) {
-                    return Ok(true);
+                    return Ok(ClientMessageDisposition::Continue);
                 }
                 let result = tau_proto::PeerSessionProbeResult {
                     request_id: request.request_id,
@@ -14291,7 +14337,7 @@ impl Harness {
                     None,
                     HarnessOutputMessage::PeerSessionProbeResult(result),
                 );
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::Emit(emit) => {
                 // Keep this arm aligned with
@@ -14302,7 +14348,7 @@ impl Harness {
                 // for directed/control operations.
                 let (event, persist) = emit.into_parts();
                 self.handle_client_event_inner_with_persist(client_id, event, Some(persist))?;
-                Ok(true)
+                Ok(ClientMessageDisposition::Continue)
             }
             // Other input messages from clients are ignored.
             HarnessInputMessage::ConfigError(_)
@@ -14310,7 +14356,9 @@ impl Harness {
             | HarnessInputMessage::Intercept(_)
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
-            | HarnessInputMessage::ExtensionDataRequest(_) => Ok(true),
+            | HarnessInputMessage::ExtensionDataRequest(_) => {
+                Ok(ClientMessageDisposition::Continue)
+            }
         }
     }
 
