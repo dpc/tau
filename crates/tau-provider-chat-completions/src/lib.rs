@@ -108,14 +108,46 @@ pub struct AttemptCompat {
     pub stream_options: bool,
     /// Send `parallel_tool_calls` when tools are present.
     pub parallel_tool_calls: bool,
-    /// Send an agent-derived prompt cache key.
-    pub prompt_cache_key: bool,
+    /// Typed OpenAI prompt-cache controls explicitly selected for this route.
+    pub prompt_cache: Option<PromptCache>,
     /// Send the selected reasoning effort.
     pub reasoning_effort: bool,
     /// Use `max_completion_tokens` rather than `max_tokens`.
     pub max_completion_tokens: bool,
     /// Explicit provider usage schema accepted from this route.
     pub cache_usage: CacheUsageCompat,
+}
+
+/// Typed OpenAI prompt-cache controls selected for one Chat Completions route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCache {
+    /// Use OpenAI's legacy automatic caching with an explicit retention value.
+    Legacy {
+        /// Legacy retention sent as `prompt_cache_retention`.
+        retention: PromptCacheRetention,
+    },
+    /// Mark the stable system prompt and disable implicit cache writes.
+    ExplicitSystemPrompt,
+}
+
+/// Legacy OpenAI prompt-cache retention values supported by this adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCacheRetention {
+    /// Use the provider's ordinary in-memory retention behavior.
+    InMemory,
+    /// Request the provider's 24-hour retention behavior.
+    Hours24,
+}
+
+impl PromptCacheRetention {
+    /// Return the exact OpenAI wire spelling for this retention selection.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::Hours24 => "24h",
+        }
+    }
 }
 
 /// Provider-specific cache usage wire schema selected by configuration.
@@ -151,6 +183,7 @@ enum LlmError {
     UnsupportedToolType(ToolType),
     ExtraBodyCollision(String),
     InvalidCompaction(String),
+    PromptCacheSystemPromptRequired,
     StreamError(StreamFailure),
 }
 
@@ -176,6 +209,10 @@ impl std::fmt::Display for LlmError {
                 write!(f, "Chat Completions does not support {tool_type:?} tools")
             }
             Self::InvalidCompaction(message) => write!(f, "{message}"),
+            Self::PromptCacheSystemPromptRequired => write!(
+                f,
+                "explicit OpenAI prompt caching requires a non-empty system prompt"
+            ),
             Self::ExtraBodyCollision(field) => {
                 write!(
                     f,
@@ -194,6 +231,7 @@ impl LlmError {
             | Self::Canceled
             | Self::UnsupportedToolType(_)
             | Self::InvalidCompaction(_)
+            | Self::PromptCacheSystemPromptRequired
             | Self::ExtraBodyCollision(_) => None,
             Self::StreamError(failure) => failure.retry.clone(),
             Self::Outbound(error) => Some(RetryDecision::new(outbound_retry_class(error.kind()))),
@@ -211,7 +249,9 @@ impl LlmError {
             Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _) => {
                 http_failure_kind(*status, body)
             }
-            Self::ExtraBodyCollision(_) => Some(tau_proto::ProviderFailureKind::RequestRejected),
+            Self::ExtraBodyCollision(_) | Self::PromptCacheSystemPromptRequired => {
+                Some(tau_proto::ProviderFailureKind::RequestRejected)
+            }
             Self::StreamError(failure) => failure.failure_kind,
             _ => None,
         }
@@ -1122,6 +1162,12 @@ struct ChatRequest {
     parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
+    /// Legacy OpenAI retention selected for an explicitly cache-capable route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: Option<&'static str>,
+    /// Explicit OpenAI cache options selected for the stable system boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<PromptCacheOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1137,6 +1183,15 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// Explicit OpenAI cache options emitted for the stable system-prompt boundary.
+#[derive(Serialize)]
+struct PromptCacheOptions {
+    /// Disable provider-created implicit breakpoints.
+    mode: &'static str,
+    /// Current OpenAI minimum lifetime for explicit cache entries.
+    ttl: &'static str,
+}
+
 fn try_build_request(
     provider: &AttemptConfig,
     model: &AttemptModel,
@@ -1146,11 +1201,26 @@ fn try_build_request(
     if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
         return build_local_summary_compaction_request(provider, model, prompt);
     }
+    let explicit_system_prompt = matches!(
+        provider.compat.prompt_cache,
+        Some(PromptCache::ExplicitSystemPrompt)
+    );
+    if explicit_system_prompt && prompt.system_prompt.trim().is_empty() {
+        return Err(LlmError::PromptCacheSystemPromptRequired);
+    }
     let mut messages = Vec::new();
     if !prompt.system_prompt.trim().is_empty() {
         messages.push(serde_json::json!({
             "role": "system",
-            "content": prompt.system_prompt,
+            "content": if explicit_system_prompt {
+                serde_json::json!([{
+                    "type": "text",
+                    "text": prompt.system_prompt,
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                }])
+            } else {
+                serde_json::json!(prompt.system_prompt)
+            },
         }));
     }
     for block in &prompt.context.blocks {
@@ -1178,8 +1248,17 @@ fn try_build_request(
             .then_some(true),
         prompt_cache_key: provider
             .compat
-            .prompt_cache_key
+            .prompt_cache
+            .is_some()
             .then(|| format!("tau:{}", prompt.agent_id)),
+        prompt_cache_retention: match provider.compat.prompt_cache {
+            Some(PromptCache::Legacy { retention }) => Some(retention.wire()),
+            Some(PromptCache::ExplicitSystemPrompt) | None => None,
+        },
+        prompt_cache_options: explicit_system_prompt.then_some(PromptCacheOptions {
+            mode: "explicit",
+            ttl: "30m",
+        }),
         reasoning_effort: provider
             .compat
             .reasoning_effort
@@ -1244,6 +1323,8 @@ fn build_local_summary_compaction_request(
         tool_choice: Some("none"),
         parallel_tool_calls: None,
         prompt_cache_key: None,
+        prompt_cache_retention: None,
+        prompt_cache_options: None,
         reasoning_effort: None,
         max_tokens,
         max_completion_tokens,
@@ -1261,6 +1342,8 @@ fn validate_extra_body(extra_body: &BTreeMap<String, serde_json::Value>) -> Resu
         "tool_choice",
         "parallel_tool_calls",
         "prompt_cache_key",
+        "prompt_cache_retention",
+        "prompt_cache_options",
         "reasoning_effort",
         "max_tokens",
         "max_completion_tokens",

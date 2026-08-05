@@ -116,7 +116,7 @@ impl OpenRouterProfile {
             compat: ChatCompletionsCompat {
                 stream_options: true,
                 parallel_tool_calls: false,
-                prompt_cache_key: false,
+                openai_prompt_cache: None,
                 reasoning_effort: true,
                 max_completion_tokens: true,
                 cache_usage: super::CacheUsageCompat::None,
@@ -278,7 +278,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
         compat: Some(ChatCompletionsCompat {
             stream_options: true,
             parallel_tool_calls: false,
-            prompt_cache_key: false,
+            openai_prompt_cache: None,
             reasoning_effort: supports_reasoning,
             max_completion_tokens: true,
             cache_usage: super::CacheUsageCompat::None,

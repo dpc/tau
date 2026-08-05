@@ -846,7 +846,7 @@ fn chat_completions_add_defaults_to_legacy_max_tokens() {
 
     assert!(!compat.max_completion_tokens);
     assert!(compat.stream_options);
-    assert!(compat.prompt_cache_key);
+    assert!(compat.openai_prompt_cache.is_none());
 }
 
 /// The Responses setup wizard must omit effort overrides so its generated

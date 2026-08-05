@@ -270,6 +270,7 @@ fn incomplete_reasoning_attempt_rejects_terminal_sentinel() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -638,6 +639,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -662,6 +664,7 @@ fn request_lowers_off_and_max_reasoning_efforts() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
+        prompt_cache_retention: None,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),
@@ -678,6 +681,33 @@ fn request_lowers_off_and_max_reasoning_efforts() {
 
         assert_eq!(request["reasoning"]["effort"], expected);
     }
+}
+
+/// Public Responses must send only the approved legacy automatic-cache fields
+/// and leave its `instructions` representation unchanged.
+#[test]
+fn request_lowers_legacy_prompt_cache_retention() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 0,
+        transport: Transport::Sse,
+        prompt_cache_retention: Some(PromptCacheRetention::InMemory),
+    };
+    let request = build_request(
+        &minimal_prompt(),
+        &config,
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+    )
+    .expect("request");
+    let request = serde_json::to_value(request).expect("serialize request");
+
+    assert_eq!(request["prompt_cache_key"], "tau:agent-test");
+    assert_eq!(request["prompt_cache_retention"], "in_memory");
+    assert!(request.get("prompt_cache_options").is_none());
+    assert_eq!(request["instructions"], "test system");
 }
 
 /// Post-upgrade provider errors must terminate known auth/request/context
@@ -778,6 +808,7 @@ fn websocket_attempt_uses_response_create_protocol() {
             api_key: "test-key".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -825,6 +856,7 @@ fn websocket_rejected_upgrade_is_terminal() {
             api_key: "bad-key".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -951,6 +983,7 @@ fn run_websocket_messages(
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -1075,6 +1108,7 @@ fn stalled_header_observes_cancellation() {
                 api_key: String::new(),
                 max_output_tokens: 0,
                 transport: Transport::Sse,
+                prompt_cache_retention: None,
             },
             &AttemptModel {
                 id: ModelName::new("test-model"),
@@ -1127,6 +1161,7 @@ fn proxy_407_is_typed_as_auth_retry() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -1213,6 +1248,7 @@ fn compressed_sse_line_uses_decoded_limits_and_statistics() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
+            prompt_cache_retention: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -1291,6 +1327,7 @@ fn responses_request_keeps_stable_lowering_for_local_changes() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
+        prompt_cache_retention: None,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),
@@ -1355,6 +1392,7 @@ fn responses_request_exposes_provider_visible_identity_changes() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
+        prompt_cache_retention: None,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),

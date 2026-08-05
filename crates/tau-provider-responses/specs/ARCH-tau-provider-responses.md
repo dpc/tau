@@ -26,3 +26,11 @@ Every request also lowers the harness-selected effective reasoning effort as
 `reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining
 canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass
 through directly.
+
+An exact configured route may opt into a legacy OpenAI automatic-cache retention
+policy. The adapter then sends an agent-derived `prompt_cache_key` and
+`prompt_cache_retention` in the shared HTTP/SSE and WebSocket request body.
+It does not support explicit cache options or rewrite top-level `instructions`
+as a breakpoint-bearing input item; that would change the public Responses
+request semantics. The selected legacy policy accepts the provider's automatic
+cache behavior and any associated volatile-suffix/write-premium risk.

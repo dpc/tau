@@ -162,9 +162,9 @@ pub struct ChatCompletionsCompat {
     /// Emit `parallel_tool_calls` when tools exist.
     #[serde(default, skip_serializing_if = "is_false")]
     pub parallel_tool_calls: bool,
-    /// Emit a stable prompt cache key.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub prompt_cache_key: bool,
+    /// Exact OpenAI prompt-cache controls accepted by this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_prompt_cache: Option<OpenAiPromptCache>,
     /// Emit reasoning effort.
     #[serde(default, skip_serializing_if = "is_false")]
     pub reasoning_effort: bool,
@@ -217,7 +217,7 @@ impl ChatCompletionsCompat {
         Self {
             stream_options: true,
             parallel_tool_calls: true,
-            prompt_cache_key: true,
+            openai_prompt_cache: None,
             reasoning_effort: true,
             max_completion_tokens: true,
             cache_usage: CacheUsageCompat::OpenAi,
@@ -246,6 +246,7 @@ fn is_default_max_output_tokens(value: &u32) -> bool {
 
 mod attempt;
 mod openrouter;
+mod prompt_cache;
 mod sampling;
 #[cfg(test)]
 mod tests;
@@ -253,3 +254,7 @@ mod tests;
 pub(super) use attempt::{PromptAttemptOutcome, models_for_provider, run_prompt_attempt};
 pub(super) use openrouter::fetch_openrouter_models;
 pub use openrouter::{OpenRouterDiscoveryError, OpenRouterProfile};
+pub use prompt_cache::{
+    OpenAiExplicitPromptCacheMode, OpenAiPromptCache, OpenAiPromptCacheBoundary,
+    OpenAiPromptCacheOptions, OpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
+};

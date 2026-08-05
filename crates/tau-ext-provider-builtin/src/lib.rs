@@ -12,6 +12,7 @@ use std::io as path_std_io;
 mod chat_completions;
 mod credential_record;
 mod oauth_refresh_rejection;
+mod openai_prompt_cache;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
@@ -33,6 +34,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
     LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
+    OpenAiExplicitPromptCacheMode, OpenAiPromptCache as ChatCompletionsOpenAiPromptCache,
+    OpenAiPromptCacheBoundary, OpenAiPromptCacheOptions,
+    OpenAiPromptCachePolicy as ChatCompletionsOpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
     OpenRouterDiscoveryError, OpenRouterProfile,
 };
 use chat_completions::{
@@ -41,15 +45,19 @@ use chat_completions::{
 };
 use dialoguer::{Confirm, Input, Password, Select};
 use oauth_refresh_rejection::{OAuthRefreshRejectionCache, RefreshCredentialsError};
+pub use openai_prompt_cache::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
+pub use responses::{
+    OpenAiPromptCache as ResponsesOpenAiPromptCache, ResponsesCompat, ResponsesEfforts,
+    ResponsesModel, ResponsesProvider,
+};
 use responses::{
     PromptAttemptOutcome as ResponsesAttemptOutcome,
     models_for_provider as responses_models_for_provider,
     run_prompt_attempt as run_responses_prompt_attempt,
 };
-pub use responses::{ResponsesEfforts, ResponsesModel, ResponsesProvider};
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
@@ -926,6 +934,7 @@ fn cmd_add_responses(extension_instance: &tau_proto::ExtensionName) -> Result<()
             tags: Vec::new(),
             max_output_tokens: 8192,
             transport,
+            compat: responses::ResponsesCompat::default(),
         }),
         api_key_source,
     )?;
@@ -1179,6 +1188,7 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
                 ModelName::try_new(id.to_owned()).map(|id| ResponsesModel {
                     id,
                     efforts: None,
+                    compat: None,
                     display_name: None,
                     context_window: 128_000,
                     tags: Vec::new(),

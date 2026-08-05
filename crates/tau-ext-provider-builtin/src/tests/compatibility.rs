@@ -26,10 +26,10 @@ fn assert_canonical_profile_fixture(relative: &str) -> BuiltinProviderProfile {
     profile
 }
 
-/// Old auth profile files for every persisted provider kind must continue to
+/// Current persisted profile fixtures for every supported provider kind must
 /// decode and canonically reserialize byte-for-byte.
 #[test]
-fn old_profile_fixtures_round_trip_canonically() {
+fn profile_fixtures_round_trip_canonically() {
     for fixture in [
         "profiles/chatgpt.json",
         "profiles/chat_completions.json",
@@ -37,6 +37,14 @@ fn old_profile_fixtures_round_trip_canonically() {
     ] {
         assert_canonical_profile_fixture(fixture);
     }
+}
+
+/// The pre-446c boolean cache-key fixture must fail closed, proving the
+/// approved schema break cannot silently send GPT-5.6 implicit cache writes.
+#[test]
+fn legacy_prompt_cache_key_fixture_is_rejected() {
+    let source = read_compat_fixture("profiles/chat_completions_legacy_prompt_cache_key.json");
+    assert!(serde_json::from_str::<BuiltinProviderProfile>(&source).is_err());
 }
 
 /// The generic Responses profile must serialize its explicit API-key route

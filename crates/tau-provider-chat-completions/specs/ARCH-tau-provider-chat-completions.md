@@ -8,6 +8,18 @@ classification, and replay conversion. Serialized profiles, OpenRouter
 discovery, model publication, public response sampling, and harness event writes
 belong to `tau-ext-provider-builtin`.
 
+## Typed OpenAI prompt-cache lowering
+
+The extension may opt one exact configured route into typed OpenAI prompt-cache
+controls. The adapter never infers this capability from a provider, endpoint, or
+model name. A legacy retention policy sends an agent-derived key plus
+`prompt_cache_retention` and otherwise retains provider-selected automatic
+behavior. An explicit policy sends the same key, explicit `30m` options, and
+marks the end of a non-empty system message with the documented content-block
+breakpoint. It does not mark conversation or tool suffixes, so it does not
+implicitly write a volatile suffix. The standalone compactor omits every cache
+field. Opaque `extra_body` cannot collide with these typed top-level members.
+
 ## Function-call argument replay identity
 
 Chat Completions providers expose function-call arguments as JSON text. The

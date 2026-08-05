@@ -685,7 +685,10 @@
       "model": {
         "compat": {
           "parallel_tool_calls": true,
-          "prompt_cache_key": true,
+          "openai_prompt_cache": {
+            "key": "agent",
+            "retention": "in_memory"
+          },
           "reasoning_effort": true,
           "stream_options": true
         },
@@ -699,7 +702,10 @@
       "provider": {
         "base_url": "http://127.0.0.1:8080/v1",
         "compat": {
-          "prompt_cache_key": true,
+          "openai_prompt_cache": {
+            "key": "agent",
+            "retention": "in_memory"
+          },
           "stream_options": true
         },
         "credential_present": true,

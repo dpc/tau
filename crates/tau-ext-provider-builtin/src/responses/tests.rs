@@ -1,5 +1,37 @@
 use super::*;
 
+/// Public Responses accepts only its legacy retention cache contract, keeping
+/// explicit boundaries out until they can preserve `instructions` semantics.
+#[test]
+fn profile_accepts_legacy_cache_retention_and_rejects_explicit_options() {
+    let profile: ResponsesProvider = serde_json::from_value(serde_json::json!({
+        "compat": {
+            "openai_prompt_cache": {
+                "key": "agent",
+                "retention": "24h"
+            }
+        }
+    }))
+    .expect("legacy cache profile");
+    assert_eq!(
+        profile.compat.openai_prompt_cache,
+        Some(OpenAiPromptCache {
+            key: crate::OpenAiPromptCacheKey::Agent,
+            retention: crate::OpenAiPromptCacheRetention::Hours24,
+        })
+    );
+
+    let unsupported = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+        "compat": {
+            "openai_prompt_cache": {
+                "key": "agent",
+                "options": {"mode": "explicit"}
+            }
+        }
+    }));
+    assert!(unsupported.is_err());
+}
+
 /// Responses profiles must retain their explicit route and model list rather
 /// than gaining provider discovery or an implicit provider-specific model.
 #[test]
@@ -65,6 +97,7 @@ fn profile_publishes_default_responses_efforts() {
         models: vec![ResponsesModel {
             id: tau_proto::ModelName::new("example-model"),
             efforts: None,
+            compat: None,
             display_name: None,
             context_window: 42,
             tags: Vec::new(),
@@ -78,6 +111,7 @@ fn profile_publishes_default_responses_efforts() {
         tags: Vec::new(),
         max_output_tokens: 0,
         transport: tau_provider_responses::Transport::Sse,
+        compat: ResponsesCompat::default(),
     };
     let models = models_for_provider(&tau_proto::ProviderName::new("responses"), &provider);
     assert_eq!(models.len(), 1);

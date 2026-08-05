@@ -217,7 +217,25 @@ fn lower_compat(
     tau_provider_chat_completions::AttemptCompat {
         stream_options: compat.stream_options,
         parallel_tool_calls: compat.parallel_tool_calls,
-        prompt_cache_key: compat.prompt_cache_key,
+        prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
+            crate::OpenAiPromptCacheKey::Agent => match cache.policy {
+                super::OpenAiPromptCachePolicy::Legacy { retention } => {
+                    tau_provider_chat_completions::PromptCache::Legacy {
+                        retention: match retention {
+                            crate::OpenAiPromptCacheRetention::InMemory => {
+                                tau_provider_chat_completions::PromptCacheRetention::InMemory
+                            }
+                            crate::OpenAiPromptCacheRetention::Hours24 => {
+                                tau_provider_chat_completions::PromptCacheRetention::Hours24
+                            }
+                        },
+                    }
+                }
+                super::OpenAiPromptCachePolicy::Explicit { .. } => {
+                    tau_provider_chat_completions::PromptCache::ExplicitSystemPrompt
+                }
+            },
+        }),
         reasoning_effort: compat.reasoning_effort,
         max_completion_tokens: compat.max_completion_tokens,
         cache_usage: match compat.cache_usage {

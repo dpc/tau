@@ -10,10 +10,7 @@
       "compat": {
         "stream_options": true,
         "parallel_tool_calls": true,
-        "openai_prompt_cache": {
-          "key": "agent",
-          "retention": "in_memory"
-        },
+        "prompt_cache_key": true,
         "reasoning_effort": true
       },
       "tags": [
@@ -32,9 +29,6 @@
   },
   "compat": {
     "stream_options": true,
-    "openai_prompt_cache": {
-      "key": "agent",
-      "retention": "in_memory"
-    }
+    "prompt_cache_key": true
   }
 }

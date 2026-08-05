@@ -154,6 +154,19 @@ Chat Completions cache counters are ignored by default. Set
 that response schema. Unsupported Anthropic/Gemini-compatible cache details
 remain absent; the extension has no native cache-object lifecycle client.
 
+Generic OpenAI-compatible cache request controls are opt-in and route-local:
+`compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat
+Completions accepts either legacy `retention: in_memory`/`"24h"` or explicit
+`options: { mode: explicit, ttl: 30m, boundary: system_prompt }`. Explicit mode
+marks the end of a non-empty system prompt, preventing an implicit breakpoint
+from writing a volatile transcript suffix. The legacy retention policy instead
+accepts the provider's automatic behavior, including a possible volatile-suffix
+write premium. Public Responses accepts the key plus legacy retention only; it
+does not rewrite top-level `instructions` into a breakpoint-bearing message.
+The retired `compat.prompt_cache_key: bool` is invalid. Tau neither guesses
+cache support from route names nor adds native Anthropic/Gemini cache clients or
+cache lifecycle traffic.
+
 ChatGPT's full account quota snapshot is acquired best-effort from `/wham/usage`
 and reconciled with sparse in-band WebSocket `codex.rate_limits` observations
 without delaying model work. Tau shows neutral `Q?` for a selected model when provider quota

@@ -24,3 +24,16 @@ reject image/file output, custom or hosted tools, and unknown output families.
 These validations limit the supported transcript surface; they do not make
 provider output trusted or redact reasoning from journals, session inspection,
 or other authorized transcript consumers.
+
+## Typed OpenAI prompt-cache controls
+
+Only an operator-declared exact route may send legacy
+`compat.openai_prompt_cache` controls. Tau sends its stable
+`tau:<agent-id>` key to that configured external provider, making it a
+provider-visible correlation value. Public Responses accepts only legacy
+automatic retention, so the operator accepts the provider's retention posture
+and possible volatile-suffix cache-write premium.
+
+The backend does not accept explicit cache options and does not rewrite
+top-level `instructions` into a content block. HTTP/SSE and WebSocket serialize
+the same key and legacy retention fields.

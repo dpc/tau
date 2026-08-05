@@ -345,6 +345,47 @@ Responses and private ChatGPT routes use their native OpenAI response shape.
 Anthropic/Gemini compatibility routes remain best-effort and expose no native
 cache parsing or object lifecycle.
 
+Generic OpenAI-compatible routes may opt into typed cache request controls only
+when the exact configured route supports them. Tau never infers these controls
+from a provider name, model name, base URL, or OpenRouter route. `extra_body`
+cannot supply `prompt_cache_key`, `prompt_cache_retention`, or
+`prompt_cache_options`; typed compatibility owns those top-level fields.
+
+Chat Completions provider or model compatibility accepts one of these policies:
+
+```yaml
+compat:
+  openai_prompt_cache:
+    key: agent
+    retention: in_memory # or "24h"
+```
+
+```yaml
+compat:
+  openai_prompt_cache:
+    key: agent
+    options:
+      mode: explicit
+      ttl: 30m
+      boundary: system_prompt
+```
+
+`key: agent` derives Tau's stable `tau:<agent-id>` key; profiles cannot select
+an arbitrary shared key. The first policy uses the provider's legacy automatic
+cache behavior. It deliberately accepts that the provider can choose a volatile
+suffix and, where the route prices cache writes separately, can charge a
+write premium. The explicit policy instead marks the end of the non-empty
+system prompt and sends `prompt_cache_options.mode: explicit`, so Tau does not
+create an implicit suffix breakpoint. `retention` and `options` are mutually
+exclusive. The retired `compat.prompt_cache_key: bool` is invalid.
+
+Public Responses profiles accept the same `key: agent` plus `retention` policy,
+at provider or model `compat`, but do not accept `options`. The backend keeps
+the system prompt in `instructions`; changing that shape to add an explicit
+content-block boundary belongs to a separate interface change. Its HTTP/SSE and
+WebSocket attempts both serialize the key and legacy retention from the same
+request body.
+
 ### Scoped provider credentials
 
 `tau provider add` writes one registration under the selected enabled built-in

@@ -9,6 +9,53 @@ use std::{io as path_std_io, time as path_std_time};
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 use super::*;
 
+/// Cache controls must reject the retired boolean key flag so profiles cannot
+/// accidentally retain GPT-5.6 implicit caching without an explicit policy.
+#[test]
+fn profile_rejects_retired_prompt_cache_key_flag() {
+    let result = serde_json::from_value::<ChatCompletionsCompat>(serde_json::json!({
+        "prompt_cache_key": true
+    }));
+
+    assert!(result.is_err());
+}
+
+/// A Chat Completions route may select only one typed OpenAI cache policy,
+/// making the legacy automatic and explicit-boundary wire paths unambiguous.
+#[test]
+fn profile_validates_exclusive_openai_prompt_cache_policies() {
+    let explicit: ChatCompletionsCompat = serde_json::from_value(serde_json::json!({
+        "openai_prompt_cache": {
+            "key": "agent",
+            "options": {
+                "mode": "explicit",
+                "ttl": "30m",
+                "boundary": "system_prompt"
+            }
+        }
+    }))
+    .expect("explicit policy");
+    assert!(explicit.openai_prompt_cache.is_some());
+
+    let ambiguous = serde_json::from_value::<ChatCompletionsCompat>(serde_json::json!({
+        "openai_prompt_cache": {
+            "key": "agent",
+            "retention": "in_memory",
+            "options": {
+                "mode": "explicit",
+                "ttl": "30m",
+                "boundary": "system_prompt"
+            }
+        }
+    }));
+    assert!(ambiguous.is_err());
+
+    let empty = serde_json::from_value::<ChatCompletionsCompat>(serde_json::json!({
+        "openai_prompt_cache": {"key": "agent"}
+    }));
+    assert!(empty.is_err());
+}
+
 /// Ensures legacy model JSON omitting the additive capability remains
 /// parallel-capable, preserving phase-1 profile compatibility.
 #[test]

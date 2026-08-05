@@ -163,7 +163,7 @@ fn provider() -> TestProvider {
         compat: AttemptCompat {
             stream_options: true,
             parallel_tool_calls: true,
-            prompt_cache_key: true,
+            prompt_cache: None,
             reasoning_effort: true,
             max_completion_tokens: true,
             cache_usage: CacheUsageCompat::None,
@@ -618,6 +618,73 @@ fn cache_prefix_prompt() -> tau_proto::AgentPromptCreated {
     prompt
 }
 
+/// Explicit cache controls must mark only the stable system-message text and
+/// send the matching top-level OpenAI options, preventing implicit suffix
+/// writes.
+#[test]
+fn explicit_prompt_cache_marks_the_system_prompt_boundary() {
+    let mut provider = provider();
+    provider.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
+    let request = build_request(
+        &resolved_provider(&provider),
+        &provider.models[0],
+        &cache_prefix_prompt(),
+    );
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["prompt_cache_key"], "tau:agent-test");
+    assert_eq!(
+        json["prompt_cache_options"],
+        serde_json::json!({"mode": "explicit", "ttl": "30m"})
+    );
+    assert!(json.get("prompt_cache_retention").is_none());
+    assert_eq!(
+        json["messages"][0]["content"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "stable system authority",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }])
+    );
+}
+
+/// Explicit cache controls require a stable system prefix instead of moving the
+/// breakpoint to volatile conversation content when no system prompt is
+/// present.
+#[test]
+fn explicit_prompt_cache_rejects_an_empty_system_prompt() {
+    let mut provider = provider();
+    provider.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
+    let mut prompt = cache_prefix_prompt();
+    prompt.system_prompt.clear();
+
+    assert!(matches!(
+        try_build_request(&resolved_provider(&provider), &provider.models[0], &prompt),
+        Err(LlmError::PromptCacheSystemPromptRequired)
+    ));
+}
+
+/// Legacy cache retention must retain the provider's automatic policy while
+/// avoiding GPT-5.6 explicit-cache fields and synthetic content markers.
+#[test]
+fn legacy_prompt_cache_emits_only_the_legacy_top_level_fields() {
+    let mut provider = provider();
+    provider.compat.prompt_cache = Some(PromptCache::Legacy {
+        retention: PromptCacheRetention::Hours24,
+    });
+    let request = build_request(
+        &resolved_provider(&provider),
+        &provider.models[0],
+        &cache_prefix_prompt(),
+    );
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["prompt_cache_key"], "tau:agent-test");
+    assert_eq!(json["prompt_cache_retention"], "24h");
+    assert!(json.get("prompt_cache_options").is_none());
+    assert_eq!(json["messages"][0]["content"], "stable system authority");
+}
+
 /// Ensures local correlation changes, appended history, and call suppression
 /// retain the existing provider-visible lowering needed for prefix reuse.
 #[test]
@@ -850,6 +917,8 @@ fn local_summary_compaction_builds_dedicated_bounded_request() {
     assert_eq!(request.tool_choice, Some("none"));
     assert_eq!(request.max_completion_tokens, Some(321));
     assert_eq!(request.prompt_cache_key, None);
+    assert_eq!(request.prompt_cache_retention, None);
+    assert!(request.prompt_cache_options.is_none());
     assert_eq!(request.reasoning_effort, None);
     let messages = serde_json::to_value(&request.messages).expect("messages");
     assert!(
@@ -1305,6 +1374,8 @@ fn extra_body_rejects_every_reserved_request_member() {
         "tool_choice",
         "parallel_tool_calls",
         "prompt_cache_key",
+        "prompt_cache_retention",
+        "prompt_cache_options",
         "reasoning_effort",
         "max_tokens",
         "max_completion_tokens",

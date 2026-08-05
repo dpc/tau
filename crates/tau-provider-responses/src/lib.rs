@@ -51,6 +51,29 @@ pub struct AttemptConfig {
     pub max_output_tokens: u32,
     /// Explicit wire transport; omitted profile values resolve to SSE.
     pub transport: Transport,
+    /// Legacy OpenAI automatic-cache retention explicitly selected for this
+    /// route.
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+}
+
+/// Legacy OpenAI prompt-cache retention values supported by public Responses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCacheRetention {
+    /// Use the provider's ordinary in-memory retention behavior.
+    InMemory,
+    /// Request the provider's 24-hour retention behavior.
+    Hours24,
+}
+
+impl PromptCacheRetention {
+    /// Return the exact legacy OpenAI wire spelling.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::Hours24 => "24h",
+        }
+    }
 }
 
 /// Model wire identity for one Responses attempt.
@@ -1285,6 +1308,12 @@ struct RequestBody {
     /// Optional provider instructions.
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    /// Stable agent-derived cache key for an explicitly cache-capable route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    /// Legacy automatic-cache retention for an explicitly cache-capable route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: Option<&'static str>,
     /// Optional output-token limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
@@ -1344,6 +1373,13 @@ fn build_request(
         },
         instructions: (!prompt.system_prompt.trim().is_empty())
             .then(|| prompt.system_prompt.clone()),
+        prompt_cache_key: config
+            .prompt_cache_retention
+            .is_some()
+            .then(|| format!("tau:{}", prompt.agent_id)),
+        prompt_cache_retention: config
+            .prompt_cache_retention
+            .map(PromptCacheRetention::wire),
         max_output_tokens: (config.max_output_tokens != 0).then_some(config.max_output_tokens),
         tools,
         tool_choice,
