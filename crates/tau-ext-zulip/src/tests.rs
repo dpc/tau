@@ -1009,9 +1009,25 @@ fn http_register_uses_basic_auth_and_native_queue_api() {
              long-poll timeout"
         );
         assert_eq!(
-            form.get("client_capabilities").map(String::as_str),
-            Some(r#"{"empty_topic_name":true}"#),
-            "registration must preserve Zulip's canonical empty general-chat topic"
+            form.get("event_types")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
+            Some(serde_json::json!([
+                "message",
+                "update_message",
+                "delete_message",
+                "reaction"
+            ])),
+            "registration must retain explicit Zulip mutation event subscriptions"
+        );
+        assert_eq!(
+            form.get("client_capabilities")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
+            Some(serde_json::json!({
+                "notification_settings_null": false,
+                "empty_topic_name": true,
+            })),
+            "registration must include Zulip's historical required capability \
+             while preserving its canonical empty general-chat topic"
         );
         assert!(
             !form.values().any(|value| value.contains("realm_user")),

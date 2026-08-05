@@ -372,7 +372,9 @@ impl ZulipClient for HttpZulipClient {
                 ("apply_markdown".to_owned(), "false".to_owned()),
                 (
                     "client_capabilities".to_owned(),
-                    r#"{"empty_topic_name":true}"#.to_owned(),
+                    // Zulip's schema keeps this historical member required even
+                    // when the client does not use null notification settings.
+                    r#"{"notification_settings_null":false,"empty_topic_name":true}"#.to_owned(),
                 ),
             ],
             ResponseContext::Startup(RejectedOperation::Register),
