@@ -513,7 +513,7 @@ impl Extension {
         let queue = if needs_queue {
             match self.client.register_queue(&cfg) {
                 Ok(queue) => Some(queue),
-                Err(error) => return tool_error(invoke, error.diagnostic().to_owned()),
+                Err(error) => return tool_error(invoke, error.diagnostic()),
             }
         } else {
             None
@@ -724,7 +724,7 @@ impl Extension {
         };
         let sent = match self.client.send_message(&cfg, &route, &message) {
             Ok(value) => value,
-            Err(error) => return tool_error(invoke, error.diagnostic().to_owned()),
+            Err(error) => return tool_error(invoke, error.diagnostic()),
         };
         let message_ref = message_fact_id(&cfg, sent.message_id);
         {
@@ -826,7 +826,7 @@ impl Extension {
             )
         };
         if let Err(error) = self.client.react(&cfg, native_id, &emoji, add) {
-            return tool_error(invoke, error.diagnostic().to_owned());
+            return tool_error(invoke, error.diagnostic());
         }
         let state = self.state.lock();
         if state.config_generation != generation
@@ -1220,8 +1220,8 @@ fn worker_loop(ext: Arc<Extension>) {
             }
             Err(error) => {
                 tracing::warn!(target: LOG_TARGET, category = error.diagnostic(), "Zulip long poll failed");
-                let delay = if let ApiError::RateLimited(delay) = error {
-                    delay
+                let delay = if let ApiError::RateLimited { retry, .. } = error {
+                    retry
                 } else {
                     let delay = backoff;
                     backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
@@ -1285,7 +1285,7 @@ fn handle_queue_expiry(
                 return;
             }
             Err(error) => {
-                tracing::warn!(target: LOG_TARGET, category = error.diagnostic(), "Zulip queue registration failed");
+                log_queue_registration_failure(&error);
             }
         }
         let (state_after_wait, _) = ext
@@ -1303,6 +1303,11 @@ fn handle_queue_expiry(
         drop(state);
         backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
     }
+}
+
+/// Log one content-free live queue re-registration failure.
+fn log_queue_registration_failure(error: &ApiError) {
+    tracing::warn!(target: LOG_TARGET, category = error.diagnostic(), "Zulip queue registration failed");
 }
 
 fn admitted_conversation(

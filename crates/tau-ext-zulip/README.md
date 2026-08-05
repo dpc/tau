@@ -75,4 +75,11 @@ The queue cursor, duplicate cache, reply routes, message ownership, and registra
 
 Outbound calls make one bounded provider request and do not retry ambiguous sends or mutations, preventing an automatic duplicate remote effect. A timeout can still leave an unknown remote outcome. Configuration, registration, unload, and shutdown generations reject stale local completions; a remote effect may have completed before authority changed.
 
+When the initial `users_me` lookup or `register` request is rejected, the
+diagnostic identifies only that operation, HTTP status, and a bounded uppercase
+ASCII Zulip error code matching `[A-Z0-9_]` in 1–64 bytes. Missing, malformed,
+or oversized codes become `unknown`; remote response messages and bodies,
+request data, URLs, headers, and credentials never appear in diagnostics. The
+same bound applies when live queue re-registration fails.
+
 The bridge intentionally does not upload or download files. Slack's analogous safe surface is text-only and requests no file scopes, so Zulip Markdown links remain inert text/links rather than creating a local-file capability.

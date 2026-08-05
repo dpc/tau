@@ -6100,6 +6100,7 @@ dependencies = [
  "tau-core",
  "tau-proto",
  "tracing",
+ "tracing-subscriber",
  "ureq",
  "url",
 ]

@@ -51,30 +51,149 @@ pub(crate) enum ApiError {
     /// The event queue expired and must be replaced.
     QueueExpired,
     /// Zulip requested a bounded retry delay.
-    RateLimited(Duration),
+    RateLimited {
+        /// The bounded delay requested by Zulip.
+        retry: Duration,
+        /// Safe rejection metadata when Zulip returned an HTTP response.
+        rejection: Option<RemoteRejection>,
+    },
     /// Authentication was refused.
-    Unauthorized,
+    Unauthorized {
+        /// Safe rejection metadata when Zulip returned an HTTP response.
+        rejection: Option<RemoteRejection>,
+    },
     /// The request was definitively invalid.
-    InvalidRequest,
+    InvalidRequest {
+        /// Safe rejection metadata when Zulip returned an HTTP response.
+        rejection: Option<RemoteRejection>,
+    },
     /// The service or network failed and outcome may be unknown for mutations.
-    Unavailable,
+    Unavailable {
+        /// Safe rejection metadata when Zulip returned an HTTP response.
+        rejection: Option<RemoteRejection>,
+    },
     /// A success response violated the expected bounded schema.
     MalformedResponse,
 }
 
 impl ApiError {
     /// Return a content-free user-facing diagnostic.
-    pub(crate) fn diagnostic(&self) -> &'static str {
+    pub(crate) fn diagnostic(&self) -> String {
         match self {
-            Self::QueueExpired => "Zulip event queue expired",
-            Self::RateLimited(_) => "Zulip rate limit exceeded",
-            Self::Unauthorized => "Zulip authentication failed",
-            Self::InvalidRequest => "Zulip rejected the request",
-            Self::Unavailable => "Zulip service is unavailable",
-            Self::MalformedResponse => "Zulip returned an invalid response",
+            Self::QueueExpired => "Zulip event queue expired".to_owned(),
+            Self::RateLimited {
+                rejection: Some(rejection),
+                ..
+            } => format!("Zulip rate limit exceeded ({})", rejection.detail()),
+            Self::RateLimited {
+                rejection: None, ..
+            } => "Zulip rate limit exceeded".to_owned(),
+            Self::Unauthorized {
+                rejection: Some(rejection),
+            } => {
+                format!("Zulip authentication failed ({})", rejection.detail())
+            }
+            Self::Unauthorized { rejection: None } => "Zulip authentication failed".to_owned(),
+            Self::InvalidRequest {
+                rejection: Some(rejection),
+            } => {
+                format!("Zulip rejected the request ({})", rejection.detail())
+            }
+            Self::InvalidRequest { rejection: None } => "Zulip rejected the request".to_owned(),
+            Self::Unavailable {
+                rejection: Some(rejection),
+            } => {
+                format!("Zulip service is unavailable ({})", rejection.detail())
+            }
+            Self::Unavailable { rejection: None } => "Zulip service is unavailable".to_owned(),
+            Self::MalformedResponse => "Zulip returned an invalid response".to_owned(),
+        }
+    }
+
+    /// Build a safely classified startup rejection without retaining remote
+    /// text.
+    #[cfg(test)]
+    pub(crate) fn rejected_startup_request(
+        operation: RejectedOperation,
+        status: u16,
+        retry: Option<Duration>,
+        code: &str,
+    ) -> Self {
+        let rejection = Some(RemoteRejection::new(operation, status, code));
+        classify_http_rejection(status, retry, rejection.clone())
+            .unwrap_or(Self::InvalidRequest { rejection })
+    }
+
+    /// Return the generic category used when no remote response was available.
+    pub(crate) fn unavailable() -> Self {
+        Self::Unavailable { rejection: None }
+    }
+}
+
+/// The only startup requests whose rejection diagnostics name an operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RejectedOperation {
+    /// The authenticated-bot identity request.
+    UsersMe,
+    /// The event-queue registration request.
+    Register,
+}
+
+impl RejectedOperation {
+    /// Return the stable, data-free operation label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::UsersMe => "users_me",
+            Self::Register => "register",
         }
     }
 }
+
+/// Meaning of an API response while selecting safe failure handling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseContext {
+    /// A request without special response handling.
+    Ordinary,
+    /// A long-poll response that may report an expired event queue.
+    QueuePoll,
+    /// A startup request whose rejection receives a bounded diagnostic.
+    Startup(RejectedOperation),
+}
+
+/// Safe metadata retained from a remote rejection for a startup diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteRejection {
+    /// Stable local name for the rejected request.
+    operation: RejectedOperation,
+    /// HTTP status returned by the remote server.
+    status: u16,
+    /// Validated bounded Zulip machine error code, or `unknown`.
+    code: String,
+}
+
+impl RemoteRejection {
+    /// Retain only a bounded safe code from a remote rejection.
+    fn new(operation: RejectedOperation, status: u16, code: &str) -> Self {
+        Self {
+            operation,
+            status,
+            code: sanitize_zulip_error_code(code),
+        }
+    }
+
+    /// Render the fixed-shape diagnostic without remote response content.
+    fn detail(&self) -> String {
+        format!(
+            "{}, HTTP {}, code {}",
+            self.operation.label(),
+            self.status,
+            self.code
+        )
+    }
+}
+
+/// Maximum number of ASCII bytes accepted from a Zulip machine error code.
+const MAX_ZULIP_ERROR_CODE_BYTES: usize = 64;
 
 /// Small Zulip HTTP API surface used by the bridge and fake-server tests.
 pub(crate) trait ZulipClient: Send + Sync + 'static {
@@ -138,7 +257,7 @@ impl HttpZulipClient {
     fn read_json(
         &self,
         mut response: ureq::http::Response<ureq::Body>,
-        queue_request: bool,
+        context: ResponseContext,
     ) -> Result<serde_json::Value, ApiError> {
         let status = response.status().as_u16();
         let retry = response
@@ -152,25 +271,33 @@ impl HttpZulipClient {
             .with_config()
             .limit(MAX_API_RESPONSE_BYTES)
             .read_to_string()
-            .map_err(|_| ApiError::MalformedResponse)?;
+            .ok();
         // Provider bodies never enter diagnostics because unusual reverse proxies
         // may reflect credentials or request content.
-        if status == 401 || status == 403 {
-            return Err(ApiError::Unauthorized);
-        }
-        if status == 429 {
-            return Err(ApiError::RateLimited(
-                retry.unwrap_or(Duration::from_secs(1)),
-            ));
-        }
-        if queue_request && status == 400 && text.contains("BAD_EVENT_QUEUE_ID") {
+        let remote_rejection = |code: String| match context {
+            ResponseContext::Startup(operation) => {
+                Some(RemoteRejection::new(operation, status, &code))
+            }
+            ResponseContext::Ordinary | ResponseContext::QueuePoll => None,
+        };
+        let Some(text) = text else {
+            return Err(classify_http_rejection(
+                status,
+                retry,
+                remote_rejection("unknown".to_owned()),
+            )
+            .unwrap_or(ApiError::MalformedResponse));
+        };
+        if context == ResponseContext::QueuePoll
+            && status == 400
+            && text.contains("BAD_EVENT_QUEUE_ID")
+        {
             return Err(ApiError::QueueExpired);
         }
-        if 500 <= status {
-            return Err(ApiError::Unavailable);
-        }
-        if !(200..300).contains(&status) {
-            return Err(ApiError::InvalidRequest);
+        if let Some(error) =
+            classify_http_rejection(status, retry, remote_rejection(zulip_error_code(&text)))
+        {
+            return Err(error);
         }
         let value: serde_json::Value =
             serde_json::from_str(&text).map_err(|_| ApiError::MalformedResponse)?;
@@ -179,7 +306,9 @@ impl HttpZulipClient {
             .and_then(serde_json::Value::as_str)
             .is_some_and(|result| result != "success")
         {
-            return Err(ApiError::InvalidRequest);
+            return Err(ApiError::InvalidRequest {
+                rejection: remote_rejection(zulip_error_code(&text)),
+            });
         }
         Ok(value)
     }
@@ -189,14 +318,15 @@ impl HttpZulipClient {
         cfg: &RuntimeConfig,
         path: &str,
         form: Vec<(String, String)>,
+        context: ResponseContext,
     ) -> Result<serde_json::Value, ApiError> {
         let response = self
             .agent
             .post(&format!("{}/{path}", cfg.api_base))
             .header("Authorization", &Self::auth(cfg))
             .send_form(form)
-            .map_err(|_| ApiError::Unavailable)?;
-        self.read_json(response, false)
+            .map_err(|_| ApiError::unavailable())?;
+        self.read_json(response, context)
     }
 
     fn current_user(&self, cfg: &RuntimeConfig) -> Result<(u64, Option<String>), ApiError> {
@@ -205,8 +335,11 @@ impl HttpZulipClient {
             .get(&format!("{}/users/me", cfg.api_base))
             .header("Authorization", &Self::auth(cfg))
             .call()
-            .map_err(|_| ApiError::Unavailable)?;
-        let value = self.read_json(response, false)?;
+            .map_err(|_| ApiError::unavailable())?;
+        let value = self.read_json(
+            response,
+            ResponseContext::Startup(RejectedOperation::UsersMe),
+        )?;
         let user_id = value
             .get("user_id")
             .and_then(serde_json::Value::as_u64)
@@ -242,6 +375,7 @@ impl ZulipClient for HttpZulipClient {
                     r#"{"empty_topic_name":true}"#.to_owned(),
                 ),
             ],
+            ResponseContext::Startup(RejectedOperation::Register),
         )?;
         let queue_id = value
             .get("queue_id")
@@ -285,8 +419,8 @@ impl ZulipClient for HttpZulipClient {
             .timeout_global(Some(request_timeout))
             .build()
             .call()
-            .map_err(|_| ApiError::Unavailable)?;
-        let value = self.read_json(response, true)?;
+            .map_err(|_| ApiError::unavailable())?;
+        let value = self.read_json(response, ResponseContext::QueuePoll)?;
         let events = value
             .get("events")
             .and_then(serde_json::Value::as_array)
@@ -309,7 +443,8 @@ impl ZulipClient for HttpZulipClient {
                 form.push(("type".to_owned(), "direct".to_owned()));
                 form.push((
                     "to".to_owned(),
-                    serde_json::to_string(users).map_err(|_| ApiError::InvalidRequest)?,
+                    serde_json::to_string(users)
+                        .map_err(|_| ApiError::InvalidRequest { rejection: None })?,
                 ));
             }
             NativeRoute::Stream { stream_id, topic } => {
@@ -318,7 +453,7 @@ impl ZulipClient for HttpZulipClient {
                 form.push(("topic".to_owned(), topic.clone()));
             }
         }
-        let value = self.post_form(cfg, "messages", form)?;
+        let value = self.post_form(cfg, "messages", form, ResponseContext::Ordinary)?;
         let message_id = value
             .get("id")
             .and_then(serde_json::Value::as_u64)
@@ -351,8 +486,61 @@ impl ZulipClient for HttpZulipClient {
                 .query("reaction_type", "unicode_emoji")
                 .call()
         }
-        .map_err(|_| ApiError::Unavailable)?;
-        self.read_json(response, false)?;
+        .map_err(|_| ApiError::unavailable())?;
+        self.read_json(response, ResponseContext::Ordinary)?;
         Ok(())
     }
+}
+
+/// Preserve the existing category for a non-success HTTP response.
+fn classify_http_rejection(
+    status: u16,
+    retry: Option<Duration>,
+    rejection: Option<RemoteRejection>,
+) -> Option<ApiError> {
+    if status == 401 || status == 403 {
+        return Some(ApiError::Unauthorized { rejection });
+    }
+    if status == 429 {
+        return Some(ApiError::RateLimited {
+            retry: retry.unwrap_or(Duration::from_secs(1)),
+            rejection,
+        });
+    }
+    if 500 <= status {
+        return Some(ApiError::Unavailable { rejection });
+    }
+    if !(200..300).contains(&status) {
+        return Some(ApiError::InvalidRequest { rejection });
+    }
+    None
+}
+
+/// Extract a bounded machine error code without retaining remote response text.
+fn zulip_error_code(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .map_or_else(
+            || "unknown".to_owned(),
+            |code| sanitize_zulip_error_code(&code),
+        )
+}
+
+/// Replace an unsafe Zulip machine code with the fixed fallback.
+fn sanitize_zulip_error_code(code: &str) -> String {
+    if !code.is_empty()
+        && code.len() < MAX_ZULIP_ERROR_CODE_BYTES + 1
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return code.to_owned();
+    }
+    "unknown".to_owned()
 }

@@ -3,7 +3,35 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::*;
-use crate::api::{SentMessage, ZulipClient};
+use crate::api::{RejectedOperation, SentMessage, ZulipClient};
+
+/// Cloneable in-memory sink used to inspect tracing output.
+#[derive(Clone, Default)]
+struct SharedTraceWriter {
+    /// Bytes written by the temporary tracing subscriber.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedTraceWriter {
+    /// Return all tracing bytes captured so far.
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("trace writer lock").clone()
+    }
+}
+
+impl std::io::Write for SharedTraceWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("trace writer lock")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Deterministic API fake retaining calls without network access.
 #[derive(Default)]
@@ -57,7 +85,7 @@ impl ZulipClient for FakeClient {
         _last_event_id: i64,
         _request_timeout: Duration,
     ) -> Result<Vec<serde_json::Value>, ApiError> {
-        Err(ApiError::Unavailable)
+        Err(ApiError::unavailable())
     }
 
     fn send_message(
@@ -803,6 +831,41 @@ fn queue_expiry_reports_gap_and_registers_fresh_queue() {
     );
 }
 
+/// Failed live queue re-registration logs the bounded category field and omits
+/// untrusted malformed code text without waiting for a retry timer.
+#[test]
+fn queue_reregistration_log_redacts_rejection_code() {
+    let error = ApiError::rejected_startup_request(
+        RejectedOperation::Register,
+        400,
+        None,
+        "bad-code remote-message top-secret",
+    );
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        log_queue_registration_failure(&error);
+    });
+
+    let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(
+        output
+            .contains("category=\"Zulip rejected the request (register, HTTP 400, code unknown)\"")
+    );
+    for secret in ["bad-code", "remote-message", "top-secret"] {
+        assert!(!output.contains(secret), "log leaked `{secret}`");
+    }
+}
+
 /// Edit, delete, and reaction events reference only a previously admitted owned
 /// message and deletion revokes its route.
 #[test]
@@ -866,6 +929,36 @@ fn read_http_request(socket: &mut impl Read) -> String {
             return String::from_utf8_lossy(&bytes).to_string();
         }
     }
+}
+
+/// Return one deterministic `users_me` rejection from a loopback Zulip server.
+fn users_me_rejection(status: &str, headers: &str, code: &str) -> ApiError {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let status = status.to_owned();
+    let headers = headers.to_owned();
+    let body = serde_json::json!({"result":"error","code":code}).to_string();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept identity request");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let request = read_http_request(&mut socket);
+        assert!(request.starts_with("GET /api/v1/users/me "));
+        write!(
+            socket,
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{headers}Connection: close\r\n\r\n{body}",
+            body.len(),
+        )
+        .expect("reject identity");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+    let error = HttpZulipClient::default()
+        .register_queue(&config)
+        .expect_err("identity rejection");
+    server.join().expect("server");
+    error
 }
 
 /// The production client fetches its own bounded identity before registering,
@@ -946,6 +1039,298 @@ fn http_register_uses_basic_auth_and_native_queue_api() {
     let (identity_request, register_request) = server.join().expect("server");
     assert!(!identity_request.contains("queue-secret"));
     assert!(!register_request.contains("queue-secret"));
+}
+
+/// A rejected authenticated-user lookup reports only its stable operation,
+/// status, and machine code, never remote text or configured credentials.
+#[test]
+fn users_me_rejection_diagnostic_is_content_free() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept identity request");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let request = read_http_request(&mut socket);
+        assert!(request.starts_with("GET /api/v1/users/me "));
+        let body = r#"{"result":"error","code":"INVALID_API_KEY","msg":"remote-message top-secret bot@example.test","reflected_body":"register payload","url":"https://top-secret@chat.example.test/path?api_key=top-secret","response_header":"X-Remote-Token: top-secret"}"#;
+        write!(
+            socket,
+            "HTTP/1.1 418 Teapot\r\nContent-Length: {}\r\nContent-Type: application/json\r\nX-Remote-Token: top-secret\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("reject identity");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+
+    let error = HttpZulipClient::default()
+        .register_queue(&config)
+        .expect_err("identity rejection");
+    let diagnostic = error.diagnostic();
+
+    assert_eq!(
+        diagnostic,
+        "Zulip rejected the request (users_me, HTTP 418, code INVALID_API_KEY)"
+    );
+    for secret in [
+        "remote-message",
+        "top-secret",
+        "bot@example.test",
+        "register payload",
+        "chat.example.test",
+        "X-Remote-Token",
+    ] {
+        assert!(!diagnostic.contains(secret), "diagnostic leaked `{secret}`");
+    }
+    server.join().expect("server");
+}
+
+/// Every HTTP failure category retains its established diagnostic prefix while
+/// adding only sanitized startup-rejection metadata and a bounded retry delay.
+#[test]
+fn users_me_http_rejections_preserve_categories_and_bounds() {
+    let forbidden = users_me_rejection("403 Forbidden", "", "BAD_PERMISSION");
+    assert!(matches!(forbidden, ApiError::Unauthorized { .. }));
+    assert_eq!(
+        forbidden.diagnostic(),
+        "Zulip authentication failed (users_me, HTTP 403, code BAD_PERMISSION)"
+    );
+
+    let rate_limited = users_me_rejection("429 Too Many Requests", "", "RATE_LIMITED");
+    assert!(matches!(
+        rate_limited,
+        ApiError::RateLimited {
+            retry,
+            ..
+        } if retry == Duration::from_secs(1)
+    ));
+    assert_eq!(
+        rate_limited.diagnostic(),
+        "Zulip rate limit exceeded (users_me, HTTP 429, code RATE_LIMITED)"
+    );
+
+    let capped_rate_limit = users_me_rejection(
+        "429 Too Many Requests",
+        "Retry-After: 99\r\n",
+        "RATE_LIMITED",
+    );
+    assert!(matches!(
+        capped_rate_limit,
+        ApiError::RateLimited {
+            retry,
+            ..
+        } if retry == Duration::from_secs(30)
+    ));
+
+    let unavailable = users_me_rejection("503 Service Unavailable", "", "SERVER_ERROR");
+    assert!(matches!(unavailable, ApiError::Unavailable { .. }));
+    assert_eq!(
+        unavailable.diagnostic(),
+        "Zulip service is unavailable (users_me, HTTP 503, code SERVER_ERROR)"
+    );
+
+    let malformed_code = users_me_rejection("400 Bad Request", "", "bad-code secret");
+    assert!(matches!(malformed_code, ApiError::InvalidRequest { .. }));
+    assert_eq!(
+        malformed_code.diagnostic(),
+        "Zulip rejected the request (users_me, HTTP 400, code unknown)"
+    );
+}
+
+/// A rejected queue registration reports its stable operation and substitutes
+/// `unknown` for an oversized remote machine code without exposing the body.
+#[test]
+fn register_rejection_diagnostic_bounds_remote_code() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut identity_socket, _) = listener.accept().expect("accept identity request");
+        identity_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let identity_request = read_http_request(&mut identity_socket);
+        assert!(identity_request.starts_with("GET /api/v1/users/me "));
+        let identity_body = r#"{"result":"success","user_id":99}"#;
+        write!(
+            identity_socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            identity_body.len(),
+            identity_body
+        )
+        .expect("respond with identity");
+
+        let (mut register_socket, _) = listener.accept().expect("accept register request");
+        register_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let register_request = read_http_request(&mut register_socket);
+        assert!(register_request.starts_with("POST /api/v1/register "));
+        let oversized_code = format!("BAD_{}", "A".repeat(128));
+        let body = serde_json::json!({
+            "result": "error",
+            "code": oversized_code,
+            "msg": "remote-message top-secret bot@example.test",
+            "reflected_body": "event_types payload",
+            "url": "https://top-secret@chat.example.test/path?api_key=top-secret",
+            "response_header": "X-Remote-Token: top-secret",
+        })
+        .to_string();
+        write!(
+            register_socket,
+            "HTTP/1.1 422 Unprocessable Content\r\nContent-Length: {}\r\nContent-Type: application/json\r\nX-Remote-Token: top-secret\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("reject registration");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+
+    let error = HttpZulipClient::default()
+        .register_queue(&config)
+        .expect_err("registration rejection");
+    let diagnostic = error.diagnostic();
+
+    assert_eq!(
+        diagnostic,
+        "Zulip rejected the request (register, HTTP 422, code unknown)"
+    );
+    for secret in [
+        "remote-message",
+        "top-secret",
+        "bot@example.test",
+        "event_types payload",
+        "chat.example.test",
+        "X-Remote-Token",
+    ] {
+        assert!(!diagnostic.contains(secret), "diagnostic leaked `{secret}`");
+    }
+    server.join().expect("server");
+}
+
+/// A semantic Zulip error in a successful HTTP response keeps the 200 status
+/// and accepts exactly 64 safe code bytes without retaining the response body.
+#[test]
+fn register_semantic_rejection_keeps_status_and_maximum_code() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut identity_socket, _) = listener.accept().expect("accept identity request");
+        identity_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let identity_request = read_http_request(&mut identity_socket);
+        assert!(identity_request.starts_with("GET /api/v1/users/me "));
+        let identity_body = r#"{"result":"success","user_id":99}"#;
+        write!(
+            identity_socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            identity_body.len(),
+            identity_body
+        )
+        .expect("respond with identity");
+
+        let (mut register_socket, _) = listener.accept().expect("accept register request");
+        register_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let register_request = read_http_request(&mut register_socket);
+        assert!(register_request.starts_with("POST /api/v1/register "));
+        let code = "A".repeat(64);
+        let body = serde_json::json!({"result":"error","code":code}).to_string();
+        write!(
+            register_socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("reject registration");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+
+    let error = HttpZulipClient::default()
+        .register_queue(&config)
+        .expect_err("semantic registration rejection");
+
+    assert_eq!(
+        error.diagnostic(),
+        format!(
+            "Zulip rejected the request (register, HTTP 200, code {})",
+            "A".repeat(64)
+        )
+    );
+    server.join().expect("server");
+}
+
+/// An oversized response still preserves the known startup rejection category,
+/// operation, and HTTP status while replacing its unknown machine code safely.
+#[test]
+fn users_me_oversized_rejection_preserves_category() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept identity request");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let request = read_http_request(&mut socket);
+        assert!(request.starts_with("GET /api/v1/users/me "));
+        let body = "x".repeat(MAX_API_RESPONSE_BYTES as usize + 1);
+        write!(
+            socket,
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write oversized rejection");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+
+    let error = HttpZulipClient::default()
+        .register_queue(&config)
+        .expect_err("oversized identity rejection");
+
+    assert_eq!(
+        error.diagnostic(),
+        "Zulip authentication failed (users_me, HTTP 401, code unknown)"
+    );
+    server.join().expect("server");
+}
+
+/// Registration returns the fixed-shape remote-rejection diagnostic through
+/// the public tool result rather than exposing a raw provider error.
+#[test]
+fn register_tool_returns_content_free_rejection_diagnostic() {
+    let (ext, _rx, client) = extension();
+    client
+        .register_error
+        .lock()
+        .expect("register lock")
+        .replace(ApiError::rejected_startup_request(
+            RejectedOperation::Register,
+            400,
+            None,
+            "BAD_REQUEST",
+        ));
+    ext.state.lock().queue = None;
+
+    let result = ext.handle_register(
+        tool(REGISTER_TOOL_NAME, vec![("enabled", CborValue::Bool(true))]),
+        Some(1),
+    );
+
+    let Event::ToolError(error) = result else {
+        panic!("expected registration error")
+    };
+    assert_eq!(
+        error.message,
+        "Zulip rejected the request (register, HTTP 400, code BAD_REQUEST)"
+    );
 }
 
 /// The production client long-polls the native events endpoint with an opaque

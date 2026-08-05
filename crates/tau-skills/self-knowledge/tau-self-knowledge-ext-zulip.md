@@ -13,4 +13,11 @@ The disabled tools are `zulip_register`, `zulip_conversations`, `zulip_send`, an
 
 The extension emits generic message reports for creates, edits, deletes, reactions, and successful sends. Queue loss reconnects live and warns about a possible gap; it does not fetch missed backlog. Runtime references, dedupe, registrations, and cursors disappear on restart. The bridge is Markdown text-only and deliberately provides no file upload/download capability.
 
+When Zulip rejects the initial or live-re-registration `users_me` or `register`
+request, the diagnostic keeps its authentication, rate-limit, invalid-request,
+or unavailable category and adds only the operation, HTTP status, and a
+1–64-byte uppercase ASCII `[A-Z0-9_]` machine error code. Missing, malformed,
+or oversized codes show as `unknown`; no response message/body, request data,
+headers, URL data, or credentials appear.
+
 See `crates/tau-ext-zulip/README.md`, `SECURITY.md`, `testing.md`, and local specs for complete behavior.
