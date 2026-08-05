@@ -1,15 +1,20 @@
 //! Extension-owned public Responses profiles and finite attempt adapter.
 
+mod prompt_cache;
 mod sampling;
 #[cfg(test)]
 mod tests;
 
+pub use prompt_cache::{
+    OpenAiExplicitPromptCacheMode, OpenAiPromptCache, OpenAiPromptCacheBoundary,
+    OpenAiPromptCacheOptions, OpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
+};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName};
 
 use self::sampling::ResponsesResponseSampler;
-use crate::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
+use crate::OpenAiPromptCacheKey;
 
 /// One serialized generic public Responses provider profile.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -98,16 +103,6 @@ impl ResponsesCompat {
     fn is_default(value: &Self) -> bool {
         value.openai_prompt_cache.is_none()
     }
-}
-
-/// Legacy OpenAI prompt-cache controls for one public Responses route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenAiPromptCache {
-    /// Tau-owned namespace used to derive the stable cache key.
-    pub key: OpenAiPromptCacheKey,
-    /// Legacy automatic-cache retention accepted by this exact route.
-    pub retention: OpenAiPromptCacheRetention,
 }
 
 /// A validated canonical set of public Responses reasoning-effort levels.
@@ -253,13 +248,20 @@ pub fn run_prompt_attempt<W: std::io::Write>(
         api_key: provider.api_key.clone(),
         max_output_tokens: provider.max_output_tokens,
         transport: provider.transport,
-        prompt_cache_retention: compat.openai_prompt_cache.map(|cache| match cache.key {
-            OpenAiPromptCacheKey::Agent => match cache.retention {
-                OpenAiPromptCacheRetention::InMemory => {
-                    tau_provider_responses::PromptCacheRetention::InMemory
+        prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
+            OpenAiPromptCacheKey::Agent => match cache.policy {
+                OpenAiPromptCachePolicy::Legacy { retention } => {
+                    tau_provider_responses::PromptCachePolicy::Legacy(match retention {
+                        crate::OpenAiPromptCacheRetention::InMemory => {
+                            tau_provider_responses::PromptCacheRetention::InMemory
+                        }
+                        crate::OpenAiPromptCacheRetention::Hours24 => {
+                            tau_provider_responses::PromptCacheRetention::Hours24
+                        }
+                    })
                 }
-                OpenAiPromptCacheRetention::Hours24 => {
-                    tau_provider_responses::PromptCacheRetention::Hours24
+                OpenAiPromptCachePolicy::Explicit { .. } => {
+                    tau_provider_responses::PromptCachePolicy::Explicit
                 }
             },
         }),

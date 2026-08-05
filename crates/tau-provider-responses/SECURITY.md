@@ -27,13 +27,15 @@ or other authorized transcript consumers.
 
 ## Typed OpenAI prompt-cache controls
 
-Only an operator-declared exact route may send legacy
+Only an operator-declared exact route may send
 `compat.openai_prompt_cache` controls. Tau sends its stable
 `tau:<agent-id>` key to that configured external provider, making it a
-provider-visible correlation value. Public Responses accepts only legacy
-automatic retention, so the operator accepts the provider's retention posture
-and possible volatile-suffix cache-write premium.
+provider-visible correlation value. Legacy retention accepts the provider's
+retention posture and possible volatile-suffix cache-write premium. Explicit
+first-input-text caching is opt-in per-agent multi-turn cost control, not
+cross-agent reuse.
 
-The backend does not accept explicit cache options and does not rewrite
-top-level `instructions` into a content block. HTTP/SSE and WebSocket serialize
-the same key and legacy retention fields.
+The backend preserves top-level `instructions`, never rewrites it into input
+content, and rejects explicit mode locally when no Tau-constructed
+non-assistant input-text block exists. HTTP/SSE and WebSocket serialize the same
+cache policy fields.

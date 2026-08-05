@@ -27,10 +27,12 @@ Every request also lowers the harness-selected effective reasoning effort as
 canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass
 through directly.
 
-An exact configured route may opt into a legacy OpenAI automatic-cache retention
-policy. The adapter then sends an agent-derived `prompt_cache_key` and
-`prompt_cache_retention` in the shared HTTP/SSE and WebSocket request body.
-It does not support explicit cache options or rewrite top-level `instructions`
-as a breakpoint-bearing input item; that would change the public Responses
-request semantics. The selected legacy policy accepts the provider's automatic
-cache behavior and any associated volatile-suffix/write-premium risk.
+An exact configured route may opt into legacy OpenAI automatic-cache retention
+or explicit first-input-text caching. The adapter sends an agent-derived
+`prompt_cache_key` and either retention or explicit options in the shared
+HTTP/SSE and WebSocket request body. Explicit mode keeps top-level
+`instructions` unchanged and marks only the earliest Tau-constructed
+non-assistant `input_text` block. It is per-agent multi-turn cost control, not a
+system-prompt boundary or cross-agent reuse; no eligible input fails before
+egress. The legacy policy accepts the provider's automatic cache behavior and
+any associated volatile-suffix/write-premium risk.

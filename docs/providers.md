@@ -379,12 +379,24 @@ system prompt and sends `prompt_cache_options.mode: explicit`, so Tau does not
 create an implicit suffix breakpoint. `retention` and `options` are mutually
 exclusive. The retired `compat.prompt_cache_key: bool` is invalid.
 
-Public Responses profiles accept the same `key: agent` plus `retention` policy,
-at provider or model `compat`, but do not accept `options`. The backend keeps
-the system prompt in `instructions`; changing that shape to add an explicit
-content-block boundary belongs to a separate interface change. Its HTTP/SSE and
-WebSocket attempts both serialize the key and legacy retention from the same
-request body.
+Public Responses profiles accept the same legacy policy and this separate
+explicit policy at provider or model `compat`:
+
+```yaml
+compat:
+  openai_prompt_cache:
+    key: agent
+    options:
+      mode: explicit
+      ttl: 30m
+      boundary: first_input_text
+```
+
+This strictly opt-in policy leaves top-level `instructions` unchanged and marks
+the earliest Tau-constructed non-assistant `input_text` block. It is per-agent,
+multi-turn cost control, not a system-prompt boundary or cross-agent reuse. A
+request without that block fails locally rather than sending explicit options
+without a marker. HTTP/SSE and WebSocket serialize the same cache fields.
 
 ### Scoped provider credentials
 

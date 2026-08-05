@@ -51,9 +51,8 @@ pub struct AttemptConfig {
     pub max_output_tokens: u32,
     /// Explicit wire transport; omitted profile values resolve to SSE.
     pub transport: Transport,
-    /// Legacy OpenAI automatic-cache retention explicitly selected for this
-    /// route.
-    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    /// Optional exact OpenAI prompt-cache policy selected for this route.
+    pub prompt_cache: Option<PromptCachePolicy>,
 }
 
 /// Legacy OpenAI prompt-cache retention values supported by public Responses.
@@ -63,6 +62,15 @@ pub enum PromptCacheRetention {
     InMemory,
     /// Request the provider's 24-hour retention behavior.
     Hours24,
+}
+
+/// One valid OpenAI prompt-cache policy for a public Responses route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCachePolicy {
+    /// Legacy automatic caching with a provider-selected retention policy.
+    Legacy(PromptCacheRetention),
+    /// Explicit caching at Tau's first typed input-text boundary.
+    Explicit,
 }
 
 impl PromptCacheRetention {
@@ -1314,6 +1322,9 @@ struct RequestBody {
     /// Legacy automatic-cache retention for an explicitly cache-capable route.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'static str>,
+    /// Explicit OpenAI cache policy for a route with one typed breakpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<PromptCacheOptions>,
     /// Optional output-token limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
@@ -1339,6 +1350,17 @@ enum ResponsesInputItem {
     Raw(Box<RawValue>),
     /// Semantically constructed input item.
     Json(Value),
+    /// Tau-constructed non-assistant message eligible for a cache breakpoint.
+    TauInputMessage(Value),
+}
+
+/// Exact explicit cache policy accepted by the public Responses wire API.
+#[derive(Serialize)]
+struct PromptCacheOptions {
+    /// Explicit mode suppresses OpenAI's implicit cache breakpoint.
+    mode: &'static str,
+    /// OpenAI's currently supported explicit cache lifetime.
+    ttl: &'static str,
 }
 
 fn build_request(
@@ -1346,14 +1368,14 @@ fn build_request(
     config: &AttemptConfig,
     model: &AttemptModel,
 ) -> Result<RequestBody, Error> {
-    let input = prompt
+    let mut input = prompt
         .context
         .flatten_iter()
         .map(|item| lower_item(&item))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
-        .collect();
+        .collect::<Vec<_>>();
     let tools = prompt
         .tools
         .iter()
@@ -1363,6 +1385,14 @@ fn build_request(
         (ToolChoice::None, _) => Some("none".to_owned()),
         (ToolChoice::Auto, false) => Some("auto".to_owned()),
         _ => None,
+    };
+    let explicit_cache = matches!(config.prompt_cache, Some(PromptCachePolicy::Explicit));
+    if explicit_cache && !mark_first_input_text(&mut input) {
+        return Err(Error::InvalidRequest);
+    }
+    let legacy_retention = match config.prompt_cache {
+        Some(PromptCachePolicy::Legacy(retention)) => Some(retention.wire()),
+        Some(PromptCachePolicy::Explicit) | None => None,
     };
     Ok(RequestBody {
         model: model.id.as_str().to_owned(),
@@ -1374,12 +1404,14 @@ fn build_request(
         instructions: (!prompt.system_prompt.trim().is_empty())
             .then(|| prompt.system_prompt.clone()),
         prompt_cache_key: config
-            .prompt_cache_retention
+            .prompt_cache
             .is_some()
             .then(|| format!("tau:{}", prompt.agent_id)),
-        prompt_cache_retention: config
-            .prompt_cache_retention
-            .map(PromptCacheRetention::wire),
+        prompt_cache_retention: legacy_retention,
+        prompt_cache_options: explicit_cache.then_some(PromptCacheOptions {
+            mode: "explicit",
+            ttl: "30m",
+        }),
         max_output_tokens: (config.max_output_tokens != 0).then_some(config.max_output_tokens),
         tools,
         tool_choice,
@@ -1432,10 +1464,15 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
                 "input_text"
             };
             Ok((!text.is_empty()).then(|| {
-                ResponsesInputItem::Json(serde_json::json!({
+                let value = serde_json::json!({
                     "role": role,
                     "content": [{"type": part_type, "text": text}],
-                }))
+                });
+                if message.role == ContextRole::Assistant {
+                    ResponsesInputItem::Json(value)
+                } else {
+                    ResponsesInputItem::TauInputMessage(value)
+                }
             }))
         }
         ContextItem::ToolCall(call) if call.tool_type == ToolType::Function => {
@@ -1472,6 +1509,32 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
             Err(Error::UnsupportedOutput)
         }
     }
+}
+
+fn mark_first_input_text(input: &mut [ResponsesInputItem]) -> bool {
+    for item in input {
+        let ResponsesInputItem::TauInputMessage(message) = item else {
+            continue;
+        };
+        let Some(content) = message["content"].as_array_mut() else {
+            continue;
+        };
+        let Some(part) = content.iter_mut().find(|part| {
+            part["type"] == "input_text"
+                && part["text"].as_str().is_some_and(|text| !text.is_empty())
+        }) else {
+            continue;
+        };
+        let Some(object) = part.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            "prompt_cache_breakpoint".to_owned(),
+            serde_json::json!({"mode": "explicit"}),
+        );
+        return true;
+    }
+    false
 }
 
 fn is_text_assistant_message(value: &Value) -> bool {

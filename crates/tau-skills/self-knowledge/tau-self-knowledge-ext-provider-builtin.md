@@ -161,8 +161,12 @@ Completions accepts either legacy `retention: in_memory`/`"24h"` or explicit
 marks the end of a non-empty system prompt, preventing an implicit breakpoint
 from writing a volatile transcript suffix. The legacy retention policy instead
 accepts the provider's automatic behavior, including a possible volatile-suffix
-write premium. Public Responses accepts the key plus legacy retention only; it
-does not rewrite top-level `instructions` into a breakpoint-bearing message.
+write premium. Public Responses also accepts
+`options: { mode: explicit, ttl: 30m, boundary: first_input_text }`. It preserves
+top-level `instructions`, marks the earliest Tau-constructed non-assistant
+input-text block, and rejects locally when no eligible block exists. This is
+per-agent multi-turn cost control, not a system-prompt boundary or cross-agent
+reuse.
 The retired `compat.prompt_cache_key: bool` is invalid. Tau neither guesses
 cache support from route names nor adds native Anthropic/Gemini cache clients or
 cache lifecycle traffic.

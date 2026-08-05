@@ -50,7 +50,12 @@ use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
 pub use responses::{
-    OpenAiPromptCache as ResponsesOpenAiPromptCache, ResponsesCompat, ResponsesEfforts,
+    OpenAiExplicitPromptCacheMode as ResponsesOpenAiExplicitPromptCacheMode,
+    OpenAiPromptCache as ResponsesOpenAiPromptCache,
+    OpenAiPromptCacheBoundary as ResponsesOpenAiPromptCacheBoundary,
+    OpenAiPromptCacheOptions as ResponsesOpenAiPromptCacheOptions,
+    OpenAiPromptCachePolicy as ResponsesOpenAiPromptCachePolicy,
+    OpenAiPromptCacheTtl as ResponsesOpenAiPromptCacheTtl, ResponsesCompat, ResponsesEfforts,
     ResponsesModel, ResponsesProvider,
 };
 use responses::{

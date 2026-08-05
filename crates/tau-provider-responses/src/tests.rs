@@ -270,7 +270,7 @@ fn incomplete_reasoning_attempt_rejects_terminal_sentinel() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
-            prompt_cache_retention: None,
+            prompt_cache: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -610,6 +610,14 @@ fn http_sse_attempt_posts_responses_and_completes() {
         let request: serde_json::Value = serde_json::from_slice(&body).expect("request JSON");
         assert_eq!(request["stream"], true);
         assert_eq!(request["reasoning"]["effort"], "none");
+        assert_eq!(request["prompt_cache_key"], "tau:agent-test");
+        assert_eq!(request["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(request["prompt_cache_options"]["ttl"], "30m");
+        assert!(request.get("prompt_cache_retention").is_none());
+        assert_eq!(
+            request["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+            "explicit"
+        );
         assert!(request.get("previous_response_id").is_none());
         assert!(request.get("store").is_none());
         assert_eq!(
@@ -639,7 +647,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
-            prompt_cache_retention: None,
+            prompt_cache: Some(PromptCachePolicy::Explicit),
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -664,7 +672,7 @@ fn request_lowers_off_and_max_reasoning_efforts() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache_retention: None,
+        prompt_cache: None,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),
@@ -692,7 +700,7 @@ fn request_lowers_legacy_prompt_cache_retention() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache_retention: Some(PromptCacheRetention::InMemory),
+        prompt_cache: Some(PromptCachePolicy::Legacy(PromptCacheRetention::InMemory)),
     };
     let request = build_request(
         &minimal_prompt(),
@@ -708,6 +716,187 @@ fn request_lowers_legacy_prompt_cache_retention() {
     assert_eq!(request["prompt_cache_retention"], "in_memory");
     assert!(request.get("prompt_cache_options").is_none());
     assert_eq!(request["instructions"], "test system");
+}
+
+/// Explicit caching must retain top-level instruction authority and mark only
+/// the first Tau-constructed input-text block.
+#[test]
+fn request_lowers_explicit_prompt_cache_at_first_input_text() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 0,
+        transport: Transport::Sse,
+        prompt_cache: Some(PromptCachePolicy::Explicit),
+    };
+    let request = build_request(
+        &cache_prefix_prompt(),
+        &config,
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+    )
+    .expect("request");
+    let request = serde_json::to_value(request).expect("serialize request");
+
+    assert_eq!(request["instructions"], "stable system authority");
+    assert_eq!(request["prompt_cache_key"], "tau:agent-test");
+    assert_eq!(request["prompt_cache_options"]["mode"], "explicit");
+    assert_eq!(request["prompt_cache_options"]["ttl"], "30m");
+    assert!(request.get("prompt_cache_retention").is_none());
+    assert_eq!(
+        request["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+}
+
+/// Explicit caching must fail before egress when replay supplies no eligible
+/// Tau-constructed input text to carry the required provider marker.
+#[test]
+fn explicit_prompt_cache_rejects_missing_input_text() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 0,
+        transport: Transport::Sse,
+        prompt_cache: Some(PromptCachePolicy::Explicit),
+    };
+    assert!(matches!(
+        build_request(
+            &minimal_prompt(),
+            &config,
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+        ),
+        Err(Error::InvalidRequest)
+    ));
+}
+
+/// The explicit boundary must select only the earliest constructed input text
+/// and leave raw assistant replay and tool transcript items untouched.
+#[test]
+fn explicit_prompt_cache_marks_only_earliest_constructed_input() {
+    let mut prompt = cache_prefix_prompt();
+    prompt.context.blocks.push(tau_proto::ContextBlock::UserInput(
+        tau_proto::UserInputBlock {
+            items: vec![
+                ContextItem::Message(tau_proto::MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "replayed assistant".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: Some(
+                        r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"old"}]}"#.to_owned(),
+                    ),
+                }),
+                ContextItem::ToolResult(tau_proto::ToolResultItem {
+                    call_id: tau_proto::ToolCallId::new("call-1"),
+                    tool_type: ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse {
+                        raw: tau_proto::CborValue::Text("tool result".to_owned()),
+                        headers: Vec::new(),
+                        body: "tool result".to_owned(),
+                    },
+                    provider_content: Vec::new(),
+                }),
+                ContextItem::Message(tau_proto::MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text {
+                        text: "second input".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                }),
+            ],
+        },
+    ));
+    let request = build_request(
+        &prompt,
+        &AttemptConfig {
+            base_url: "https://example.test/v1".to_owned(),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: Some(PromptCachePolicy::Explicit),
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+    )
+    .expect("request");
+    let request = serde_json::to_value(request).expect("serialize request");
+    let input = request["input"].as_array().expect("input array");
+    assert_eq!(
+        input[0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(
+        serde_json::to_string(&request)
+            .expect("request JSON")
+            .matches("prompt_cache_breakpoint")
+            .count(),
+        1
+    );
+    assert!(
+        input[1]["content"][0]
+            .get("prompt_cache_breakpoint")
+            .is_none()
+    );
+    assert!(input[2].get("prompt_cache_breakpoint").is_none());
+    assert!(
+        input[3]["content"][0]
+            .get("prompt_cache_breakpoint")
+            .is_none()
+    );
+}
+
+/// HTTP/SSE and WebSocket must preserve cache fields identically when
+/// converting the shared request body into the WebSocket response-create
+/// envelope.
+#[test]
+fn cache_policy_wire_fields_match_shared_request_conversion() {
+    for policy in [
+        None,
+        Some(PromptCachePolicy::Legacy(PromptCacheRetention::InMemory)),
+        Some(PromptCachePolicy::Explicit),
+    ] {
+        let prompt = if policy == Some(PromptCachePolicy::Explicit) {
+            cache_prefix_prompt()
+        } else {
+            minimal_prompt()
+        };
+        let body = build_request(
+            &prompt,
+            &AttemptConfig {
+                base_url: "https://example.test/v1".to_owned(),
+                api_key: String::new(),
+                max_output_tokens: 0,
+                transport: Transport::Sse,
+                prompt_cache: policy,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+        )
+        .expect("request");
+        let http = serde_json::to_value(&body).expect("HTTP/SSE body");
+        let mut websocket = serde_json::to_value(body).expect("WebSocket body");
+        let object = websocket.as_object_mut().expect("request object");
+        object.remove("stream");
+        object.insert("type".to_owned(), serde_json::json!("response.create"));
+        for field in [
+            "instructions",
+            "input",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "prompt_cache_options",
+        ] {
+            assert_eq!(http.get(field), websocket.get(field), "{field}");
+        }
+    }
 }
 
 /// Post-upgrade provider errors must terminate known auth/request/context
@@ -789,6 +978,14 @@ fn websocket_attempt_uses_response_create_protocol() {
         assert_eq!(envelope["type"], "response.create");
         assert_eq!(envelope["model"], "test-model");
         assert!(envelope.get("stream").is_none());
+        assert_eq!(envelope["prompt_cache_key"], "tau:agent-test");
+        assert_eq!(envelope["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(envelope["prompt_cache_options"]["ttl"], "30m");
+        assert!(envelope.get("prompt_cache_retention").is_none());
+        assert_eq!(
+            envelope["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+            "explicit"
+        );
         assert!(envelope.get("previous_response_id").is_none());
         assert_eq!(
             request_path.lock().expect("path lock").as_str(),
@@ -802,13 +999,13 @@ fn websocket_attempt_uses_response_create_protocol() {
             .expect("send completed response");
     });
     let outcome = run_attempt(
-        &minimal_prompt(),
+        &cache_prefix_prompt(),
         &AttemptConfig {
             base_url: format!("http://{address}"),
             api_key: "test-key".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
-            prompt_cache_retention: None,
+            prompt_cache: Some(PromptCachePolicy::Explicit),
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -856,7 +1053,7 @@ fn websocket_rejected_upgrade_is_terminal() {
             api_key: "bad-key".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
-            prompt_cache_retention: None,
+            prompt_cache: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -983,7 +1180,7 @@ fn run_websocket_messages(
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Websocket,
-            prompt_cache_retention: None,
+            prompt_cache: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -1108,7 +1305,7 @@ fn stalled_header_observes_cancellation() {
                 api_key: String::new(),
                 max_output_tokens: 0,
                 transport: Transport::Sse,
-                prompt_cache_retention: None,
+                prompt_cache: None,
             },
             &AttemptModel {
                 id: ModelName::new("test-model"),
@@ -1161,7 +1358,7 @@ fn proxy_407_is_typed_as_auth_retry() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
-            prompt_cache_retention: None,
+            prompt_cache: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -1248,7 +1445,7 @@ fn compressed_sse_line_uses_decoded_limits_and_statistics() {
             api_key: String::new(),
             max_output_tokens: 0,
             transport: Transport::Sse,
-            prompt_cache_retention: None,
+            prompt_cache: None,
         },
         &AttemptModel {
             id: ModelName::new("test-model"),
@@ -1327,7 +1524,7 @@ fn responses_request_keeps_stable_lowering_for_local_changes() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache_retention: None,
+        prompt_cache: None,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),
@@ -1392,7 +1589,7 @@ fn responses_request_exposes_provider_visible_identity_changes() {
         api_key: String::new(),
         max_output_tokens: 0,
         transport: Transport::Sse,
-        prompt_cache_retention: None,
+        prompt_cache: None,
     };
     let model = AttemptModel {
         id: ModelName::new("test-model"),

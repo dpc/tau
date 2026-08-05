@@ -1,9 +1,9 @@
 use super::*;
 
-/// Public Responses accepts only its legacy retention cache contract, keeping
-/// explicit boundaries out until they can preserve `instructions` semantics.
+/// Public Responses accepts legacy retention and its one opt-in typed
+/// input-text boundary while rejecting the Chat Completions boundary.
 #[test]
-fn profile_accepts_legacy_cache_retention_and_rejects_explicit_options() {
+fn profile_accepts_supported_cache_policies_and_rejects_wrong_boundary() {
     let profile: ResponsesProvider = serde_json::from_value(serde_json::json!({
         "compat": {
             "openai_prompt_cache": {
@@ -17,19 +17,53 @@ fn profile_accepts_legacy_cache_retention_and_rejects_explicit_options() {
         profile.compat.openai_prompt_cache,
         Some(OpenAiPromptCache {
             key: crate::OpenAiPromptCacheKey::Agent,
-            retention: crate::OpenAiPromptCacheRetention::Hours24,
+            policy: OpenAiPromptCachePolicy::Legacy {
+                retention: crate::OpenAiPromptCacheRetention::Hours24,
+            },
         })
     );
 
-    let unsupported = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+    let explicit: ResponsesProvider = serde_json::from_value(serde_json::json!({
         "compat": {
             "openai_prompt_cache": {
                 "key": "agent",
-                "options": {"mode": "explicit"}
+                "options": {
+                    "mode": "explicit",
+                    "ttl": "30m",
+                    "boundary": "first_input_text"
+                }
             }
         }
+    }))
+    .expect("explicit cache profile");
+    assert!(matches!(
+        explicit.compat.openai_prompt_cache,
+        Some(OpenAiPromptCache {
+            policy: OpenAiPromptCachePolicy::Explicit { .. },
+            ..
+        })
+    ));
+
+    let unsupported = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+        "compat": {"openai_prompt_cache": {"key": "agent", "options": {
+            "mode": "explicit", "ttl": "30m", "boundary": "system_prompt"
+        }}}
     }));
     assert!(unsupported.is_err());
+
+    for invalid in [
+        serde_json::json!({"key": "agent"}),
+        serde_json::json!({"key": "agent", "retention": "24h", "options": {
+            "mode": "explicit", "ttl": "30m", "boundary": "first_input_text"
+        }}),
+    ] {
+        assert!(
+            serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+                "compat": {"openai_prompt_cache": invalid}
+            }))
+            .is_err()
+        );
+    }
 }
 
 /// Responses profiles must retain their explicit route and model list rather
