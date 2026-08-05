@@ -1,6 +1,10 @@
+mod proactive_direct_message;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
+pub(crate) use proactive_direct_message::DirectRoute;
+use proactive_direct_message::ProactiveDirectMessageConfig;
 use tau_proto::SecretValue;
 
 use crate::{DEFAULT_MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
@@ -23,6 +27,8 @@ pub(crate) struct ExtConfig {
     pub(crate) sender_aliases: Vec<SenderAliasConfig>,
     /// Exact configured stream/topic routes.
     pub(crate) conversations: Vec<ConversationConfig>,
+    /// Explicit proactive direct-message destinations.
+    pub(crate) proactive_direct_messages: Vec<ProactiveDirectMessageConfig>,
     /// Whether one-to-one and group direct messages may be received.
     pub(crate) direct_messages: Option<DirectMessageConfig>,
     /// Maximum UTF-8 bytes accepted for inbound and outbound text.
@@ -138,6 +144,8 @@ pub(crate) struct RuntimeConfig {
     pub(crate) sender_aliases: HashMap<u64, String>,
     /// Configured stream routes.
     pub(crate) routes: Vec<StreamRoute>,
+    /// Configured proactive direct-message routes.
+    pub(crate) direct_routes: Vec<DirectRoute>,
     /// Whether direct-message ingress is enabled.
     pub(crate) receive_direct_messages: bool,
     /// Message size ceiling.
@@ -162,7 +170,9 @@ impl ExtConfig {
         if self.allowed_user_ids.is_empty() {
             return Err("zulip config requires non-empty `allowed_user_ids`".to_owned());
         }
-        if 64 < self.conversations.len() || 64 < self.sender_aliases.len() {
+        if 64 < self.conversations.len() + self.proactive_direct_messages.len()
+            || 64 < self.sender_aliases.len()
+        {
             return Err("zulip config exceeds the 64-entry route or alias limit".to_owned());
         }
         let site = self
@@ -180,12 +190,12 @@ impl ExtConfig {
             ));
         }
         let mut aliases = HashMap::new();
-        let mut alias_values = HashSet::new();
+        let mut sender_alias_values = HashSet::new();
         for entry in self.sender_aliases {
             validate_alias(&entry.alias)?;
             if !self.allowed_user_ids.contains(&entry.user_id)
                 || aliases.insert(entry.user_id, entry.alias.clone()).is_some()
-                || !alias_values.insert(entry.alias)
+                || !sender_alias_values.insert(entry.alias)
             {
                 return Err(
                     "zulip sender aliases must be unique and refer to allowlisted users".to_owned(),
@@ -246,6 +256,10 @@ impl ExtConfig {
                 description: route.description,
             });
         }
+        let mut direct_routes = Vec::new();
+        for route in self.proactive_direct_messages {
+            direct_routes.push(route.validate(&mut route_aliases)?);
+        }
         for (index, route) in routes.iter().enumerate() {
             if route.receive.is_none() {
                 continue;
@@ -275,6 +289,7 @@ impl ExtConfig {
             allowed_user_ids: self.allowed_user_ids.into_iter().collect(),
             sender_aliases: aliases,
             routes,
+            direct_routes,
             receive_direct_messages,
             max_message_bytes,
             id_key,

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use api::{ApiError, EventQueue, HttpZulipClient, NativeRoute, ZulipClient};
 use checkpoint::CheckpointRuntime;
-use config::{ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
+use config::{DirectRoute, ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
 use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
@@ -626,6 +626,15 @@ impl Extension {
                     "description": route.description,
                 })
             })
+            .chain(cfg.direct_routes.iter().map(|route| {
+                serde_json::json!({
+                    "alias": route.alias(),
+                    "kind": "direct",
+                    "topic": serde_json::Value::Null,
+                    "agent_chosen_topic": false,
+                    "description": route.description(),
+                })
+            }))
             .collect::<Vec<_>>();
         tool_result(
             invoke,
@@ -699,44 +708,60 @@ impl Extension {
                 owner.conversation.clone()
             } else {
                 let alias = destination.as_deref().unwrap_or_default();
-                let Some(route) = cfg.routes.iter().find(|route| route.alias == alias) else {
-                    return tool_error(
-                        invoke,
-                        "unknown or unauthorized Zulip destination alias".to_owned(),
-                    );
-                };
-                let topic = match &route.proactive {
-                    ProactiveRoute::Disabled => {
+                if let Some(route) = cfg
+                    .direct_routes
+                    .iter()
+                    .find(|route| route.alias() == alias)
+                {
+                    if requested_topic.is_some() {
+                        return tool_error(
+                            invoke,
+                            "`topic` is allowed only for destinations with \
+                             `agent_chosen_topic` authority"
+                                .to_owned(),
+                        );
+                    }
+                    direct_conversation(&cfg, route)
+                } else {
+                    let Some(route) = cfg.routes.iter().find(|route| route.alias == alias) else {
                         return tool_error(
                             invoke,
                             "unknown or unauthorized Zulip destination alias".to_owned(),
                         );
-                    }
-                    ProactiveRoute::AgentChosenTopic => {
-                        let Some(topic) = requested_topic.as_deref() else {
+                    };
+                    let topic = match &route.proactive {
+                        ProactiveRoute::Disabled => {
                             return tool_error(
                                 invoke,
-                                "`topic` is required for this Zulip destination".to_owned(),
-                            );
-                        };
-                        if let Err(error) = validate_agent_topic(topic) {
-                            return tool_error(invoke, error);
-                        }
-                        topic
-                    }
-                    ProactiveRoute::ExactTopic(topic) => {
-                        if requested_topic.is_some() {
-                            return tool_error(
-                                invoke,
-                                "`topic` is allowed only for destinations with \
-                                 `agent_chosen_topic` authority"
-                                    .to_owned(),
+                                "unknown or unauthorized Zulip destination alias".to_owned(),
                             );
                         }
-                        topic
-                    }
-                };
-                stream_conversation(&cfg, route, topic)
+                        ProactiveRoute::AgentChosenTopic => {
+                            let Some(topic) = requested_topic.as_deref() else {
+                                return tool_error(
+                                    invoke,
+                                    "`topic` is required for this Zulip destination".to_owned(),
+                                );
+                            };
+                            if let Err(error) = validate_agent_topic(topic) {
+                                return tool_error(invoke, error);
+                            }
+                            topic
+                        }
+                        ProactiveRoute::ExactTopic(topic) => {
+                            if requested_topic.is_some() {
+                                return tool_error(
+                                    invoke,
+                                    "`topic` is allowed only for destinations with \
+                                     `agent_chosen_topic` authority"
+                                        .to_owned(),
+                                );
+                            }
+                            topic
+                        }
+                    };
+                    stream_conversation(&cfg, route, topic)
+                }
             };
             if reply_to.is_some() && requested_topic.is_some() {
                 return tool_error(
@@ -1709,6 +1734,18 @@ fn stream_conversation(cfg: &RuntimeConfig, route: &StreamRoute, topic: &str) ->
         },
         stable_id: format!("zulip-stream:{}", hasher.finalize().to_hex()),
         alias: Some(route.alias.clone()),
+    }
+}
+
+/// Build the opaque conversation record for one configured direct destination.
+fn direct_conversation(cfg: &RuntimeConfig, route: &DirectRoute) -> Conversation {
+    let mut hasher = blake3::Hasher::new_keyed(&cfg.id_key);
+    hasher.update(b"tau-ext-zulip/direct-conversation/v1\0");
+    hasher.update(&route.recipient().to_le_bytes());
+    Conversation {
+        route: NativeRoute::Direct(vec![route.recipient()]),
+        stable_id: format!("zulip-direct:{}", hasher.finalize().to_hex()),
+        alias: Some(route.alias().to_owned()),
     }
 }
 

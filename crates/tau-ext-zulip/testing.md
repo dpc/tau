@@ -11,7 +11,8 @@ is required.
 Injected-client tests cover strict unknown-field and allowlist validation,
 official outer-event mention flags, one exact stream/topic and DM route,
 participant canonicalization, duplicate/self suppression, source-bound and
-proactive sends, explicit agent-chosen-topic authorization including the empty
+proactive stream and fixed-recipient direct-message sends, explicit
+agent-chosen-topic authorization including the empty
 general-chat topic, incoming edit/reaction/delete reports, stale ingress
 generation, delayed-enable/later-unregister ordering, report-before-result
 ordering, and successful queue-expiry

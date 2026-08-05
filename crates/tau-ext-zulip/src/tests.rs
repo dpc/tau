@@ -200,6 +200,7 @@ fn cfg() -> RuntimeConfig {
             proactive: ProactiveRoute::ExactTopic("deploy".to_owned()),
             description: Some("Operations".to_owned()),
         }],
+        direct_routes: Vec::new(),
         receive_direct_messages: true,
         max_message_bytes: 1024,
         id_key: [7; 32],
@@ -211,6 +212,15 @@ fn cfg() -> RuntimeConfig {
 /// Validate a minimal stream-route configuration with deterministic test
 /// secrets.
 fn validated_config(conversations: serde_json::Value) -> Result<RuntimeConfig, String> {
+    validated_config_with_direct_messages(conversations, serde_json::json!([]))
+}
+
+/// Validate stream and proactive direct-message routes with deterministic test
+/// secrets.
+fn validated_config_with_direct_messages(
+    conversations: serde_json::Value,
+    proactive_direct_messages: serde_json::Value,
+) -> Result<RuntimeConfig, String> {
     let config = CborValue::serialized(&serde_json::json!({
         "bot_email_secret":"email",
         "api_key_secret":"key",
@@ -218,6 +228,8 @@ fn validated_config(conversations: serde_json::Value) -> Result<RuntimeConfig, S
         "site":"https://chat.example.test",
         "allowed_user_ids":[42],
         "conversations":conversations,
+        "proactive_direct_messages":proactive_direct_messages,
+        "direct_messages":{"receive":"all_messages"},
     }))
     .expect("config value")
     .deserialized::<ExtConfig>()
@@ -823,6 +835,143 @@ fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
     );
 }
 
+/// Proactive direct-message aliases carry exactly one independently configured
+/// outbound recipient and reject zero, arrays, duplicate aliases, and unknown
+/// nested fields before any Zulip request can target them.
+#[test]
+fn proactive_direct_message_configuration_fails_closed() {
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    let parse = |conversations: serde_json::Value, direct_messages: serde_json::Value| {
+        CborValue::serialized(&serde_json::json!({
+            "bot_email_secret":"email",
+            "api_key_secret":"key",
+            "identity_key_secret":"identity",
+            "site":"https://chat.example.test",
+            "allowed_user_ids":[42],
+            "conversations":conversations,
+            "proactive_direct_messages":direct_messages,
+        }))
+        .expect("config value")
+        .deserialized::<ExtConfig>()
+        .expect("config schema")
+    };
+    let valid = parse(
+        serde_json::json!([{
+            "alias":"ops", "stream_id":7, "topic":"deploy", "proactive_send":true
+        }]),
+        serde_json::json!([{
+            "alias":"dpc", "recipient":1180954, "description":"Operator escalation"
+        }]),
+    )
+    .validate(&secrets)
+    .expect("outbound recipient need not be an inbound sender");
+    assert_eq!(valid.direct_routes[0].recipient(), 1180954);
+
+    let sender_and_destination = CborValue::serialized(&serde_json::json!({
+        "bot_email_secret":"email",
+        "api_key_secret":"key",
+        "identity_key_secret":"identity",
+        "site":"https://chat.example.test",
+        "allowed_user_ids":[42],
+        "sender_aliases":[{"user_id":42, "alias":"dpc"}],
+        "proactive_direct_messages":[{"alias":"dpc", "recipient":1180954}],
+    }))
+    .expect("config value")
+    .deserialized::<ExtConfig>()
+    .expect("config schema")
+    .validate(&secrets);
+    assert!(
+        sender_and_destination.is_ok(),
+        "presentation aliases do not occupy the destination namespace"
+    );
+
+    let Err(error) = parse(
+        serde_json::json!([]),
+        serde_json::json!([{"alias":"zero", "recipient":0}]),
+    )
+    .validate(&secrets) else {
+        panic!("zero direct recipient accepted")
+    };
+    assert_eq!(
+        error,
+        "zulip proactive direct-message recipient must be a non-zero user ID"
+    );
+
+    let Err(error) = parse(
+        serde_json::json!([{
+            "alias":"ops", "stream_id":7, "topic":"deploy", "proactive_send":true
+        }]),
+        serde_json::json!([{"alias":"ops", "recipient":1180954}]),
+    )
+    .validate(&secrets) else {
+        panic!("stream/direct alias collision accepted")
+    };
+    assert_eq!(
+        error,
+        "zulip proactive direct-message aliases must be unique"
+    );
+
+    let routes = (0..64)
+        .map(|index| {
+            serde_json::json!({
+                "alias":format!("stream{index}"),
+                "stream_id":index,
+                "topic":"deploy",
+                "proactive_send":true
+            })
+        })
+        .collect::<Vec<_>>();
+    let Err(error) = parse(
+        serde_json::Value::Array(routes),
+        serde_json::json!([{"alias":"dpc", "recipient":1180954}]),
+    )
+    .validate(&secrets) else {
+        panic!("65 configured destinations accepted")
+    };
+    assert_eq!(
+        error,
+        "zulip config exceeds the 64-entry route or alias limit"
+    );
+
+    let Err(duplicate_alias) = parse(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"alias":"dpc", "recipient":1180954},
+            {"alias":"dpc", "recipient":42}
+        ]),
+    )
+    .validate(&secrets) else {
+        panic!("duplicate direct alias accepted")
+    };
+    assert_eq!(
+        duplicate_alias,
+        "zulip proactive direct-message aliases must be unique"
+    );
+
+    let nested_unknown = CborValue::serialized(&serde_json::json!({
+        "proactive_direct_messages":[{
+            "alias":"dpc", "recipient":1180954, "unexpected":true
+        }]
+    }))
+    .expect("config value");
+    assert!(nested_unknown.deserialized::<ExtConfig>().is_err());
+    let recipient_array = CborValue::serialized(&serde_json::json!({
+        "proactive_direct_messages":[{"alias":"dpc", "recipients":[1180954]}]
+    }))
+    .expect("config value");
+    assert!(recipient_array.deserialized::<ExtConfig>().is_err());
+}
+
 /// Pseudonymization identity remains stable across API-key rotation and changes
 /// only when the explicitly stable identity secret rotates.
 #[test]
@@ -934,6 +1083,213 @@ fn direct_message_reply_is_source_bound() {
     assert_eq!(
         client.sends.lock().expect("sends").as_slice(),
         &[(NativeRoute::Direct(vec![42]), "reply".to_owned())]
+    );
+}
+
+/// Configured aliases permit only their fixed direct recipient, retain
+/// source-bound replies, and coexist with stream destinations without exposing
+/// a recipient ID through discovery or tool arguments.
+#[test]
+fn proactive_direct_message_alias_is_fixed_and_coexists_with_other_routes() {
+    let config = validated_config_with_direct_messages(
+        serde_json::json!([{
+            "alias":"ops",
+            "stream_id":7,
+            "topic":"deploy",
+            "receive":"mentions_only",
+            "proactive_send":true,
+            "description":"Operations"
+        }]),
+        serde_json::json!([{
+            "alias":"dpc",
+            "recipient":1180954,
+            "description":"Operator escalation"
+        }]),
+    )
+    .expect("valid direct and stream destinations");
+    let source_config = config.clone();
+    let (ext, _rx, client) = extension_with_config(config);
+    let Event::ToolResult(discovery) =
+        ext.handle_conversations(tool(CONVERSATIONS_TOOL_NAME, vec![]))
+    else {
+        panic!("expected discovery result")
+    };
+    let CborValue::Text(discovery) = discovery.result else {
+        panic!("expected JSON discovery result")
+    };
+    let discovery: serde_json::Value =
+        serde_json::from_str(&discovery).expect("valid discovery JSON");
+    assert_eq!(
+        discovery.pointer("/conversations/1/kind"),
+        Some(&serde_json::Value::String("direct".to_owned()))
+    );
+    assert!(!discovery.to_string().contains("1180954"));
+
+    let direct = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            (
+                "message",
+                CborValue::Text("proactive direct message".to_owned()),
+            ),
+            ("destination", CborValue::Text("dpc".to_owned())),
+        ],
+    ));
+    assert!(matches!(direct, Event::ToolResult(_)));
+    let stream = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            (
+                "message",
+                CborValue::Text("proactive stream message".to_owned()),
+            ),
+            ("destination", CborValue::Text("ops".to_owned())),
+        ],
+    ));
+    assert!(matches!(stream, Event::ToolResult(_)));
+
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    ext.process_event(
+        serde_json::json!({
+            "id":42, "type":"message", "message": {
+                "id":502, "type":"private", "sender_id":42, "content":"reply to me", "flags":[],
+                "display_recipient":[{"id":99},{"id":42}]
+            }
+        }),
+        generation,
+        registration,
+        99,
+        Some("Tau Bot"),
+    );
+    let source_reply = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("source reply".to_owned())),
+            (
+                "reply_to",
+                CborValue::Text(message_fact_id(&source_config, 502).as_str().to_owned()),
+            ),
+        ],
+    ));
+    assert!(matches!(source_reply, Event::ToolResult(_)));
+    assert_eq!(
+        client.sends.lock().expect("sends").as_slice(),
+        &[
+            (
+                NativeRoute::Direct(vec![1180954]),
+                "proactive direct message".to_owned(),
+            ),
+            (
+                NativeRoute::Stream {
+                    stream_id: 7,
+                    topic: "deploy".to_owned(),
+                },
+                "proactive stream message".to_owned(),
+            ),
+            (NativeRoute::Direct(vec![42]), "source reply".to_owned()),
+        ]
+    );
+
+    let numeric_destination = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("denied".to_owned())),
+            ("destination", CborValue::Text("1180954".to_owned())),
+        ],
+    ));
+    assert!(matches!(numeric_destination, Event::ToolError(_)));
+    let direct_topic = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("denied".to_owned())),
+            ("destination", CborValue::Text("dpc".to_owned())),
+            ("topic", CborValue::Text("not-applicable".to_owned())),
+        ],
+    ));
+    assert!(matches!(direct_topic, Event::ToolError(_)));
+    let arbitrary_user_id = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("denied".to_owned())),
+            ("destination", CborValue::Text("dpc".to_owned())),
+            ("user_id", CborValue::Integer(1180954.into())),
+        ],
+    ));
+    assert!(matches!(arbitrary_user_id, Event::ToolError(_)));
+}
+
+/// Sender presentation aliases never become outbound destinations, even when
+/// their names differ from every configured stream and direct destination.
+#[test]
+fn sender_alias_cannot_select_an_outbound_destination() {
+    let mut config = cfg();
+    config.sender_aliases.insert(42, "inbound-only".to_owned());
+    let (ext, _rx, client) = extension_with_config(config);
+    let result = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("denied".to_owned())),
+            ("destination", CborValue::Text("inbound-only".to_owned())),
+        ],
+    ));
+    assert!(matches!(result, Event::ToolError(_)));
+    assert!(client.sends.lock().expect("sends").is_empty());
+}
+
+/// A configured direct send reports only an opaque conversation and the
+/// configured alias, while the fake transport still receives its fixed native
+/// recipient route.
+#[test]
+fn proactive_direct_send_keeps_recipient_private_in_report_and_result() {
+    let config = validated_config_with_direct_messages(
+        serde_json::json!([]),
+        serde_json::json!([{"alias":"dpc", "recipient":1180954}]),
+    )
+    .expect("valid direct destination");
+    let (ext, rx, client) = extension_with_config(config);
+    ext.dispatch_tool(tool(
+        SEND_TOOL_NAME,
+        vec![
+            (
+                "message",
+                CborValue::Text("private direct message".to_owned()),
+            ),
+            ("destination", CborValue::Text("dpc".to_owned())),
+        ],
+    ));
+    assert!(matches!(
+        event_from(rx.recv().expect("progress")),
+        Event::ToolProgressReported(_)
+    ));
+    let Event::MessageSentReported(report) = event_from(rx.recv().expect("sent report")) else {
+        panic!("missing direct sent report")
+    };
+    let conversation = report.conversation.as_ref().expect("direct conversation");
+    assert!(conversation.stable_id.starts_with("zulip-direct:"));
+    assert_eq!(conversation.alias.as_deref(), Some("dpc"));
+    assert_eq!(report.recipient, None);
+    let report_json = serde_json::to_string(&report).expect("serializable sent report");
+    assert!(!report_json.contains("1180954"));
+    assert!(!report_json.contains("recipient"));
+    assert!(!report_json.contains("native"));
+    let Event::ToolResultReported(result) = event_from(rx.recv().expect("result")) else {
+        panic!("missing direct send result")
+    };
+    let CborValue::Text(result) = result.result else {
+        panic!("text direct send result")
+    };
+    assert!(result.contains("zulip-message:"));
+    assert!(!result.contains("1180954"));
+    assert!(!result.contains("777"));
+    assert_eq!(
+        client.sends.lock().expect("sends").as_slice(),
+        &[(
+            NativeRoute::Direct(vec![1180954]),
+            "private direct message".to_owned(),
+        )]
     );
 }
 
