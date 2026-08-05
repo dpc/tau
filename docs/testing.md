@@ -520,7 +520,9 @@ lifecycle code may wait for it.
 
 Startup diagnostic-retention tests live beside `diagnostic_cleanup`. Use the injected
 clock/removal seam for exact age, scope, symlink, and per-file failure behavior
-across `events.jsonl` and legacy/compressed provider captures.
+across `events.jsonl` and legacy/compressed provider captures. New captures
+live under `debug/provider-requests/<provider-instance>/`; legacy flat
+captures remain eligible for retention cleanup.
 Use the returned test join handle only to verify startup gating: durable configured
 cleanup launches and protects the current session, while disabled retention and
 ephemeral sessions do not launch. Production drops that handle and never blocks
@@ -529,10 +531,11 @@ startup on cleanup.
 Provider-capture filename grammar tests live in
 `tau-config::provider_debug_capture`, the dependency-neutral contract used by
 writers and cleanup. Worker and producer-integration tests live in
-`tau-provider::debug_capture_writer` and the concrete provider backends.
-Exercise immediate bounded admission, per-job write-failure isolation, zstd
-round trips, and refusal of missing or symlinked session/debug/capture
-directories. The process-wide sender deliberately
+`tau-provider::debug_capture_writer`, `tau-harness::provider_capture_writer`,
+and the concrete provider backends. Exercise immediate bounded admission,
+Provider-side zstd round trips, redacted protocol Debug, late-session
+attribution, exact opaque harness writes, and refusal of missing or symlinked
+session/debug/capture directories. The process-wide sender deliberately
 has no shutdown or join API: process exit can interrupt queued or in-flight
 captures. A local-channel worker-drain test covers only the worker loop after
 test producers disconnect and is not a production shutdown guarantee.

@@ -4,6 +4,8 @@ session_retention_days: 60
 diagnostic_retention_days: 14
 wait_timeout_minimum_minutes: 5
 wait_timeout_maximum_minutes: 1440
+# Supervised extensions receive an isolated Tau-state view by default.
+tau_state_access: hidden
 extensions: {}
 tool_policy:
   rules:

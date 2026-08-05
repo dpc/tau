@@ -1,29 +1,19 @@
+use std::io;
 use std::sync::{Arc, Mutex, mpsc};
-use std::{fs as path_std_fs, io, path as path_std_path};
 
-use tau_config::provider_debug_capture::ProviderDebugCaptureFilename;
-use tempfile::TempDir;
+use super::{
+    CaptureJob, CaptureQueue, ProviderDebugCapture, capture_fits_raw_bound, compressed_message,
+    enforce_encoded_bound, run_worker, start_transport_with,
+};
 
-use super::{CaptureJob, CaptureQueue, run_worker, write_capture, write_capture_with};
-
-fn job(session_dir: &std::path::Path, filename: &str, json: &[u8]) -> CaptureJob {
-    CaptureJob::new(
-        session_dir.to_path_buf(),
-        ProviderDebugCaptureFilename::parse(filename).expect("valid capture filename"),
+/// Build one typed capture job for worker and queue tests.
+fn job(prompt: &str, json: &[u8]) -> CaptureJob {
+    CaptureJob::new(ProviderDebugCapture::new(
+        tau_proto::SessionId::parse("session-test").expect("session"),
+        tau_proto::AgentPromptId::parse(prompt).expect("prompt"),
+        tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
         json.to_vec(),
-    )
-}
-
-/// Ensures absolute, traversal, and malformed session spellings cannot reach
-/// the typed shared capture API or its filesystem join.
-#[test]
-fn shared_capture_api_rejects_unsafe_session_identity() {
-    for invalid in ["../escape", "/absolute", ".", "has/slash", "has space"] {
-        assert!(
-            tau_proto::SessionId::parse(invalid).is_err(),
-            "{invalid} must not become a capture path"
-        );
-    }
+    ))
 }
 
 /// Proves full queues reject new captures immediately rather than waiting for
@@ -31,233 +21,112 @@ fn shared_capture_api_rejects_unsafe_session_identity() {
 #[test]
 fn overload_drops_new_capture_without_blocking() {
     let (sender, _receiver) = mpsc::sync_channel(1);
-    let queue = CaptureQueue { sender };
-    queue
-        .try_submit(job(
-            path_std_path::Path::new("session"),
-            "1-one-http-sse-request.json.zst",
-            b"one",
-        ))
-        .expect("first job fills queue");
-
-    let error = queue
-        .try_submit(job(
-            path_std_path::Path::new("session"),
-            "2-two-http-sse-request.json.zst",
-            b"two",
-        ))
-        .expect_err("full queue rejects next capture");
-
-    assert!(matches!(error, mpsc::TrySendError::Full(_)));
+    let queue = CaptureQueue::with_sender(sender);
+    queue.try_submit(job("one", b"one")).expect("first job");
+    assert!(matches!(
+        queue.try_submit(job("two", b"two")),
+        Err(mpsc::TrySendError::Full(_))
+    ));
 }
 
-/// Proves one write failure does not stop later accepted captures from running.
+/// Proves one transport failure does not stop later accepted captures.
 #[test]
-fn write_failure_isolated_from_later_capture() {
+fn transport_failure_isolated_from_later_capture() {
     let (sender, receiver) = mpsc::sync_channel(2);
-    sender
-        .try_send(job(
-            path_std_path::Path::new("session"),
-            "1-one-http-sse-request.json.zst",
-            b"one",
-        ))
-        .expect("first job");
-    sender
-        .try_send(job(
-            path_std_path::Path::new("session"),
-            "2-two-http-sse-request.json.zst",
-            b"two",
-        ))
-        .expect("second job");
+    sender.try_send(job("one", b"one")).expect("first");
+    sender.try_send(job("two", b"two")).expect("second");
     drop(sender);
     let attempted = Arc::new(Mutex::new(Vec::new()));
     let worker_attempted = Arc::clone(&attempted);
-
     run_worker(receiver, move |job| {
+        let prompt = job.capture.agent_prompt_id.as_str().to_owned();
         worker_attempted
             .lock()
-            .expect("attempt list")
-            .push(job.filename.as_str().to_owned());
-        if job.filename.as_str().contains("-one-") {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            .expect("attempts")
+            .push(prompt.clone());
+        if prompt == "one" {
+            Err(io::Error::other("synthetic failure"))
         } else {
             Ok(())
         }
     });
-
-    assert_eq!(
-        *attempted.lock().expect("attempt list"),
-        [
-            "1-one-http-sse-request.json.zst",
-            "2-two-http-sse-request.json.zst"
-        ]
-    );
+    assert_eq!(*attempted.lock().expect("attempts"), ["one", "two"]);
 }
 
-/// Proves the worker helper drains accepted captures when its test-only
-/// producers disconnect; production intentionally keeps its sender for process
-/// lifetime and does not use this as a shutdown guarantee.
+/// Proves the shared production constructor accepts admissions 1 through 64
+/// and rejects admission 65 without blocking.
 #[test]
-fn worker_drains_when_test_producers_disconnect() {
-    let (sender, receiver) = mpsc::sync_channel(2);
-    sender
-        .try_send(job(
-            path_std_path::Path::new("session"),
-            "1-one-http-sse-request.json.zst",
-            b"one",
-        ))
-        .expect("first job");
-    sender
-        .try_send(job(
-            path_std_path::Path::new("session"),
-            "2-two-http-sse-request.json.zst",
-            b"two",
-        ))
-        .expect("second job");
-    drop(sender);
-    let mut attempted = Vec::new();
-
-    run_worker(receiver, |job| {
-        attempted.push(job.filename.as_str().to_owned());
-        Ok(())
-    });
-
-    assert_eq!(
-        attempted,
-        [
-            "1-one-http-sse-request.json.zst",
-            "2-two-http-sse-request.json.zst"
-        ]
-    );
-}
-
-/// Proves production captures are zstd streams containing the exact serialized
-/// JSON and that missing session roots are never created.
-#[test]
-fn production_writer_compresses_json_and_requires_existing_session() {
-    let temp = TempDir::new().expect("temp state");
-    let session = temp.path().join("session");
-    std::fs::create_dir(&session).expect("session");
-    let json = br#"{"secret":"debug"}"#;
-    let capture = job(&session, "1-prompt-http-sse-request.json.zst", json);
-
-    write_capture(&capture).expect("write capture");
-
-    let path = session.join("debug/provider-requests/1-prompt-http-sse-request.json.zst");
-    let decoded = zstd::stream::decode_all(path_std_fs::File::open(path).expect("capture"))
-        .expect("decode zstd");
-    assert_eq!(decoded, json);
-
-    let failure_json = br#"{"capture_kind":"provider_attempt_failure"}"#;
-    let failure = job(
-        &session,
-        "2-prompt-responses-attempt-failure.json.zst",
-        failure_json,
-    );
-    write_capture(&failure).expect("write attempt failure");
-    let failure_path =
-        session.join("debug/provider-requests/2-prompt-responses-attempt-failure.json.zst");
-    let decoded = zstd::stream::decode_all(
-        path_std_fs::File::open(failure_path).expect("attempt-failure capture"),
-    )
-    .expect("decode attempt-failure zstd");
-    assert_eq!(decoded, failure_json);
-
-    let missing = temp.path().join("missing");
-    assert!(write_capture(&job(&missing, "3-prompt-http-sse-request.json.zst", json)).is_err());
-    assert!(!missing.exists());
-}
-
-/// Proves the worker refuses symlinked debug descendants rather than writing
-/// sensitive captures outside the durable session directory.
-#[cfg(unix)]
-#[test]
-fn production_writer_rejects_symlinked_debug_directory() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().expect("temp state");
-    let session = temp.path().join("session");
-    let external = temp.path().join("external");
-    std::fs::create_dir(&session).expect("session");
-    std::fs::create_dir(&external).expect("external");
-    symlink(&external, session.join("debug")).expect("debug symlink");
-
-    let result = write_capture(&job(
-        &session,
-        "1-prompt-http-sse-request.json.zst",
-        br#"{"secret":"debug"}"#,
+fn production_queue_capacity_is_enforced() {
+    assert_eq!(super::CAPTURE_QUEUE_CAPACITY, 64);
+    let (sender, _receiver) = mpsc::sync_channel(super::CAPTURE_QUEUE_CAPACITY);
+    let queue = CaptureQueue::with_sender(sender);
+    for index in 1..=64 {
+        queue
+            .try_submit(job(&format!("prompt-{index}"), b"capture"))
+            .unwrap_or_else(|_| panic!("admission {index} within production capacity"));
+    }
+    assert!(matches!(
+        queue.try_submit(job("prompt-65", b"capture")),
+        Err(mpsc::TrySendError::Full(_))
     ));
-
-    assert!(result.is_err());
-    assert!(
-        std::fs::read_dir(&external)
-            .expect("external")
-            .next()
-            .is_none()
-    );
 }
 
-/// Proves the worker refuses both a symlinked session root and a symlinked
-/// existing provider-capture directory.
-#[cfg(unix)]
+/// Proves the Provider compresses the exact JSON and preserves only structured
+/// attribution in the dedicated non-event protocol message.
 #[test]
-fn production_writer_rejects_symlinked_session_and_capture_directories() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().expect("temp state");
-    let external = temp.path().join("external");
-    std::fs::create_dir(&external).expect("external");
-    let linked_session = temp.path().join("linked-session");
-    symlink(&external, &linked_session).expect("session symlink");
-    assert!(
-        write_capture(&job(
-            &linked_session,
-            "1-prompt-http-sse-request.json.zst",
-            b"capture",
-        ))
-        .is_err()
-    );
-
-    let session = temp.path().join("session");
-    let debug = session.join("debug");
-    std::fs::create_dir_all(&debug).expect("debug");
-    symlink(&external, debug.join("provider-requests")).expect("capture symlink");
-    assert!(
-        write_capture(&job(
-            &session,
-            "2-prompt-websocket-response.json.zst",
-            b"capture",
-        ))
-        .is_err()
-    );
-    assert!(
-        std::fs::read_dir(&external)
-            .expect("external")
-            .next()
-            .is_none()
-    );
-}
-
-/// Defines write-failure semantics: a streaming failure can leave a truncated
-/// final `.json.zst` artifact, but the error remains local to the worker job.
-#[test]
-fn streaming_write_failure_can_leave_truncated_final_artifact() {
-    use std::io::Write as _;
-
-    let temp = TempDir::new().expect("temp state");
-    let session = temp.path().join("session");
-    std::fs::create_dir(&session).expect("session");
-    let capture = job(&session, "1-prompt-http-sse-request.json.zst", b"complete");
-
-    let result = write_capture_with(&capture, |mut file, _json| {
-        file.write_all(b"truncated")?;
-        Err(io::Error::new(io::ErrorKind::WriteZero, "injected"))
-    });
-
-    assert!(result.is_err());
+fn compression_builds_opaque_attributed_protocol_message() {
+    let json = br#"{"secret":"debug"}"#;
+    let message = compressed_message(&job("prompt", json)).expect("compress");
+    let tau_proto::HarnessInputMessage::ProviderDebugCapture(capture) = message else {
+        panic!("dedicated capture message");
+    };
+    assert_eq!(capture.session_id.as_str(), "session-test");
+    assert_eq!(capture.agent_prompt_id.as_str(), "prompt");
     assert_eq!(
-        std::fs::read(session.join("debug/provider-requests/1-prompt-http-sse-request.json.zst"))
-            .expect("truncated artifact"),
-        b"truncated"
+        zstd::stream::decode_all(&capture.zstd[..]).expect("decode"),
+        json
     );
+    assert!(!format!("{capture:?}").contains("secret"));
+}
+
+/// Ensures absolute, traversal, and malformed session spellings cannot enter
+/// structured capture attribution.
+#[test]
+fn capture_api_rejects_unsafe_session_identity() {
+    for invalid in ["../escape", "/absolute", ".", "has/slash", "has space"] {
+        assert!(tau_proto::SessionId::parse(invalid).is_err(), "{invalid}");
+    }
+}
+
+/// Proves the raw payload bound is inclusive at the established protocol
+/// ceiling and rejects the next byte before queue admission.
+#[test]
+fn raw_payload_bound_precedes_queue_admission() {
+    let exact = job(
+        "exact",
+        &vec![0; tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize],
+    );
+    let oversized = job(
+        "oversized",
+        &vec![0; tau_proto::MAX_PROTOCOL_MESSAGE_BYTES as usize + 1],
+    );
+    assert!(capture_fits_raw_bound(&exact.capture));
+    assert!(!capture_fits_raw_bound(&oversized.capture));
+}
+
+/// Proves worker spawn failure leaves capture transport unavailable without
+/// failing Provider startup.
+#[test]
+fn worker_spawn_failure_is_nonfatal() {
+    let queue = start_transport_with(|| Err(io::Error::other("spawn failed")));
+    assert!(queue.is_none());
+}
+
+/// Proves the complete encoded frame bound is inclusive at the shared ceiling
+/// and rejects the next byte through a deterministic size seam.
+#[test]
+fn encoded_complete_frame_bound_is_enforced() {
+    let message = compressed_message(&job("frame", b"small")).expect("message");
+    assert!(enforce_encoded_bound(message.clone(), tau_proto::MAX_PROTOCOL_MESSAGE_BYTES).is_ok());
+    assert!(enforce_encoded_bound(message, tau_proto::MAX_PROTOCOL_MESSAGE_BYTES + 1).is_err());
 }

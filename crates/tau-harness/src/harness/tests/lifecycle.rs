@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
 use tau_config::secret_sources::SecretSources;
-use tau_config::settings::BuiltinComponentIdentity;
+use tau_config::settings::{BuiltinComponentIdentity, TauStateAccess};
 
 use super::*;
 use crate::agent::{Agent, PendingPrompt};
@@ -24,7 +24,9 @@ use crate::harness::{
     prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
     tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
 };
-use crate::settings::{CoreMode, ExtensionConfig};
+use crate::settings::{
+    CoreMode, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,
+};
 use crate::{event_log as path_crate_event_log, settings as path_crate_settings};
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
@@ -115,6 +117,145 @@ fn session_rollover_resets_creator_subtree_cost_accounting() {
             &harness.creator_topology,
         ),
         vec![child]
+    );
+}
+
+/// Proves a late opaque capture keeps its Provider-supplied durable session
+/// attribution after the harness rolls to a replacement current session.
+#[test]
+fn provider_capture_attribution_survives_session_rollover() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    harness
+        .switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    let provider = harness
+        .extensions
+        .entries
+        .iter()
+        .find_map(|(connection_id, entry)| {
+            (entry.kind == tau_proto::ClientKind::Provider && entry.state == ExtensionState::Ready)
+                .then(|| connection_id.clone())
+        })
+        .expect("ready provider");
+    let capture = tau_proto::ProviderDebugCapture {
+        session_id: test_session_id("s1"),
+        agent_prompt_id: tau_proto::AgentPromptId::parse("late-prompt").expect("prompt"),
+        class: tau_proto::ProviderDebugCaptureClass::HttpSseResponse,
+        zstd: vec![1, 2, 3],
+    };
+    assert!(
+        harness.sessions_dir().join("s1").is_dir(),
+        "old durable session root remains"
+    );
+
+    let (target, instance) = harness
+        .provider_debug_capture_target(&provider, &capture)
+        .expect("late durable attribution");
+
+    assert!(target.ends_with("sessions/s1"));
+    assert_eq!(instance.as_str(), "provider");
+}
+
+/// Proves session-ephemeral and memory-only harnesses never turn Provider
+/// attribution into a filesystem capture target.
+#[test]
+fn provider_capture_target_requires_durable_storage() {
+    for (name, mode) in [
+        ("ephemeral", crate::HarnessStorageMode::SessionEphemeral),
+        ("memory", crate::HarnessStorageMode::MemoryOnly),
+    ] {
+        let temp = TempDir::new().expect("tempdir");
+        let harness = quiet_provider_harness_with_start_reason_and_storage_mode(
+            temp.path(),
+            tau_proto::SessionStartReason::Initial,
+            mode,
+        )
+        .expect("harness");
+        let provider = harness
+            .extensions
+            .entries
+            .iter()
+            .find_map(|(connection_id, entry)| {
+                (entry.kind == tau_proto::ClientKind::Provider
+                    && entry.state == ExtensionState::Ready)
+                    .then(|| connection_id.clone())
+            })
+            .expect("ready provider");
+        let capture = tau_proto::ProviderDebugCapture {
+            session_id: test_session_id("s1"),
+            agent_prompt_id: tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+            class: tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
+            zstd: vec![1],
+        };
+        assert!(
+            harness
+                .provider_debug_capture_target(&provider, &capture)
+                .is_none(),
+            "{name} storage must reject capture persistence"
+        );
+    }
+}
+
+/// Proves only a ready authenticated Provider with an existing attributed
+/// durable-session root can select a capture target.
+#[test]
+fn provider_capture_target_rejects_unknown_or_unauthorized_attribution() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let provider = harness
+        .extensions
+        .entries
+        .iter()
+        .find_map(|(connection_id, entry)| {
+            (entry.kind == tau_proto::ClientKind::Provider && entry.state == ExtensionState::Ready)
+                .then(|| connection_id.clone())
+        })
+        .expect("ready provider");
+    let capture = tau_proto::ProviderDebugCapture {
+        session_id: test_session_id("s1"),
+        agent_prompt_id: tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+        class: tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
+        zstd: vec![1],
+    };
+
+    harness
+        .extensions
+        .entries
+        .get_mut(&provider)
+        .expect("entry")
+        .kind = tau_proto::ClientKind::Tool;
+    assert!(
+        harness
+            .provider_debug_capture_target(&provider, &capture)
+            .is_none()
+    );
+    let entry = harness
+        .extensions
+        .entries
+        .get_mut(&provider)
+        .expect("entry");
+    entry.kind = tau_proto::ClientKind::Provider;
+    entry.state = ExtensionState::Handshaking;
+    assert!(
+        harness
+            .provider_debug_capture_target(&provider, &capture)
+            .is_none()
+    );
+    harness
+        .extensions
+        .entries
+        .get_mut(&provider)
+        .expect("entry")
+        .state = ExtensionState::Ready;
+    let unknown = tau_proto::ProviderDebugCapture {
+        session_id: test_session_id("unknown"),
+        ..capture
+    };
+    assert!(
+        harness
+            .provider_debug_capture_target(&provider, &unknown)
+            .is_none()
     );
 }
 
@@ -316,6 +457,7 @@ fn supervised_test_config(name: &str, script: &str) -> ExtensionConfig {
         cwd: None,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
+        tau_state_access: TauStateAccess::Legacy,
     }
 }
 
@@ -673,6 +815,7 @@ fn configure_supervised_extension(
         cwd: None,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
+        tau_state_access: TauStateAccess::Legacy,
     });
     entry.state = ExtensionState::Spawning;
 
@@ -721,6 +864,7 @@ fn builtin_provider_startup_config(
                 secrets: source_declaration
                     .map(|declaration| BTreeMap::from([("provider_key".to_owned(), declaration)]))
                     .unwrap_or_default(),
+                tau_state_access: TauStateAccess::Legacy,
             },
         )]),
         extension_startup_diagnostics: Vec::new(),
@@ -2859,6 +3003,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
                 cwd: None,
                 config: serde_json::json!({"token": "config-secret"}),
                 secrets: BTreeMap::new(),
+                tau_state_access: TauStateAccess::Legacy,
             },
         )]),
         extension_startup_diagnostics: Vec::new(),
@@ -3312,6 +3457,7 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
     h.emit_extension_startup_diagnostics(&[crate::settings::ExtensionStartupDiagnostic {
         extension: "optional-diagnostic".to_owned(),
         message: "optional extension optional-diagnostic did not initialize".to_owned(),
+        kind: ExtensionStartupDiagnosticKind::OptionalSkip,
     }]);
 
     assert!(event_log_contains_source_event(
@@ -3346,6 +3492,37 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
                 && info.always_show
                 && info.message == "optional extension optional-diagnostic did not initialize"
     )));
+}
+
+/// Ensures a recovery Tau-state policy publishes its dedicated replayable
+/// notice kind rather than sharing generic harness-internal warnings.
+#[test]
+fn state_access_startup_diagnostic_uses_dedicated_notice_kind() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+
+    h.emit_extension_startup_diagnostics(&[crate::settings::ExtensionStartupDiagnostic {
+        extension: "core-shell".to_owned(),
+        message: "extension `core-shell` uses Tau-state access `read_only` from global harness configuration"
+            .to_owned(),
+        kind: ExtensionStartupDiagnosticKind::StateAccess {
+            source: TauStateAccessSource::GlobalConfiguration,
+        },
+    }]);
+
+    assert!(event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_STATE_ACCESS
+                    && info.always_show
+                    && info.message.contains("core-shell")
+        )
+    ));
 }
 
 #[test]

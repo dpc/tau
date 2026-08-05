@@ -1,5 +1,32 @@
 # Configuring extensions
 
+## Tau-state access
+
+Supervised extensions receive an empty read-only Tau-state view by default.
+Use `read_only` for trusted diagnostics, or `legacy` to recover the historical
+ambient view:
+
+```yaml
+extensions:
+  core-shell:
+    tau_state_access: read_only
+  legacy-integration:
+    tau_state_access: legacy
+```
+
+`TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only|legacy tau` overrides every
+supervised extension for one new daemon. It is intentionally rejected by
+`tau attach` and never reaches extension child environments. Secrets stay
+masked in every mode. Restricted modes restore only the extension's own
+durable state directory read-write. Providers additionally receive their
+selected credential-free settings read-only. Provider captures cross the
+extension protocol as bounded opaque zstd blobs; the harness alone derives and
+writes their session/instance paths.
+
+The recursive read-only mount operation requires Linux 5.12 or later.
+Tau never weakens a restricted mount to accommodate an older kernel:
+`mount_setattr` failure fails supervised extension startup closed.
+
 ## Rostra
 
 The bundled `std-rostra` instance is disabled by default. It runs one full

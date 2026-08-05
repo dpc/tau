@@ -1986,6 +1986,8 @@ where
     let worker_waker = runtime.waker();
     runtime.state_mut().set_worker_waker(worker_waker);
     let handle = runtime.handle();
+    #[cfg(not(test))]
+    tau_provider::debug_capture_writer::initialize_provider_debug_capture_transport(handle.clone());
     runtime.state_mut().initialize_quota(&handle)?;
     run_provider_loop(runtime)
 }
@@ -2586,7 +2588,8 @@ where
     ) -> ClientResult<()> {
         let mut frame_writer = handle_frame_writer(handle);
         finish_canceled(agent_prompt_id, prompt, &mut frame_writer)
-            .map_err(|error| ClientError::handler(error.to_string()))
+            .map_err(|error| ClientError::handler(error.to_string()))?;
+        Ok(())
     }
 
     fn start_or_reject_prompt(

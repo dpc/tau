@@ -6178,6 +6178,7 @@ dependencies = [
  "rustls-platform-verifier 0.7.0",
  "serde",
  "serde_json",
+ "tau-client",
  "tau-config",
  "tau-proto",
  "tempfile",

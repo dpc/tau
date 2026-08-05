@@ -3,6 +3,8 @@ use std::error::Error as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::Duration;
 
+use tau_config::settings::TauStateAccess;
+
 use super::*;
 
 fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
@@ -18,6 +20,7 @@ fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
         cwd,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
+        tau_state_access: TauStateAccess::Legacy,
     }
 }
 
@@ -54,7 +57,7 @@ fn supervised_command_uses_configured_cwd() {
     let (command, _) = supervised_command(
         &config,
         &ClientKind::Tool,
-        false,
+        None,
         Path::new("/tmp/tau-state"),
         false,
     )

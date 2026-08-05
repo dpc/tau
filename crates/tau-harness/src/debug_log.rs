@@ -93,6 +93,7 @@ impl DebugEventLog {
                         emit.event.name().to_string()
                     }
                     tau_proto::HarnessInputMessage::UiDebugEventStatsRequest(_) => return Ok(()),
+                    tau_proto::HarnessInputMessage::ProviderDebugCapture(_) => return Ok(()),
                     _ => "<message>".to_owned(),
                 };
                 let mut frame_json = debug_harness_input_json(message.as_ref());

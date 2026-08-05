@@ -350,6 +350,113 @@ fn resolve_extensions_builtin_can_start_disabled() {
     assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
+/// Ensures only exceptional policies emit notices and attributes each notice to
+/// the selecting configuration layer.
+#[test]
+fn tau_state_access_recovery_notices_report_the_selecting_layer() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "core-shell".to_owned(),
+        ExtensionEntry {
+            tau_state_access: Some(path_tau_config_settings::TauStateAccess::ReadOnly),
+            ..Default::default()
+        },
+    );
+
+    let resolved =
+        resolve_extensions_with_environment_and_cli_overrides(&settings, builtins(), &[], &[])
+            .expect("global and instance state access resolve");
+    assert_eq!(
+        resolved
+            .extensions
+            .iter()
+            .find(|extension| extension.name == "provider-builtin")
+            .expect("provider")
+            .tau_state_access,
+        path_tau_config_settings::TauStateAccess::Hidden
+    );
+    assert_eq!(
+        resolved
+            .extensions
+            .iter()
+            .find(|extension| extension.name == "core-shell")
+            .expect("core shell")
+            .tau_state_access,
+        path_tau_config_settings::TauStateAccess::ReadOnly
+    );
+
+    let mut config = config_from_resolved_extensions(resolved.clone());
+    append_tau_state_access_diagnostics(&mut config, &settings, None);
+    assert_eq!(config.extension_startup_diagnostics.len(), 1);
+    let shell = config
+        .extension_startup_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.extension == "core-shell")
+        .expect("core-shell state-access diagnostic");
+    assert_eq!(
+        shell.kind,
+        ExtensionStartupDiagnosticKind::StateAccess {
+            source: TauStateAccessSource::InstanceConfiguration
+        }
+    );
+    assert!(shell.message.contains("extension configuration"));
+
+    settings.tau_state_access = path_tau_config_settings::TauStateAccess::ReadOnly;
+    let resolved =
+        resolve_extensions_with_environment_and_cli_overrides(&settings, builtins(), &[], &[])
+            .expect("global recovery policy resolves");
+    let mut config = config_from_resolved_extensions(resolved.clone());
+    append_tau_state_access_diagnostics(&mut config, &settings, None);
+    let provider = config
+        .extension_startup_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.extension == "provider-builtin")
+        .expect("provider state-access diagnostic");
+    assert_eq!(
+        provider.kind,
+        ExtensionStartupDiagnosticKind::StateAccess {
+            source: TauStateAccessSource::GlobalConfiguration
+        }
+    );
+    assert!(provider.message.contains("global harness configuration"));
+
+    let mut forced = resolved;
+    apply_tau_state_access_force(
+        &mut forced,
+        Some(path_tau_config_settings::TauStateAccess::ReadOnly),
+    );
+    assert!(
+        forced
+            .extensions
+            .iter()
+            .all(|extension| extension.tau_state_access
+                == path_tau_config_settings::TauStateAccess::ReadOnly)
+    );
+    let mut forced_config = config_from_resolved_extensions(forced);
+    append_tau_state_access_diagnostics(
+        &mut forced_config,
+        &settings,
+        Some(path_tau_config_settings::TauStateAccess::ReadOnly),
+    );
+    assert!(
+        forced_config
+            .extension_startup_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.kind
+                == ExtensionStartupDiagnosticKind::StateAccess {
+                    source: TauStateAccessSource::EnvironmentForce
+                })
+    );
+    assert!(
+        forced_config
+            .extension_startup_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic
+                .message
+                .contains("process-wide TAU_EXTENSION_TAU_STATE_ACCESS"))
+    );
+}
+
 /// Ensures public environment enables are applied after configuration and
 /// before ordered CLI disables, including the normally disabled test fixture.
 #[test]

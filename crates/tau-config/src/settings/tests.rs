@@ -6,6 +6,31 @@ use tempfile::TempDir;
 use super::*;
 use crate::settings as path_crate_settings;
 
+/// Ensures the emergency state-access override accepts only its exact
+/// process-wide recovery tokens rather than silently weakening isolation.
+#[test]
+fn tau_state_access_environment_is_exact_and_fail_closed() {
+    assert_eq!(
+        parse_tau_state_access_env(Some("hidden".into())).expect("hidden"),
+        Some(TauStateAccess::Hidden)
+    );
+    assert_eq!(
+        parse_tau_state_access_env(Some("read_only".into())).expect("read-only"),
+        Some(TauStateAccess::ReadOnly)
+    );
+    assert_eq!(
+        parse_tau_state_access_env(Some("legacy".into())).expect("legacy"),
+        Some(TauStateAccess::Legacy)
+    );
+    assert_eq!(parse_tau_state_access_env(None).expect("absent"), None);
+    for invalid in ["", "Hidden", "read-only", "legacy ", "all"] {
+        assert!(
+            parse_tau_state_access_env(Some(invalid.into())).is_err(),
+            "{invalid:?} must fail closed"
+        );
+    }
+}
+
 /// Ensures the supported extension environment grammar trims OWS, preserves
 /// first-seen order, and makes duplicate enables idempotent.
 #[test]
@@ -4338,6 +4363,7 @@ fn missing_user_files_load_the_built_in_baseline() {
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
     assert!(harness.roles.contains_key("engineer-junior"));
+    assert_eq!(harness.tau_state_access, TauStateAccess::Hidden);
     assert!(harness.roles.contains_key("engineer"));
     assert_eq!(harness.default_role.as_deref(), Some("engineer"));
     assert_eq!(harness.roles["engineer-junior"].enable, Some(true));
@@ -4897,4 +4923,21 @@ fn harness_extension_tool_prefix_rejects_hyphens() {
     .expect("write");
     let error = load_harness_settings_in(&dirs_with_config(td.path())).expect_err("invalid prefix");
     assert!(error.to_string().contains("invalid tool prefix"));
+}
+
+/// Ensures global access defaults layer below an instance-specific override.
+#[test]
+fn tau_state_access_supports_global_and_instance_configuration() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "tau_state_access: hidden\nextensions:\n  shell:\n    command: [demo]\n    tau_state_access: read_only\n",
+    )
+    .expect("write");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    assert_eq!(settings.tau_state_access, TauStateAccess::Hidden);
+    assert_eq!(
+        settings.extensions["shell"].tau_state_access,
+        Some(TauStateAccess::ReadOnly)
+    );
 }

@@ -506,6 +506,18 @@ fn reject_attach_extension_environment(environment_names: &[String]) -> Result<(
     )))
 }
 
+fn reject_attach_tau_state_access_environment(
+    tau_state_access: Option<tau_config::settings::TauStateAccess>,
+) -> Result<(), CliError> {
+    if tau_state_access.is_none() {
+        return Ok(());
+    }
+    Err(CliError::Participant(format!(
+        "`tau attach` cannot apply {} to an already-running daemon",
+        tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV
+    )))
+}
+
 fn reject_ephemeral_incompatible(
     ephemeral: bool,
     startup_mode: &StartupMode,
@@ -716,12 +728,21 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         } else {
             Vec::new()
         };
+        let tau_state_access_environment = if reads_extension_environment {
+            tau_config::settings::parse_tau_state_access_env(std::env::var_os(
+                tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV,
+            ))
+            .map_err(|error| CliError::Participant(error.to_string()))?
+        } else {
+            None
+        };
         match &command {
             DispatchCommand::Startup {
                 mode: StartupMode::Attach(_),
                 ..
             } => {
                 reject_attach_extension_environment(&environment_extension_names)?;
+                reject_attach_tau_state_access_environment(tau_state_access_environment)?;
             }
             DispatchCommand::Startup { .. }
             | DispatchCommand::Other(cli::Command::Dev {

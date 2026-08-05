@@ -56,6 +56,69 @@ fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> 
 /// Supported environment variable for additively enabling configured
 /// extensions.
 pub const TAU_ENABLE_EXTENSIONS_ENV: &str = "TAU_ENABLE_EXTENSIONS";
+/// Emergency process-wide override for supervised extension Tau-state access.
+pub const TAU_EXTENSION_TAU_STATE_ACCESS_ENV: &str = "TAU_EXTENSION_TAU_STATE_ACCESS";
+
+/// Visibility of Tau's state root in a supervised extension mount namespace.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TauStateAccess {
+    /// Present an empty Tau-state tree, restoring only approved owned paths.
+    #[default]
+    Hidden,
+    /// Present Tau state read-only, restoring only approved owned writable
+    /// paths.
+    ReadOnly,
+    /// Retain the historical ambient Tau-state view except for secrets.
+    Legacy,
+}
+
+impl std::fmt::Display for TauStateAccess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Hidden => "hidden",
+            Self::ReadOnly => "read_only",
+            Self::Legacy => "legacy",
+        })
+    }
+}
+
+/// Failure while parsing [`TAU_EXTENSION_TAU_STATE_ACCESS_ENV`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TauStateAccessEnvError(
+    /// Human-readable exact-token validation failure.
+    String,
+);
+
+impl fmt::Display for TauStateAccessEnvError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TauStateAccessEnvError {}
+
+/// Parses the exact emergency Tau-state access override token.
+pub fn parse_tau_state_access_env(
+    value: Option<OsString>,
+) -> Result<Option<TauStateAccess>, TauStateAccessEnvError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.into_string().map_err(|_| {
+        TauStateAccessEnvError(format!(
+            "{TAU_EXTENSION_TAU_STATE_ACCESS_ENV} must be valid UTF-8 and exactly hidden, read_only, or legacy"
+        ))
+    })?;
+    match value.as_str() {
+        "hidden" => Ok(Some(TauStateAccess::Hidden)),
+        "read_only" => Ok(Some(TauStateAccess::ReadOnly)),
+        "legacy" => Ok(Some(TauStateAccess::Legacy)),
+        _ => Err(TauStateAccessEnvError(format!(
+            "{TAU_EXTENSION_TAU_STATE_ACCESS_ENV} must be exactly hidden, read_only, or legacy"
+        ))),
+    }
+}
 
 /// Failure while parsing [`TAU_ENABLE_EXTENSIONS_ENV`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -635,6 +698,8 @@ pub struct HarnessSettings {
     /// Highest effective activating-input wait timeout accepted from the `wait`
     /// tool, measured in whole minutes.
     pub wait_timeout_maximum_minutes: u64,
+    /// Default Tau-state presentation for supervised extension instances.
+    pub tau_state_access: TauStateAccess,
 
     /// Extension table, keyed by name. Built-in entries (`provider-builtin`,
     /// `core-shell`) come pre-baked at the harness level; anything the
@@ -712,6 +777,9 @@ struct HarnessSettingsWire {
     /// Highest effective activating-input wait timeout in whole minutes.
     #[serde(alias = "waitTimeoutMaximumMinutes")]
     wait_timeout_maximum_minutes: u64,
+    /// Default extension Tau-state presentation.
+    #[serde(default)]
+    tau_state_access: TauStateAccess,
     /// Configured extension entries.
     extensions: HashMap<String, ExtensionEntry>,
     #[serde(default, alias = "customPrompts")]
@@ -800,6 +868,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             diagnostic_retention_days: wire.diagnostic_retention_days,
             wait_timeout_minimum_minutes: wire.wait_timeout_minimum_minutes,
             wait_timeout_maximum_minutes: wire.wait_timeout_maximum_minutes,
+            tau_state_access: wire.tau_state_access,
             extensions: wire.extensions,
             default_role: wire.agents.default_role,
             roles: HashMap::new(),
@@ -1909,6 +1978,8 @@ pub struct ExtensionEntry {
     /// `["ssh", "user@host"]` to run remotely or
     /// `["bwrap", "--ro-bind", "/", "/", "--"]` to sandbox.
     pub prefix: Option<Vec<String>>,
+    /// Optional instance-specific Tau-state presentation.
+    pub tau_state_access: Option<TauStateAccess>,
 
     /// Optional immutable prefix for this instance's structural tool names.
     ///

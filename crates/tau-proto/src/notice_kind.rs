@@ -2,6 +2,7 @@
 
 pub const EXTENSION_CONFIG_ERROR: &str = "extension.config_error";
 pub const EXTENSION_OPTIONAL_SKIPPED: &str = "extension.optional_skipped";
+pub const EXTENSION_STATE_ACCESS: &str = "extension.state_access";
 pub const EXTENSION_NOTICE: &str = "extension.notice";
 pub const HARNESS_CONFIG_ERROR: &str = "harness.config_error";
 pub const HARNESS_FAILURE: &str = "harness.failure";

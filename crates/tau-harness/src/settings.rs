@@ -28,19 +28,55 @@ pub struct Config {
     /// Enabled extensions that should be spawned unless skipped later by
     /// secrets.
     pub extensions: BTreeMap<String, ExtensionConfig>,
-    /// Mandatory warning diagnostics for optional extensions skipped during
-    /// config resolution.
+    /// Mandatory startup diagnostics for optional extensions skipped during
+    /// configuration or for every non-hidden Tau-state policy.
     pub extension_startup_diagnostics: Vec<ExtensionStartupDiagnostic>,
 }
 
-/// Replayable startup diagnostic for an optional extension skipped before
-/// spawn.
+/// Replayable startup diagnostic for an extension startup decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionStartupDiagnostic {
     /// Extension config key that the diagnostic is about.
     pub extension: String,
     /// User-visible explanation safe to publish as mandatory `harness.notice`.
     pub message: String,
+    /// Typed decision that selects the notice kind and presentation.
+    pub kind: ExtensionStartupDiagnosticKind,
+}
+
+/// Reason the harness publishes one extension startup diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionStartupDiagnosticKind {
+    /// An optional extension could not start and was skipped.
+    OptionalSkip,
+    /// A non-default Tau-state recovery policy is active for an extension.
+    StateAccess {
+        /// Configuration layer that selected the effective policy.
+        source: TauStateAccessSource,
+    },
+}
+
+/// Configuration layer that selected an extension's Tau-state policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TauStateAccessSource {
+    /// The global `tau_state_access` setting selected the policy.
+    GlobalConfiguration,
+    /// The extension's `tau_state_access` setting selected the policy.
+    InstanceConfiguration,
+    /// The emergency environment force selected the policy for every extension.
+    EnvironmentForce,
+}
+
+impl TauStateAccessSource {
+    /// Return the stable user-facing description of this configuration layer.
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::GlobalConfiguration => "global harness configuration",
+            Self::InstanceConfiguration => "extension configuration",
+            Self::EnvironmentForce => "process-wide TAU_EXTENSION_TAU_STATE_ACCESS",
+        }
+    }
 }
 
 /// Resolved core configuration values.
@@ -90,6 +126,8 @@ pub struct ExtensionConfig {
     pub config: serde_json::Value,
     /// Secret declarations authorized for this extension.
     pub secrets: BTreeMap<String, ExtensionSecretEntry>,
+    /// Effective Tau-state presentation for this supervised extension.
+    pub tau_state_access: path_tau_config_settings::TauStateAccess,
 }
 
 /// Built-in extension shipped with `tau`. Used by
@@ -184,6 +222,8 @@ struct ResolvedExtension {
     cwd: Option<PathBuf>,
     config: serde_json::Value,
     secrets: BTreeMap<String, ExtensionSecretEntry>,
+    /// Effective policy after global and instance configuration resolution.
+    tau_state_access: path_tau_config_settings::TauStateAccess,
 }
 
 /// Merge user-provided `extensions` entries on top of the supplied
@@ -261,8 +301,15 @@ fn resolve_extensions_with_environment_and_cli_overrides(
 ) -> Result<ResolvedExtensions, ResolveExtensionsError> {
     // Keep the config → environment → CLI ordering aligned with
     // `SPEC-tau-harness-extension-lifecycle`.
-    let (order, entries) = seed_builtin_extension_entries(builtins);
+    let (order, entries) = seed_builtin_extension_entries(builtins, settings.tau_state_access);
     let (order, mut entries) = apply_user_extension_entries(settings, order, entries);
+    for (name, entry) in &settings.extensions {
+        if entry.tau_state_access.is_none()
+            && let Some(resolved) = entries.get_mut(name)
+        {
+            resolved.tau_state_access = settings.tau_state_access;
+        }
+    }
     for name in environment_names {
         let entry = entries
             .get_mut(name)
@@ -275,13 +322,14 @@ fn resolve_extensions_with_environment_and_cli_overrides(
 
 fn seed_builtin_extension_entries(
     builtins: Vec<BuiltinExtension>,
+    tau_state_access: path_tau_config_settings::TauStateAccess,
 ) -> (Vec<String>, HashMap<String, ResolvedExtension>) {
     let order: Vec<String> = builtins.iter().map(|b| b.name.clone()).collect();
     let entries = builtins
         .into_iter()
         .map(|b| {
             let name = b.name.clone();
-            (name, ResolvedExtension::from_builtin(b))
+            (name, ResolvedExtension::from_builtin(b, tau_state_access))
         })
         .collect();
 
@@ -289,7 +337,10 @@ fn seed_builtin_extension_entries(
 }
 
 impl ResolvedExtension {
-    fn from_builtin(builtin: BuiltinExtension) -> Self {
+    fn from_builtin(
+        builtin: BuiltinExtension,
+        tau_state_access: path_tau_config_settings::TauStateAccess,
+    ) -> Self {
         let component = BuiltinComponentIdentity::from_tau_owned_suffix(&builtin.suffix);
         Self {
             prefix: builtin.prefix,
@@ -304,6 +355,7 @@ impl ResolvedExtension {
             cwd: builtin.cwd,
             config: builtin.config,
             secrets: builtin.secrets,
+            tau_state_access,
         }
     }
 
@@ -335,6 +387,7 @@ impl ResolvedExtension {
                 .clone()
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
             secrets: user.secrets.clone().unwrap_or_default(),
+            tau_state_access: user.tau_state_access.unwrap_or_default(),
         }
     }
 
@@ -382,6 +435,9 @@ impl ResolvedExtension {
         if let Some(secrets) = user.secrets.as_ref() {
             self.secrets.extend(secrets.clone());
         }
+        if let Some(tau_state_access) = user.tau_state_access {
+            self.tau_state_access = tau_state_access;
+        }
     }
 
     fn into_enabled_extension_config(
@@ -423,6 +479,7 @@ impl ResolvedExtension {
             cwd: self.cwd,
             config: self.config,
             secrets: self.secrets,
+            tau_state_access: self.tau_state_access,
         }))
     }
 }
@@ -532,6 +589,7 @@ fn push_optional_empty_command_diagnostic(
     diagnostics.push(ExtensionStartupDiagnostic {
         extension: name.clone(),
         message: format!("optional extension {name} did not initialize"),
+        kind: ExtensionStartupDiagnosticKind::OptionalSkip,
     });
 }
 
@@ -1018,7 +1076,63 @@ fn resolve_config_in_with_extension_cli_overrides(
         &environment_names,
         extension_overrides,
     )?;
-    Ok(config_from_resolved_extensions(resolved_extensions))
+    let mut resolved_extensions = resolved_extensions;
+    let tau_state_access_force = tau_config::settings::parse_tau_state_access_env(
+        std::env::var_os(tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV),
+    )?;
+    apply_tau_state_access_force(&mut resolved_extensions, tau_state_access_force);
+    let mut config = config_from_resolved_extensions(resolved_extensions);
+    append_tau_state_access_diagnostics(&mut config, &settings, tau_state_access_force);
+    Ok(config)
+}
+
+/// Apply the emergency process-wide state-access override after configuration
+/// resolution.
+fn apply_tau_state_access_force(
+    resolved_extensions: &mut ResolvedExtensions,
+    tau_state_access_force: Option<path_tau_config_settings::TauStateAccess>,
+) {
+    if let Some(tau_state_access) = tau_state_access_force {
+        for extension in &mut resolved_extensions.extensions {
+            extension.tau_state_access = tau_state_access;
+        }
+    }
+}
+
+/// Append mandatory diagnostics for each Tau-state recovery policy.
+fn append_tau_state_access_diagnostics(
+    config: &mut Config,
+    settings: &HarnessSettings,
+    tau_state_access_force: Option<path_tau_config_settings::TauStateAccess>,
+) {
+    for extension in config.extensions.values().filter(|extension| {
+        extension.tau_state_access != path_tau_config_settings::TauStateAccess::Hidden
+    }) {
+        let source = match tau_state_access_force {
+            Some(_) => TauStateAccessSource::EnvironmentForce,
+            None if settings
+                .extensions
+                .get(&extension.name)
+                .and_then(|entry| entry.tau_state_access)
+                .is_some() =>
+            {
+                TauStateAccessSource::InstanceConfiguration
+            }
+            None => TauStateAccessSource::GlobalConfiguration,
+        };
+        config
+            .extension_startup_diagnostics
+            .push(ExtensionStartupDiagnostic {
+                extension: extension.name.clone(),
+                message: format!(
+                    "extension `{}` uses Tau-state access `{}` from {}",
+                    extension.name,
+                    extension.tau_state_access,
+                    source.description()
+                ),
+                kind: ExtensionStartupDiagnosticKind::StateAccess { source },
+            });
+    }
 }
 
 fn config_from_resolved_extensions(resolved_extensions: ResolvedExtensions) -> Config {
@@ -1031,7 +1145,15 @@ fn config_from_resolved_extensions(resolved_extensions: ResolvedExtensions) -> C
             .into_iter()
             .map(|extension| (extension.name.clone(), extension))
             .collect(),
-        extension_startup_diagnostics: resolved_extensions.diagnostics,
+        extension_startup_diagnostics: resolved_extensions
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| ExtensionStartupDiagnostic {
+                extension: diagnostic.extension,
+                message: diagnostic.message,
+                kind: ExtensionStartupDiagnosticKind::OptionalSkip,
+            })
+            .collect(),
     }
 }
 

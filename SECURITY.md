@@ -26,6 +26,23 @@ prompts, answers, identifiers, and collections remain size-validated inputs.
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
 
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
+Supervised extension state isolation is defense in depth inside the configured
+same-user executable boundary, not hostile-code containment. `hidden` and
+`read_only` prevent ordinary discovery or mutation of unrelated Tau state while
+preserving exact extension-owned state; they do
+not defend against procfs, ptrace, pre-opened descriptors, unrelated host data,
+or authorized secret RPC delivery.
+The launcher covers its temporary real-state staging tree with an empty
+read-only mount before exec, after installing the exact destination binds, so
+the child cannot bypass the selected view through the staging source path.
+
+Provider debug captures cross the cooperative configured-extension protocol as
+dedicated non-journaled messages. The Provider zstd-compresses opaque artifacts
+off its request path and supplies only typed session/prompt attribution; the
+harness authenticates the Provider connection, derives the instance-specific
+durable-session path, and writes without parsing or decompressing payload bytes.
+Both transport and filesystem queues are bounded and best-effort. Capture
+payloads never enter events, journals, debug JSONL, or generic Debug output.
 The distinct deterministic and live/VCR test-fixture boundaries are documented
 in [`tau-e2e-tests/SECURITY.md`](crates/tau-e2e-tests/SECURITY.md).
 The disabled-by-default test-dummy extension's capability and worker-lifecycle

@@ -6178,3 +6178,21 @@ fn extension_data_debug_redacts_secret_payload_bytes() {
     assert!(!debug.contains("never-print-result"));
     assert!(debug.contains("contents_len"));
 }
+
+/// Proves the dedicated capture frame round-trips opaque bytes without
+/// becoming an event or exposing payload content through Debug.
+#[test]
+fn provider_capture_round_trips_with_redacted_debug() {
+    let message = crate::HarnessInputMessage::ProviderDebugCapture(crate::ProviderDebugCapture {
+        session_id: crate::SessionId::parse("session").expect("session"),
+        agent_prompt_id: crate::AgentPromptId::parse("prompt").expect("prompt"),
+        class: crate::ProviderDebugCaptureClass::WebsocketResponse,
+        zstd: b"raw-sensitive-bytes".to_vec(),
+    });
+    let encoded = crate::encode_harness_input_to_vec(&message).expect("encode");
+    let decoded = crate::decode_harness_input_from_slice(&encoded).expect("decode");
+    assert_eq!(decoded, message);
+    let debug = format!("{message:?}");
+    assert!(debug.contains("zstd_len"));
+    assert!(!debug.contains("raw-sensitive-bytes"));
+}

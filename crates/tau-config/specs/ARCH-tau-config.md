@@ -1,5 +1,12 @@
 # ARCH-tau-config: tau-config architecture
 
+`tau_state_access` selects `hidden`, `read_only`, or `legacy` for supervised
+extensions, and an extension entry can override it with the same field. The
+shipped default is `hidden`;
+`TAU_EXTENSION_TAU_STATE_ACCESS` accepts only those exact lowercase values and
+is a final process-wide force after all configuration layers. The CLI rejects
+that force on attach because it cannot change an existing daemon.
+
 Extension availability is layered in this order: built-in defaults, harness
 configuration/drop-ins, the selected profile, and ordered `--harness-config` layers,
 `TAU_ENABLE_EXTENSIONS` named enables, then extension CLI overrides in argv order.

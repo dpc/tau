@@ -154,6 +154,12 @@ acknowledgement, reply-route, deduplication, or send-completion schema.
 Streaming readers reject a single encoded protocol message larger than 16 MiB
 before higher-level connection or activation queues receive it.
 
+Provider debug captures use the dedicated `provider_debug_capture` input
+message, not `Emit`. The message carries typed session/prompt attribution,
+capture class, and opaque zstd bytes. It is non-journaled, debug-redacted, and
+accepted only from an authenticated configured Provider; the harness owns path
+selection and never parses or decompresses the payload.
+
 Provider-visible images are transport-neutral binary values attached to tool
 results, separate from message authorship. CBOR is the durable/IPC byte
 transport; provider-specific data URLs are never protocol truth. Debug

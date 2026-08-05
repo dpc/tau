@@ -18,7 +18,12 @@ Compare-and-swap names the BLAKE3 generation of the complete current contents. T
 
 Secret request and result payloads remain absent from events, journals, logs, generic debug formatting, errors, and OAuth diagnostics. Diagnostics may expose operation kind, byte count, sanitized relative identity, and typed failure only; they never expose credential bytes or host secret paths.
 
-Every supervised extension starts inside a harness-owned outer Linux user and mount namespace. The launcher makes propagation private, masks the whole Tau secret root before applying configured cwd, closes setup authority, and then executes the complete configured prefix, command, and suffix. Configured Provider instances additionally receive only their selected provider-settings tree mounted read-only. Tool instances receive no provider-settings mount. Any namespace, mapping, mount, cwd, or exec failure fails extension startup. Non-Linux systems have no unmasked fallback.
+Every supervised extension starts inside a harness-owned outer Linux user and mount namespace. The launcher makes propagation private, masks the whole Tau secret root before applying configured cwd, closes setup authority, and then executes the complete configured prefix, command, and suffix. `tau_state_access` defaults to `hidden`, which presents an empty read-only state tree; `read_only` presents the real tree recursively read-only; `legacy` retains the historical ambient view. In both restricted modes the exact persistent `<state>/ext/<instance>` tree is restored read-write. A Provider additionally receives its selected settings tree read-only. Provider debug captures cross a dedicated bounded non-journaled protocol message as opaque zstd bytes; the harness derives and writes the durable session/instance path without exposing another writable mount. Tool instances receive no Provider exception. Secrets remain masked in every mode. Any namespace, mapping, mount, cwd, or exec failure fails extension startup. Non-Linux systems have no unmasked fallback.
+
+Recursive read-only presentation uses Linux 5.12 `mount_setattr` with
+`AT_RECURSIVE`. Tau does not fall back to a non-recursive remount on older
+kernels because a nested mount could remain writable; unsupported or failed
+`mount_setattr` fails supervised extension startup closed.
 
 A persistent harness creates the private mask targets before spawn. A memory-only harness creates no host state: it masks the existing Tau state root, or skips that vacuous mount when the state root does not exist. Configured cwd at or below the masked state root is invalid. In-process extensions remain test-only and cannot request Secret.
 

@@ -3,34 +3,17 @@
 #[cfg(test)]
 mod tests;
 
-/// Valid request/response and transport combination for one provider capture.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderDebugCaptureClass {
-    /// HTTP/SSE request metadata.
-    HttpSseRequest,
-    /// Responses WebSocket request metadata.
-    WebsocketRequest,
-    /// HTTP/SSE response or HTTP-error metadata.
-    HttpSseResponse,
-    /// Responses WebSocket response metadata.
-    WebsocketResponse,
-    /// Response metadata whose transport descriptor is unavailable.
-    UnknownResponse,
-    /// Bounded, redacted metadata for one failed finite Responses attempt.
-    ResponsesAttemptFailure,
-}
+pub use tau_proto::ProviderDebugCaptureClass;
 
-impl ProviderDebugCaptureClass {
-    /// Return the stable filename label for this class.
-    fn label(self) -> &'static str {
-        match self {
-            Self::HttpSseRequest => "http-sse-request",
-            Self::WebsocketRequest => "websocket-request",
-            Self::HttpSseResponse => "http-sse-response",
-            Self::WebsocketResponse => "websocket-response",
-            Self::UnknownResponse => "unknown-response",
-            Self::ResponsesAttemptFailure => "responses-attempt-failure",
-        }
+/// Return the stable filename label owned by this grammar module.
+fn class_label(class: ProviderDebugCaptureClass) -> &'static str {
+    match class {
+        ProviderDebugCaptureClass::HttpSseRequest => "http-sse-request",
+        ProviderDebugCaptureClass::WebsocketRequest => "websocket-request",
+        ProviderDebugCaptureClass::HttpSseResponse => "http-sse-response",
+        ProviderDebugCaptureClass::WebsocketResponse => "websocket-response",
+        ProviderDebugCaptureClass::UnknownResponse => "unknown-response",
+        ProviderDebugCaptureClass::ResponsesAttemptFailure => "responses-attempt-failure",
     }
 }
 
@@ -73,7 +56,7 @@ impl ProviderDebugCaptureFilename {
             basename: format!(
                 "{timestamp_micros}-{}-{}{}",
                 agent_prompt_id.as_str(),
-                class.label(),
+                class_label(class),
                 format.extension()
             ),
         }
@@ -100,7 +83,7 @@ impl ProviderDebugCaptureFilename {
         ]
         .into_iter()
         .find_map(|class| {
-            stem.strip_suffix(class.label())
+            stem.strip_suffix(class_label(class))
                 .and_then(|prefix| prefix.strip_suffix('-'))
                 .map(|prefix| (prefix, class))
         })?;

@@ -181,6 +181,14 @@ failed-attempt diagnostic
 captures, defaulting to fourteen days while excluding current or locked
 sessions, symlinks, unrelated diagnostics, and all canonical journals.
 
+Opaque Provider debug captures arrive through a dedicated non-event protocol
+message with Provider-supplied session/prompt attribution. The harness accepts
+them only from the current authenticated Provider connection and a known
+durable session, derives the configured-instance path itself, and queues exact
+zstd bytes on a bounded filesystem worker without parsing or decompression.
+Late captures retain their attributed old session across rollover; missing
+session roots, overload, failures, and shutdown omit the best-effort artifact.
+
 Live provider retry updates may carry bounded provider detail, but the
 non-authoritative `events.jsonl` projection replaces it with only retry
 category, attempt, delay, and retrying status. Watcher and agent-message

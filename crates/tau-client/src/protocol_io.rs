@@ -420,6 +420,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::UiDebugEventStatsRequest(_) => "ui_debug_event_stats_request",
         HarnessInputMessage::UiDetachRequest(_) => "ui_detach_request",
         HarnessInputMessage::UiTreeRequest(_) => "ui_tree_request",
+        HarnessInputMessage::ProviderDebugCapture(_) => "provider_debug_capture",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "external_agent_message_auth",

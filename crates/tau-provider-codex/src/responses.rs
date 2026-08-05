@@ -287,15 +287,15 @@ pub struct ResponsesConfig {
 /// Serialize and submit the exact Responses request body Tau is about to send.
 ///
 /// This records the full prompt transcript, including tool results. It never
-/// writes credentials or request headers. Files are written under the session
-/// debug directory:
+/// writes credentials or request headers. The harness eventually writes the
+/// opaque compressed artifact under the attributed session debug directory:
 ///
 /// `~/.local/state/tau/sessions/<session_id>/debug/provider-requests/`.
 ///
 /// Return does not imply persistence. Serialization remains local and fallible,
 /// but bounded queue admission is
-/// immediate. Compression and every filesystem operation run on the detached
-/// capture worker.
+/// immediate. Compression runs on the Provider capture worker; harness
+/// filesystem I/O runs on its separate bounded worker.
 pub(super) fn maybe_debug_submit_provider_request(
     agent_prompt_id: &str,
     config: &ResponsesConfig,

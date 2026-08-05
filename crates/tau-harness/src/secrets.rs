@@ -10,7 +10,7 @@ use tau_config::secret_sources::{
 pub use tau_config::secret_sources::{SecretSourceError as SecretsError, SecretSources};
 use tau_proto::SecretValue;
 
-use crate::settings::{Config, ExtensionStartupDiagnostic};
+use crate::settings::{Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind};
 
 /// Collect all `TAU_SECRET_*` variables and remove them from this process.
 #[allow(unsafe_code)]
@@ -76,6 +76,7 @@ pub fn resolve_extension_secrets_excluding(
                     diagnostics.push(ExtensionStartupDiagnostic {
                         extension: extension.clone(),
                         message: format!("optional extension {extension} did not initialize"),
+                        kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                     });
                     skipped_extensions.insert(extension.clone());
                     secrets.clear();

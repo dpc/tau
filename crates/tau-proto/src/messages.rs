@@ -1285,6 +1285,52 @@ pub struct UiTreeRequest {
     pub target_agent_id: Option<AgentId>,
 }
 
+/// Valid request/response and transport combination for one provider debug
+/// capture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDebugCaptureClass {
+    /// HTTP/SSE request metadata.
+    HttpSseRequest,
+    /// Responses WebSocket request metadata.
+    WebsocketRequest,
+    /// HTTP/SSE response or HTTP-error metadata.
+    HttpSseResponse,
+    /// Responses WebSocket response metadata.
+    WebsocketResponse,
+    /// Response metadata whose transport descriptor is unavailable.
+    UnknownResponse,
+    /// Bounded, redacted metadata for one failed finite Responses attempt.
+    ResponsesAttemptFailure,
+}
+
+/// One opaque zstd-compressed Provider debug artifact attributed to a harness
+/// dispatch.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderDebugCapture {
+    /// Durable session identity copied from the harness dispatch.
+    pub session_id: SessionId,
+    /// Prompt correlation copied from the harness dispatch.
+    pub agent_prompt_id: crate::AgentPromptId,
+    /// Typed transport and direction used in the harness-owned filename.
+    pub class: ProviderDebugCaptureClass,
+    /// Opaque zstd bytes. The harness never parses or decompresses this value.
+    #[serde(with = "serde_bytes")]
+    pub zstd: Vec<u8>,
+}
+
+impl fmt::Debug for ProviderDebugCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderDebugCapture")
+            .field("session_id", &self.session_id)
+            .field("agent_prompt_id", &self.agent_prompt_id)
+            .field("class", &self.class)
+            .field("zstd_len", &self.zstd.len())
+            .finish()
+    }
+}
+
 /// Messages the harness accepts from connected peers (UI clients and
 /// extensions).
 ///
@@ -1312,6 +1358,7 @@ pub enum HarnessInputMessage {
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     UiDetachRequest(UiDetachRequest),
     UiTreeRequest(UiTreeRequest),
+    ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),

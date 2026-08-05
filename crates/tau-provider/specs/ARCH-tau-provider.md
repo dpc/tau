@@ -7,13 +7,21 @@ provider response semantics.
 
 The shared provider debug-capture writer accepts already-serialized request and
 response metadata through one bounded process-wide nonblocking FIFO. Its
-detached worker validates durable session paths, zstd-compresses records, and
-performs all filesystem I/O. Overload, worker startup/write failure, and process
-exit may omit captures; the process-lifetime sender exposes no shutdown, drain,
-or join API, so provider and UI work never waits for capture completion. A
-streaming compression/write failure or process interruption can leave a
-truncated final `.json.zst`; readers must treat decompression failure as an
-omitted diagnostic.
+detached worker zstd-compresses records and synchronously flushes a dedicated
+non-journaled protocol message containing typed session/prompt attribution and
+opaque bytes. The complete encoded message uses the shared 16 MiB protocol
+ceiling. Overload, compression/protocol failure, and process exit may omit
+captures. Capture compression and harness filesystem work remain detached from
+provider request execution and terminal generation. Capture and terminal frames
+share the ordinary non-preemptive extension IPC writer: a terminal queued after
+an already-started capture frame waits for that frame, with no capture-specific
+terminal gate, priority scheduler, or second stream.
+
+The harness authenticates the configured Provider instance, accepts only known
+durable-session attribution, derives
+`debug/provider-requests/<instance>/`, and writes through a second bounded
+best-effort worker without inspecting or decompressing the blob. The Provider
+receives no writable capture mount or host capture path.
 
 Provider startup captures one `Arc<OutboundNetworkPolicy>` and injects it into
 each backend runtime. The snapshot selects lowercase proxy variables before

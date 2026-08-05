@@ -16,7 +16,7 @@ use super::extension_data::{
     write_extension_data_file_with_limit_locked,
 };
 use crate::error::HarnessError;
-use crate::settings::{Config, ExtensionStartupDiagnostic};
+use crate::settings::{Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind};
 
 /// Maximum number of CLI-owned settings files sent to one extension at startup.
 const MAX_EXTENSION_SETTINGS_FILES: usize = 4_096;
@@ -148,6 +148,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
                             "optional provider extension '{}' did not initialize",
                             extension.name
                         ),
+                        kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                     });
                     skipped_extensions.insert(extension.name.clone());
                     continue;
@@ -169,6 +170,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
                         "optional provider extension '{}' did not initialize",
                         extension.name
                     ),
+                    kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                 });
                 skipped_extensions.insert(extension.name.clone());
                 continue;
@@ -241,6 +243,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
                         "provider profile '{profile}' for extension '{}' is disabled: configured named secret '{source_name}' is unavailable",
                         extension.name
                     ),
+                    kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                 });
             }
         }
@@ -251,6 +254,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
                     "optional provider extension '{}' did not initialize",
                     extension.name
                 ),
+                kind: ExtensionStartupDiagnosticKind::OptionalSkip,
             });
             skipped_extensions.insert(extension.name.clone());
             continue;
@@ -279,6 +283,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
                             "optional provider extension '{}' did not initialize",
                             extension.name
                         ),
+                        kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                     });
                     skipped_extensions.insert(extension.name.clone());
                     continue;

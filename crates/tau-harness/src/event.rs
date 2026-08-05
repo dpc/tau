@@ -252,6 +252,12 @@ pub(crate) struct SupervisedWriterHandle {
     writer_thread: Option<JoinHandle<()>>,
     /// Shared two-phase watchdog transition synchronized with child reaping.
     watchdog: Arc<WriterWatchdog>,
+    /// Mount staging and mask paths that remain mounted by the supervised
+    /// child.
+    ///
+    /// The child namespace references these paths as bind-mount sources, so
+    /// their parent must retain them until the child is reaped.
+    _isolation_tempdir: Option<tempfile::TempDir>,
 }
 
 impl SupervisedWriterHandle {
@@ -415,12 +421,33 @@ pub(crate) fn spawn_writer_thread(
 }
 
 /// Spawn a supervised writer whose join handle remains owned by the harness.
+#[cfg(test)]
 pub(crate) fn spawn_supervised_writer_thread(
     connection_id: tau_proto::ConnectionId,
     writer: impl Write + Send + 'static,
     child: Child,
     protocol_io: Option<ProtocolIoMeter>,
     harness_tx: Sender<HarnessEvent>,
+) -> (Sender<WriterCommand>, SupervisedWriterHandle) {
+    spawn_supervised_writer_thread_with_isolation_tempdir(
+        connection_id,
+        writer,
+        child,
+        protocol_io,
+        harness_tx,
+        None,
+    )
+}
+
+/// Like [`spawn_supervised_writer_thread`], retaining a child namespace's
+/// staging root until the direct child has been reaped.
+pub(crate) fn spawn_supervised_writer_thread_with_isolation_tempdir(
+    connection_id: tau_proto::ConnectionId,
+    writer: impl Write + Send + 'static,
+    child: Child,
+    protocol_io: Option<ProtocolIoMeter>,
+    harness_tx: Sender<HarnessEvent>,
+    isolation_tempdir: Option<tempfile::TempDir>,
 ) -> (Sender<WriterCommand>, SupervisedWriterHandle) {
     let child_pid = child.id();
     let watchdog = Arc::new(WriterWatchdog::new());
@@ -440,6 +467,7 @@ pub(crate) fn spawn_supervised_writer_thread(
             child_pid,
             writer_thread: Some(writer_thread),
             watchdog,
+            _isolation_tempdir: isolation_tempdir,
         },
     )
 }

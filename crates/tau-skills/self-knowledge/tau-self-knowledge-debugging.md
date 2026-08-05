@@ -30,7 +30,7 @@ Tau follows the XDG directories:
   - `meta.json` — session metadata such as creation time and last-touched time.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
-  - `debug/provider-requests/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort only for a current durable session whose directory already exists. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`; legacy uncompressed `.json` captures may remain until retention cleanup. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
+  - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. A late capture can land in the old attributed session after rollover. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`; legacy flat uncompressed `.json` or compressed captures may remain until retention cleanup. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`
@@ -116,16 +116,16 @@ find ~/.local/state/tau/sessions -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p
 ls -lah ~/.local/state/tau/sessions/<session_id>/logs
 
 # Inspect exact provider request/response captures, if present.
-ls -lah ~/.local/state/tau/sessions/<session_id>/debug/provider-requests
+find ~/.local/state/tau/sessions/<session_id>/debug/provider-requests -maxdepth 2 -type f -print
 # Responses-backend request/response fields.
-zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-request.json.zst | jq 'select(.backend == "responses") | .body.previous_response_id, .body.input'
-zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-response.json.zst | jq 'select(.backend.kind == "responses" or .backend == "responses") | .provider_response_id, .usage, .provider_response_finished.output_items, .provider_terminal_event'
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-request.json.zst | jq 'select(.backend == "responses") | .body.previous_response_id, .body.input'
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-response.json.zst | jq 'select(.backend.kind == "responses" or .backend == "responses") | .provider_response_id, .usage, .provider_response_finished.output_items, .provider_terminal_event'
 # Failed Responses attempt: content-free class/transport facts and bounded shape.
-zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-responses-attempt-failure.json.zst | jq '{logical_attempt, wire_dispatch_index, classification, wire, provider, transport, truncation}'
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-responses-attempt-failure.json.zst | jq '{logical_attempt, wire_dispatch_index, classification, wire, provider, transport, truncation}'
 
 # Chat Completions request, successful-response, and HTTP-error fields.
-zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-request.json.zst | jq 'select(.backend == "chat_completions") | .body.messages'
-zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-response.json.zst | jq 'select(.backend == "chat_completions") | .usage, .output_items, .raw_events, .http_status, .body'
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-request.json.zst | jq 'select(.backend == "chat_completions") | .body.messages'
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*/*-sp-6-*-response.json.zst | jq 'select(.backend == "chat_completions") | .usage, .output_items, .raw_events, .http_status, .body'
 ```
 
 

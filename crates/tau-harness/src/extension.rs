@@ -11,13 +11,15 @@ use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_client::ProtocolIoMeter;
 use tau_config::settings::InvalidExtensionName;
+#[cfg(not(test))]
+use tau_config::settings::TauStateAccess;
 use tau_core::ConnectionOrigin;
 use tau_proto::ClientKind;
 
 use crate::error::{ExtensionSpawnError, HarnessError};
 use crate::event::{
     HarnessEvent, SupervisedWriterHandle, WriterCommand, spawn_reader_thread_after_initialized,
-    spawn_supervised_writer_thread, spawn_writer_thread,
+    spawn_supervised_writer_thread_with_isolation_tempdir, spawn_writer_thread,
 };
 use crate::prompt::chrono_free_date;
 use crate::settings::ExtensionConfig;
@@ -207,14 +209,14 @@ pub fn harness_log_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
 fn supervised_command(
     config: &ExtensionConfig,
     kind: &ClientKind,
-    pipe_stderr: bool,
+    stderr_log_path: Option<&Path>,
     state_dir: &Path,
     memory_only: bool,
 ) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
     let (mut command, empty_mask) =
         isolated_supervised_command(config, kind, state_dir, memory_only)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
-    if pipe_stderr {
+    if stderr_log_path.is_some() {
         command.stderr(Stdio::piped());
     } else {
         command.stderr(Stdio::inherit());
@@ -243,6 +245,11 @@ fn isolated_supervised_command(
     {
         use std::os::unix::fs::PermissionsExt as _;
 
+        let tau_state_access = if memory_only {
+            TauStateAccess::Hidden
+        } else {
+            config.tau_state_access
+        };
         let settings_root =
             prepare_provider_settings_mount(state_dir, &config.name, kind, memory_only)?;
         let cwd = config
@@ -250,42 +257,99 @@ fn isolated_supervised_command(
             .clone()
             .unwrap_or(std::env::current_dir()?)
             .canonicalize()?;
-        let secret_mask_target = if memory_only {
+        let state_root = if memory_only {
             state_dir
                 .exists()
                 .then(|| state_dir.canonicalize())
                 .transpose()?
         } else {
+            std::fs::create_dir_all(state_dir)?;
             create_private_state_tree(
                 state_dir,
                 &PathBuf::from("secrets/ext").join(config.name.as_str()),
             )?;
-            Some(state_dir.join("secrets"))
+            create_private_state_tree(state_dir, &PathBuf::from("ext").join(config.name.as_str()))?;
+            Some(state_dir.canonicalize()?)
         };
-        if secret_mask_target
-            .as_ref()
-            .is_some_and(|target| cwd.starts_with(target))
-        {
+        if state_root.as_ref().is_some_and(|target| {
+            tau_state_access != TauStateAccess::Legacy && cwd.starts_with(target)
+                || cwd.starts_with(target.join("secrets"))
+        }) {
             return Err(HarnessError::Participant(format!(
                 "extension `{}` cwd must not be at or below masked Tau state",
                 config.name
             )));
         }
         let empty_mask = tempfile::Builder::new()
-            .prefix("tau-extension-secret-mask-")
+            .prefix("tau-extension-state-mask-")
             .tempdir()?;
+        let outer_mask = empty_mask.path().join("outer");
+        let staging_root = empty_mask.path().join("staging");
+        std::fs::create_dir(&outer_mask)?;
+        std::fs::create_dir(&staging_root)?;
+        let state_root_ref = state_root.as_deref();
+        let own_target = (!memory_only).then(|| {
+            state_root
+                .as_ref()
+                .expect("persistent state root")
+                .join("ext")
+                .join(&config.name)
+        });
+        let settings_target = settings_root.as_ref().map(|path| {
+            state_root.as_ref().expect("persistent state root").join(
+                path.strip_prefix(state_dir)
+                    .expect("provider settings below state"),
+            )
+        });
+        for target in [&own_target, &settings_target].into_iter().flatten() {
+            let relative = target
+                .strip_prefix(state_root.as_ref().expect("persistent state root"))
+                .expect("isolation target below state");
+            std::fs::create_dir_all(outer_mask.join(relative))?;
+        }
         std::fs::set_permissions(
             empty_mask.path(),
             path_std_fs::Permissions::from_mode(0o700),
         )?;
         let mut command = Command::new(&config.command);
         command.args(&config.args).current_dir("/");
+        let stage_source = |target: Option<&Path>| {
+            target.map(|target| {
+                staging_root.join(
+                    target
+                        .strip_prefix(
+                            state_root
+                                .as_ref()
+                                .expect("mount target requires state root"),
+                        )
+                        .expect("mount target below state"),
+                )
+            })
+        };
+        let own_source = stage_source(own_target.as_deref());
+        let settings_source = stage_source(settings_target.as_deref());
+        let secret_mask_target = state_root.as_ref().map(|root| root.join("secrets"));
         crate::extension_launcher::configure_command(
             &mut command,
-            secret_mask_target.as_deref(),
-            empty_mask.path(),
-            settings_root.as_deref(),
-            &cwd,
+            crate::extension_launcher::IsolationPlan {
+                isolation_root: empty_mask.path(),
+                state_root: state_root_ref,
+                tau_state_access,
+                outer_mask: &outer_mask,
+                staging_root: &staging_root,
+                secret_mask_target: secret_mask_target.as_deref(),
+                own_state: own_source.as_deref().zip(own_target.as_deref()).map(
+                    |(source, target)| crate::extension_launcher::MountPlan { source, target },
+                ),
+                provider_settings: settings_source
+                    .as_deref()
+                    .zip(settings_target.as_deref())
+                    .map(|(source, target)| crate::extension_launcher::MountPlan {
+                        source,
+                        target,
+                    }),
+                cwd: &cwd,
+            },
         )
         .map_err(HarnessError::Participant)?;
         Ok((command, Some(empty_mask)))
@@ -344,7 +408,7 @@ pub(crate) fn spawn_supervised(
     let (mut command, empty_mask) = supervised_command(
         config,
         &kind,
-        stderr_log_path.is_some(),
+        stderr_log_path.as_deref(),
         state_dir,
         memory_only,
     )?;
@@ -354,6 +418,7 @@ pub(crate) fn spawn_supervised(
     {
         command.env_remove(key);
     }
+    command.env_remove(tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV);
     let mut child = command.spawn().map_err(|source| {
         HarnessError::ExtensionSpawn(ExtensionSpawnError::new(
             &config.name,
@@ -362,8 +427,6 @@ pub(crate) fn spawn_supervised(
             source,
         ))
     })?;
-    drop(empty_mask);
-
     let child_pid = child.id();
     let stdin = child
         .stdin
@@ -380,12 +443,13 @@ pub(crate) fn spawn_supervised(
 
     let connection_id = next_extension_connection_id();
     let protocol_io = ProtocolIoMeter::default();
-    let (writer_tx, writer) = spawn_supervised_writer_thread(
+    let (writer_tx, writer) = spawn_supervised_writer_thread_with_isolation_tempdir(
         connection_id.clone(),
         stdin,
         child,
         Some(protocol_io.clone()),
         tx.clone(),
+        empty_mask,
     );
 
     let (initialized_tx, initialized_rx) = mpsc::channel();

@@ -1,22 +1,13 @@
-//! Bounded best-effort writer for compressed provider debug captures.
+//! Bounded best-effort transport for compressed provider debug captures.
 
-use std::{thread as path_std_thread, time as path_std_time};
-
-use zstd::stream::write as path_zstd_stream_write;
+use std::thread as path_std_thread;
 
 #[cfg(test)]
 mod tests;
-
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::io;
 use std::sync::{OnceLock, mpsc};
 
-pub use tau_config::provider_debug_capture::ProviderDebugCaptureClass;
-use tau_config::provider_debug_capture::{
-    ProviderDebugCaptureFilename, ProviderDebugCaptureFormat,
-};
-
+pub use tau_proto::ProviderDebugCaptureClass;
 /// Maximum number of captures waiting for background compression and writing.
 const CAPTURE_QUEUE_CAPACITY: usize = 64;
 /// Compression level used for private diagnostic captures.
@@ -78,22 +69,14 @@ impl ProviderDebugCapture {
 
 /// One already-serialized provider capture awaiting background persistence.
 struct CaptureJob {
-    /// Durable session directory that must already exist as a real directory.
-    session_dir: PathBuf,
-    /// Unique capture filename below `debug/provider-requests`.
-    filename: ProviderDebugCaptureFilename,
-    /// Uncompressed pretty-printed JSON record.
-    json: Vec<u8>,
+    /// Capture metadata and uncompressed JSON accepted by the bounded queue.
+    capture: ProviderDebugCapture,
 }
 
 impl CaptureJob {
-    /// Build one capture job for a durable session candidate.
-    fn new(session_dir: PathBuf, filename: ProviderDebugCaptureFilename, json: Vec<u8>) -> Self {
-        Self {
-            session_dir,
-            filename,
-            json,
-        }
+    /// Build one capture transport job.
+    fn new(capture: ProviderDebugCapture) -> Self {
+        Self { capture }
     }
 }
 
@@ -103,14 +86,25 @@ struct CaptureQueue {
     sender: mpsc::SyncSender<CaptureJob>,
 }
 
+/// Single transport queue owned by one supervised Provider process.
+static CAPTURE_QUEUE: OnceLock<CaptureQueue> = OnceLock::new();
+
 impl CaptureQueue {
-    /// Start one detached worker using the production filesystem writer.
-    fn spawn() -> io::Result<Self> {
+    /// Build a queue around one bounded sender.
+    fn with_sender(sender: mpsc::SyncSender<CaptureJob>) -> Self {
+        Self { sender }
+    }
+
+    /// Start one detached worker that sends compressed protocol messages.
+    fn spawn(handle: tau_client::ClientHandle) -> io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
+        let queue = Self::with_sender(sender);
         path_std_thread::Builder::new()
             .name("tau-provider-capture".to_owned())
-            .spawn(move || run_worker(receiver, write_capture))
-            .map(|_| Self { sender })
+            .spawn(move || {
+                run_worker(receiver, |job| send_capture(&handle, job));
+            })
+            .map(|_| queue)
     }
 
     /// Admit a job immediately or return it when the queue is
@@ -122,61 +116,96 @@ impl CaptureQueue {
 
 /// Submit a provider capture without waiting for worker capacity or I/O.
 fn submit(job: CaptureJob) {
-    static QUEUE: OnceLock<io::Result<CaptureQueue>> = OnceLock::new();
-    let queue = QUEUE.get_or_init(CaptureQueue::spawn);
-    match queue {
-        Ok(queue) => match queue.try_submit(job) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(job)) => {
-                tracing::warn!(
-                    target: "tau_provider::debug_capture_writer",
-                    filename = %job.filename.as_str(),
-                    "provider debug capture queue is full; dropping capture"
-                );
-            }
-            Err(mpsc::TrySendError::Disconnected(job)) => {
-                tracing::warn!(
-                    target: "tau_provider::debug_capture_writer",
-                    filename = %job.filename.as_str(),
-                    "provider debug capture worker stopped; dropping capture"
-                );
-            }
-        },
-        Err(error) => {
+    let Some(queue) = CAPTURE_QUEUE.get() else {
+        tracing::warn!(
+            target: "tau_provider::debug_capture_writer",
+            "provider debug capture transport is unavailable; dropping capture"
+        );
+        return;
+    };
+    match queue.try_submit(job) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(job)) => {
             tracing::warn!(
                 target: "tau_provider::debug_capture_writer",
-                %error,
-                "provider debug capture worker is unavailable; dropping capture"
+                agent_prompt_id = %job.capture.agent_prompt_id,
+                "provider debug capture queue is full; dropping capture"
+            );
+        }
+        Err(mpsc::TrySendError::Disconnected(job)) => {
+            tracing::warn!(
+                target: "tau_provider::debug_capture_writer",
+                agent_prompt_id = %job.capture.agent_prompt_id,
+                "provider debug capture worker stopped; dropping capture"
             );
         }
     }
 }
 
-/// Submit one serialized provider diagnostic without waiting for compression,
-/// queue capacity, or filesystem work.
+/// Idempotently attempt to install the process-wide Provider capture transport.
 ///
-/// Callers must invoke this only after the harness permits durable-session
-/// capture. An unavailable state directory silently omits the best-effort
-/// diagnostic. The worker independently requires the corresponding durable
-/// session directory to exist as a real directory before it creates debug
-/// descendants.
-pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
-    let Some(state_dir) = tau_config::settings::state_dir() else {
+/// A supervised Provider process owns exactly one harness connection. Repeated
+/// calls leave the first transport installed. Worker startup failure is logged
+/// and leaves captures unavailable without returning an error to the caller.
+pub fn initialize_provider_debug_capture_transport(handle: tau_client::ClientHandle) {
+    if CAPTURE_QUEUE.get().is_some() {
+        return;
+    }
+    let Some(queue) = start_transport_with(|| CaptureQueue::spawn(handle)) else {
         return;
     };
-    let timestamp = path_std_time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    let filename = ProviderDebugCaptureFilename::new(
-        timestamp,
-        &capture.agent_prompt_id,
-        capture.class,
-        ProviderDebugCaptureFormat::ZstdJson,
-    );
-    let session_dir =
-        tau_config::settings::sessions_dir_of(&state_dir).join(capture.session_id.as_str());
-    submit(CaptureJob::new(session_dir, filename, capture.json));
+    if CAPTURE_QUEUE.set(queue).is_err() {
+        tracing::warn!(
+            target: "tau_provider::debug_capture_writer",
+            "provider debug capture transport was initialized concurrently"
+        );
+    }
+}
+
+/// Convert worker startup failure into best-effort capture unavailability.
+fn start_transport_with(spawn: impl FnOnce() -> io::Result<CaptureQueue>) -> Option<CaptureQueue> {
+    match spawn() {
+        Ok(queue) => Some(queue),
+        Err(error) => {
+            tracing::warn!(
+                target: "tau_provider::debug_capture_writer",
+                %error,
+                "provider debug capture worker is unavailable; captures will be dropped"
+            );
+            None
+        }
+    }
+}
+
+/// Submit one serialized Provider diagnostic through nonblocking bounded
+/// admission.
+///
+/// Callers must invoke this only after the harness permits durable-session
+/// capture. The detached worker compresses accepted JSON independently of
+/// terminal generation and sends a dedicated attributed protocol message on the
+/// ordinary non-preemptive extension stream. A terminal queued behind an
+/// already-started capture frame follows normal FIFO ordering; no
+/// capture-specific gate or priority exists. The harness alone selects and
+/// asynchronously writes the filesystem path. Any unavailable worker, overload,
+/// compression, protocol, or harness I/O failure may omit the best-effort
+/// artifact.
+pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
+    if !capture_fits_raw_bound(&capture) {
+        tracing::warn!(
+            target: "tau_provider::debug_capture_writer",
+            agent_prompt_id = %capture.agent_prompt_id,
+            json_bytes = capture.json.len(),
+            "provider debug capture exceeds the protocol bound; dropping capture"
+        );
+        return;
+    }
+    submit(CaptureJob::new(capture));
+}
+
+/// Return whether one uncompressed job fits the established protocol bound
+/// before it can consume a queue slot.
+fn capture_fits_raw_bound(capture: &ProviderDebugCapture) -> bool {
+    capture.json.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
 }
 
 /// Drain accepted jobs until every producer disconnects.
@@ -188,58 +217,47 @@ fn run_worker(
         if let Err(error) = write(&job) {
             tracing::warn!(
                 target: "tau_provider::debug_capture_writer",
-                filename = %job.filename.as_str(),
+                agent_prompt_id = %job.capture.agent_prompt_id,
                 %error,
-                "failed to write compressed provider debug capture"
+                "failed to send compressed provider debug capture"
             );
         }
     }
 }
 
-/// Compress and write one capture entirely on the worker thread.
-fn write_capture(job: &CaptureJob) -> io::Result<()> {
-    write_capture_with(job, |file, json| {
-        let mut encoder = path_zstd_stream_write::Encoder::new(file, ZSTD_COMPRESSION_LEVEL)?;
-        encoder.write_all(json)?;
-        encoder.finish()?;
-        Ok(())
-    })
+/// Compress and synchronously flush one capture from the detached worker.
+fn send_capture(handle: &tau_client::ClientHandle, job: &CaptureJob) -> io::Result<()> {
+    let message = compressed_message(job)?;
+    handle
+        .send(message)
+        .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error))
 }
 
-/// Write one capture with an injectable compression/write operation.
-fn write_capture_with(
-    job: &CaptureJob,
-    write: impl FnOnce(std::fs::File, &[u8]) -> io::Result<()>,
-) -> io::Result<()> {
-    ensure_real_directory(&job.session_dir)?;
-    let debug_dir = job.session_dir.join("debug");
-    let dir = debug_dir.join("provider-requests");
-    ensure_or_create_real_directory(&debug_dir)?;
-    ensure_or_create_real_directory(&dir)?;
-
-    let path = dir.join(job.filename.as_str());
-    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    write(file, &job.json)
+/// Compress one job and enforce the complete encoded protocol-frame bound.
+fn compressed_message(job: &CaptureJob) -> io::Result<tau_proto::HarnessInputMessage> {
+    let zstd = zstd::stream::encode_all(&job.capture.json[..], ZSTD_COMPRESSION_LEVEL)?;
+    let message =
+        tau_proto::HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
+            session_id: job.capture.session_id.clone(),
+            agent_prompt_id: job.capture.agent_prompt_id.clone(),
+            class: job.capture.class,
+            zstd,
+        });
+    let encoded = tau_proto::encode_harness_input_to_vec(&message)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    enforce_encoded_bound(message, encoded.len() as u64)
 }
 
-/// Create one directory when absent, then require a non-symlink directory.
-fn ensure_or_create_real_directory(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => ensure_real_directory(path),
-        Err(error) => Err(error),
+/// Enforce the complete encoded-frame ceiling after compression.
+fn enforce_encoded_bound(
+    message: tau_proto::HarnessInputMessage,
+    encoded_len: u64,
+) -> io::Result<tau_proto::HarnessInputMessage> {
+    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < encoded_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compressed provider debug capture exceeds the protocol bound",
+        ));
     }
-}
-
-/// Require `path` to identify a directory without following a final symlink.
-fn ensure_real_directory(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_dir() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "{} is not a real directory",
-            path.display()
-        )))
-    }
+    Ok(message)
 }

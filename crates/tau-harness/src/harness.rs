@@ -150,8 +150,8 @@ use crate::secrets::{
     ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets_excluding,
 };
 use crate::settings::{
-    Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn,
-    load_harness_settings_without_environment_or_warn,
+    Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind,
+    load_harness_settings_or_warn, load_harness_settings_without_environment_or_warn,
 };
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 
@@ -11737,6 +11737,7 @@ impl Harness {
                         | HarnessInputMessage::ExtensionNoticeRequest(_)
                         | HarnessInputMessage::InterceptReply(_)
                         | HarnessInputMessage::GetAgentPromptCreated(_)
+                        | HarnessInputMessage::ProviderDebugCapture(_)
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
                         | HarnessInputMessage::UiDetachRequest(_)
@@ -11974,6 +11975,9 @@ impl Harness {
             HarnessInputMessage::ExtensionDataRequest(request) => {
                 self.handle_extension_data_request(source_id, request);
             }
+            HarnessInputMessage::ProviderDebugCapture(capture) => {
+                self.handle_provider_debug_capture(source_id, capture);
+            }
             // Messages sent by clients only — extensions shouldn't round-trip
             // these. Ignore silently.
             HarnessInputMessage::Disconnect(_)
@@ -11990,6 +11994,44 @@ impl Harness {
             | HarnessInputMessage::PeerSessionProbe(_) => {}
         }
         Ok(())
+    }
+
+    /// Attribute one opaque capture from a cooperative configured Provider and
+    /// queue it on the harness-owned filesystem path.
+    fn handle_provider_debug_capture(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        capture: tau_proto::ProviderDebugCapture,
+    ) {
+        let Some((session_dir, provider_instance)) =
+            self.provider_debug_capture_target(source_id, &capture)
+        else {
+            return;
+        };
+        crate::provider_capture_writer::enqueue(session_dir, provider_instance, capture);
+    }
+
+    /// Resolve structured Provider attribution without consulting the current
+    /// prompt route, which may already have completed.
+    fn provider_debug_capture_target(
+        &self,
+        source_id: &tau_proto::ConnectionId,
+        capture: &tau_proto::ProviderDebugCapture,
+    ) -> Option<(PathBuf, tau_proto::ExtensionName)> {
+        let provider_instance = self.extensions.entries.get(source_id).and_then(|entry| {
+            (entry.kind == ClientKind::Provider
+                && entry.state == ExtensionState::Ready
+                && entry.connection_id == *source_id)
+                .then(|| entry.name.clone())
+        })?;
+        if self.storage_mode.is_ephemeral() {
+            return None;
+        }
+        let session_dir = self.sessions_dir().join(capture.session_id.as_str());
+        if !session_dir.is_dir() {
+            return None;
+        }
+        Some((session_dir, provider_instance))
     }
 
     #[cfg(test)]
@@ -14723,6 +14765,7 @@ impl Harness {
             | HarnessInputMessage::Intercept(_)
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
+            | HarnessInputMessage::ProviderDebugCapture(_)
             | HarnessInputMessage::ExtensionDataRequest(_) => {
                 Ok(ClientMessageDisposition::Continue)
             }
@@ -17892,7 +17935,19 @@ impl Harness {
 
     fn emit_extension_startup_diagnostics(&mut self, diagnostics: &[ExtensionStartupDiagnostic]) {
         for diagnostic in diagnostics {
-            self.emit_optional_extension_skipped(&diagnostic.message);
+            match diagnostic.kind {
+                ExtensionStartupDiagnosticKind::OptionalSkip => {
+                    self.emit_optional_extension_skipped(&diagnostic.message);
+                }
+                ExtensionStartupDiagnosticKind::StateAccess { .. } => {
+                    self.emit_notice(
+                        tau_proto::notice_kind::EXTENSION_STATE_ACCESS,
+                        tau_proto::NoticeLevel::Warning,
+                        true,
+                        &diagnostic.message,
+                    );
+                }
+            }
         }
     }
 

@@ -118,6 +118,31 @@ fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     }
 }
 
+/// Ensures retention cleanup reaches provider-instance capture sinks without
+/// treating an instance directory's unrelated files as diagnostics.
+#[test]
+fn cleanup_removes_expired_nested_provider_instance_captures() {
+    let temp = TempDir::new().expect("temp state");
+    let sessions = temp.path().join("sessions");
+    let captures = sessions.join("one/debug/provider-requests/provider-work");
+    std::fs::create_dir_all(&captures).expect("instance capture dir");
+    let capture = captures.join("1-prompt-http-sse-request.json.zst");
+    let unrelated = captures.join("notes.json");
+    std::fs::write(&capture, b"capture").expect("provider capture");
+    std::fs::write(&unrelated, b"unrelated").expect("unrelated file");
+
+    cleanup_diagnostics_with(
+        &sessions,
+        Duration::ZERO,
+        SystemTime::now() + Duration::from_secs(1),
+        &[],
+        |path| std::fs::remove_file(path),
+    );
+
+    assert!(!capture.exists());
+    assert!(unrelated.exists());
+}
+
 /// Ensures a diagnostic newer than the configured window remains available.
 #[test]
 fn cleanup_keeps_recent_diagnostic_jsonl() {

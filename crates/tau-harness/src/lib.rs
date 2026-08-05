@@ -36,6 +36,7 @@ pub mod internal_tools;
 mod model;
 mod pending_agent_discovery;
 mod prompt;
+mod provider_capture_writer;
 mod secrets;
 mod session_cleanup;
 mod settings;

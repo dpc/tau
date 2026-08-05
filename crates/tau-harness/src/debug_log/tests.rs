@@ -819,6 +819,25 @@ fn ui_debug_event_stats_requests_are_not_logged() {
     assert!(read_lines(log.path()).is_empty());
 }
 
+/// Dedicated Provider capture messages never enter debug JSONL because even a
+/// compacted projection would duplicate opaque sensitive artifact bytes.
+#[test]
+fn provider_debug_captures_are_not_logged() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open");
+    log.log_harness_event(&HarnessEvent::from_connection_for_test(
+        tau_proto::ConnectionId::parse("provider").expect("connection"),
+        HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
+            session_id: SessionId::parse("session").expect("session"),
+            agent_prompt_id: AgentPromptId::parse("prompt").expect("prompt"),
+            class: tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
+            zstd: b"opaque-sensitive-capture".to_vec(),
+        }),
+    ))
+    .expect("skip Provider capture");
+    assert!(read_lines(log.path()).is_empty());
+}
+
 /// Ensures raw terminal provider reports cannot leak embedded provider-image
 /// bytes into debug JSONL.
 #[test]

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tau_config::settings::ExtensionSecretEntry;
+use tau_config::settings::{ExtensionSecretEntry, TauStateAccess};
 use tempfile::TempDir;
 
 use super::*;
@@ -33,6 +33,7 @@ fn config_with_secret(optional: bool) -> Config {
                 cwd: None,
                 config: serde_json::json!({}),
                 secrets,
+                tau_state_access: TauStateAccess::Legacy,
             },
         )]),
         extension_startup_diagnostics: Vec::new(),

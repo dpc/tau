@@ -7,6 +7,7 @@ use tau_config::provider_debug_capture as path_tau_config_provider_debug_capture
 #[cfg(test)]
 mod tests;
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
@@ -185,14 +186,42 @@ fn cleanup_provider_captures(
                 continue;
             }
         };
-        let filename = entry.file_name();
-        let Some(filename) = filename.to_str() else {
-            continue;
-        };
-        if !is_provider_capture_filename(filename) {
-            continue;
+        let path = entry.path();
+        if is_real_directory(&path) {
+            cleanup_provider_capture_directory(&path, retention, now, remove_file);
+        } else {
+            cleanup_provider_capture_candidate(&path, retention, now, remove_file);
         }
-        cleanup_candidate(&entry.path(), retention, now, remove_file);
+    }
+}
+
+/// Remove recognized capture files from one legacy or instance-specific sink.
+fn cleanup_provider_capture_directory(
+    directory: &Path,
+    retention: Duration,
+    now: SystemTime,
+    remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
+) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        cleanup_provider_capture_candidate(&entry.path(), retention, now, remove_file);
+    }
+}
+
+/// Remove one recognized provider capture file, retaining unrelated entries.
+fn cleanup_provider_capture_candidate(
+    path: &Path,
+    retention: Duration,
+    now: SystemTime,
+    remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
+) {
+    let Some(filename) = path.file_name().and_then(OsStr::to_str) else {
+        return;
+    };
+    if is_provider_capture_filename(filename) {
+        cleanup_candidate(path, retention, now, remove_file);
     }
 }
 
