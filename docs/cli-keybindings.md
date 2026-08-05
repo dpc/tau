@@ -143,6 +143,16 @@ Meta chords or `C-B` on terminal paths that preserve Shift.
   above the marker. Leaving the trailer unchanged clears old recovery. Deleting
   the marker makes the whole file prompt-owned and also clears old recovery.
 
+## Prompt-history persistence
+
+Tau updates the current process's prompt navigation immediately. Persistence
+uses a bounded best-effort FIFO worker: admission queues a copy, not a durable
+write. If its item or byte limit is full, Tau drops the newest history entry
+instead of delaying prompt submission. Tau neither flushes nor fsyncs these
+writes, and it does not drain the worker on exit. See
+[SECURITY.md](../SECURITY.md#prompt-history-persistence) for the complete
+cooperative multi-process file contract.
+
 `shell-prompt-insert` and `prompt-history-search` capture at most 1 MiB of
 stdout and discard stderr. `shell-prompt-edit` inherits terminal stdio so
 interactive editors can use the terminal directly. All prompt shell actions time

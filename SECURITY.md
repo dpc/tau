@@ -206,12 +206,23 @@ Failure to publish derived metadata does not invalidate an already committed rec
 This is cooperative same-UID crash consistency, not tamper detection: arbitrary
 same-inode/same-size journal mutation is outside the append-only store contract.
 
-Global prompt history uses the same cooperative boundary. A process-local
-device/inode/EOF/final-boundary witness avoids rescanning an unchanged framed
-prefix under the cross-process lock and falls back on ordinary replacement,
-truncation, or tail mismatch. The witness is not cryptographic tamper evidence;
-a same-UID process deliberately preserving its identity and witnessed tail while
-rewriting older bytes remains outside the prompt-history contract.
+## Prompt-history persistence
+
+Global prompt history uses a bounded best-effort FIFO worker. Its queue has 64
+pending slots, and its queued plus in-flight prompt text is capped at 1 MiB;
+the worker can hold one of those accepted entries in flight while it writes.
+The newest entry drops when either bound is full or the worker is unavailable.
+Admission does not mean the record reached the filesystem or is durable. The
+worker does not flush, fsync, or drain at shutdown, so a crash or normal exit
+can lose accepted history.
+
+The worker retains cooperative cross-process locking and repair. A
+process-local device/inode/EOF/final-boundary witness avoids rescanning an
+unchanged framed prefix under the cross-process lock and falls back on ordinary
+replacement, truncation, or tail mismatch. The witness is not cryptographic
+tamper evidence; a same-UID process deliberately preserving its identity and
+witnessed tail while rewriting older bytes remains outside the prompt-history
+contract.
 
 Cold restore detaches completed start-agent workers only from validated journal
 evidence that matches warm side-conversation terminalization. Explicitly

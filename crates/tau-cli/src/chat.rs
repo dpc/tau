@@ -43,7 +43,7 @@ use crate::daemon::{
     storage_mode_from_ephemeral,
 };
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
-use crate::prompt_history::PromptHistoryStore;
+use crate::prompt_history::{PromptHistoryAdmission, PromptHistoryStore};
 use crate::tool_render::ui_dir_block;
 use crate::ui_prompt::{
     CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, PromptCommandHandling,
@@ -2441,8 +2441,20 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         let history_line = redacted_prompt_history_line(line, text);
-        if let Err(error) = self.ctx.prompt_history.append(&history_line) {
-            tracing::warn!(target: "tau_cli::ui", %error, "failed to append persistent prompt history");
+        match self.ctx.prompt_history.append(&history_line) {
+            PromptHistoryAdmission::Queued | PromptHistoryAdmission::IgnoredEmpty => {}
+            PromptHistoryAdmission::DroppedFull => {
+                tracing::warn!(
+                    target: "tau_cli::ui",
+                    "dropped prompt history because the persistence queue is full"
+                );
+            }
+            PromptHistoryAdmission::DroppedUnavailable => {
+                tracing::warn!(
+                    target: "tau_cli::ui",
+                    "dropped prompt history because persistence is unavailable"
+                );
+            }
         }
         if let Ok(mut context) = self.ctx.editor_context.lock() {
             context.previous_prompt = Some(text.to_owned());

@@ -13,17 +13,96 @@ fn append_raw_record(path: &Path, record: &PromptHistoryRecord) {
     file.write_all(&encoded).expect("write payload");
 }
 
-/// Prompt history should round-trip non-empty prompts in append order,
-/// including multiline prompt text.
+/// Queued prompt history should persist in append order, including multiline
+/// prompt text, once the asynchronous worker crosses its test ordering point.
 #[test]
-fn appends_and_loads_prompt_history_in_order() {
+fn persistence_worker_writes_queued_history_in_order() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = PromptHistoryStore::for_path(tmp.path().join(HISTORY_FILE));
 
-    store.append("one").expect("append one");
-    store.append("two\nlines").expect("append two");
+    assert_eq!(store.append("one"), PromptHistoryAdmission::Queued);
+    assert_eq!(store.append("two\nlines"), PromptHistoryAdmission::Queued);
+    store.wait_for_persistence();
 
     assert_eq!(store.load().expect("load"), vec!["one", "two\nlines"]);
+    assert_eq!(store.queued_bytes.load(Ordering::Acquire), 0);
+}
+
+/// A saturated persistence queue must drop its newest request immediately
+/// instead of making a prompt submission wait for a worker to make room.
+#[test]
+fn persistence_admission_drops_when_the_bounded_queue_is_full() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, _persistence_rx) =
+        PromptHistoryStore::for_path_without_worker(tmp.path().join(HISTORY_FILE));
+
+    for index in 0..PERSIST_QUEUE_CAPACITY {
+        assert_eq!(
+            store.append(&format!("queued prompt {index}")),
+            PromptHistoryAdmission::Queued
+        );
+    }
+    assert_eq!(
+        store.append("dropped prompt"),
+        PromptHistoryAdmission::DroppedFull
+    );
+}
+
+/// The shared byte budget must reject an oversized request before retaining a
+/// copy, and it must account for every queued request independently of slots.
+#[test]
+fn persistence_admission_drops_when_the_byte_budget_is_full() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, _persistence_rx) =
+        PromptHistoryStore::for_path_without_worker(tmp.path().join(HISTORY_FILE));
+    let oversized = "x".repeat(PERSIST_QUEUE_MAX_BYTES + 1);
+
+    assert_eq!(
+        store.append(&oversized),
+        PromptHistoryAdmission::DroppedFull
+    );
+    assert_eq!(store.queued_bytes.load(Ordering::Acquire), 0);
+    assert_eq!(
+        store.append(&"x".repeat(PERSIST_QUEUE_MAX_BYTES)),
+        PromptHistoryAdmission::Queued
+    );
+    assert_eq!(
+        store.append("dropped after byte budget"),
+        PromptHistoryAdmission::DroppedFull
+    );
+}
+
+/// Missing persistence configuration and a stopped worker must both drop
+/// requests without blocking prompt submission.
+#[test]
+fn persistence_admission_reports_unavailable_workers() {
+    let unavailable = PromptHistoryStore::for_optional_path(None);
+    assert_eq!(
+        unavailable.append("no state directory"),
+        PromptHistoryAdmission::DroppedUnavailable
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (disconnected, persistence_rx) =
+        PromptHistoryStore::for_path_without_worker(tmp.path().join(HISTORY_FILE));
+    drop(persistence_rx);
+    assert_eq!(
+        disconnected.append("stopped worker"),
+        PromptHistoryAdmission::DroppedUnavailable
+    );
+    assert_eq!(disconnected.queued_bytes.load(Ordering::Acquire), 0);
+}
+
+/// Empty prompts must remain a truthful no-op instead of claiming persistence
+/// admission or reserving queue memory.
+#[test]
+fn persistence_admission_ignores_empty_prompts() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, _persistence_rx) =
+        PromptHistoryStore::for_path_without_worker(tmp.path().join(HISTORY_FILE));
+
+    assert_eq!(store.append(""), PromptHistoryAdmission::IgnoredEmpty);
+    assert_eq!(store.queued_bytes.load(Ordering::Acquire), 0);
 }
 
 /// Once an unchanged tail is witnessed, warm validation must not revisit any
@@ -71,7 +150,7 @@ fn warm_tail_validation_skips_unchanged_history_prefix() {
     );
     drop(file);
 
-    store.append("warm append").expect("append through store");
+    store.append_and_wait("warm append");
     let appended_tail = store
         .validated_tail
         .lock()
@@ -99,7 +178,7 @@ fn cached_tail_validates_external_append_delta() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
-    store.append("first").expect("append first");
+    store.append_and_wait("first");
 
     append_raw_record(
         &path,
@@ -109,7 +188,7 @@ fn cached_tail_validates_external_append_delta() {
             text: "external".to_owned(),
         },
     );
-    store.append("last").expect("append after external writer");
+    store.append_and_wait("last");
     let appended_tail = store
         .validated_tail
         .lock()
@@ -134,7 +213,7 @@ fn cached_tail_falls_back_after_boundary_mismatch() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
-    store.append("old boundary").expect("append old");
+    store.append_and_wait("old boundary");
     let tail = store
         .validated_tail
         .lock()
@@ -150,7 +229,7 @@ fn cached_tail_falls_back_after_boundary_mismatch() {
     file.write_all(b"x").expect("mutate boundary");
     drop(file);
 
-    store.append("new").expect("append after boundary mismatch");
+    store.append_and_wait("new");
 
     let appended_tail = store
         .validated_tail
@@ -179,9 +258,7 @@ fn cached_tail_falls_back_after_same_inode_truncation() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
-    store
-        .append(&format!("old {}", "x".repeat(4_096)))
-        .expect("append large old record");
+    store.append_and_wait(&format!("old {}", "x".repeat(4_096)));
     let tail = store
         .validated_tail
         .lock()
@@ -210,7 +287,7 @@ fn cached_tail_falls_back_after_same_inode_truncation() {
         "replacement must exercise shorter-than-witness invalidation"
     );
 
-    store.append("new").expect("append after truncation");
+    store.append_and_wait("new");
 
     let appended_tail = store
         .validated_tail
@@ -229,7 +306,7 @@ fn cached_tail_falls_back_after_file_replacement() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
-    store.append("old").expect("append old");
+    store.append_and_wait("old");
     fs::remove_file(&path).expect("replace history");
     append_raw_record(
         &path,
@@ -240,7 +317,7 @@ fn cached_tail_falls_back_after_file_replacement() {
         },
     );
 
-    store.append("new").expect("append after replacement");
+    store.append_and_wait("new");
 
     assert_eq!(store.load().expect("load"), vec!["replacement", "new"]);
 }
@@ -279,7 +356,7 @@ fn ignores_torn_tail_record() {
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
 
-    store.append("kept").expect("append kept");
+    store.append_and_wait("kept");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)
@@ -298,7 +375,7 @@ fn ignores_malformed_record_and_keeps_reading() {
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
 
-    store.append("before").expect("append before");
+    store.append_and_wait("before");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)
@@ -306,7 +383,7 @@ fn ignores_malformed_record_and_keeps_reading() {
     file.write_all(&4_u64.to_le_bytes()).expect("write length");
     file.write_all(b"junk").expect("write malformed payload");
     drop(file);
-    store.append("after").expect("append after");
+    store.append_and_wait("after");
 
     assert_eq!(store.load().expect("load"), vec!["before", "after"]);
 }
@@ -319,7 +396,7 @@ fn append_after_partial_length_header_keeps_new_entry_reachable() {
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
 
-    store.append("before").expect("append before");
+    store.append_and_wait("before");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)
@@ -328,9 +405,7 @@ fn append_after_partial_length_header_keeps_new_entry_reachable() {
         .expect("write partial length");
     drop(file);
 
-    store
-        .append("after")
-        .expect("append repairs partial length header");
+    store.append_and_wait("after");
 
     assert_eq!(store.load().expect("load"), vec!["before", "after"]);
 }
@@ -363,7 +438,7 @@ fn append_repair_truncates_history_files_over_size_limit() {
 
     let store = PromptHistoryStore::for_path(path);
 
-    store.append("new").expect("append after bounded repair");
+    store.append_and_wait("new");
     assert_eq!(store.load().expect("load"), vec!["new"]);
 }
 
@@ -408,7 +483,7 @@ fn append_after_torn_tail_keeps_new_entry_reachable() {
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
 
-    store.append("before").expect("append before");
+    store.append_and_wait("before");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)
@@ -417,7 +492,7 @@ fn append_after_torn_tail_keeps_new_entry_reachable() {
     file.write_all(b"torn").expect("write partial payload");
     drop(file);
 
-    store.append("after").expect("append after torn tail");
+    store.append_and_wait("after");
 
     assert_eq!(store.load().expect("load"), vec!["before", "after"]);
 }
@@ -430,7 +505,7 @@ fn append_after_oversized_tail_keeps_new_entry_reachable() {
     let path = tmp.path().join(HISTORY_FILE);
     let store = PromptHistoryStore::for_path(path.clone());
 
-    store.append("before").expect("append before");
+    store.append_and_wait("before");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)
@@ -439,7 +514,7 @@ fn append_after_oversized_tail_keeps_new_entry_reachable() {
         .expect("write corrupt prefix");
     drop(file);
 
-    store.append("after").expect("append after oversized tail");
+    store.append_and_wait("after");
 
     assert_eq!(store.load().expect("load"), vec!["before", "after"]);
 }

@@ -16,13 +16,15 @@ Dynamic action tests apply successive owner-stamped schema generations and
 verify that deep argument completions plus parse errors use the latest
 suggestions while stale candidates disappear.
 
-Prompt-history tests cover ordered length-prefixed round trips, malformed or
-unsupported records, torn or oversized tails, and command-layer redaction and
-routing. Witness tests must separately prove zero-prefix warm validation,
-delta-only validation after a cooperative external append, and full bounded
-fallback after replacement, same-inode truncation, or boundary mismatch. They
-also exercise the production store append rather than only the scanner helper.
-They do not require interactive terminal E2E checks.
+Prompt-history tests cover ordered asynchronous-worker persistence, nonblocking
+item/byte admission drops, unavailable-worker drops, malformed or unsupported
+records, torn or oversized tails, and command-layer redaction and routing.
+Witness tests must separately prove zero-prefix warm validation, delta-only
+validation after a cooperative external append, and full bounded fallback after
+replacement, same-inode truncation, or boundary mismatch. Tests use a
+test-only worker barrier to observe accepted writes; they deliberately do not
+test shutdown draining because production never joins or drains that
+best-effort worker. They do not require interactive terminal E2E checks.
 
 Developer prompt and tool-preview startup regressions execute the bundled `tau`
 binary with isolated home and working directories. They assert observable rendered

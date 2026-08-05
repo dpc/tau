@@ -1,28 +1,33 @@
 //! Persistent prompt input history.
 //!
 //! Entries are stored as length-prefixed CBOR records. Loading ignores
-//! unreadable tail records, and appending first truncates torn or oversized
-//! tail frames so newly appended prompts remain reachable after a crash. Load
-//! and repair work are bounded by a total file-size cap; oversized history
-//! files are ignored on load and discarded before writing the next prompt. A
-//! process-local file-identity, offset, and final-up-to-64-byte boundary
-//! witness lets warm appends validate only records added by another CLI since
-//! the known-good prefix. Identity, length, or boundary mismatch falls back to
-//! the complete bounded repair scan. Errors during locked validation, repair,
-//! write, flush, or sync invalidate the witness; setup/lock errors before that
-//! work leave it unchanged, and an unlock error after successful append keeps
-//! the newly captured witness.
+//! unreadable tail records, and the persistence worker first truncates torn or
+//! oversized tail frames so newly appended prompts remain reachable after a
+//! crash. Load and repair work are bounded by a total file-size cap; oversized
+//! history files are ignored on load and discarded before writing the next
+//! prompt. A process-local file-identity, offset, and final-up-to-64-byte
+//! boundary witness lets warm appends validate only records added by another
+//! CLI since the known-good prefix. Identity, length, or boundary mismatch
+//! falls back to the complete bounded repair scan. Errors during locked
+//! validation, repair, or write invalidate the witness; setup/lock errors
+//! before that work leave it unchanged, and an unlock error after successful
+//! append keeps the newly captured witness.
 //! This cooperative same-user optimization detects ordinary replacement,
 //! truncation, and tail mutation but is not tamper evidence. Framing, locking,
-//! append-before-send ordering, repair, flush, and `sync_data` semantics remain
-//! unchanged.
+//! and repair preserve safe multi-process appends where possible. Submission
+//! queues persistence without waiting for filesystem work or queue capacity: a
+//! full queue drops the newest entry. The worker neither flushes nor calls
+//! `sync_data`, and shutdown never waits for it to drain.
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::thread::Builder;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -34,10 +39,17 @@ const LOCK_FILE: &str = "prompt-history.lock";
 const MAX_HISTORY_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = MAX_HISTORY_FILE_BYTES;
 const MAX_PROMPT_HISTORY_ENTRIES: usize = 1000;
+const PERSIST_QUEUE_CAPACITY: usize = 64;
+const PERSIST_QUEUE_MAX_BYTES: usize = 1024 * 1024;
 // Keep at zero per `GATE-no-backward-compatibility`.
 const PROMPT_HISTORY_VERSION: u8 = 0;
 
-/// Persistent prompt-history access with a shared process-local tail witness.
+/// Persistent prompt-history access with bounded best-effort admission.
+///
+/// [`Self::append`] preserves submission order only among entries accepted by
+/// its bounded FIFO. It allocates an owned copy only after byte admission,
+/// never waits for queue space or filesystem I/O, and returns a drop outcome
+/// rather than durability. The detached worker does not drain on shutdown.
 #[derive(Clone)]
 pub(crate) struct PromptHistoryStore {
     /// Global prompt-history path, or none when state persistence is
@@ -45,6 +57,50 @@ pub(crate) struct PromptHistoryStore {
     path: Option<PathBuf>,
     /// Last prefix validated by this process's clones.
     validated_tail: Arc<Mutex<Option<ValidatedTail>>>,
+    /// Bounded asynchronous persistence queue. A full queue drops its newest
+    /// requested history entry rather than delaying prompt submission.
+    persistence_tx: Option<SyncSender<PromptHistoryWrite>>,
+    /// Total bytes held by queued and in-flight persistence requests.
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+/// One best-effort prompt-history persistence request.
+enum PromptHistoryWrite {
+    /// Append one submitted prompt to persistent history.
+    Append {
+        /// Submitted prompt text retained until the worker finishes it.
+        text: String,
+        /// Bytes reserved from the shared queued-and-in-flight budget.
+        queue_bytes: usize,
+    },
+    /// Test-only ordering point after all earlier persistence requests.
+    #[cfg(test)]
+    Barrier(SyncSender<()>),
+}
+
+impl PromptHistoryWrite {
+    /// Returns bytes retained by this request under the shared memory budget.
+    fn queue_bytes(&self) -> usize {
+        match self {
+            Self::Append { queue_bytes, .. } => *queue_bytes,
+            #[cfg(test)]
+            Self::Barrier(_) => 0,
+        }
+    }
+}
+
+/// Outcome of admitting one submitted prompt to best-effort persistence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromptHistoryAdmission {
+    /// The worker accepted the prompt for later persistence.
+    Queued,
+    /// Empty prompt text does not require persistent history.
+    IgnoredEmpty,
+    /// The bounded queue was full, so the newest prompt was deliberately lost.
+    DroppedFull,
+    /// The persistence worker is unavailable, so the prompt was deliberately
+    /// lost.
+    DroppedUnavailable,
 }
 
 /// Identity and boundary witness for one validated append-only file prefix.
@@ -87,17 +143,45 @@ struct PromptHistoryRecord {
 impl PromptHistoryStore {
     #[must_use]
     pub(crate) fn new(dirs: &TauDirs) -> Self {
-        Self {
-            path: dirs.state_dir.as_ref().map(|dir| dir.join(HISTORY_FILE)),
-            validated_tail: Arc::new(Mutex::new(None)),
-        }
+        Self::for_optional_path(dirs.state_dir.as_ref().map(|dir| dir.join(HISTORY_FILE)))
     }
 
     #[cfg(test)]
     fn for_path(path: PathBuf) -> Self {
+        Self::for_optional_path(Some(path))
+    }
+
+    #[cfg(test)]
+    fn for_path_without_worker(path: PathBuf) -> (Self, Receiver<PromptHistoryWrite>) {
+        let validated_tail = Arc::new(Mutex::new(None));
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let (persistence_tx, persistence_rx) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
+        (
+            Self {
+                path: Some(path),
+                validated_tail,
+                persistence_tx: Some(persistence_tx),
+                queued_bytes,
+            },
+            persistence_rx,
+        )
+    }
+
+    fn for_optional_path(path: Option<PathBuf>) -> Self {
+        let validated_tail = Arc::new(Mutex::new(None));
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let persistence_tx = path.as_ref().and_then(|path| {
+            start_prompt_history_persistence_worker(
+                path.clone(),
+                validated_tail.clone(),
+                queued_bytes.clone(),
+            )
+        });
         Self {
-            path: Some(path),
-            validated_tail: Arc::new(Mutex::new(None)),
+            path,
+            validated_tail,
+            persistence_tx,
+            queued_bytes,
         }
     }
 
@@ -113,14 +197,140 @@ impl PromptHistoryStore {
         Ok(entries)
     }
 
-    pub(crate) fn append(&self, text: &str) -> io::Result<()> {
-        let Some(path) = self.path.as_deref() else {
-            return Ok(());
-        };
+    /// Attempts nonblocking best-effort persistence for one submitted prompt.
+    ///
+    /// This reserves bounded queue bytes before cloning `text`, then returns
+    /// immediately after FIFO admission or a deliberate newest-entry drop.
+    /// [`PromptHistoryAdmission::Queued`] only means the worker owns a copy;
+    /// it does not mean the record reached the filesystem or is durable.
+    pub(crate) fn append(&self, text: &str) -> PromptHistoryAdmission {
         if text.is_empty() {
-            return Ok(());
+            return PromptHistoryAdmission::IgnoredEmpty;
         }
-        append_prompt_history(path, text, &self.validated_tail)
+        let Some(persistence_tx) = &self.persistence_tx else {
+            return PromptHistoryAdmission::DroppedUnavailable;
+        };
+        let queue_bytes = text.len();
+        if !reserve_prompt_history_queue_bytes(&self.queued_bytes, queue_bytes) {
+            return PromptHistoryAdmission::DroppedFull;
+        }
+        let request = PromptHistoryWrite::Append {
+            text: text.to_owned(),
+            queue_bytes,
+        };
+        match persistence_tx.try_send(request) {
+            Ok(()) => PromptHistoryAdmission::Queued,
+            Err(TrySendError::Full(request)) => {
+                release_prompt_history_queue_bytes(&self.queued_bytes, request.queue_bytes());
+                PromptHistoryAdmission::DroppedFull
+            }
+            Err(TrySendError::Disconnected(request)) => {
+                release_prompt_history_queue_bytes(&self.queued_bytes, request.queue_bytes());
+                PromptHistoryAdmission::DroppedUnavailable
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn append_and_wait(&self, text: &str) {
+        assert_eq!(
+            self.append(text),
+            PromptHistoryAdmission::Queued,
+            "test history append must enter the persistence queue"
+        );
+        self.wait_for_persistence();
+    }
+
+    #[cfg(test)]
+    fn wait_for_persistence(&self) {
+        let Some(persistence_tx) = &self.persistence_tx else {
+            panic!("test history store must have a persistence worker");
+        };
+        let (barrier_tx, barrier_rx) = mpsc::sync_channel(0);
+        persistence_tx
+            .send(PromptHistoryWrite::Barrier(barrier_tx))
+            .expect("test history persistence worker must remain available");
+        barrier_rx
+            .recv()
+            .expect("test history persistence worker must cross barrier");
+    }
+}
+
+/// Reserves request bytes without exceeding the queue-and-worker memory budget.
+fn reserve_prompt_history_queue_bytes(queued_bytes: &AtomicUsize, bytes: usize) -> bool {
+    let mut current = queued_bytes.load(Ordering::Relaxed);
+    loop {
+        if PERSIST_QUEUE_MAX_BYTES.saturating_sub(current) < bytes {
+            return false;
+        }
+        match queued_bytes.compare_exchange_weak(
+            current,
+            current.saturating_add(bytes),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Releases bytes retained by a request that was rejected or has finished
+/// writing.
+fn release_prompt_history_queue_bytes(queued_bytes: &AtomicUsize, queue_bytes: usize) {
+    queued_bytes.fetch_sub(queue_bytes, Ordering::Release);
+}
+
+/// Starts the best-effort history worker and returns its bounded admission
+/// queue.
+fn start_prompt_history_persistence_worker(
+    path: PathBuf,
+    validated_tail: Arc<Mutex<Option<ValidatedTail>>>,
+    queued_bytes: Arc<AtomicUsize>,
+) -> Option<SyncSender<PromptHistoryWrite>> {
+    let (persistence_tx, persistence_rx) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
+    match Builder::new()
+        .name("tau-prompt-history".to_owned())
+        .spawn(move || {
+            prompt_history_persistence_loop(path, validated_tail, queued_bytes, persistence_rx)
+        }) {
+        Ok(_) => Some(persistence_tx),
+        Err(error) => {
+            tracing::warn!(
+                target: "tau_cli::prompt_history",
+                %error,
+                "could not start best-effort prompt-history persistence worker"
+            );
+            None
+        }
+    }
+}
+
+/// Persists queued history entries without imposing durability waits on
+/// callers.
+fn prompt_history_persistence_loop(
+    path: PathBuf,
+    validated_tail: Arc<Mutex<Option<ValidatedTail>>>,
+    queued_bytes: Arc<AtomicUsize>,
+    persistence_rx: Receiver<PromptHistoryWrite>,
+) {
+    while let Ok(request) = persistence_rx.recv() {
+        match request {
+            PromptHistoryWrite::Append { text, queue_bytes } => {
+                if let Err(error) = append_prompt_history(&path, &text, &validated_tail) {
+                    tracing::warn!(
+                        target: "tau_cli::prompt_history",
+                        %error,
+                        "failed to persist queued prompt history"
+                    );
+                }
+                release_prompt_history_queue_bytes(&queued_bytes, queue_bytes);
+            }
+            #[cfg(test)]
+            PromptHistoryWrite::Barrier(barrier_tx) => {
+                let _ = barrier_tx.send(());
+            }
+        }
     }
 }
 
@@ -346,8 +556,6 @@ fn append_prompt_history_locked_with_tail_and_limit(
     }
     file.seek(io::SeekFrom::End(0))?;
     file.write_all(&entry)?;
-    file.flush()?;
-    file.sync_data()?;
     let tail = ValidatedTail::capture(&mut file)?;
     #[cfg(test)]
     let tail = {

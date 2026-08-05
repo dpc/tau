@@ -13,8 +13,9 @@ without surrounding them with heavy chrome. It includes:
 
 - streaming responses, reasoning summaries, inline diffs, and lightweight
   Markdown styling;
-- persistent prompt history, path and action completion, configurable key
-  bindings, and prompt editing in `$EDITOR`;
+- [best-effort persistent prompt history](docs/cli-keybindings.md#prompt-history-persistence),
+  path and action completion, configurable key bindings, and prompt editing in
+  `$EDITOR`;
 - local `!` shell commands, arbitrary picker commands such as `fzf`, and
   user-defined prompt templates;
 - commands for agents, sessions, roles, models, transcript branches, and
