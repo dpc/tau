@@ -1232,7 +1232,7 @@ pub fn get_daemon_rendered_tool_definitions(
     peer.send(&HarnessInputMessage::GetRenderedToolDefinitions(
         tau_proto::GetRenderedToolDefinitions {
             request_id: request_id.clone(),
-            role: role.to_owned(),
+            role: Some(role.to_owned()),
         },
     ))?;
 

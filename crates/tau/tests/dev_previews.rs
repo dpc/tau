@@ -24,6 +24,8 @@ fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
         .env("XDG_RUNTIME_DIR", runtime)
         .env_remove("TAU_ENABLE_EXTENSIONS")
         .env_remove("TAU_PROFILE")
+        .env_remove(tau_harness::ROLE_CLI_OVERRIDES_ENV)
+        .env_remove(tau_harness::STARTUP_ROLE_ENV)
         .args(args);
     if let Some(environment) = environment {
         command.env("TAU_ENABLE_EXTENSIONS", environment);
@@ -230,6 +232,78 @@ fn print_prompt_supplies_workdir_context_to_strict_role_template() {
         "{:?}",
         output.stdout
     );
+}
+
+/// Ensures role-less developer previews use normal startup-role selection while
+/// `--role` continues to select an explicit prompt and tool policy.
+#[test]
+fn previews_use_configured_default_role_unless_overridden() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    std::fs::create_dir_all(&config_dir).expect("create config directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"agents:
+  default_role: preview-default
+  role_groups:
+    preview:
+      roles:
+        preview-default:
+          prompt_fragments:
+            - name: preview.default
+              priority: 10
+              text: DEFAULT PREVIEW ROLE
+          tools: [read]
+        preview-explicit:
+          prompt_fragments:
+            - name: preview.explicit
+              priority: 10
+              text: EXPLICIT PREVIEW ROLE
+          tools: [grep]
+"#,
+    )
+    .expect("write harness config");
+
+    let default_prompt = preview(&home, None, &["dev", "print-prompt"]);
+    let explicit_prompt = preview(
+        &home,
+        None,
+        &["--role", "preview-explicit", "dev", "print-prompt"],
+    );
+    let default_tools = preview(&home, None, &["dev", "print-tools"]);
+    let explicit_tools = preview(
+        &home,
+        None,
+        &["--role", "preview-explicit", "dev", "print-tools"],
+    );
+
+    for output in [
+        &default_prompt,
+        &explicit_prompt,
+        &default_tools,
+        &explicit_tools,
+    ] {
+        assert!(output.status.success(), "{:?}", output.stderr);
+    }
+    assert!(String::from_utf8_lossy(&default_prompt.stdout).contains("DEFAULT PREVIEW ROLE"));
+    assert!(!String::from_utf8_lossy(&default_prompt.stdout).contains("EXPLICIT PREVIEW ROLE"));
+    assert!(String::from_utf8_lossy(&explicit_prompt.stdout).contains("EXPLICIT PREVIEW ROLE"));
+    assert!(!String::from_utf8_lossy(&explicit_prompt.stdout).contains("DEFAULT PREVIEW ROLE"));
+
+    let tool_names = |output: &Output| {
+        serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            .expect("tool preview JSON")
+            .into_iter()
+            .map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .expect("tool definition name")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tool_names(&default_tools), ["read"]);
+    assert_eq!(tool_names(&explicit_tools), ["grep"]);
 }
 
 /// Proves tool previews expose a disabled-by-default extension from the public

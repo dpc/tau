@@ -2060,12 +2060,12 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::GetRenderedPrompt(GetRenderedPrompt {
             request_id: "render-prompt-1".to_owned(),
-            role: "engineer".to_owned(),
+            role: Some("engineer".to_owned()),
             enable_agents_md: true,
         }),
         HarnessInputMessage::GetRenderedToolDefinitions(GetRenderedToolDefinitions {
             request_id: "render-tools-1".to_owned(),
-            role: "engineer".to_owned(),
+            role: Some("engineer".to_owned()),
         }),
         HarnessInputMessage::GetCurrentSession(GetCurrentSession {
             request_id: "current-session-1".to_owned(),

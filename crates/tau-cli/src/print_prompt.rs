@@ -8,7 +8,7 @@ use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
 
 pub(crate) fn run_print_prompt(
-    role: &str,
+    role: Option<&str>,
     enable_agents_md: bool,
     profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
@@ -40,7 +40,7 @@ pub(crate) fn run_print_system_prompt(
 ) -> Result<(), CliError> {
     let mut daemon = launch_render_daemon(
         "print-system-prompt",
-        role,
+        Some(role),
         profile,
         role_cli_overrides,
         extension_cli_overrides,
@@ -54,7 +54,7 @@ pub(crate) fn run_print_system_prompt(
 
 fn launch_render_daemon(
     session_prefix: &str,
-    role: &str,
+    role: Option<&str>,
     profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
@@ -72,7 +72,7 @@ fn launch_render_daemon(
         &session_id,
         SessionLaunchStatus::New,
         Some(output),
-        Some(role),
+        role,
         DaemonCliOverrides {
             profile,
             role: role_cli_overrides,
@@ -93,7 +93,7 @@ fn print_prompt(prompt: &str) -> Result<(), CliError> {
 
 fn get_rendered_prompt(
     daemon: &mut DaemonHandle,
-    role: &str,
+    role: Option<&str>,
     enable_agents_md: bool,
 ) -> Result<String, CliError> {
     crate::render_request::request_rendered_value(
@@ -103,7 +103,7 @@ fn get_rendered_prompt(
         |request_id| {
             HarnessInputMessage::GetRenderedPrompt(tau_proto::GetRenderedPrompt {
                 request_id,
-                role: role.to_owned(),
+                role: role.map(str::to_owned),
                 enable_agents_md,
             })
         },

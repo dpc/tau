@@ -581,13 +581,16 @@ pub struct RenderedSystemPromptResult {
 }
 
 /// Request that the harness render the effective provider-visible prompt
-/// context for one role.
+/// context for a role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GetRenderedPrompt {
     /// Request correlation id echoed by [`RenderedPromptResult`].
     pub request_id: String,
-    /// Role name whose resolved prompt should be rendered.
-    pub role: String,
+    /// Explicit role whose resolved prompt should be rendered.
+    ///
+    /// When absent, the harness renders for its currently selected role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Include harness-injected AGENTS.md context.
     #[serde(default = "default_true")]
     pub enable_agents_md: bool,
@@ -617,8 +620,11 @@ fn default_true() -> bool {
 pub struct GetRenderedToolDefinitions {
     /// Request correlation id echoed by [`RenderedToolDefinitionsResult`].
     pub request_id: String,
-    /// Role name whose resolved tool list should be reported.
-    pub role: String,
+    /// Explicit role whose resolved tool list should be reported.
+    ///
+    /// When absent, the harness reports tools for its currently selected role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Response to [`GetRenderedToolDefinitions`].

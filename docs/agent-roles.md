@@ -63,6 +63,10 @@ Apply these instructions outside the excluded project.
 {{/if}}
 ```
 
+`tau dev print-prompt` and `tau dev print-tools` use the role that normal startup
+would select when `--role` is omitted, including profile and configured-default
+resolution. Pass `--role NAME` to preview that explicit role instead.
+
 Templates also receive sparse, deterministic runtime capabilities:
 
 ```handlebars

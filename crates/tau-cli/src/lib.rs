@@ -982,9 +982,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     Ok(())
                 }
                 cli::DevCommand::PrintPrompt { enable_agents_md } => {
-                    let role = required_harness_role(harness.role.as_deref(), "print-prompt")?;
                     print_prompt::run_print_prompt(
-                        role,
+                        harness.role.as_deref(),
                         enable_agents_md,
                         selected_profile.as_ref(),
                         &role_cli_overrides,
@@ -1005,17 +1004,14 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &harness_config_overrides,
                     )
                 }
-                cli::DevCommand::PrintTools => {
-                    let role = required_harness_role(harness.role.as_deref(), "print-tools")?;
-                    print_tools::run_print_tools(
-                        role,
-                        selected_profile.as_ref(),
-                        &role_cli_overrides,
-                        &extension_cli_overrides,
-                        &environment_extension_names,
-                        &harness_config_overrides,
-                    )
-                }
+                cli::DevCommand::PrintTools => print_tools::run_print_tools(
+                    harness.role.as_deref(),
+                    selected_profile.as_ref(),
+                    &role_cli_overrides,
+                    &extension_cli_overrides,
+                    &environment_extension_names,
+                    &harness_config_overrides,
+                ),
                 cli::DevCommand::Tmux { command } => {
                     let _ = command;
                     unreachable!("dev tmux dispatch returns before harness config validation")

@@ -34203,7 +34203,7 @@ fn request_rendered_prompt(
         &crate::test_connection_id("render-prompt-test"),
         tau_proto::GetRenderedPrompt {
             request_id: "request-1".to_owned(),
-            role: role.to_owned(),
+            role: Some(role.to_owned()),
             enable_agents_md,
         },
     );

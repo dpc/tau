@@ -9485,10 +9485,11 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetRenderedPrompt,
     ) {
+        let role = request.role.unwrap_or_else(|| self.selected_role.clone());
         self.queue_rendered_prompt(PendingRenderedPrompt::Prompt {
             connection_id: connection_id.clone(),
             request_id: request.request_id,
-            role: request.role,
+            role,
             enable_agents_md: request.enable_agents_md,
         });
     }
@@ -9614,16 +9615,12 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetRenderedToolDefinitions,
     ) {
-        let (tools, error) = if !self.available_roles.contains_key(&request.role) {
-            (None, Some(format!("unknown role: {}", request.role)))
+        let role = request.role.unwrap_or_else(|| self.selected_role.clone());
+        let (tools, error) = if !self.available_roles.contains_key(&role) {
+            (None, Some(format!("unknown role: {role}")))
         } else {
-            let model = model_for_role(
-                &self.provider_model_info,
-                &self.available_roles,
-                &request.role,
-            );
-            let specs =
-                self.gather_effective_tool_specs_for_role_model(&request.role, model.as_ref());
+            let model = model_for_role(&self.provider_model_info, &self.available_roles, &role);
+            let specs = self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
             match duplicate_model_visible_tool_name(&specs) {
                 Some(name) => (
                     None,

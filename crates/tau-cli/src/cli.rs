@@ -349,10 +349,11 @@ pub enum DevCommand {
         message: String,
     },
 
-    /// Print the effective provider-visible prompt context for a role.
+    /// Print the effective provider-visible prompt context.
     ///
     /// Uses a stable fake agent id so role previews render agent-scoped
-    /// template sections such as Agent identity.
+    /// template sections such as Agent identity. Omitting `--role` uses the
+    /// configured startup role.
     PrintPrompt {
         /// Include harness-injected AGENTS.md context.
         #[arg(long = "enable-agents-md", default_value_t = true, action = clap::ArgAction::Set)]
@@ -365,7 +366,9 @@ pub enum DevCommand {
     /// template sections such as Agent identity.
     PrintSystemPrompt,
 
-    /// Print the effective tool definitions for a role.
+    /// Print the effective tool definitions.
+    ///
+    /// Omitting `--role` uses the configured startup role.
     PrintTools,
 
     /// Manage a manual Tau end-to-end session in a private tmux server.

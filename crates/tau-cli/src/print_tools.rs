@@ -7,7 +7,7 @@ use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session,
 use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
 pub(crate) fn run_print_tools(
-    role: &str,
+    role: Option<&str>,
     profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
@@ -25,7 +25,7 @@ pub(crate) fn run_print_tools(
         &session_id,
         SessionLaunchStatus::New,
         Some(output),
-        Some(role),
+        role,
         DaemonCliOverrides {
             profile,
             role: role_cli_overrides,
@@ -49,7 +49,7 @@ pub(crate) fn run_print_tools(
 
 fn get_rendered_tool_definitions(
     daemon: &mut DaemonHandle,
-    role: &str,
+    role: Option<&str>,
 ) -> Result<Vec<tau_proto::ToolDefinition>, CliError> {
     crate::render_request::request_rendered_value(
         daemon,
@@ -58,7 +58,7 @@ fn get_rendered_tool_definitions(
         |request_id| {
             HarnessInputMessage::GetRenderedToolDefinitions(tau_proto::GetRenderedToolDefinitions {
                 request_id,
-                role: role.to_owned(),
+                role: role.map(str::to_owned),
             })
         },
         |message, request_id| match message {
