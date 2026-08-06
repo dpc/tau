@@ -117,15 +117,17 @@ An optional `shell.allowlist` provides a best-effort command/cwd guardrail for
 model `shell`, ChatGPT-facing `shell_command`, and user `!`/`!!`. It is not a
 sandbox or security boundary. Absence preserves unrestricted execution; an
 explicit empty list denies all. Each rule conjunctively binds an absolute
-canonical-workdir glob to a raw submitted shell-language command glob, and any
-complete matching pair allows execution. Matching is whole-string and
-case-sensitive. Workdir `*` stays within one path component while `**` crosses
-components; command globs treat separators and newlines as ordinary characters.
-Authorization occurs before VCR replay and process spawn. It does not inspect
-the configured shell/wrapper, environment, `PATH`, shell expansion, or resolved
-executables. Denials disclose the configured paired patterns so an agent can
-choose a permitted command. Fixed internal subprocesses such as the `rg` used by
-`grep` do not participate.
+canonical-workdir glob to exactly one raw submitted shell-language command matcher:
+the existing `command` glob or a `command_regex` regular expression. Any complete
+matching pair allows execution. Both match the whole raw command case-sensitively;
+regexes receive implicit absolute anchors, including across newlines. Workdir `*`
+stays within one path component while `**` crosses components; command globs retain
+globset grammar and treat separators and newlines as ordinary characters.
+Authorization uses bounded matcher compilation and occurs before VCR replay and
+process spawn. It does not inspect the configured shell/wrapper, environment,
+`PATH`, shell expansion, or resolved executables. Denials disclose each typed
+command matcher with its paired workdir so an agent can choose a permitted command.
+Fixed internal subprocesses such as the `rg` used by `grep` do not participate.
 
 For harness-routed `!`/`!!` work, the extension echoes the private command route
 and immutable request fields through transient

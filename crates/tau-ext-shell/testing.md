@@ -46,11 +46,14 @@ Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.
 Allowlist coverage distinguishes absent from empty configuration, validates
-strict paired absolute-workdir/raw-command glob rules, exercises anchored
-separator and multiline matching, and rejects cross-rule mixing. Integration
-tests cover generic `shell`, ChatGPT `shell_command`, and both user context
-modes, including paired-rule disclosure and proof that denial does not spawn.
-VCR coverage requires authorization before replay.
+strict paired absolute-workdir/raw-command glob or regex rules, exercises glob
+separator/multiline semantics and regex implicit absolute anchors, and rejects
+cross-rule mixing. It locks the `jj (?:log|show [a-z]{6,32})` regex at the 5/6/32/33
+boundaries plus bad characters, whitespace, newlines, options, arguments, and shell
+operators. Configuration coverage rejects invalid, both, neither, case-insensitive,
+and resource-bounded matchers. Integration tests cover generic `shell`, ChatGPT
+`shell_command`, and both user context modes, including typed-pair disclosure and
+proof that denial does not spawn. VCR coverage requires authorization before replay.
 
 ## Processes, locking, and scheduling
 

@@ -24,11 +24,14 @@ calls in one batch are causally ordered.
 
 When `extensions.<instance>.config.shell.allowlist` is present, verify paired
 rule behavior rather than testing command patterns in isolation. One rule must
-match both the canonical absolute effective cwd and raw submitted command.
-Confirm that denial through `shell`, `shell_command`, `!`, and `!!` shows the
-configured command/workdir glob pairs and does not execute the command. An
-absent allowlist remains unrestricted; an empty list denies all. Treat this as a
-best-effort guardrail, not a sandbox test.
+match both the canonical absolute effective cwd and raw submitted command. Each
+rule requires exactly one matcher: `command` retains the globset glob grammar,
+while `command_regex` uses a case-sensitive Rust regex with implicit absolute
+whole-string anchors. Confirm that denial through `shell`, `shell_command`, `!`,
+and `!!` shows the typed configured matcher (`command_glob` or `command_regex`)
+with its paired workdir and does not execute the command. An absent allowlist
+remains unrestricted; an empty list denies all. Treat this as a best-effort
+guardrail, not a sandbox test.
 
 `read_image` accepts exactly one PNG, JPEG, or WebP path, an optional
 `mode: high | overview`, and an optional `{x,y,width,height}` region; it has no

@@ -31,6 +31,8 @@ globset.workspace = true
 ignore.workspace = true
 image.workspace = true
 libc.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
@@ -49,4 +51,5 @@ rustix-openpty.workspace = true
 rustix-v1 = { workspace = true, features = ["alloc", "fs", "pty", "termios"] }
 
 [dev-dependencies]
+serde_yaml_ng.workspace = true
 tau-core.workspace = true

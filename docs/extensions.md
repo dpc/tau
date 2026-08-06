@@ -211,18 +211,33 @@ extensions:
             command: cargo *
           - workdir: /srv/project
             command: jj status
+          - workdir: /srv/project/**
+            command_regex: 'jj (?:log|show [a-z]{6,32})'
 ```
 
 Omitting `allowlist` preserves unrestricted execution; `allowlist: []` denies
-every covered command. Each rule requires both fields, and one rule must match
-both the canonical absolute effective workdir and the raw submitted
-shell-language command. Matching is anchored and case-sensitive. Workdir `*`
-stays within one path component while `**` crosses components. Command globs
-treat separators and newlines as ordinary characters.
+every covered command. Each rule requires `workdir` plus exactly one command
+matcher: existing `command` is a glob, while `command_regex` is a Rust regular
+expression. One rule must match both the canonical absolute effective workdir and
+the raw submitted shell-language command. Both matcher kinds are whole-string and
+case-sensitive. Regexes use absolute implicit anchors, so authors should not add
+`^...$`; matching includes newlines in the submitted command. Use a YAML
+single-quoted scalar for regexes containing backslashes. Inline case-insensitive
+regex flags are rejected.
+
+Workdir `*` stays within one path component while `**` crosses components.
+Command globs retain globset grammar and treat separators and newlines as ordinary
+characters. Regular expressions use Rust's non-backtracking `regex` engine, which
+rejects look-around and backreferences. Each allowlist has at most 32 rules, each
+workdir or command pattern has at most 2,048 authored UTF-8 bytes, and each
+compiled glob or regex matcher has a 262,144-byte bound. Configuration rejects
+invalid patterns, both/neither matcher fields, and each limit with a stable error.
 
 The same rules cover model `shell`, ChatGPT-facing `shell_command`, and user
 `!`/`!!` before VCR replay or process spawn. A denial shows the configured
-command/workdir pairs so the agent can choose a permitted invocation. Matching
+typed command matcher and workdir pair so the agent can choose a permitted
+invocation. Do not place secrets in a glob or regex: denials deliberately disclose
+the configured patterns. Matching
 does not inspect shell syntax, the configured shell or wrapper prefix,
 environment, `PATH`, or resolved executables; fixed internal subprocesses such
 as `grep`'s `rg` are excluded. This is a best-effort guardrail, not a sandbox or

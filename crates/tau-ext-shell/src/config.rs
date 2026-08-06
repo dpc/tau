@@ -1,16 +1,19 @@
 //! Per-session configuration for the shell/file extension.
 
-use std::path as path_std_path;
-
+mod shell_allowlist;
 #[cfg(test)]
 mod tests;
+
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::path as path_std_path;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use globset::{GlobBuilder, GlobMatcher};
-use serde::de::Error as _;
+#[cfg(test)]
+use shell_allowlist::{
+    MAX_SHELL_ALLOWLIST_COMPILE_BYTES, MAX_SHELL_ALLOWLIST_PATTERN_BYTES, MAX_SHELL_ALLOWLIST_RULES,
+};
+use shell_allowlist::{ShellAllowRule, deserialize_shell_allowlist};
 
 use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
 use crate::shell_process::ShellProcess;
@@ -125,83 +128,6 @@ impl Default for ShellConfig {
     }
 }
 
-/// Preserve the semantic difference between an absent allowlist and every
-/// present value, including rejecting explicit null as malformed.
-fn deserialize_shell_allowlist<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<ShellAllowRule>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    <Vec<ShellAllowRule> as serde::Deserialize>::deserialize(deserializer).map(Some)
-}
-
-/// One conjunctive workdir-and-command allowlist rule.
-#[derive(Clone, Debug)]
-struct ShellAllowRule {
-    /// Authored absolute workdir glob retained for denial diagnostics.
-    workdir: String,
-    /// Authored raw shell-language command glob retained for denial
-    /// diagnostics.
-    command: String,
-    /// Compiled workdir matcher with component-aware separators.
-    workdir_matcher: GlobMatcher,
-    /// Compiled command matcher with separators treated as ordinary characters.
-    command_matcher: GlobMatcher,
-}
-
-impl<'de> serde::Deserialize<'de> for ShellAllowRule {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        /// Strict authored representation of one allowlist rule.
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawRule {
-            /// Absolute workdir glob.
-            workdir: String,
-            /// Raw shell-language command glob.
-            command: String,
-        }
-
-        let raw = RawRule::deserialize(deserializer)?;
-        if !Path::new(&raw.workdir).is_absolute() {
-            return Err(D::Error::custom(
-                "shell allowlist workdir glob must be absolute",
-            ));
-        }
-        let workdir_matcher = GlobBuilder::new(&raw.workdir)
-            .literal_separator(true)
-            .backslash_escape(true)
-            .build()
-            .map_err(|error| {
-                D::Error::custom(format!(
-                    "invalid shell allowlist workdir glob `{}`: {error}",
-                    raw.workdir
-                ))
-            })?
-            .compile_matcher();
-        let command_matcher = GlobBuilder::new(&raw.command)
-            .literal_separator(false)
-            .backslash_escape(true)
-            .build()
-            .map_err(|error| {
-                D::Error::custom(format!(
-                    "invalid shell allowlist command glob `{}`: {error}",
-                    raw.command
-                ))
-            })?
-            .compile_matcher();
-        Ok(Self {
-            workdir: raw.workdir,
-            command: raw.command,
-            workdir_matcher,
-            command_matcher,
-        })
-    }
-}
-
 impl ShellConfig {
     /// Authorize one submitted shell string in its effective cwd.
     ///
@@ -230,24 +156,24 @@ impl ShellConfig {
                     .to_owned(),
             );
         }
-        if rules.iter().any(|rule| {
-            rule.workdir_matcher.is_match(&canonical_cwd) && rule.command_matcher.is_match(command)
-        }) {
+        let canonical_cwd_text = canonical_cwd
+            .to_str()
+            .expect("UTF-8 workdirs returned after explicit validation");
+        if rules
+            .iter()
+            .any(|rule| rule.matches(canonical_cwd_text, command))
+        {
             return Ok(Some(canonical_cwd));
         }
         let mut message = format!(
-            "shell command denied by configured allowlist: no rule matched workdir {} and command\nallowed command/workdir glob pairs:",
+            "shell command denied by configured allowlist: no rule matched workdir {} and command\nallowed command/workdir rule pairs:",
             canonical_cwd.display()
         );
         if rules.is_empty() {
             message.push_str("\n- none");
         } else {
             for rule in rules {
-                let command = serde_json::to_string(&rule.command)
-                    .expect("serializing a string to JSON cannot fail");
-                let workdir = serde_json::to_string(&rule.workdir)
-                    .expect("serializing a string to JSON cannot fail");
-                let _ = write!(&mut message, "\n- command: {command}\n  workdir: {workdir}");
+                rule.append_diagnostic(&mut message);
             }
         }
         Err(message)

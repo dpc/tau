@@ -15,8 +15,8 @@ fn absent_allowlist_does_not_touch_or_restrict_the_workdir() {
     );
 }
 
-/// Ensures command and workdir globs match as one conjunctive rule rather than
-/// combining halves from different entries.
+/// Ensures command and workdir matchers bind as one conjunctive rule rather
+/// than combining halves from different entries.
 #[test]
 fn allowlist_rules_bind_command_and_workdir_as_pairs() {
     let temp = TempDir::new().expect("tempdir");
@@ -44,9 +44,123 @@ fn allowlist_rules_bind_command_and_workdir_as_pairs() {
     let error = config
         .authorize("jj status", temp.path())
         .expect_err("split pair must not authorize");
-    assert!(error.contains("allowed command/workdir glob pairs:"));
-    assert!(error.contains(r#"command: "cargo *""#));
+    assert!(error.contains("allowed command/workdir rule pairs:"));
+    assert!(error.contains(r#"command_glob: "cargo *""#));
     assert!(error.contains(&format!(r#"workdir: "{}""#, temp.path().display())));
+}
+
+/// Ensures the documented `jj` regular expression accepts only the intended
+/// raw command language at each length and shell-syntax boundary.
+#[test]
+fn command_regex_matches_only_the_documented_jj_language() {
+    let temp = TempDir::new().expect("tempdir");
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [{
+            "workdir": temp.path().display().to_string(),
+            "command_regex": "jj (?:log|show [a-z]{6,32})"
+        }]
+    }))
+    .expect("parse regex allowlist");
+
+    for command in [
+        "jj log",
+        "jj show abcdef",
+        "jj show abcdefghijklmnopqrstuvwxyzabcdef",
+    ] {
+        assert!(
+            config
+                .authorize(command, temp.path())
+                .expect("permitted command")
+                .is_some(),
+            "{command:?} must match"
+        );
+    }
+    for command in [
+        "jj show abcde",
+        "jj show abcdefghijklmnopqrstuvwxyzabcdefg",
+        "jj show ABCDEF",
+        "jj show abcde1",
+        "jj show abcdéf",
+        " jj log",
+        "jj  log",
+        "jj log ",
+        "jj log\n",
+        "jj log --no-pager",
+        "jj show abcdef extra",
+        "jj log | cat",
+        "jj log >output",
+        "jj log $(true)",
+        "jj log `true`",
+        "jj log; true",
+        "jj log && true",
+        "jj log || true",
+    ] {
+        assert!(
+            config.authorize(command, temp.path()).is_err(),
+            "{command:?} must be denied"
+        );
+    }
+}
+
+/// Ensures regex rules implicitly use absolute anchors even when multiline mode
+/// would make ordinary line anchors accept a substring.
+#[test]
+fn command_regex_uses_implicit_absolute_whole_string_anchors() {
+    let temp = TempDir::new().expect("tempdir");
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [{
+            "workdir": temp.path().display().to_string(),
+            "command_regex": "(?m)^printf allowed$"
+        }]
+    }))
+    .expect("parse regex allowlist");
+
+    assert!(
+        config
+            .authorize("printf allowed", temp.path())
+            .expect("whole command matches")
+            .is_some()
+    );
+    assert!(
+        config
+            .authorize("printf allowed\nprintf denied", temp.path())
+            .is_err(),
+        "multiline mode must not weaken implicit absolute anchors"
+    );
+}
+
+/// Ensures regex configuration stays case-sensitive even if an authored inline
+/// flag attempts to weaken that stated allowlist invariant.
+#[test]
+fn command_regex_rejects_case_insensitive_inline_flags() {
+    let error = serde_json::from_value::<ShellConfig>(serde_json::json!({
+        "allowlist": [{
+            "workdir": "/tmp/**",
+            "command_regex": "(?i)jj log"
+        }]
+    }))
+    .expect_err("case-insensitive regex must fail configuration");
+    assert!(
+        error
+            .to_string()
+            .contains("shell allowlist command regex must remain case-sensitive")
+    );
+
+    for pattern in [r"(?-i:jj log)", "(?x)# (?i)\njj\\x20log"] {
+        let config: ShellConfig = serde_json::from_value(serde_json::json!({
+            "allowlist": [{
+                "workdir": "/tmp",
+                "command_regex": pattern
+            }]
+        }))
+        .expect("syntax-aware validation must accept case-sensitive regex");
+        assert!(
+            config
+                .authorize("jj log", Path::new("/tmp"))
+                .expect("accepted case-sensitive regex")
+                .is_some()
+        );
+    }
 }
 
 /// Ensures command matching is anchored over the raw string while treating
@@ -131,7 +245,7 @@ fn empty_allowlist_denies_all_with_stable_diagnostic() {
     assert_eq!(
         error,
         format!(
-            "shell command denied by configured allowlist: no rule matched workdir {} and command\nallowed command/workdir glob pairs:\n- none",
+            "shell command denied by configured allowlist: no rule matched workdir {} and command\nallowed command/workdir rule pairs:\n- none",
             temp.path().canonicalize().expect("canonical").display()
         )
     );
@@ -153,11 +267,11 @@ fn malformed_allowlist_rules_fail_configuration() {
         ),
         (
             serde_json::json!({ "allowlist": [{ "workdir": "/tmp/[", "command": "*" }] }),
-            "workdir glob",
+            "invalid shell allowlist workdir glob",
         ),
         (
             serde_json::json!({ "allowlist": [{ "workdir": "/tmp/**", "command": "[" }] }),
-            "command glob",
+            "invalid shell allowlist command glob",
         ),
         (
             serde_json::json!({ "allowlist": [{ "workdir": "/tmp/**", "command": "*", "extra": true }] }),
@@ -167,6 +281,131 @@ fn malformed_allowlist_rules_fail_configuration() {
         let error = serde_json::from_value::<ShellConfig>(value).expect_err("malformed rule");
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+/// Ensures exactly one command matcher is required, invalid regular expressions
+/// fail closed, and resource diagnostics remain stable at configuration time.
+#[test]
+fn command_matcher_choice_and_resource_bounds_fail_configuration() {
+    let at_rule_limit = (0..MAX_SHELL_ALLOWLIST_RULES)
+        .map(|_| serde_json::json!({ "workdir": "/tmp/**", "command": "*" }))
+        .collect::<Vec<_>>();
+    serde_json::from_value::<ShellConfig>(serde_json::json!({ "allowlist": at_rule_limit }))
+        .expect("exact rule-count limit must be accepted");
+
+    let mut too_many_rules = (0..MAX_SHELL_ALLOWLIST_RULES)
+        .map(|_| serde_json::json!({ "workdir": "/tmp/**", "command": "*" }))
+        .collect::<Vec<_>>();
+    too_many_rules.push(serde_json::json!({
+        "workdir": "/tmp/**",
+        "command_regex": format!("a{{{MAX_SHELL_ALLOWLIST_COMPILE_BYTES}}}")
+    }));
+
+    let exact_workdir_pattern = format!("/{}", "x".repeat(MAX_SHELL_ALLOWLIST_PATTERN_BYTES - 1));
+    for (field, pattern) in [
+        ("workdir", exact_workdir_pattern),
+        ("command", "x".repeat(MAX_SHELL_ALLOWLIST_PATTERN_BYTES)),
+        (
+            "command_regex",
+            "x".repeat(MAX_SHELL_ALLOWLIST_PATTERN_BYTES),
+        ),
+    ] {
+        let mut rule = serde_json::Map::new();
+        rule.insert("workdir".to_owned(), serde_json::json!("/tmp/**"));
+        rule.insert(field.to_owned(), serde_json::Value::String(pattern));
+        if field == "workdir" {
+            rule.insert("command".to_owned(), serde_json::json!("*"));
+        }
+        serde_json::from_value::<ShellConfig>(serde_json::json!({
+            "allowlist": [rule]
+        }))
+        .expect("exact authored-pattern limit must be accepted");
+    }
+
+    let oversized_pattern = "x".repeat(MAX_SHELL_ALLOWLIST_PATTERN_BYTES + 1);
+    let compiled_too_large = format!("a{{{}}}", MAX_SHELL_ALLOWLIST_COMPILE_BYTES);
+    for (value, expected) in [
+        (
+            serde_json::json!({ "allowlist": [{ "workdir": "/tmp/**" }] }),
+            "shell allowlist rule requires exactly one of `command` or `command_regex`",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{
+                    "workdir": "/tmp/**",
+                    "command": "*",
+                    "command_regex": ".*"
+                }]
+            }),
+            "shell allowlist rule requires exactly one of `command` or `command_regex`",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{ "workdir": "/tmp/**", "command_regex": "(" }]
+            }),
+            "invalid shell allowlist command regex",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{ "workdir": "/tmp/**", "command": oversized_pattern }]
+            }),
+            "shell allowlist `command` must not exceed 2048 authored UTF-8 bytes",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{
+                    "workdir": format!("/{}", "x".repeat(MAX_SHELL_ALLOWLIST_PATTERN_BYTES)),
+                    "command": "*"
+                }]
+            }),
+            "shell allowlist `workdir` must not exceed 2048 authored UTF-8 bytes",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{
+                    "workdir": "/tmp/**",
+                    "command_regex": oversized_pattern
+                }]
+            }),
+            "shell allowlist `command_regex` must not exceed 2048 authored UTF-8 bytes",
+        ),
+        (
+            serde_json::json!({
+                "allowlist": [{
+                    "workdir": "/tmp/**",
+                    "command_regex": compiled_too_large
+                }]
+            }),
+            "shell allowlist command regex compilation must not exceed 262144 bytes",
+        ),
+        (
+            serde_json::json!({ "allowlist": too_many_rules }),
+            "shell allowlist permits at most 32 rules",
+        ),
+    ] {
+        let error = serde_json::from_value::<ShellConfig>(value).expect_err("invalid allowlist");
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
+/// Ensures YAML's recommended single-quoted scalar preserves regular-expression
+/// escapes while strict command matcher selection remains active.
+#[test]
+fn command_regex_accepts_yaml_single_quoted_patterns() {
+    let config: ShellConfig = serde_yaml_ng::from_str(
+        r#"
+allowlist:
+  - workdir: /tmp
+    command_regex: 'jj show [a-z]{6,32}\.json'
+"#,
+    )
+    .expect("parse YAML regex allowlist");
+    assert!(
+        config
+            .authorize("jj show abcdef.json", Path::new("/tmp"))
+            .expect("matching YAML regex")
+            .is_some()
+    );
 }
 
 /// Ensures empty extra_env values implement the documented clear-variable

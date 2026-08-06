@@ -660,17 +660,18 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
     writer.flush().expect("flush config");
 }
 
-/// Configure an explicit shell allowlist for integration tests.
-fn send_shell_allowlist_config(
+/// Configure explicit command-regex shell allowlist rules for integration
+/// tests.
+fn send_shell_regex_allowlist_config(
     writer: &mut EventWriter<BufWriter<UnixStream>>,
     rules: Vec<(&str, &str)>,
 ) {
     let rules = rules
         .into_iter()
-        .map(|(workdir, command)| {
+        .map(|(workdir, command_regex)| {
             cbor_map(vec![
                 ("workdir", CborValue::Text(workdir.to_owned())),
-                ("command", CborValue::Text(command.to_owned())),
+                ("command_regex", CborValue::Text(command_regex.to_owned())),
             ])
         })
         .collect();
@@ -687,8 +688,8 @@ fn send_shell_allowlist_config(
             secrets: Default::default(),
             settings_files: Default::default(),
         }))
-        .expect("configure shell allowlist");
-    writer.flush().expect("flush shell allowlist");
+        .expect("configure shell regex allowlist");
+    writer.flush().expect("flush shell regex allowlist");
 }
 
 fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue, agent_id: &str) -> Event {
@@ -5936,19 +5937,19 @@ fn gpt_shell_tool_reports_progress_and_success() {
     writer.flush().expect("flush");
 }
 
-/// Ensures both model shell dialects deny before spawn and disclose paired
-/// command/workdir rules in the agent-facing error.
+/// Ensures both model shell dialects enforce command-regex rules before spawn
+/// and disclose each typed command/workdir pair in the agent-facing error.
 #[test]
 fn model_shell_surfaces_enforce_allowlist_before_spawn() {
     let workdir = TempDir::new().expect("workdir");
     let sentinel = workdir.path().join("must-not-exist");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
-    send_shell_allowlist_config(
+    send_shell_regex_allowlist_config(
         &mut writer,
         vec![(
             workdir.path().to_str().expect("UTF-8 workdir"),
-            "printf allowed",
+            r"printf allowed",
         )],
     );
 
@@ -5980,14 +5981,14 @@ fn model_shell_surfaces_enforce_allowlist_before_spawn() {
             panic!("expected tool error");
         };
         assert!(error.message.contains("denied by configured allowlist"));
-        assert!(error.message.contains(r#"command: "printf allowed""#));
+        assert!(error.message.contains(r#"command_regex: "printf allowed""#));
         assert!(error.message.contains("workdir:"));
         assert!(!sentinel.exists(), "denied command must not spawn");
     }
 }
 
-/// Ensures both `!` and `!!` execution semantics use the same paired allowlist
-/// and report one terminal denial without spawning a child.
+/// Ensures both `!` and `!!` execution semantics use the same command-regex
+/// allowlist and report one terminal denial without spawning a child.
 #[test]
 fn user_shell_context_modes_enforce_the_same_allowlist() {
     let workdir = TempDir::new().expect("workdir");
@@ -5995,11 +5996,11 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
     let sentinel = workdir.path().join("must-not-exist");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
-    send_shell_allowlist_config(
+    send_shell_regex_allowlist_config(
         &mut writer,
         vec![(
             workdir.path().to_str().expect("UTF-8 workdir"),
-            "printf allowed",
+            r"printf allowed",
         )],
     );
     writer
@@ -6027,7 +6028,11 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
         let finished = wait_for_user_shell_finished(&mut reader, command_id);
         assert_eq!(finished.include_in_context, include_in_context);
         assert!(finished.output.contains("denied by configured allowlist"));
-        assert!(finished.output.contains(r#"command: "printf allowed""#));
+        assert!(
+            finished
+                .output
+                .contains(r#"command_regex: "printf allowed""#)
+        );
         assert_eq!(finished.exit_code, None);
         assert!(!sentinel.exists(), "denied user command must not spawn");
     }
@@ -6038,8 +6043,13 @@ fn user_shell_context_modes_enforce_the_same_allowlist() {
 #[test]
 fn shell_allowlist_denial_never_opens_vcr_state() {
     let workdir = TempDir::new().expect("workdir");
-    let config: path_crate_config::ShellConfig =
-        serde_json::from_value(serde_json::json!({ "allowlist": [] })).expect("config");
+    let config: path_crate_config::ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [{
+            "workdir": workdir.path().display().to_string(),
+            "command_regex": "printf allowed"
+        }]
+    }))
+    .expect("config");
     let invoke = || {
         let mut invoke = match tool_started(
             "deny-before-vcr",
