@@ -95,6 +95,17 @@ and only its write-complete post-commit continuation directs the transient full
 request to the selected provider. The authority and crash cuts are governed by
 [SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
+The harness is the sole process-local owner of disabled-by-default Provider
+cache refresh scheduling. It derives keyed exact-prefix identities and economic
+eligibility only from current route policy, privacy, quota, price, and successful
+read/write observations. It sends sensitive refresh and cancellation requests
+only to the exact captured Provider route during a registered finite tool-batch
+window, below real prompts, with bounded global and per-Provider admission.
+Authenticated terminal reports release slots and derive content-free canonical
+facts. Provider cooldown and real prompt priority suppress work. The owner does
+not retry failure, persist lifecycle state, or restore it after restart. See
+[SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
+
 Provider account quota is an ephemeral current-state cache. The harness accepts
 it only when every effective model route in the provider namespace has one
 unambiguous extension owner, and every binding names a route won by that owner.

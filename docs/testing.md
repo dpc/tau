@@ -621,3 +621,18 @@ delivery, exact bounded correlation, no generic completion, consumed wait state,
 and no replayed checkpoint. Cover success, started failure/cancellation,
 pre-start failure, and explicit successor recovery independently; retain
 cross-agent `agent_compact` as the asynchronous waitable control case.
+## Provider cache-refresh lifecycle
+
+Current deterministic coverage injects monotonic time and identity/jitter
+entropy into scheduler tests for eligibility, economic evidence, bounded
+eviction, window closure, cancel-without-release, source correlation, enqueue
+failure, disconnect, and deadline equality. Harness tests cover canonical
+terminal correlation and concurrent tool-cohort union. Built-in Provider runtime
+tests cover directed successful completion; supervisor tests cover synchronous
+directed cancellation and cooldown cancellation.
+
+The deterministic fake-Provider E2E suite currently covers ordinary prompt/tool
+turns with cache refresh disabled by default. It does not emulate cache-policy
+evidence or an enabled refresh lifecycle. Add that fake lifecycle fixture before
+depending on cross-process cache-refresh E2E coverage; never use live Provider
+cache behavior as the deterministic oracle.

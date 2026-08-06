@@ -368,6 +368,10 @@ impl EventName {
         Self::from_static(EventCategory::Provider, "cache_miss_diagnostic_reported");
     pub const PROVIDER_CACHE_MISS_DIAGNOSTIC: Self =
         Self::from_static(EventCategory::Provider, "cache_miss_diagnostic");
+    pub const PROVIDER_CACHE_REFRESH_FINISHED_REPORTED: Self =
+        Self::from_static(EventCategory::Provider, "cache_refresh_finished_reported");
+    pub const PROVIDER_CACHE_REFRESH_FINISHED: Self =
+        Self::from_static(EventCategory::Provider, "cache_refresh_finished");
 
     pub const HARNESS_NOTICE: Self = Self::from_static(EventCategory::Harness, "notice");
     pub const HARNESS_SESSION_DIR: Self = Self::from_static(EventCategory::Harness, "session_dir");
@@ -523,6 +527,10 @@ impl EventName {
     pub const AGENT_PROMPT_FAILED: Self = Self::from_static(EventCategory::Agent, "prompt_failed");
     pub const AGENT_PROMPT_PREWARM_REQUESTED: Self =
         Self::from_static(EventCategory::Agent, "prompt_prewarm_requested");
+    pub const AGENT_CACHE_REFRESH_REQUESTED: Self =
+        Self::from_static(EventCategory::Agent, "cache_refresh_requested");
+    pub const AGENT_CACHE_REFRESH_CANCEL_REQUESTED: Self =
+        Self::from_static(EventCategory::Agent, "cache_refresh_cancel_requested");
     pub const AGENT_USER_MESSAGE_INJECTED: Self =
         Self::from_static(EventCategory::Agent, "user_message_injected");
     pub const AGENT_HEAD_MOVED: Self = Self::from_static(EventCategory::Agent, "head_moved");

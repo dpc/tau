@@ -357,13 +357,33 @@ The legacy `prompt_cache_retention` request control selects an OpenAI retention
 policy; it does not turn typical behavior or a maximum into a minimum, fixed,
 or sliding policy fact.
 
-Tau has no cache-refresh experiment or scheduler. Adding an experiment would
-require separately approved opt-in configuration and request behavior. Any such
-future experiment must use explicit breakpoints, observe both cache reads and
-writes, tightly cap generated output, and stop before its request/quota cost
-exceeds the expected avoided cache-write cost. It must not infer renewal from a
-hit, run before GPT-5.6's documented minimum, or continue through unknown or
-unbounded idle.
+Tau's cache-refresh scheduler is disabled by default. Opt in globally:
+
+```yaml
+provider_cache_refresh:
+  enabled: true
+  max_idle_seconds: 300
+```
+
+`max_idle_seconds` accepts `1..=86400`; the default is 300. The scheduler uses
+only exact routes with sliding read renewal, zero output, volatile ZDR-compatible
+storage that preserves route residency, concrete quota classes, and explicit
+ordinary/read/write prices. It requires both a reported write and the
+price-derived number of later reads before one refresh is economical. It resends
+the exact full successful prompt prefix—including prior user/tool context and
+tool schemas—through the existing non-generating prewarm operation. This
+sensitive resend is why opt-in is explicit.
+
+Refreshes currently run only during a finite foreground tool-batch window,
+below real prompts, with two global and one-per-Provider slots. There is no
+deadline-bearing approval operation today, so approval waits do not admit work.
+A real prompt,
+cooldown, exact idle/residency deadline, route or prefix change, shutdown, or
+rotation suppresses or cancels work. The Provider reports a correlated terminal;
+cancel delivery alone does not release scheduler capacity. Each qualifying read
+creates a new observation generation, and each generation authorizes at most one
+attempt; failure never creates a prompt retry. Keys, evidence, jitter, and
+lifecycle state are process-only and never journaled or restored.
 
 Hardcoded ChatGPT/Codex ordinary-input and output comparison prices come from OpenAI's provider-owned
 [API pricing table](https://developers.openai.com/api/docs/pricing). Configured

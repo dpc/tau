@@ -15,6 +15,8 @@ pub(crate) struct PrewarmKey {
     pub(crate) provider: tau_proto::ProviderName,
     /// Durable target agent whose provider cache is being warmed.
     pub(crate) agent_id: tau_proto::AgentId,
+    /// Lifecycle correlation for scheduler work; absent for legacy prewarm.
+    pub(crate) refresh_id: Option<tau_proto::ProviderCacheRefreshId>,
 }
 
 /// Main-loop-owned registry of bounded prewarm workers.
@@ -70,6 +72,19 @@ impl PrewarmSupervisor {
     /// Cancels active work for one cache owner so a real prompt can take over.
     pub(crate) fn cancel_key(&mut self, key: &PrewarmKey) {
         if let Some(active) = self.active.get(key) {
+            active.abort.cancel();
+        }
+    }
+
+    /// Synchronously invalidates one exact refresh before real work proceeds.
+    pub(crate) fn cancel_refresh(&mut self, refresh_id: &tau_proto::ProviderCacheRefreshId) {
+        let key = self
+            .active
+            .keys()
+            .find_map(|key| (key.refresh_id.as_ref() == Some(refresh_id)).then(|| key.clone()));
+        if let Some(key) = key
+            && let Some(active) = self.active.remove(&key)
+        {
             active.abort.cancel();
         }
     }

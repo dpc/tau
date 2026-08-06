@@ -31,6 +31,63 @@ fn tau_state_access_environment_is_exact_and_fail_closed() {
     }
 }
 
+/// Provider cache refresh stays disabled with the approved finite default.
+#[test]
+fn provider_cache_refresh_defaults_disabled() {
+    let settings = HarnessSettings::built_in();
+    assert_eq!(
+        settings.provider_cache_refresh,
+        ProviderCacheRefresh {
+            enabled: false,
+            max_idle_seconds: ProviderCacheMaxIdle::new(300).expect("valid default"),
+        }
+    );
+}
+
+/// Sparse drop-ins merge cache-refresh fields without resetting the idle bound.
+#[test]
+fn provider_cache_refresh_merges_recursively() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "provider_cache_refresh:\n  max_idle_seconds: 42\n",
+    )
+    .expect("write base");
+    std::fs::create_dir(td.path().join("harness.d")).expect("drop-in directory");
+    std::fs::write(
+        td.path().join("harness.d/10-enable.yaml"),
+        "provider_cache_refresh:\n  enabled: true\n",
+    )
+    .expect("write drop-in");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load cache refresh");
+    assert_eq!(
+        settings.provider_cache_refresh,
+        ProviderCacheRefresh {
+            enabled: true,
+            max_idle_seconds: ProviderCacheMaxIdle::new(42).expect("valid test bound"),
+        }
+    );
+}
+
+/// The approved idle bound validates even when refresh is disabled.
+#[test]
+fn provider_cache_refresh_rejects_out_of_range_idle() {
+    for seconds in [0, 86_401] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!("provider_cache_refresh:\n  enabled: false\n  max_idle_seconds: {seconds}\n"),
+        )
+        .expect("write config");
+        let error = load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect_err("out-of-range idle must fail");
+        assert!(error.to_string().contains(
+            "provider_cache_refresh.max_idle_seconds must be between 1 and 86400 seconds inclusive"
+        ));
+    }
+}
+
 /// Ensures the supported extension environment grammar trims OWS, preserves
 /// first-seen order, and makes duplicate enables idempotent.
 #[test]

@@ -14,6 +14,7 @@ fn stale_completion_cannot_remove_successor() {
     let key = PrewarmKey {
         provider: tau_proto::ProviderName::new("chatgpt"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        refresh_id: None,
     };
     let mut supervisor = PrewarmSupervisor::default();
     let (first, _) = supervisor.begin(key.clone()).expect("first begin");
@@ -42,6 +43,7 @@ fn active_work_is_capped_at_pool_capacity() {
                     provider: tau_proto::ProviderName::new("chatgpt"),
                     agent_id: tau_proto::AgentId::parse(format!("agent-{index}"))
                         .expect("agent id"),
+                    refresh_id: None,
                 })
                 .is_some()
         );
@@ -51,9 +53,50 @@ fn active_work_is_capped_at_pool_capacity() {
             .begin(PrewarmKey {
                 provider: tau_proto::ProviderName::new("chatgpt"),
                 agent_id: tau_proto::AgentId::parse("overflow").expect("agent id"),
+                refresh_id: None,
             })
             .is_none()
     );
+}
+
+/// Directed cancellation removes ownership synchronously and stale worker
+/// completion cannot affect a successor.
+#[test]
+fn refresh_cancel_synchronously_invalidates_generation() {
+    let refresh_id =
+        tau_proto::ProviderCacheRefreshId::parse("pcr-cancel-test").expect("refresh id");
+    let key = PrewarmKey {
+        provider: tau_proto::ProviderName::new("chatgpt"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent"),
+        refresh_id: Some(refresh_id.clone()),
+    };
+    let mut supervisor = PrewarmSupervisor::default();
+    let (generation, _) = supervisor.begin(key.clone()).expect("begin");
+    supervisor.cancel_refresh(&refresh_id);
+    assert!(supervisor.is_empty());
+    let (successor, _) = supervisor.begin(key.clone()).expect("successor");
+    supervisor.complete(&key, generation);
+    assert!(!supervisor.is_empty());
+    supervisor.complete(&key, successor);
+    assert!(supervisor.is_empty());
+}
+
+/// Shared cooldown evidence wakes matching refresh transport while retaining
+/// ownership for its eventual terminal.
+#[test]
+fn provider_cooldown_cancels_transport_but_retains_owner() {
+    let key = PrewarmKey {
+        provider: tau_proto::ProviderName::new("chatgpt"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent"),
+        refresh_id: Some(
+            tau_proto::ProviderCacheRefreshId::parse("pcr-cooldown").expect("refresh id"),
+        ),
+    };
+    let mut supervisor = PrewarmSupervisor::default();
+    let (_, mut abort) = supervisor.begin(key).expect("begin");
+    supervisor.cancel_provider(&tau_proto::ProviderName::new("chatgpt"));
+    assert!(abort.is_aborted());
+    assert!(!supervisor.is_empty());
 }
 
 /// Once cancellation enters a registered callback, guard drop must wait for

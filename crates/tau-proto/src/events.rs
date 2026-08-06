@@ -13,7 +13,7 @@
 //! `SPEC-tau-proto-provider-updates`.
 
 use std::fmt;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU32};
 
 use serde::{Deserialize, Serialize, de as path_serde_de, ser as path_serde_ser};
 
@@ -25,9 +25,10 @@ use crate::{
     HarnessAgentContextInitialized, HarnessProviderQuotaChanged, HarnessSessionSkillsAvailable,
     InternalPromptKind, MessageDeleted, MessageDelivered, MessageEdited, MessagePhase,
     MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag, ObservationId,
-    PromptContext, PromptFragment, PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch,
-    ProviderQuotaReplace, ProviderTokenUsage, ReasoningTextKind, SessionId, ToolCallId,
-    ToolCallRef, ToolDefinition, ToolGroupName, ToolName, ToolTag,
+    PromptContext, PromptFragment, PromptSubmissionSource, ProviderCacheRefreshId,
+    ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace, ProviderTokenUsage,
+    ReasoningTextKind, SessionId, ToolCallId, ToolCallRef, ToolDefinition, ToolGroupName, ToolName,
+    ToolTag,
 };
 
 fn default_true() -> bool {
@@ -4975,6 +4976,84 @@ pub struct AgentPromptPrewarmRequested {
     pub share_user_cache_key: bool,
 }
 
+/// Harness-authored directed request for one bounded cache-refresh attempt.
+///
+/// This sensitive payload is point-to-point only. It must not be broadcast,
+/// journaled, replayed, intercepted, or included in generic debug output.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentCacheRefreshRequested {
+    /// Unique process-local attempt identity.
+    pub refresh_id: ProviderCacheRefreshId,
+    /// Exact stable-prefix request previously sent on this Provider route.
+    pub prompt: AgentPromptPrewarmRequested,
+    /// Provider-side fail-safe deadline relative to receipt.
+    pub stop_after_millis: NonZeroU32,
+}
+
+/// Why the harness invalidated an in-flight cache refresh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCacheRefreshCancelReason {
+    /// A real prompt preempted speculative work.
+    RealPrompt,
+    /// The finite admission opportunity ended.
+    WaitEnded,
+    /// The exact monotonic stop elapsed.
+    Deadline,
+    /// Session identity changed.
+    SessionChanged,
+    /// Target agent unloaded.
+    AgentUnloaded,
+    /// Provider connection generation changed.
+    ProviderRotated,
+    /// Selected model changed.
+    ModelChanged,
+    /// Tool prefix changed.
+    ToolsChanged,
+    /// System prompt changed.
+    SystemPromptChanged,
+    /// Another Provider-visible prefix field changed.
+    PrefixChanged,
+    /// Published or operator policy changed.
+    PolicyChanged,
+    /// Harness shutdown began.
+    Shutdown,
+}
+
+/// Harness-authored directed cancellation for one cache-refresh attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentCacheRefreshCancelRequested {
+    /// Exact attempt to invalidate.
+    pub refresh_id: ProviderCacheRefreshId,
+    /// Closed invalidation cause.
+    pub reason: ProviderCacheRefreshCancelReason,
+}
+
+/// Content-free terminal status reported by the exact Provider owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCacheRefreshStatus {
+    /// Prefix installation succeeded.
+    Succeeded,
+    /// Attempt failed without retry.
+    Failed,
+    /// Cooperative cancellation ended the attempt.
+    Cancelled,
+    /// Route cannot perform non-generating refresh.
+    Unsupported,
+    /// Provider fail-safe deadline elapsed.
+    DeadlineExceeded,
+}
+
+/// Provider-authored terminal observation for a cache-refresh attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderCacheRefreshFinished {
+    /// Exact attempt terminalized by its owning Provider.
+    pub refresh_id: ProviderCacheRefreshId,
+    /// Closed content-free outcome.
+    pub status: ProviderCacheRefreshStatus,
+}
+
 // ---------------------------------------------------------------------------
 // Provider execution payloads — reports and canonical harness facts
 // ---------------------------------------------------------------------------
@@ -5779,6 +5858,10 @@ pub enum Event {
     AgentPromptFailed(AgentPromptFailed),
     #[serde(rename = "agent.prompt_prewarm_requested")]
     AgentPromptPrewarmRequested(AgentPromptPrewarmRequested),
+    #[serde(rename = "agent.cache_refresh_requested")]
+    AgentCacheRefreshRequested(AgentCacheRefreshRequested),
+    #[serde(rename = "agent.cache_refresh_cancel_requested")]
+    AgentCacheRefreshCancelRequested(AgentCacheRefreshCancelRequested),
     #[serde(rename = "agent.user_message_injected")]
     AgentUserMessageInjected(AgentUserMessageInjected),
     #[serde(rename = "agent.head_moved")]
@@ -5851,6 +5934,12 @@ pub enum Event {
     ProviderCacheMissDiagnosticReported(ProviderCacheMissDiagnostic),
     #[serde(rename = "provider.cache_miss_diagnostic")]
     ProviderCacheMissDiagnostic(ProviderCacheMissDiagnostic),
+    /// Provider-authored cache-refresh terminal awaiting owner validation.
+    #[serde(rename = "provider.cache_refresh_finished_reported")]
+    ProviderCacheRefreshFinishedReported(ProviderCacheRefreshFinished),
+    /// Harness-canonical content-free cache-refresh terminal.
+    #[serde(rename = "provider.cache_refresh_finished")]
+    ProviderCacheRefreshFinished(ProviderCacheRefreshFinished),
 }
 
 impl Event {
@@ -6200,6 +6289,10 @@ impl Event {
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptFailed(_) => EventName::AGENT_PROMPT_FAILED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
+            Self::AgentCacheRefreshRequested(_) => EventName::AGENT_CACHE_REFRESH_REQUESTED,
+            Self::AgentCacheRefreshCancelRequested(_) => {
+                EventName::AGENT_CACHE_REFRESH_CANCEL_REQUESTED
+            }
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
             Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
             Self::AgentStarted(_) => EventName::AGENT_STARTED,
@@ -6249,6 +6342,10 @@ impl Event {
                 EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC_REPORTED
             }
             Self::ProviderCacheMissDiagnostic(_) => EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
+            Self::ProviderCacheRefreshFinishedReported(_) => {
+                EventName::PROVIDER_CACHE_REFRESH_FINISHED_REPORTED
+            }
+            Self::ProviderCacheRefreshFinished(_) => EventName::PROVIDER_CACHE_REFRESH_FINISHED,
             _ => return None,
         }
         .into()
@@ -6287,6 +6384,10 @@ impl Event {
                 | Self::ProviderResponseFinishedReported(_)
                 | Self::ProviderRetryPromptResultReported(_)
                 | Self::ProviderCacheMissDiagnosticReported(_)
+                | Self::ProviderCacheRefreshFinishedReported(_)
+                | Self::ProviderCacheRefreshFinished(_)
+                | Self::AgentCacheRefreshRequested(_)
+                | Self::AgentCacheRefreshCancelRequested(_)
                 | Self::ProviderResponseUpdated(_)
                 | Self::ProviderQuotaReplaceReported(_)
                 | Self::ProviderQuotaPatchReported(_)

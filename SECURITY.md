@@ -43,6 +43,14 @@ harness authenticates the Provider connection, derives the instance-specific
 durable-session path, and writes without parsing or decompressing payload bytes.
 Both transport and filesystem queues are bounded and best-effort. Capture
 payloads never enter events, journals, debug JSONL, or generic Debug output.
+Disabled-by-default cache refreshes resend an exact previously successful
+Provider-visible prefix. The harness keeps that content in process memory and
+sends refresh/cancel requests point-to-point only to the captured configured
+Provider generation. Sensitive requests are excluded from broadcast,
+interception, journals, replay, debug JSONL, generic Debug output, watchers, and
+UI projection. Content-free terminal reports and canonical facts may remain
+observable. Provider-specific private request capture can still contain the
+upstream refresh request when the operator separately enables that capture.
 The distinct deterministic and live/VCR test-fixture boundaries are documented
 in [`tau-e2e-tests/SECURITY.md`](crates/tau-e2e-tests/SECURITY.md).
 The disabled-by-default test-dummy extension's capability and worker-lifecycle

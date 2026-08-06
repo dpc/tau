@@ -463,6 +463,13 @@ validated_string_newtype!(
     "agent message id",
     128
 );
+validated_string_newtype!(
+    /// Correlation identifier for one bounded Provider cache-refresh attempt.
+    ProviderCacheRefreshId,
+    ProviderCacheRefreshIdParseError,
+    "provider cache refresh id",
+    128
+);
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);

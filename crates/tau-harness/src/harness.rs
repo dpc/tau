@@ -146,6 +146,9 @@ use crate::prompt::{
     assemble_prompt_context_from, built_in_system_prompt_templates, render_agents_context_message,
     render_effective_prompt_message, try_build_system_prompt_with_tool_template_context,
 };
+use crate::provider_cache_residency::{
+    ProviderCacheResidency, RuntimeCacheClock, RuntimeCacheJitter,
+};
 use crate::secrets::{
     ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets_excluding,
 };
@@ -2486,6 +2489,10 @@ pub struct Harness {
     /// selected by the deterministic sorted-source, last-advertisement-wins
     /// registry rebuild.
     pub(crate) provider_model_routes: HashMap<ModelId, tau_proto::ConnectionId>,
+    /// Single process-only owner of bounded Provider cache refresh work.
+    provider_cache_residency: ProviderCacheResidency<RuntimeCacheClock, RuntimeCacheJitter>,
+    /// Foreground cohort that owns the current finite cache-refresh window.
+    cache_refresh_tool_window_calls: HashSet<ToolCallId>,
     /// Ephemeral validated account-quota snapshots keyed by provider namespace.
     pub(crate) provider_quota: HashMap<tau_proto::ProviderName, CurrentProviderQuota>,
     /// Empty latest snapshots retained after a clear so live and late clients
@@ -3003,6 +3010,8 @@ struct HarnessBaseParts {
     tool_policy: tau_config::settings::ToolPolicy,
     /// Inclusive effective bounds for activating-input `wait` calls.
     input_wait_timeout_bounds: (u64, u64),
+    /// Approved disabled-by-default Provider cache refresh policy.
+    provider_cache_refresh: tau_config::settings::ProviderCacheRefresh,
     /// Initially selected role name.
     selected_role: String,
     /// Initially selected model, if any provider metadata can resolve one.
@@ -3306,6 +3315,8 @@ impl Harness {
             provider_quota_retired_epochs: HashMap::new(),
             provider_model_info: HashMap::new(),
             provider_model_routes: HashMap::new(),
+            provider_cache_residency: ProviderCacheResidency::runtime(parts.provider_cache_refresh),
+            cache_refresh_tool_window_calls: HashSet::new(),
             pending_provider_prompts: HashMap::new(),
             pending_prompt_dispatches: HashSet::new(),
             available_roles: parts.available_roles,
@@ -3596,6 +3607,7 @@ impl Harness {
             role_overrides,
             tool_policy: harness_settings.tool_policy.clone(),
             input_wait_timeout_bounds: harness_settings.wait_timeout_bounds(),
+            provider_cache_refresh: harness_settings.provider_cache_refresh,
             selected_role,
             selected_model,
             agent_id_template: harness_settings.agent_id_template.clone(),
@@ -4085,6 +4097,7 @@ impl Harness {
             role_overrides: parts.roles.role_overrides,
             tool_policy: parts.harness_settings.tool_policy.clone(),
             input_wait_timeout_bounds: parts.harness_settings.wait_timeout_bounds(),
+            provider_cache_refresh: parts.harness_settings.provider_cache_refresh,
             selected_role: parts.roles.selected_role,
             selected_model: parts.roles.selected_model,
             agent_id_template: parts.harness_settings.agent_id_template.clone(),
@@ -5437,6 +5450,7 @@ impl Harness {
         agent_prompt_id: &AgentPromptId,
     ) -> Option<AgentId> {
         self.pending_prompt_dispatches.remove(agent_prompt_id);
+        self.provider_cache_residency.drop_prompt(agent_prompt_id);
         let cid = self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_operations.remove(agent_prompt_id);
@@ -6244,6 +6258,15 @@ impl Harness {
                     "prompt delivery authority changed before provider send",
                 );
                 return;
+            }
+            if let Event::AgentPromptCreated(prompt) = &event {
+                self.preempt_cache_refresh_for_prompt(prompt);
+                let model_info = self.provider_model_info.get(&prompt.model).cloned();
+                self.provider_cache_residency.track_prompt(
+                    provider_connection_id.clone(),
+                    prompt,
+                    model_info.as_ref(),
+                );
             }
             // Provider-owned prompt execution is point-to-point: observers still
             // see the transient work envelope, but execution clients do not all race
@@ -9432,7 +9455,8 @@ impl Harness {
             let input = self.next_input_wait_deadline();
             let work_wait = self.next_work_wait_threshold_deadline();
             let extension = self.next_extension_deadline();
-            let next = [work_wait, input, background, extension]
+            let cache = self.next_cache_refresh_deadline();
+            let next = [work_wait, input, background, extension, cache]
                 .into_iter()
                 .flatten()
                 .min();
@@ -9441,7 +9465,7 @@ impl Harness {
             };
             if work_wait == Some(deadline) {
                 let budget = self.long_wait_materialization_budget.unwrap_or_default();
-                let next_non_work = [input, background, extension]
+                let next_non_work = [input, background, extension, cache]
                     .into_iter()
                     .flatten()
                     .min()
@@ -9451,6 +9475,8 @@ impl Harness {
                 self.process_input_wait_deadlines(deadline);
             } else if background == Some(deadline) {
                 self.process_background_deadlines_at(deadline);
+            } else if cache == Some(deadline) {
+                self.process_cache_refresh_deadline();
             } else {
                 self.process_extension_deadlines_at(deadline, now);
             }
@@ -9464,10 +9490,66 @@ impl Harness {
             self.next_input_wait_deadline(),
             self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),
+            self.next_cache_refresh_deadline(),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    fn next_cache_refresh_deadline(&self) -> Option<Instant> {
+        self.provider_cache_residency.next_deadline()
+    }
+
+    fn process_cache_refresh_deadline(&mut self) {
+        let cancellations = self.provider_cache_residency.expire_deadlines();
+        self.send_cache_refresh_cancellations(cancellations);
+        for refresh in self.provider_cache_residency.admit() {
+            tracing::debug!(
+                target: "tau_harness",
+                provider = %refresh.provider,
+                agent_id = %refresh.request.prompt.agent_id,
+                "dispatching bounded Provider cache refresh",
+            );
+            let refresh_id = refresh.request.refresh_id.clone();
+            let delivered = self.bus.send_to(
+                &refresh.connection_id,
+                Some(crate::harness::harness_connection_id()),
+                HarnessOutputMessage::deliver(Event::AgentCacheRefreshRequested(refresh.request)),
+            );
+            if !delivered.is_ok_and(|report| !report.delivered_to.is_empty()) {
+                self.provider_cache_residency
+                    .finish(&refresh.connection_id, &refresh_id);
+            }
+        }
+    }
+
+    fn send_cache_refresh_cancellations(
+        &mut self,
+        cancellations: Vec<crate::provider_cache_residency::CacheRefreshCancel>,
+    ) {
+        for cancellation in cancellations {
+            let _ = self.bus.send_to(
+                &cancellation.connection_id,
+                Some(crate::harness::harness_connection_id()),
+                HarnessOutputMessage::deliver(Event::AgentCacheRefreshCancelRequested(
+                    cancellation.request,
+                )),
+            );
+        }
+    }
+
+    fn preempt_cache_refresh_for_prompt(&mut self, prompt: &AgentPromptCreated) {
+        let cancellations = self
+            .provider_cache_residency
+            .cancel_real(&prompt.model.provider, &prompt.agent_id);
+        self.send_cache_refresh_cancellations(cancellations);
+    }
+
+    fn clear_cache_refreshes(&mut self, reason: tau_proto::ProviderCacheRefreshCancelReason) {
+        self.cache_refresh_tool_window_calls.clear();
+        let cancellations = self.provider_cache_residency.clear(reason);
+        self.send_cache_refresh_cancellations(cancellations);
     }
 
     fn next_extension_deadline(&self) -> Option<Instant> {
@@ -10509,6 +10591,7 @@ impl Harness {
         publisher_instance_id: tau_proto::ExtensionInstanceId,
         registration: ToolRegistrationDeclared,
     ) {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ToolsChanged);
         let internal_name = registration.tool.name.clone();
         let visible_name = self.tool_model_visible_name(&registration.tool).clone();
         let was_available = !self
@@ -12272,6 +12355,9 @@ impl Harness {
                 | Event::ProviderResponseUpdated(_)
                 | Event::ProviderResponseFinished(_)
                 | Event::ProviderCacheMissDiagnostic(_)
+                | Event::ProviderCacheRefreshFinished(_)
+                | Event::AgentCacheRefreshRequested(_)
+                | Event::AgentCacheRefreshCancelRequested(_)
                 | Event::AgentPromptFailed(_)
         ) {
             // Canonical provider execution facts and pre-materialization prompt
@@ -12287,6 +12373,7 @@ impl Harness {
                 | Event::ProviderResponseFinishedReported(_)
                 | Event::ProviderRetryPromptResultReported(_)
                 | Event::ProviderCacheMissDiagnosticReported(_)
+                | Event::ProviderCacheRefreshFinishedReported(_)
         ) {
             // This is only configured event-authority admission. Per
             // `specs/SPEC-peer-event-publication.md`, prompt ownership,
@@ -12803,6 +12890,7 @@ impl Harness {
                 | Event::ProviderResponseFinishedReported(_)
                 | Event::ProviderRetryPromptResultReported(_)
                 | Event::ProviderCacheMissDiagnosticReported(_)
+                | Event::ProviderCacheRefreshFinishedReported(_)
         ) {
             self.process_committed_provider_execution_report(peer_context, event);
             return;
@@ -13287,6 +13375,17 @@ impl Harness {
             }
             Event::ProviderCacheMissDiagnosticReported(diagnostic) => {
                 self.process_provider_cache_miss_diagnostic_report(source_id, diagnostic);
+            }
+            Event::ProviderCacheRefreshFinishedReported(finished) => {
+                if self
+                    .provider_cache_residency
+                    .finish(source_id, &finished.refresh_id)
+                {
+                    self.publish_event(
+                        Some(crate::harness::harness_connection_id()),
+                        Event::ProviderCacheRefreshFinished(finished.clone()),
+                    );
+                }
             }
             _ => unreachable!("caller filters provider execution reports"),
         }
@@ -15185,6 +15284,7 @@ impl Harness {
         &mut self,
         select: tau_proto::UiRoleSelect,
     ) -> Result<bool, HarnessError> {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::PolicyChanged);
         if !self.available_roles.contains_key(&select.role) {
             let message = self
                 .disabled_role_reasons
@@ -15229,6 +15329,7 @@ impl Harness {
         &mut self,
         select: tau_proto::UiAgentModelSelect,
     ) -> Result<bool, HarnessError> {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ModelChanged);
         if !self.available_models.contains(&select.model) {
             self.emit_info(&format!("unknown model: {}", select.model));
             return Ok(true);
@@ -15284,6 +15385,7 @@ impl Harness {
         &mut self,
         req: tau_proto::UiRoleUpdate,
     ) -> Result<bool, HarnessError> {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::PolicyChanged);
         if let Some(reason) = self.disabled_role_reasons.get(&req.role) {
             self.emit_info(&format!(
                 ":role: role `{}` is disabled by configuration: {}",
@@ -17011,6 +17113,9 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
     ) {
+        self.provider_cache_residency
+            .release_connection(connection_id);
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ProviderRotated);
         let removing_tools: Vec<(ToolName, ToolName)> = self
             .registry
             .all_tool_names()
@@ -17577,6 +17682,11 @@ impl Harness {
         }
         self.tool_agents.remove(call_id);
         self.pending_tools.remove(call_id);
+        self.cache_refresh_tool_window_calls.remove(call_id);
+        if self.cache_refresh_tool_window_calls.is_empty() {
+            let cancellations = self.provider_cache_residency.close_window();
+            self.send_cache_refresh_cancellations(cancellations);
+        }
         self.pending_tool_providers.remove(call_id);
         self.pending_terminal_observations.remove(call_id);
         self.pending_wait_settlements.remove(call_id);
@@ -17630,6 +17740,7 @@ impl Harness {
                 | Event::ProviderResponseFinishedReported(_)
                 | Event::ProviderRetryPromptResultReported(_)
                 | Event::ProviderCacheMissDiagnosticReported(_)
+                | Event::ProviderCacheRefreshFinishedReported(_)
         )
     }
 
@@ -19870,6 +19981,7 @@ impl Harness {
     }
 
     fn refresh_provider_model_info(&mut self) {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ProviderRotated);
         let mut provider_model_info = HashMap::new();
         let mut provider_model_routes = HashMap::new();
         let mut duplicate_model_ids = HashSet::new();
@@ -20990,6 +21102,7 @@ impl Harness {
         }
 
         let old_id = self.current_session_id.clone();
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::SessionChanged);
         self.cancel_rendered_previews(|_| true);
         // Invalidate every admitted old-session action before quiescing
         // interception. Observation events may still commit, but their captured
@@ -22543,6 +22656,7 @@ impl Harness {
         session_id: &SessionId,
         agent_id: &str,
     ) -> bool {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::AgentUnloaded);
         if session_id != &self.current_session_id {
             return false;
         }
@@ -25666,6 +25780,19 @@ impl Harness {
             self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
             return Ok(());
         }
+        let refresh_success = response.error.is_none()
+            && response.failure_kind.is_none()
+            && matches!(
+                response.stop_reason,
+                ProviderStopReason::EndTurn
+                    | ProviderStopReason::ToolCalls
+                    | ProviderStopReason::Length
+            );
+        self.provider_cache_residency.finish_prompt(
+            &response.agent_prompt_id,
+            refresh_success,
+            response.usage.as_ref(),
+        );
         self.clear_malformed_repetition_output(&mut response);
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
@@ -26539,6 +26666,7 @@ impl Harness {
     }
 
     fn discard_finished_response_prompt_tracking(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.provider_cache_residency.drop_prompt(agent_prompt_id);
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_context_size_alerts.remove(agent_prompt_id);
@@ -27356,6 +27484,16 @@ impl Harness {
                 },
             );
         }
+        self.extend_cache_refresh_tool_window(
+            normalized_calls.iter().map(|entry| entry.call.id.clone()),
+        );
+    }
+
+    fn extend_cache_refresh_tool_window(&mut self, call_ids: impl IntoIterator<Item = ToolCallId>) {
+        self.cache_refresh_tool_window_calls.extend(call_ids);
+        if !self.cache_refresh_tool_window_calls.is_empty() {
+            self.provider_cache_residency.open_tool_window();
+        }
     }
 
     fn complete_finished_response_without_tool_calls(
@@ -27676,6 +27814,11 @@ impl Harness {
     /// Observe a live background-transition decision before publishing its
     /// foreground placeholder.
     pub(crate) fn observe_tool_backgrounded(&mut self, call_id: &ToolCallId) {
+        self.cache_refresh_tool_window_calls.remove(call_id);
+        if self.cache_refresh_tool_window_calls.is_empty() {
+            let cancellations = self.provider_cache_residency.close_window();
+            self.send_cache_refresh_cancellations(cancellations);
+        }
         let Some(call) = self.wait_tool_call_ref(call_id) else {
             return;
         };
@@ -29257,6 +29400,7 @@ impl Harness {
     /// in-process extension after one fails, returning the first observed
     /// error.
     pub(crate) fn shutdown(&mut self) -> Result<(), HarnessError> {
+        self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::Shutdown);
         self.extensions.restart_deadlines.clear();
         self.extensions.cleanup_deadlines.clear();
 

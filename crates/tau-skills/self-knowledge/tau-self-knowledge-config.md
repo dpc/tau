@@ -151,4 +151,18 @@ Other provider commands:
 
 Models are published by provider extensions at runtime; start Tau and use `:model` to inspect the current model list.
 
+Provider cache refresh is a global, disabled-by-default harness policy:
+
+```yaml
+provider_cache_refresh:
+  enabled: true
+  max_idle_seconds: 300
+```
+
+The idle bound accepts 1 through 86,400 seconds. Eligible refreshes require an
+exact safe sliding cache contract, explicit prices, and measured write/read
+evidence. They resend the complete previous Provider prefix, including user/tool
+context, only during bounded waits. Real prompts preempt refresh work, and no
+refresh state persists across restart.
+
 - `harness.yaml` can define `custom_prompts` as a map from prompt id to prompt text; in the CLI, `:prompt <id>` replaces the editable prompt buffer with that text without submitting it.

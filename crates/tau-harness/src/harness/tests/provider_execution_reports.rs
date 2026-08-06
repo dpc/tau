@@ -1,4 +1,7 @@
+use tau_config::settings::ProviderCacheMaxIdle;
+
 use super::*;
+use crate::provider_cache_residency::{ProviderCacheResidency, tests as cache_fixtures};
 use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 fn submitted(prompt_id: &str) -> Event {
@@ -386,6 +389,305 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
     assert_eq!(
         canonical_count, 1,
         "a report after route closure must remain observation-only"
+    );
+}
+
+/// The exact live Provider owner consumes a refresh terminal and derives one
+/// harness-canonical content-free fact.
+#[test]
+fn cache_refresh_terminal_requires_exact_provider_owner() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let refresh_id =
+        tau_proto::ProviderCacheRefreshId::parse("pcr-harness-test").expect("refresh id");
+    harness
+        .provider_cache_residency
+        .install_active_for_test(crate::test_connection_id("provider"), refresh_id.clone());
+
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderCacheRefreshFinishedReported(tau_proto::ProviderCacheRefreshFinished {
+                refresh_id: refresh_id.clone(),
+                status: tau_proto::ProviderCacheRefreshStatus::Succeeded,
+            }),
+        )
+        .expect("cache refresh report");
+    assert!(
+        harness.provider_cache_residency.next_deadline().is_none(),
+        "authenticated terminal must consume active ownership"
+    );
+
+    let canonical = committed_events(&harness)
+        .into_iter()
+        .filter(|(_, event)| {
+            matches!(
+                event,
+                Event::ProviderCacheRefreshFinished(finished)
+                    if finished.refresh_id == refresh_id
+            )
+        })
+        .count();
+    assert_eq!(canonical, 1);
+
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderCacheRefreshFinishedReported(tau_proto::ProviderCacheRefreshFinished {
+                refresh_id,
+                status: tau_proto::ProviderCacheRefreshStatus::Succeeded,
+            }),
+        )
+        .expect("duplicate report");
+    let canonical = committed_events(&harness)
+        .into_iter()
+        .filter(|(_, event)| matches!(event, Event::ProviderCacheRefreshFinished(_)))
+        .count();
+    assert_eq!(canonical, 1, "duplicate terminal remains observation-only");
+}
+
+/// Concurrent foreground cohorts form a union; settling one cohort cannot close
+/// the other cohort's finite opportunity.
+#[test]
+fn cache_refresh_tool_windows_union_concurrent_cohorts() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let first = tau_proto::ToolCallId::from("first");
+    let second = tau_proto::ToolCallId::from("second");
+    harness.extend_cache_refresh_tool_window([first.clone()]);
+    harness.extend_cache_refresh_tool_window([second.clone()]);
+    assert_eq!(harness.cache_refresh_tool_window_calls.len(), 2);
+    harness.clear_tool_call_tracking(first.as_str());
+    assert_eq!(harness.cache_refresh_tool_window_calls.len(), 1);
+    harness.clear_tool_call_tracking(second.as_str());
+    assert!(harness.cache_refresh_tool_window_calls.is_empty());
+}
+
+/// Qualifying evidence traverses the real harness window/deadline dispatcher,
+/// sends the exact prefix only to its captured Provider, and retains ownership
+/// through cohort cancellation until the authenticated terminal.
+#[test]
+fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    harness.provider_cache_residency =
+        ProviderCacheResidency::runtime(tau_config::settings::ProviderCacheRefresh {
+            enabled: true,
+            max_idle_seconds: ProviderCacheMaxIdle::new(300).expect("valid idle"),
+        });
+    let provider = connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let observer = connect_test_client(&mut harness, "observer", tau_proto::ClientKind::Ui);
+    let model = cache_fixtures::model("provider");
+    let write = cache_fixtures::prompt("provider", "vertical-write");
+    let read = cache_fixtures::prompt("provider", "vertical-read");
+    harness.provider_cache_residency.track_prompt(
+        crate::test_connection_id("provider"),
+        &write,
+        Some(&model),
+    );
+    harness.provider_cache_residency.finish_prompt(
+        &write.agent_prompt_id,
+        true,
+        Some(&cache_fixtures::usage(0, 10)),
+    );
+    harness.provider_cache_residency.track_prompt(
+        crate::test_connection_id("provider"),
+        &read,
+        Some(&model),
+    );
+    harness.provider_cache_residency.finish_prompt(
+        &read.agent_prompt_id,
+        true,
+        Some(&cache_fixtures::usage(10, 0)),
+    );
+    let foreground = tau_proto::ToolCallId::from("vertical-foreground");
+    harness.extend_cache_refresh_tool_window([foreground.clone()]);
+    harness
+        .provider_cache_residency
+        .force_scheduled_due_for_test();
+    provider.lock().expect("provider sink").clear();
+    observer.lock().expect("observer sink").clear();
+
+    harness.process_cache_refresh_deadline();
+
+    let request = provider
+        .lock()
+        .expect("provider sink")
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery) => match delivery.event.as_ref() {
+                Event::AgentCacheRefreshRequested(request) => Some(request.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("directed refresh request");
+    assert_eq!(
+        request.prompt,
+        tau_proto::AgentPromptPrewarmRequested {
+            agent_id: read.agent_id.clone(),
+            session_id: read.session_id.clone(),
+            system_prompt: read.system_prompt.clone(),
+            context: read.context.clone(),
+            tools: read.tools.clone(),
+            model: Some(read.model.clone()),
+            model_params: read.model_params,
+            tool_choice: read.tool_choice,
+            originator: read.originator.clone(),
+            share_user_cache_key: read.share_user_cache_key,
+        }
+    );
+    assert!(
+        observer
+            .lock()
+            .expect("observer sink")
+            .iter()
+            .all(|routed| !matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if matches!(delivery.event.as_ref(), Event::AgentCacheRefreshRequested(_))
+            ))
+    );
+
+    provider.lock().expect("provider sink").clear();
+    harness.preempt_cache_refresh_for_prompt(&read);
+    harness
+        .bus
+        .send_to(
+            &crate::test_connection_id("provider"),
+            Some(crate::harness::harness_connection_id()),
+            HarnessOutputMessage::deliver(Event::AgentPromptCreated(read.clone())),
+        )
+        .expect("real prompt delivery");
+    harness.clear_tool_call_tracking(foreground.as_str());
+    assert!(
+        harness.provider_cache_residency.next_deadline().is_some(),
+        "cancel delivery alone retains ownership"
+    );
+    let ordered = provider
+        .lock()
+        .expect("provider sink")
+        .iter()
+        .filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery)
+                if matches!(
+                    delivery.event.as_ref(),
+                    Event::AgentCacheRefreshCancelRequested(_) | Event::AgentPromptCreated(_)
+                ) =>
+            {
+                Some(delivery.event.name())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered,
+        vec![
+            tau_proto::EventName::AGENT_CACHE_REFRESH_CANCEL_REQUESTED,
+            tau_proto::EventName::AGENT_PROMPT_CREATED,
+        ]
+    );
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderCacheRefreshFinishedReported(tau_proto::ProviderCacheRefreshFinished {
+                refresh_id: request.refresh_id,
+                status: tau_proto::ProviderCacheRefreshStatus::Cancelled,
+            }),
+        )
+        .expect("terminal report");
+    assert!(harness.provider_cache_residency.next_deadline().is_none());
+
+    let deadline_read = cache_fixtures::prompt("provider", "vertical-deadline");
+    harness.provider_cache_residency.track_prompt(
+        crate::test_connection_id("provider"),
+        &deadline_read,
+        Some(&model),
+    );
+    harness.provider_cache_residency.finish_prompt(
+        &deadline_read.agent_prompt_id,
+        true,
+        Some(&cache_fixtures::usage(10, 0)),
+    );
+    harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("deadline-cohort")]);
+    harness
+        .provider_cache_residency
+        .force_scheduled_due_for_test();
+    harness.process_cache_refresh_deadline();
+    harness
+        .provider_cache_residency
+        .force_active_expired_for_test();
+    provider.lock().expect("provider sink").clear();
+    harness.process_cache_refresh_deadline();
+    assert!(provider.lock().expect("provider sink").iter().any(|routed| {
+        matches!(
+            &routed.frame,
+            HarnessOutputMessage::Deliver(delivery)
+                if matches!(
+                    delivery.event.as_ref(),
+                    Event::AgentCacheRefreshCancelRequested(cancel)
+                        if cancel.reason == tau_proto::ProviderCacheRefreshCancelReason::Deadline
+                )
+        )
+    }));
+    assert!(harness.provider_cache_residency.next_deadline().is_none());
+
+    for (id, usage) in [
+        ("vertical-missing-write", cache_fixtures::usage(0, 10)),
+        ("vertical-missing-read", cache_fixtures::usage(10, 0)),
+    ] {
+        let prompt = cache_fixtures::prompt("provider", id);
+        harness.provider_cache_residency.track_prompt(
+            crate::test_connection_id("missing-provider"),
+            &prompt,
+            Some(&model),
+        );
+        harness
+            .provider_cache_residency
+            .finish_prompt(&prompt.agent_prompt_id, true, Some(&usage));
+    }
+    harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("missing-cohort")]);
+    harness
+        .provider_cache_residency
+        .force_scheduled_due_for_test();
+    harness.process_cache_refresh_deadline();
+    assert!(
+        harness.provider_cache_residency.next_deadline().is_none(),
+        "empty directed delivery releases ownership"
+    );
+
+    let disconnect_read = cache_fixtures::prompt("provider", "vertical-disconnect");
+    harness.provider_cache_residency.track_prompt(
+        crate::test_connection_id("provider"),
+        &disconnect_read,
+        Some(&model),
+    );
+    harness.provider_cache_residency.finish_prompt(
+        &disconnect_read.agent_prompt_id,
+        true,
+        Some(&cache_fixtures::usage(10, 0)),
+    );
+    harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("disconnect-cohort")]);
+    harness
+        .provider_cache_residency
+        .force_scheduled_due_for_test();
+    harness.process_cache_refresh_deadline();
+    assert!(harness.provider_cache_residency.next_deadline().is_some());
+    harness.unregister_connection_tools_for_disconnect(&crate::test_connection_id("provider"));
+    assert!(
+        harness.provider_cache_residency.next_deadline().is_none(),
+        "authenticated disconnect releases exact ownership"
     );
 }
 

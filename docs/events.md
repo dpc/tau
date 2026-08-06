@@ -953,3 +953,11 @@ recipient performs the same runtime-only `set_active` classification after
 durable creation and current-session membership setup, and broadcasts complete
 stats. This applies only to the newly created recipient; existing bare or exact
 recipients and other start paths retain their existing navigation behavior.
+- **`agent.cache_refresh_requested`** — Harness-authored, transient, sensitive
+  cache-refresh request sent only to one captured Provider connection.
+- **`agent.cache_refresh_cancel_requested`** — Harness-authored, transient,
+  directed cancellation for one refresh id.
+- **`provider.cache_refresh_finished_reported`** — Provider-authored transient,
+  content-free terminal observation.
+- **`provider.cache_refresh_finished`** — Harness-canonical transient,
+  content-free terminal after exact owner correlation.

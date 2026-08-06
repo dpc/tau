@@ -158,3 +158,10 @@ reloads them at prompt time, and persists OAuth rotation with generation
 compare-and-swap. Secret frames and decoded records must never enter logs,
 events, transcripts, errors, or debug output. This boundary is specified by
 [`SPEC-extension-secret-storage`](../../specs/SPEC-extension-secret-storage.md).
+Lifecycle-aware cache refresh requests arrive only through trusted configured
+extension IPC and can contain the complete previously sent prompt prefix. The
+built-in Provider does not log or rebroadcast that payload. It correlates
+cancellation by validated refresh id, applies a receipt-relative fail-safe
+deadline, and reports only a closed content-free status. Separately enabled
+private Provider request capture remains an explicit exception and may contain
+the exact upstream refresh request.

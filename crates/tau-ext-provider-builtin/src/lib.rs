@@ -616,6 +616,19 @@ fn quota_report_message(event: Event) -> HarnessInputMessage {
     HarnessInputMessage::emit_with_persist(event, false)
 }
 
+fn send_cache_refresh_terminal(
+    handle: &ClientHandle,
+    refresh_id: tau_proto::ProviderCacheRefreshId,
+    status: tau_proto::ProviderCacheRefreshStatus,
+) -> ClientResult<()> {
+    handle.send(HarnessInputMessage::emit_transient(
+        Event::ProviderCacheRefreshFinishedReported(tau_proto::ProviderCacheRefreshFinished {
+            refresh_id,
+            status,
+        }),
+    ))
+}
+
 fn quota_profile_identity(config: &ResolvedConfig) -> QuotaProfileIdentity {
     config.profile_identity()
 }
@@ -2082,6 +2095,14 @@ where
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
                 handle_provider_delivery::<F>,
             )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::AGENT_CACHE_REFRESH_REQUESTED),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::AGENT_CACHE_REFRESH_CANCEL_REQUESTED),
+                handle_provider_delivery::<F>,
+            )
             .on_raw_restore(
                 tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
                 handle_provider_delivery::<F>,
@@ -2436,6 +2457,12 @@ where
         match event {
             Event::HarnessSessionDir(session_dir) => self.record_session_debug_policy(session_dir),
             Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm)?,
+            Event::AgentCacheRefreshRequested(refresh) => {
+                self.cache_refresh_backend(refresh, handle)?
+            }
+            Event::AgentCacheRefreshCancelRequested(cancel) => {
+                self.prewarm_supervisor.cancel_refresh(&cancel.refresh_id);
+            }
             Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt, handle)?,
             Event::UiCancelPrompt(cancel) => self.handle_cancel_prompt(cancel, handle)?,
             Event::UiRetryPrompt(retry) => self.handle_retry_prompt(retry)?,
@@ -2470,6 +2497,14 @@ where
             }
             return Ok(());
         };
+        if self.shared_cooldowns.contains_key(&model.provider) {
+            tracing::debug!(
+                target: LOG_TARGET,
+                provider = %model.provider,
+                "skipping prompt prewarm during Provider cooldown",
+            );
+            return Ok(());
+        }
         self.reconcile_provider_profile(
             &model.provider,
             backend_profile_identity(&PromptBackend::Responses(config.clone())),
@@ -2478,6 +2513,7 @@ where
         let key = PrewarmKey {
             provider: model.provider,
             agent_id: prewarm.agent_id.clone(),
+            refresh_id: None,
         };
         let Some((generation, abort)) = self.prewarm_supervisor.begin(key.clone()) else {
             tracing::debug!(
@@ -2498,15 +2534,111 @@ where
             .expect("provider runtime worker waker is installed before dispatch")
             .clone();
         thread::spawn(move || {
-            executor(PrewarmExecution {
+            let _ = executor(PrewarmExecution {
                 runtime,
                 config,
                 request: prewarm,
                 debug_provider_requests,
                 abort,
             });
-            let _ =
-                send_worker_message(&tx, &waker, WorkerMessage::PrewarmDone { key, generation });
+            let _ = send_worker_message(
+                &tx,
+                &waker,
+                WorkerMessage::PrewarmDone {
+                    key,
+                    generation,
+                    terminal: None,
+                },
+            );
+        });
+        Ok(())
+    }
+
+    fn cache_refresh_backend(
+        &mut self,
+        refresh: tau_proto::AgentCacheRefreshRequested,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let refresh_id = refresh.refresh_id.clone();
+        let mut profiles = self.load_profiles();
+        let Some((model, config)) = resolve_prewarm_backend(
+            &refresh.prompt,
+            &mut profiles,
+            &mut self.oauth_refresh_rejections,
+            self.codex_runtime.network(),
+            self.extension_data_client.as_ref(),
+        ) else {
+            return send_cache_refresh_terminal(
+                handle,
+                refresh_id,
+                tau_proto::ProviderCacheRefreshStatus::Unsupported,
+            );
+        };
+        if self.shared_cooldowns.contains_key(&model.provider) {
+            return send_cache_refresh_terminal(
+                handle,
+                refresh_id,
+                tau_proto::ProviderCacheRefreshStatus::Failed,
+            );
+        }
+        self.reconcile_provider_profile(
+            &model.provider,
+            backend_profile_identity(&PromptBackend::Responses(config.clone())),
+        );
+        self.reconcile_prewarm_profile(&model.provider, &config);
+        let key = PrewarmKey {
+            provider: model.provider,
+            agent_id: refresh.prompt.agent_id.clone(),
+            refresh_id: Some(refresh_id.clone()),
+        };
+        let Some((generation, abort)) = self.prewarm_supervisor.begin(key.clone()) else {
+            return send_cache_refresh_terminal(
+                handle,
+                refresh_id,
+                tau_proto::ProviderCacheRefreshStatus::Failed,
+            );
+        };
+        let deadline =
+            Instant::now() + Duration::from_millis(u64::from(refresh.stop_after_millis.get()));
+        let deadline_abort = abort.clone();
+        thread::spawn(move || {
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                thread::sleep(remaining);
+            }
+            deadline_abort.cancel();
+        });
+        let debug_provider_requests =
+            debug_provider_requests_for(&refresh.prompt.session_id, &self.session_debug_allowed);
+        let executor = self.prewarm_executor.clone();
+        let runtime = self.codex_runtime.clone();
+        let tx = self.worker_tx.clone();
+        let waker = self
+            .worker_waker
+            .as_ref()
+            .expect("provider runtime worker waker is installed before dispatch")
+            .clone();
+        thread::spawn(move || {
+            let status = executor(PrewarmExecution {
+                runtime,
+                config,
+                request: refresh.prompt,
+                debug_provider_requests,
+                abort,
+            });
+            let status = if deadline <= Instant::now() {
+                tau_proto::ProviderCacheRefreshStatus::DeadlineExceeded
+            } else {
+                status
+            };
+            let _ = send_worker_message(
+                &tx,
+                &waker,
+                WorkerMessage::PrewarmDone {
+                    key,
+                    generation,
+                    terminal: Some((refresh_id, status)),
+                },
+            );
         });
         Ok(())
     }
@@ -2620,6 +2752,7 @@ where
         self.prewarm_supervisor.cancel_key(&PrewarmKey {
             provider: prompt.model.provider.clone(),
             agent_id: prompt.agent_id.clone(),
+            refresh_id: None,
         });
         let mut profiles = self.load_profiles();
         let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
@@ -2762,8 +2895,15 @@ where
                 Ok(WorkerMessage::PromptDone) => {
                     self.active_prompts = self.active_prompts.saturating_sub(1);
                 }
-                Ok(WorkerMessage::PrewarmDone { key, generation }) => {
+                Ok(WorkerMessage::PrewarmDone {
+                    key,
+                    generation,
+                    terminal,
+                }) => {
                     self.prewarm_supervisor.complete(&key, generation);
+                    if let Some((refresh_id, status)) = terminal {
+                        send_cache_refresh_terminal(handle, refresh_id, status)?;
+                    }
                 }
                 Ok(WorkerMessage::Retry {
                     mut job,
@@ -2809,10 +2949,11 @@ where
                         let shared = install_shared_cooldown(
                             &mut self.shared_cooldowns,
                             &mut self.shared_cooldown_generation,
-                            provider,
+                            provider.clone(),
                             common_due,
                             decision.class,
                         );
+                        self.prewarm_supervisor.cancel_provider(&provider);
                         let generation = shared.generation;
                         due = independent_due.max(cooldown_due_for_job(shared.not_before, &job));
                         cooldown_constraint = Some(CooldownConstraint {
@@ -3270,7 +3411,8 @@ struct PrewarmExecution {
 }
 
 /// Injected finite prewarm attempt used by production and runtime tests.
-type PrewarmExecutor = Arc<dyn Fn(PrewarmExecution) + Send + Sync + 'static>;
+type PrewarmExecutor =
+    Arc<dyn Fn(PrewarmExecution) -> tau_proto::ProviderCacheRefreshStatus + Send + Sync + 'static>;
 
 struct PromptJob {
     agent_prompt_id: tau_proto::AgentPromptId,
@@ -3997,6 +4139,11 @@ enum WorkerMessage {
         key: PrewarmKey,
         /// Generation captured when the main loop admitted the work.
         generation: u64,
+        /// Scheduler terminal emitted only for lifecycle-aware refreshes.
+        terminal: Option<(
+            tau_proto::ProviderCacheRefreshId,
+            tau_proto::ProviderCacheRefreshStatus,
+        )>,
     },
     /// Retryable attempt outcome returned with the still-pending logical
     /// prompt.
@@ -4441,7 +4588,7 @@ fn production_prewarm_executor() -> PrewarmExecutor {
             &execution.runtime,
             execution.debug_provider_requests,
             &mut execution.abort,
-        );
+        )
     })
 }
 
@@ -5138,7 +5285,7 @@ fn handle_resolved_prewarm(
     codex_runtime: &CodexRuntime,
     debug_provider_requests: bool,
     abort: &mut impl TurnAbort,
-) {
+) -> tau_proto::ProviderCacheRefreshStatus {
     let session_id_str = prewarm.session_id.as_str();
     let request = CodexPrompt {
         system_prompt: &prewarm.system_prompt,
@@ -5156,29 +5303,25 @@ fn handle_resolved_prewarm(
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
     match codex_runtime.prewarm(config, session_id_str, &request, abort) {
         PrewarmOutcome::Installed => {
-            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm")
+            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm");
+            tau_proto::ProviderCacheRefreshStatus::Succeeded
         }
-        PrewarmOutcome::SkippedBusy => tracing::debug!(
-            target: LOG_TARGET,
-            session_id = session_id_str,
-            "skipped prompt prewarm: websocket key is busy",
-        ),
-        PrewarmOutcome::Retry(decision) => tracing::debug!(
-            target: LOG_TARGET,
-            session_id = session_id_str,
-            retry_class = ?decision.class,
-            "prompt prewarm ended with retryable provider failure",
-        ),
-        PrewarmOutcome::Canceled => tracing::debug!(
-            target: LOG_TARGET,
-            session_id = session_id_str,
-            "prompt prewarm canceled",
-        ),
-        PrewarmOutcome::Terminal(error) => tracing::debug!(
-            target: LOG_TARGET,
-            session_id = session_id_str,
-            "prompt prewarm failed: {error}",
-        ),
+        PrewarmOutcome::SkippedBusy => {
+            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "skipped prompt prewarm: websocket key is busy");
+            tau_proto::ProviderCacheRefreshStatus::Failed
+        }
+        PrewarmOutcome::Retry(decision) => {
+            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, retry_class = ?decision.class, "prompt prewarm ended with retryable provider failure");
+            tau_proto::ProviderCacheRefreshStatus::Failed
+        }
+        PrewarmOutcome::Canceled => {
+            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "prompt prewarm canceled");
+            tau_proto::ProviderCacheRefreshStatus::Cancelled
+        }
+        PrewarmOutcome::Terminal(error) => {
+            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "prompt prewarm failed: {error}");
+            tau_proto::ProviderCacheRefreshStatus::Failed
+        }
     }
 }
 

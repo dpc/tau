@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{BufReader, Cursor, Read, Write};
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -421,6 +422,7 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
             execution.abort.is_aborted(),
             "wake must represent owned cancellation"
         );
+        tau_proto::ProviderCacheRefreshStatus::Cancelled
     });
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
@@ -478,6 +480,160 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
     );
 }
 
+/// A lifecycle-aware refresh produces exactly one content-free terminal report.
+#[test]
+fn cache_refresh_reports_correlated_terminal() {
+    let refresh_id = tau_proto::ProviderCacheRefreshId::parse("pcr-test").expect("refresh id");
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentCacheRefreshRequested(tau_proto::AgentCacheRefreshRequested {
+            refresh_id: refresh_id.clone(),
+            prompt: prewarm(),
+            stop_after_millis: NonZeroU32::new(1_000).expect("nonzero"),
+        }),
+    )]));
+    let prewarm_executor: PrewarmExecutor =
+        Arc::new(|_| tau_proto::ProviderCacheRefreshStatus::Succeeded);
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let prompt_executor: PromptExecutor = Arc::new(|execution| {
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                )),
+            ))
+            .expect("finished");
+        writer.flush().expect("flush fake response");
+    });
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            prompt_executor,
+            prewarm_executor,
+        )
+        .expect("run provider");
+    });
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                    if finished.refresh_id == refresh_id
+                        && finished.status
+                            == tau_proto::ProviderCacheRefreshStatus::Succeeded
+            )
+        })
+    });
+    input.close();
+    runtime.join().expect("provider exits");
+}
+
+/// Directed cancellation is consumed before the following real prompt on the
+/// Provider FIFO and never delays that prompt.
+#[test]
+fn cache_refresh_cancel_precedes_real_prompt() {
+    let refresh_id =
+        tau_proto::ProviderCacheRefreshId::parse("pcr-cancel-order").expect("refresh id");
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentCacheRefreshRequested(tau_proto::AgentCacheRefreshRequested {
+            refresh_id: refresh_id.clone(),
+            prompt: prewarm(),
+            stop_after_millis: NonZeroU32::new(1_000).expect("nonzero"),
+        }),
+    )]));
+    let (started_tx, started_rx) = mpsc::channel();
+    let prewarm_executor: PrewarmExecutor = Arc::new(move |mut execution| {
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let _guard = execution.abort.register_waker(Arc::new(move || {
+            let _ = wake_tx.send(());
+        }));
+        started_tx.send(()).expect("started");
+        wake_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("directed cancel wakes refresh");
+        tau_proto::ProviderCacheRefreshStatus::Cancelled
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let prompt_executor: PromptExecutor = Arc::new(|execution| {
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                )),
+            ))
+            .expect("finished");
+        writer.flush().expect("flush fake response");
+    });
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            prompt_executor,
+            prewarm_executor,
+        )
+        .expect("run provider");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("refresh starts");
+    input.push(encode_frames(&[
+        live_event(
+            12,
+            Event::AgentCacheRefreshCancelRequested(tau_proto::AgentCacheRefreshCancelRequested {
+                refresh_id: refresh_id.clone(),
+                reason: tau_proto::ProviderCacheRefreshCancelReason::RealPrompt,
+            }),
+        ),
+        live_event(13, Event::AgentPromptCreated(prompt())),
+    ]));
+    wait_for_runtime_frames(&output, |frames| {
+        let cancelled = frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderCacheRefreshFinishedReported(finished))
+                    if finished.refresh_id == refresh_id
+                        && finished.status == tau_proto::ProviderCacheRefreshStatus::Cancelled
+            )
+        });
+        let prompt_finished = frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        });
+        cancelled && prompt_finished
+    });
+    input.close();
+    runtime.join().expect("provider exits");
+}
+
 /// Session shutdown must wake silent prewarm transport work and retain worker
 /// ownership until its exact completion reaches the provider loop.
 #[test]
@@ -500,6 +656,7 @@ fn session_shutdown_cancels_and_joins_silent_prewarm() {
             .expect("shutdown cancels silent prewarm");
         assert!(execution.abort.is_aborted());
         canceled_tx.send(()).expect("announce cancellation");
+        tau_proto::ProviderCacheRefreshStatus::Cancelled
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
@@ -557,6 +714,7 @@ fn profile_rotation_cancels_active_prewarm() {
             .expect("profile rotation cancels prewarm");
         assert!(execution.abort.is_aborted());
         canceled_tx.send(()).expect("announce cancellation");
+        tau_proto::ProviderCacheRefreshStatus::Cancelled
     });
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
@@ -4875,11 +5033,13 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
         subscribe_frames[0].live_selectors,
         [
             tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
+            tau_proto::EventSelector::Exact(EventName::AGENT_CACHE_REFRESH_REQUESTED),
+            tau_proto::EventSelector::Exact(EventName::AGENT_CACHE_REFRESH_CANCEL_REQUESTED),
             tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
             tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
             tau_proto::EventSelector::Exact(EventName::SESSION_SHUTDOWN),
         ],
-        "provider startup subscriptions must stay exact and must not include direct prompt routing",
+        "provider startup subscriptions must stay exact and exclude ordinary prompt routing",
     );
     assert_eq!(
         subscribe_frames[0].historical_selectors,

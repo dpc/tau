@@ -173,8 +173,10 @@ model-aware values are filtered or clamped to the model's supported surface. The
 UI also surfaces per-turn statistics, cache information, retry state, and
 conservative quota-pacing status when the provider supplies enough data.
 Provider model current state can carry a runtime-only cache capability/privacy
-contract without cache keys, object identities, lifecycle persistence, or
-refresh/delete traffic. Generic Chat Completions profiles may reference
+contract without cache keys, object identities, or lifecycle persistence.
+An explicit disabled-by-default harness policy can use safe sliding contracts
+for one economical, bounded-wait non-generating refresh; real turns preempt it
+and no refresh state survives restart. Generic Chat Completions profiles may reference
 externally managed cache objects through non-conflicting request fields, but Tau
 does not own their lifecycle or accounting.
 

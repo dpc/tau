@@ -89,6 +89,12 @@ Provider execution also separates five Provider-authored `_reported` observation
 four harness-canonical provider facts and the directed UI retry outcome. The old
 unreported provider retry-result event no longer exists. See
 [SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+
+Cache-refresh lifecycle adds directed sensitive harness requests plus a
+content-free Provider terminal report/canonical fact. Its nonpersistence,
+routing, deadline, and correlation contract is
+[SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
+
 `provider.quota_replace_reported`, `provider.quota_patch_reported`, and
 `provider.quota_clear_reported` carry opaque profile epochs, strict sequences,
 complete stable-key window records with independent usage/timing clocks, and

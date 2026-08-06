@@ -106,6 +106,16 @@ disconnect or shutdown cancels pending work and wakes registered transports.
 After terminal disconnect, detached workers retain finite network bounds but no
 longer reconcile into the dropped runtime loop.
 
+Harness-scheduled cache refreshes remain subordinate to real prompts and the
+Provider's shared cooldown. The Provider correlates each bounded request and
+cancellation, enforces a receipt-relative fail-safe deadline, and emits exactly
+one content-free terminal report. A cooled Provider returns failure without
+changing or releasing its retry cohort. Existing supervisor exact-key
+deduplication, global capacity, profile rotation, cancellation, and shutdown
+bounds remain defense in depth below the harness scheduler, which alone owns
+one-per-Provider admission. See
+[SPEC-provider-cache-refresh-lifecycle](../../../specs/SPEC-provider-cache-refresh-lifecycle.md).
+
 Adapters classify typed terminal provider failures independently of display
 text. Terminal failures bypass retries, and raw provider bodies never become
 closed failure categories. Watcher projection of bounded provider work is

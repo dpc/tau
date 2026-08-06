@@ -689,6 +689,61 @@ impl CliState {
 // Harness settings
 // ---------------------------------------------------------------------------
 
+/// Global disabled-by-default policy for bounded Provider cache refreshes.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderCacheRefresh {
+    /// Whether this harness may issue cache refresh work.
+    pub enabled: bool,
+    /// Maximum idle lifetime retained after a qualifying real response.
+    pub max_idle_seconds: ProviderCacheMaxIdle,
+}
+
+/// Validated economic-idle horizon for automatic Provider cache refreshes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ProviderCacheMaxIdle(u64);
+
+impl ProviderCacheMaxIdle {
+    /// Construct a horizon in the inclusive range `1..=86_400`.
+    pub fn new(seconds: u64) -> Result<Self, &'static str> {
+        if !(1..=86_400).contains(&seconds) {
+            return Err(
+                "provider_cache_refresh.max_idle_seconds must be between 1 and 86400 seconds inclusive",
+            );
+        }
+        Ok(Self(seconds))
+    }
+
+    /// Return the represented duration.
+    #[must_use]
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
+
+    /// Return the validated integer value.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderCacheMaxIdle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let seconds = u64::deserialize(deserializer)?;
+        Self::new(seconds).map_err(D::Error::custom)
+    }
+}
+
+impl Default for ProviderCacheRefresh {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_idle_seconds: ProviderCacheMaxIdle(300),
+        }
+    }
+}
+
 /// Harness/agent settings loaded from `harness.yaml`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
@@ -710,6 +765,8 @@ pub struct HarnessSettings {
     /// Highest effective activating-input wait timeout accepted from the `wait`
     /// tool, measured in whole minutes.
     pub wait_timeout_maximum_minutes: u64,
+    /// Disabled-by-default bounded Provider cache refresh policy.
+    pub provider_cache_refresh: ProviderCacheRefresh,
     /// Default Tau-state presentation for supervised extension instances.
     pub tau_state_access: TauStateAccess,
 
@@ -789,6 +846,9 @@ struct HarnessSettingsWire {
     /// Highest effective activating-input wait timeout in whole minutes.
     #[serde(alias = "waitTimeoutMaximumMinutes")]
     wait_timeout_maximum_minutes: u64,
+    /// Disabled-by-default bounded Provider cache refresh policy.
+    #[serde(default)]
+    provider_cache_refresh: ProviderCacheRefresh,
     /// Default extension Tau-state presentation.
     #[serde(default)]
     tau_state_access: TauStateAccess,
@@ -880,6 +940,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             diagnostic_retention_days: wire.diagnostic_retention_days,
             wait_timeout_minimum_minutes: wire.wait_timeout_minimum_minutes,
             wait_timeout_maximum_minutes: wire.wait_timeout_maximum_minutes,
+            provider_cache_refresh: wire.provider_cache_refresh,
             tau_state_access: wire.tau_state_access,
             extensions: wire.extensions,
             default_role: wire.agents.default_role,

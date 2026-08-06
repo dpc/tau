@@ -171,8 +171,8 @@ floor, quota treatment, and privacy posture for that exact route. This is an
 operator assertion, not discovery: Tau never derives a hard TTL from route names
 or recent hits. The adapter supplies prefix identity version `1`. Contracts are
 transient model current state and contain no cache keys, object names, prompt
-content, regions, timestamps, or hit history. They add no scheduler, refresh,
-PATCH, delete, journal, or restart behavior. Current generic backends reject
+content, regions, timestamps, or hit history. They add no PATCH, delete, journal,
+or restart behavior. Current generic backends reject
 manual-deletion support because none owns a typed delete operation.
 
 Anthropic documents explicit breakpoints with sliding 300-second or 3,600-second
@@ -210,10 +210,13 @@ possible longer retention, not sliding renewal. Older models need a separate
 conservative policy: typical eviction is not a hard TTL, so use unknown
 residency and unsupported renewal unless the exact route has a stronger documented
 contract. OpenAI read/write counters remain observations, never TTL evidence.
-Tau has no cache-refresh experiment or scheduler; any future experiment needs
-separate approval, explicit opt-in, measured reads/writes, tightly bounded
-output, and a request/quota budget below expected avoided writes. Observed
-eviction or recent reads never infer a TTL or schedule keepalive traffic.
+The harness cache-refresh scheduler is disabled by default and requires explicit
+global opt-in. It accepts only safe sliding read-renewal contracts, explicit
+prices, concrete quota policy, and measured writes plus break-even reads. One
+observation can authorize only one non-generating full-prefix resend during a
+bounded wait. Real prompts and Provider cooldowns take priority; failure never
+enters inference retry, and no lifecycle state survives restart. Observed
+eviction or a recent read never infers a TTL.
 
 Generic OpenAI-compatible cache request controls are opt-in and route-local:
 `compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat
