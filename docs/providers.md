@@ -273,6 +273,60 @@ Anthropic pre-warm, refresh, or nested generic request controls. In particular,
 Tau never turns the five-minute TTL into a roughly four-minute cadence and
 never schedules traffic during unknown or unbounded idle.
 
+Gemini's [explicit context caching](https://ai.google.dev/gemini-api/docs/caching)
+stores a named provider object. Creation establishes an absolute expiry; the
+provider can PATCH its `ttl` or expiry, and deletion is a separate provider
+operation. A generic route that consumes an already-created object can describe
+that provider contract without claiming Tau implements it:
+
+```yaml
+cache_contract:
+  kind: explicit_object
+  ttl:
+    kind: fixed
+    seconds: 3600
+  renewal: patch_expiry
+  output_floor: zero
+  quota:
+    requests: unknown
+    read_tokens: unknown
+    write_tokens: unknown
+    output_tokens: unknown
+  privacy:
+    storage: named_provider_object
+    zero_data_retention: incompatible
+    data_residency: provider_specific
+    manual_deletion: unavailable
+```
+
+`patch_expiry` records Gemini's documented object mechanism, not a Tau
+operation. `manual_deletion: unavailable` likewise reports Tau's typed
+capability: Gemini can delete the object, but no current Tau backend can create,
+PATCH, or delete it. The object extends provider retention, is incompatible
+with zero-data-retention operation, and has service/surface-specific residency.
+The fixed TTL describes the configured object expiry, not a read-refreshed
+deadline.
+
+Generic Chat Completions profiles retain `extra_body` for non-conflicting
+provider-specific request members, including an opaque reference to an object
+an operator manages outside Tau. Tau preserves that escape hatch but does not
+model a separate cache-object identity, lifecycle, or accounting state in
+runtime metadata or journals. It preserves the opaque configured request member
+in the profile and clones it into each attempt. Operators must account for the
+object's lifetime and lifecycle externally. The normal raw cache-price fields
+can state the exact route's token-hour storage rate; for example, Gemini 2.5
+Flash's listed rate is `$1` per million token-hours. Tau adds a storage estimate
+only when a backend reports `storage_token_micros`; generic Gemini-compatible
+routes do not parse or infer that usage from an object reference.
+
+Gemini implicit caching is a separate automatic-prefix optimization. A generic
+route may declare it only as `kind: automatic_prefix`, unknown residency,
+unsupported renewal, and unknown output floor unless its exact compatibility
+surface documents more. Tau's support is limited to keeping compatible request
+prefixes stable through its normal deterministic request lowering. It sends no
+keepalive, prewarm, cache-object, or lifecycle traffic, and a hit never proves
+a TTL or permits a renewal schedule.
+
 OpenAI's
 [prompt-caching documentation](https://developers.openai.com/api/docs/guides/prompt-caching)
 defines different contracts for GPT-5.6-and-later and older models. An exact

@@ -542,6 +542,144 @@ fn model_publishes_configured_runtime_cache_contract() {
     ));
 }
 
+/// Proves a serialized generic Chat Completions profile decodes an opaque
+/// externally managed cache reference while publishing Gemini explicit-object
+/// policy and token-hour pricing without exposing that reference as model
+/// state.
+#[test]
+fn gemini_explicit_object_profile_publishes_policy_without_lifecycle_state() {
+    let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+        "extra_body": {
+            "cached_content": "cachedContents/external-owner-object"
+        },
+        "models": [
+            {
+                "id": "gemini-2.5-flash-explicit",
+                "cache_contract": {
+                    "kind": "explicit_object",
+                    "ttl": {"kind": "fixed", "seconds": 3600},
+                    "renewal": "patch_expiry",
+                    "output_floor": "zero",
+                    "quota": {
+                        "requests": "unknown",
+                        "read_tokens": "unknown",
+                        "write_tokens": "unknown",
+                        "output_tokens": "unknown"
+                    },
+                    "privacy": {
+                        "storage": "named_provider_object",
+                        "zero_data_retention": "incompatible",
+                        "data_residency": "provider_specific",
+                        "manual_deletion": "unavailable"
+                    }
+                },
+                "est_cache_storage_cost_1m_token_hour_usd": "1"
+            },
+            {
+                "id": "gemini-2.5-flash-implicit",
+                "cache_contract": {
+                    "kind": "automatic_prefix",
+                    "ttl": {"kind": "unknown"},
+                    "renewal": "unsupported",
+                    "output_floor": "unknown",
+                    "quota": {
+                        "requests": "unknown",
+                        "read_tokens": "unknown",
+                        "write_tokens": "unknown",
+                        "output_tokens": "unknown"
+                    },
+                    "privacy": {
+                        "storage": "unknown",
+                        "zero_data_retention": "unknown",
+                        "data_residency": "unknown",
+                        "manual_deletion": "unavailable"
+                    }
+                }
+            }
+        ]
+    }))
+    .expect("Gemini explicit object profile");
+
+    assert_eq!(
+        provider.extra_body["cached_content"],
+        serde_json::json!("cachedContents/external-owner-object")
+    );
+    let published = models_for_provider(&tau_proto::ProviderName::new("generic-gemini"), &provider);
+    let explicit_model = published.first().expect("published explicit model");
+    let policy = explicit_model.cache_policy.expect("published cache policy");
+    assert_eq!(
+        (
+            policy.kind,
+            policy.renewal,
+            policy.output_floor,
+            policy.privacy.storage,
+            policy.privacy.manual_deletion,
+        ),
+        (
+            tau_proto::ProviderCacheKind::ExplicitObject,
+            tau_proto::ProviderCacheRenewal::PatchExpiry,
+            tau_proto::ProviderCacheOutputFloor::Zero,
+            tau_proto::ProviderCacheStorageMode::NamedProviderObject,
+            tau_proto::ProviderCacheDeletionAvailability::Unavailable,
+        )
+    );
+    assert!(matches!(
+        policy.ttl,
+        tau_proto::ProviderCacheTtl::Fixed { seconds } if seconds.get() == 3_600
+    ));
+    assert_eq!(
+        policy.quota,
+        tau_proto::ProviderCacheQuotaAccounting {
+            requests: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            read_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            write_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            output_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+        }
+    );
+    assert_eq!(
+        (
+            policy.privacy.zero_data_retention,
+            policy.privacy.data_residency,
+        ),
+        (
+            tau_proto::ProviderCacheZeroDataRetentionCompatibility::Incompatible,
+            tau_proto::ProviderCacheDataResidencyEffect::ProviderSpecific,
+        )
+    );
+    assert_eq!(
+        explicit_model
+            .est_cache_storage_cost_1m_token_hour_usd
+            .expect("published storage price")
+            .as_micro_usd(),
+        1_000_000
+    );
+    let serialized =
+        serde_json::to_value(explicit_model).expect("serialize published explicit model");
+    assert!(
+        !serialized.to_string().contains("external-owner-object"),
+        "runtime model metadata must not carry the configured object reference"
+    );
+    let implicit_policy = published
+        .get(1)
+        .expect("published implicit model")
+        .cache_policy
+        .expect("published implicit policy");
+    assert_eq!(
+        (
+            implicit_policy.kind,
+            implicit_policy.ttl,
+            implicit_policy.renewal,
+            implicit_policy.output_floor,
+        ),
+        (
+            tau_proto::ProviderCacheKind::AutomaticPrefix,
+            tau_proto::ProviderCacheTtl::Unknown,
+            tau_proto::ProviderCacheRenewal::Unsupported,
+            tau_proto::ProviderCacheOutputFloor::Unknown,
+        )
+    );
+}
+
 /// Proves the generic Chat Completions config owner publishes GPT-5.6's
 /// documented minimum and prices while keeping an older model's legacy request
 /// control and conservative unknown residency in a separate exact-route policy.

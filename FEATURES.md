@@ -174,7 +174,9 @@ UI also surfaces per-turn statistics, cache information, retry state, and
 conservative quota-pacing status when the provider supplies enough data.
 Provider model current state can carry a runtime-only cache capability/privacy
 contract without cache keys, object identities, lifecycle persistence, or
-refresh/delete traffic.
+refresh/delete traffic. Generic Chat Completions profiles may reference
+externally managed cache objects through non-conflicting request fields, but Tau
+does not own their lifecycle or accounting.
 
 The `completions API` route is HTTP/SSE Chat Completions and is suitable for
 local servers such as llama.cpp as well as remote compatible services. The

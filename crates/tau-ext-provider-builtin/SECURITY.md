@@ -68,6 +68,15 @@ journal data, cold replay, or restart reconstruction. Unknown ZDR, residency,
 quota, output, price, or TTL facts remain unknown and cannot authorize automated
 renewal. A recent hit never becomes hard-TTL evidence.
 
+Generic Chat Completions `extra_body` can carry an opaque reference to a named
+object managed outside Tau. Tau preserves the configured request member and
+clones it into attempts, but it does not validate its privacy or residency,
+model it as cache-object state, or perform create, recovery, PATCH, delete, or
+external-storage accounting. The operator owns retention, deletion, residency,
+zero-data-retention suitability, and billing for such an object. Native parsing,
+lifecycle, or accounting would cross this boundary and requires review before
+implementation.
+
 ## Scoped credential records
 
 Credential-free settings contain one deterministic `credential.secret_path`.

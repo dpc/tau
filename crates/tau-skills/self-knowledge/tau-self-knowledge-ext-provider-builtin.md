@@ -175,6 +175,25 @@ cost reaches the discrete break-even point after one five-minute read or two
 one-hour reads. Tau never converts that fact into a roughly four-minute cadence
 or traffic during unknown or unbounded idle.
 
+Gemini explicit context caching is a named externally managed provider object:
+its creation sets a fixed expiry, Gemini can PATCH the TTL/expiry, and deletion
+is provider-side. A generic exact-route contract may state
+`explicit_object`, `fixed` TTL, and `patch_expiry` with named-object storage,
+ZDR incompatibility, provider-specific residency, and
+`manual_deletion: unavailable`. That records provider semantics while accurately
+stating that Tau has no typed create/PATCH/delete operation. A Chat Completions
+profile can retain an opaque externally managed object reference in
+non-conflicting `extra_body`; Tau persists that configured request member and
+clones it into each attempt, but does not model separate object identity,
+lifecycle, or accounting state in runtime metadata or journals. The raw
+storage-price field can state a token-hour rate, but generic
+Gemini-compatible routes do not report object storage usage.
+
+Gemini implicit caching is only an automatic-prefix optimization. Use unknown
+residency, unsupported renewal, and unknown output floor unless the exact
+compatibility route documents stronger facts. Tau keeps compatible request
+prefixes stable but sends no keepalive, prewarm, or lifecycle traffic.
+
 For an exact generic GPT-5.6 route using typed explicit OpenAI breakpoints,
 publish the 1,800-second lifetime as `minimum`, with unsupported renewal and an
 unknown output floor. OpenAI documents eligibility for at least 30 minutes and

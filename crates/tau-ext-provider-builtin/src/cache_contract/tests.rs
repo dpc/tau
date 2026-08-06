@@ -76,6 +76,52 @@ fn configured_contract_rejects_manual_deletion_support() {
     assert!(error.to_string().contains("manual deletion is unsupported"));
 }
 
+/// Proves a generic profile can truthfully publish externally managed
+/// Gemini-style object metadata without claiming that Tau creates, patches, or
+/// deletes that object.
+#[test]
+fn configured_contract_accepts_external_explicit_object_policy() {
+    let contract: ProviderCacheContract = serde_json::from_value(serde_json::json!({
+        "kind": "explicit_object",
+        "ttl": {"kind": "fixed", "seconds": 3600},
+        "renewal": "patch_expiry",
+        "output_floor": "zero",
+        "quota": {
+            "requests": "unknown",
+            "read_tokens": "unknown",
+            "write_tokens": "unknown",
+            "output_tokens": "unknown"
+        },
+        "privacy": {
+            "storage": "named_provider_object",
+            "zero_data_retention": "incompatible",
+            "data_residency": "provider_specific",
+            "manual_deletion": "unavailable"
+        }
+    }))
+    .expect("externally managed explicit cache object");
+
+    let policy = contract
+        .runtime_policy()
+        .expect("valid explicit object policy");
+    assert!(matches!(
+        policy.ttl,
+        tau_proto::ProviderCacheTtl::Fixed { seconds } if seconds.get() == 3_600
+    ));
+    assert_eq!(
+        (policy.kind, policy.renewal, policy.privacy.storage),
+        (
+            tau_proto::ProviderCacheKind::ExplicitObject,
+            tau_proto::ProviderCacheRenewal::PatchExpiry,
+            tau_proto::ProviderCacheStorageMode::NamedProviderObject,
+        )
+    );
+    assert_eq!(
+        policy.privacy.manual_deletion,
+        tau_proto::ProviderCacheDeletionAvailability::Unavailable
+    );
+}
+
 /// Proves every provider-independent object/renewal rejection and strict nested
 /// config boundary fails closed before model publication.
 #[test]
