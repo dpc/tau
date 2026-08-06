@@ -45,6 +45,12 @@ post-completion-commit transcript injection.
 Schema coverage keeps `shell_command` limited to its current `workdir` spelling;
 the removed GPT `cwd` spelling appears only in an explicitly named legacy
 compatibility test.
+Allowlist coverage distinguishes absent from empty configuration, validates
+strict paired absolute-workdir/raw-command glob rules, exercises anchored
+separator and multiline matching, and rejects cross-rule mixing. Integration
+tests cover generic `shell`, ChatGPT `shell_command`, and both user context
+modes, including paired-rule disclosure and proof that denial does not spawn.
+VCR coverage requires authorization before replay.
 
 ## Processes, locking, and scheduling
 

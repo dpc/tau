@@ -1879,7 +1879,7 @@ fn lock_wait_duration_entry(seconds: u64) -> (CborValue, CborValue) {
 
 /// Execute a single tool invocation and send the response event(s).
 fn dispatch_tool_invoke(
-    invoke: tau_proto::ToolStarted,
+    mut invoke: tau_proto::ToolStarted,
     context: ToolDispatchContext,
     lock_wait_duration_seconds: Option<u64>,
     shell_command_mode: Option<ShellCommandMode>,
@@ -1946,12 +1946,10 @@ fn dispatch_tool_invoke(
     ) {
         crate::shell_output_spool::note_call();
     }
-    let vcr_config = tau_vcr::VcrConfig::from_env();
-    let world = match path_crate_tools_world::ShellWorld::for_tool_in_dir(
-        invoke.tool_name.as_str(),
-        invoke.call_id.as_str(),
-        &invoke.arguments,
-        vcr_config,
+    let world = match world_after_shell_authorization(
+        &mut invoke,
+        &shell_config,
+        tau_vcr::VcrConfig::from_env(),
         tool_cwd,
     ) {
         Ok(world) => world,
@@ -2015,6 +2013,36 @@ fn dispatch_tool_invoke(
         let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
         let _ = tx.report_tool_terminal(event);
     }
+}
+
+/// Authorize shell invocations before opening VCR state, then construct the
+/// execution world shared by shell and non-shell tools.
+fn world_after_shell_authorization(
+    invoke: &mut tau_proto::ToolStarted,
+    shell_config: &ShellConfig,
+    vcr_config: Option<tau_vcr::VcrConfig>,
+    tool_cwd: PathBuf,
+) -> Result<path_crate_tools_world::ShellWorld, crate::display::ToolFailure> {
+    if let Some(surface) = path_crate_tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
+        && let Some(canonical_cwd) = path_crate_tools::shell::prepare_tool_invocation(
+            surface,
+            &invoke.arguments,
+            shell_config,
+        )?
+    {
+        set_cbor_text_field(
+            &mut invoke.arguments,
+            surface.directory_argument(),
+            canonical_cwd.display().to_string(),
+        );
+    }
+    path_crate_tools_world::ShellWorld::for_tool_in_dir(
+        invoke.tool_name.as_str(),
+        invoke.call_id.as_str(),
+        &invoke.arguments,
+        vcr_config,
+        tool_cwd,
+    )
 }
 
 fn dispatch_cancellable_non_shell_tool(

@@ -1113,16 +1113,16 @@ struct HarnessRoleOverrides {
 /// Raw, selected-profile patches kept separate from effective harness settings.
 ///
 /// Profiles deliberately expose only the startup default role, role metadata,
-/// and extension enablement.
-/// This avoids making a profile a second, recursively-merged copy of the
-/// complete harness configuration schema.
+/// extension enablement, and arbitrary extension-owned config patches. This
+/// avoids making a profile a second copy of the complete harness schema while
+/// allowing extension settings to compose recursively.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfile {
     /// Agent defaults, role groups, and per-role patches.
     agents: HarnessProfileAgentOverrides,
-    /// Enablement changes for normally resolved extensions, including
-    /// built-ins.
+    /// Enablement and extension-owned config patches for normally resolved
+    /// extensions, including built-ins.
     extensions: BTreeMap<String, HarnessProfileExtension>,
 }
 
@@ -1194,16 +1194,19 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
     }
 }
 
-/// One profile's explicit extension availability change.
+/// One profile's extension enablement and extension-owned config patch.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileExtension {
     /// Whether the named base extension should run.
     #[serde(alias = "enabled")]
     enable: Option<bool>,
+    /// Arbitrary extension-owned configuration patch.
+    config: Option<serde_json::Value>,
 }
 
-/// Named profiles discovered from built-in and user configuration files.
+/// Named role and extension patches discovered from built-in and user
+/// configuration files.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct HarnessProfiles {
@@ -3246,15 +3249,15 @@ fn profile_config_source(
     let extensions = profile
         .extensions
         .iter()
-        .filter_map(|(name, patch)| {
-            patch.enable.map(|enable| {
-                (
-                    name.clone(),
-                    serde_json::json!({
-                        "enable": enable,
-                    }),
-                )
-            })
+        .map(|(name, patch)| {
+            let mut value = serde_json::Map::new();
+            if let Some(enable) = patch.enable {
+                value.insert("enable".to_owned(), serde_json::Value::Bool(enable));
+            }
+            if let Some(config) = &patch.config {
+                value.insert("config".to_owned(), config.clone());
+            }
+            (name.clone(), serde_json::Value::Object(value))
         })
         .collect::<serde_json::Map<_, _>>();
     let mut values = serde_json::Map::new();

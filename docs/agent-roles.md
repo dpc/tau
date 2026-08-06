@@ -153,11 +153,14 @@ profiles:
 ```
 
 Profiles support `agents.default_role`, agent defaults including `agents.enable`,
-global role metadata, role groups, and role patches. A profile can select a role
-it creates or enables. Its selected default supersedes the base setting, while a
-later `--harness-config agents.default_role=...` override supersedes the
-profile. Set `agents.default_role: null` in a profile to clear a base default and
-fall back to configured role order. The `defaultRole` alias is also accepted.
+global role metadata, role groups, role patches, and extension `enable` and
+arbitrary `config` patches. A profile can select a role it creates or enables.
+Its selected default supersedes the base setting, while a later
+`--harness-config agents.default_role=...` override supersedes the profile. Set
+`agents.default_role: null` in a profile to clear a base default and fall back
+to configured role order. The `defaultRole` alias is also accepted. Extension
+config maps merge recursively; arrays, scalars, nested nulls, and type
+mismatches replace, while top-level `config: null` remains absent/no-op.
 Profiles do not expose unrelated harness settings; keep those in base files or
 use a normal command-line override.
 

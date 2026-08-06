@@ -593,23 +593,25 @@ fn push_optional_empty_command_diagnostic(
     });
 }
 
-/// Merge `over` on top of `base` for extension config objects.
+/// Merge an arbitrary extension-owned JSON value from lower to higher
+/// precedence.
 ///
-/// When both are JSON objects, keys are merged shallowly:
-/// `over`'s keys win, `base`'s keys are kept where `over` doesn't
-/// mention them. For any other shape (one side isn't an object),
-/// `over` replaces `base` outright if it isn't `Null`. This is the
-/// minimum needed to let a user override one field of a builtin's
-/// config without restating the rest.
+/// Objects merge recursively. Arrays, scalars, nested nulls, and type
+/// mismatches replace the lower-precedence value. Top-level `config: null`
+/// remains represented as an absent [`ExtensionEntry::config`] before this
+/// function is called, preserving its existing no-op behavior.
 fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::Value {
     match (base, over) {
         (serde_json::Value::Object(mut b), serde_json::Value::Object(o)) => {
             for (k, v) in o {
-                b.insert(k, v);
+                if let Some(base_value) = b.remove(&k) {
+                    b.insert(k, merge_json(base_value, v));
+                } else {
+                    b.insert(k, v);
+                }
             }
             serde_json::Value::Object(b)
         }
-        (base, serde_json::Value::Null) => base,
         (_, over) => over,
     }
 }

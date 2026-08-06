@@ -199,6 +199,35 @@ an environment without `cat` fails normally with a shell “not found” error.
 `MANPAGER`, `BAT_PAGER`, and other application-specific pager variables remain
 ordinary configuration.
 
+Core-shell can also apply an optional best-effort command guardrail:
+
+```yaml
+extensions:
+  core-shell:
+    config:
+      shell:
+        allowlist:
+          - workdir: /srv/project/**
+            command: cargo *
+          - workdir: /srv/project
+            command: jj status
+```
+
+Omitting `allowlist` preserves unrestricted execution; `allowlist: []` denies
+every covered command. Each rule requires both fields, and one rule must match
+both the canonical absolute effective workdir and the raw submitted
+shell-language command. Matching is anchored and case-sensitive. Workdir `*`
+stays within one path component while `**` crosses components. Command globs
+treat separators and newlines as ordinary characters.
+
+The same rules cover model `shell`, ChatGPT-facing `shell_command`, and user
+`!`/`!!` before VCR replay or process spawn. A denial shows the configured
+command/workdir pairs so the agent can choose a permitted invocation. Matching
+does not inspect shell syntax, the configured shell or wrapper prefix,
+environment, `PATH`, or resolved executables; fixed internal subprocesses such
+as `grep`'s `rg` are excluded. This is a best-effort guardrail, not a sandbox or
+security boundary.
+
 Configured extension processes are trusted local executables with the user's OS
 authority. Tau limits their protocol authority and injects only declared
 Tau-managed secrets, but it does not make them an operating-system sandbox. See
@@ -212,9 +241,8 @@ command-line overrides. `--profile NAME` wins over `TAU_PROFILE=NAME`; when
 neither selects a name, top-level `default_profile: NAME` selects a fallback.
 Omit `default_profile`, or set it to `null`, to load only base layers. Named
 profiles do not inherit the fallback profile: each profile independently
-patches the base layers. A profile can change only
-`enable` for a base-configured or built-in extension, and CLI overrides still
-win:
+patches the base layers. A profile can change `enable` and arbitrary `config`
+for a base-configured or built-in extension, and CLI overrides still win:
 
 ```yaml
 default_profile: focused
@@ -224,7 +252,18 @@ profiles:
     extensions:
       std-pim:
         enable: false
+      core-shell:
+        config:
+          shell:
+            allowlist:
+              - workdir: /srv/project/**
+                command: cargo *
 ```
+
+Extension config maps merge recursively across layers. Arrays, scalars, nested
+nulls, and type mismatches replace lower-precedence values; there is no deletion
+sentinel. A top-level extension `config: null` keeps its historical absent/no-op
+meaning.
 
 Repeat `--harness-config=KEY=VALUE` to make a one-launch override:
 

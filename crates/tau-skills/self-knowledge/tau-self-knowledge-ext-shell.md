@@ -135,6 +135,10 @@ extensions: {
       shell: {
         command: "bash",
         prefix: ["nix", "develop", "-c"],
+        allowlist: [
+          { workdir: "/srv/project/**", command: "cargo *" },
+          { workdir: "/srv/project", command: "jj status" },
+        ],
         user_command_timeout_secs: 3600,
         non_interactive_pager: true,
         extra_env: { PATH: "/custom/bin:/usr/bin" },
@@ -146,3 +150,15 @@ extensions: {
 ```
 
 `working_directory` changes the extension process cwd only during startup config and therefore its missing-key fallback; it never overrides restored per-agent state. Late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. The protected pager overlay follows `extra_env` unless `shell.non_interactive_pager` is explicitly false. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.
+
+`shell.allowlist` is an optional best-effort guardrail, not a sandbox or
+security boundary. When absent, shell execution remains unrestricted; an empty
+list denies every model and user shell command. Every rule requires both
+`workdir` and `command`, and one rule must match both. Globs are anchored and
+case-sensitive. Workdir matching uses the canonical absolute effective cwd,
+with `*` confined to one component and `**` crossing components. Command
+matching uses the raw submitted shell-language string, with separators and
+newlines treated as ordinary characters. It does not inspect shell syntax,
+wrapper argv, environment, `PATH`, or resolved executables. Denial errors show
+the configured command/workdir pairs. The fixed `rg` subprocess behind `grep`
+and unrelated subprocess systems are not covered.

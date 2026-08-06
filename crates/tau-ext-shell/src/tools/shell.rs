@@ -171,13 +171,14 @@ pub(crate) fn run_command_cancellable_for_tool(
     }
 
     let started = path_std_time::Instant::now();
-    let outcome = run_command_live_for_surface(
+    let outcome = run_command_live_for_surface_with_authorized_cwd(
         surface,
         arguments,
         shell_config,
         command_mode,
         enforce_ro_bind,
         cancel_rx,
+        None,
     )?;
     let elapsed_ms = elapsed_millis(started.elapsed());
     let recorded = match &outcome {
@@ -213,6 +214,7 @@ pub(crate) fn run_command_live(
 }
 
 /// Run one live shell tool call using that surface's directory argument.
+#[cfg(test)]
 pub(crate) fn run_command_live_for_surface(
     surface: crate::tools::ShellSurface,
     arguments: &CborValue,
@@ -221,10 +223,35 @@ pub(crate) fn run_command_live_for_surface(
     enforce_ro_bind: bool,
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<CommandOutcome, ToolFailure> {
+    let authorized_cwd = prepare_tool_invocation(surface, arguments, shell_config)?;
+    run_command_live_for_surface_with_authorized_cwd(
+        surface,
+        arguments,
+        shell_config,
+        command_mode,
+        enforce_ro_bind,
+        cancel_rx,
+        authorized_cwd.as_deref(),
+    )
+}
+
+/// Run one live shell tool call after any pre-replay authorization.
+fn run_command_live_for_surface_with_authorized_cwd(
+    surface: crate::tools::ShellSurface,
+    arguments: &CborValue,
+    shell_config: &ShellConfig,
+    command_mode: ShellCommandMode,
+    enforce_ro_bind: bool,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+    authorized_cwd: Option<&std::path::Path>,
+) -> Result<CommandOutcome, ToolFailure> {
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     validate_surface_arguments(surface, arguments)?;
     let cwd = optional_argument_text(arguments, surface.directory_argument())
         .map_err(ToolFailure::from)?;
+    let cwd = authorized_cwd
+        .map(|path| path.display().to_string())
+        .or(cwd);
     let display_mode = command_mode.display_label().unwrap_or_default();
     let (display_args, display_payload) = command_display(&command);
     let timeout_secs = parse_timeout_secs(arguments).map_err(|message| {
@@ -352,6 +379,27 @@ pub(crate) fn run_command_live_for_surface(
     })))
 }
 
+/// Validate and authorize a shell invocation before any VCR access or spawn.
+pub(crate) fn prepare_tool_invocation(
+    surface: crate::tools::ShellSurface,
+    arguments: &CborValue,
+    shell_config: &ShellConfig,
+) -> Result<Option<PathBuf>, ToolFailure> {
+    let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
+    validate_surface_arguments(surface, arguments)?;
+    parse_timeout_secs(arguments).map_err(ToolFailure::from)?;
+    let cwd = optional_argument_text(arguments, surface.directory_argument())
+        .map_err(ToolFailure::from)?
+        .map(PathBuf::from)
+        .map_or_else(std::env::current_dir, Ok)
+        .map_err(|error| {
+            ToolFailure::from(format!("failed to resolve shell command workdir: {error}"))
+        })?;
+    shell_config
+        .authorize(&command, &cwd)
+        .map_err(ToolFailure::from)
+}
+
 fn validate_surface_arguments(
     surface: crate::tools::ShellSurface,
     arguments: &CborValue,
@@ -459,6 +507,14 @@ pub(crate) fn dispatch_user_shell_command(
     cwd: PathBuf,
 ) {
     crate::shell_output_spool::note_call();
+    let cwd = match shell_config.authorize(&cmd.command, &cwd) {
+        Ok(Some(canonical)) => canonical,
+        Ok(None) => cwd,
+        Err(error) => {
+            send_user_shell_finished(cmd, error, None, false, tx);
+            return;
+        }
+    };
     let cwd = cwd.display().to_string();
     let child = match shell_config.spawn_isolated(&cmd.command, Some(&cwd), false, false) {
         Ok(child) => child,

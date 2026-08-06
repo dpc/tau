@@ -11,6 +11,89 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Ensures arbitrary extension config maps merge recursively while every
+/// non-map shape, including nested null, replaces the lower-precedence value.
+#[test]
+fn extension_config_merge_is_recursive_with_replacement_leaves() {
+    let base = serde_json::json!({
+        "object": {
+            "kept": true,
+            "changed": 1,
+            "array": [1, 2],
+            "to_null": "value",
+            "type_change": {"nested": true}
+        }
+    });
+    let over = serde_json::json!({
+        "object": {
+            "changed": 2,
+            "array": [3],
+            "to_null": null,
+            "type_change": "scalar"
+        }
+    });
+
+    assert_eq!(
+        merge_json(base, over),
+        serde_json::json!({
+            "object": {
+                "kept": true,
+                "changed": 2,
+                "array": [3],
+                "to_null": null,
+                "type_change": "scalar"
+            }
+        })
+    );
+}
+
+/// Ensures extension resolution applies recursive user config over built-in
+/// defaults rather than replacing a complete nested object.
+#[test]
+fn extension_resolution_recursively_merges_builtin_and_user_config() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.clear();
+    settings.extensions.insert(
+        "core-shell".to_owned(),
+        ExtensionEntry {
+            config: Some(serde_json::json!({
+                "shell": {
+                    "command": "bash",
+                    "allowlist": []
+                }
+            })),
+            ..ExtensionEntry::default()
+        },
+    );
+    let resolved = resolve_extensions(
+        &settings,
+        vec![builtin(
+            "core-shell",
+            "ext-shell",
+            "tool",
+            true,
+            serde_json::json!({
+                "shell": {
+                    "command": "sh",
+                    "extra_env": {"BASE": "kept"}
+                }
+            }),
+        )],
+    )
+    .expect("resolve extension");
+
+    assert_eq!(
+        resolved[0].config,
+        serde_json::json!({
+            "shell": {
+                "command": "bash",
+                "extra_env": {"BASE": "kept"},
+                "allowlist": []
+            }
+        })
+    );
+}
+
 fn builtin(
     name: &str,
     suffix_arg: &str,

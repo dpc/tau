@@ -152,10 +152,13 @@ array replacement:
 `profiles` is a raw configuration-only map, not part of effective
 `HarnessSettings`. A selected profile supports `agents.default_role`, agent
 provider defaults, agent/global role metadata, role groups and roles, plus
-`extensions.<name>.enable` for a built-in or base-configured extension. This
-explicit subset avoids a second universal recursive merge schema. Its role
-patches replay after base file layers, so relative values resolve against base
-settings, and before CLI role or `--harness-config` patches.
+`extensions.<name>.enable` and arbitrary `extensions.<name>.config` for a
+built-in or base-configured extension. Extension config objects merge
+recursively; arrays, scalars, nested nulls, and type mismatches replace lower
+precedence values, and no deletion sentinel exists. A top-level extension
+`config: null` retains its existing absent/no-op compatibility. Role and
+extension patches replay after base file layers, so relative values resolve
+against base settings, and before CLI role or `--harness-config` patches.
 
 `default_profile` is base selection configuration, evaluated from built-in,
 user, and ordered `harness.d` layers before profile loading. A later null value

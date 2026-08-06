@@ -5,8 +5,12 @@ use std::path as path_std_path;
 #[cfg(test)]
 mod tests;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use globset::{GlobBuilder, GlobMatcher};
+use serde::de::Error as _;
 
 use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
 use crate::shell_process::ShellProcess;
@@ -100,6 +104,12 @@ pub(crate) struct ShellConfig {
     /// `extra_env`. This defaults to true. Setting it to false is the single
     /// explicit opt-out from the protected pager environment.
     non_interactive_pager: bool,
+    /// Optional best-effort allowlist for shell-style command surfaces.
+    ///
+    /// Absence preserves unrestricted execution. A present empty list denies
+    /// every command.
+    #[serde(default, deserialize_with = "deserialize_shell_allowlist")]
+    allowlist: Option<Vec<ShellAllowRule>>,
 }
 
 impl Default for ShellConfig {
@@ -110,11 +120,139 @@ impl Default for ShellConfig {
             user_command_timeout_secs: 60 * 60,
             extra_env: BTreeMap::new(),
             non_interactive_pager: true,
+            allowlist: None,
         }
     }
 }
 
+/// Preserve the semantic difference between an absent allowlist and every
+/// present value, including rejecting explicit null as malformed.
+fn deserialize_shell_allowlist<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ShellAllowRule>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Vec<ShellAllowRule> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
+/// One conjunctive workdir-and-command allowlist rule.
+#[derive(Clone, Debug)]
+struct ShellAllowRule {
+    /// Authored absolute workdir glob retained for denial diagnostics.
+    workdir: String,
+    /// Authored raw shell-language command glob retained for denial
+    /// diagnostics.
+    command: String,
+    /// Compiled workdir matcher with component-aware separators.
+    workdir_matcher: GlobMatcher,
+    /// Compiled command matcher with separators treated as ordinary characters.
+    command_matcher: GlobMatcher,
+}
+
+impl<'de> serde::Deserialize<'de> for ShellAllowRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Strict authored representation of one allowlist rule.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRule {
+            /// Absolute workdir glob.
+            workdir: String,
+            /// Raw shell-language command glob.
+            command: String,
+        }
+
+        let raw = RawRule::deserialize(deserializer)?;
+        if !Path::new(&raw.workdir).is_absolute() {
+            return Err(D::Error::custom(
+                "shell allowlist workdir glob must be absolute",
+            ));
+        }
+        let workdir_matcher = GlobBuilder::new(&raw.workdir)
+            .literal_separator(true)
+            .backslash_escape(true)
+            .build()
+            .map_err(|error| {
+                D::Error::custom(format!(
+                    "invalid shell allowlist workdir glob `{}`: {error}",
+                    raw.workdir
+                ))
+            })?
+            .compile_matcher();
+        let command_matcher = GlobBuilder::new(&raw.command)
+            .literal_separator(false)
+            .backslash_escape(true)
+            .build()
+            .map_err(|error| {
+                D::Error::custom(format!(
+                    "invalid shell allowlist command glob `{}`: {error}",
+                    raw.command
+                ))
+            })?
+            .compile_matcher();
+        Ok(Self {
+            workdir: raw.workdir,
+            command: raw.command,
+            workdir_matcher,
+            command_matcher,
+        })
+    }
+}
+
 impl ShellConfig {
+    /// Authorize one submitted shell string in its effective cwd.
+    ///
+    /// Returns `None` without touching the filesystem when no allowlist is
+    /// configured, preserving unrestricted execution behavior. With an
+    /// allowlist, returns the canonical cwd that was actually matched.
+    pub(crate) fn authorize(&self, command: &str, cwd: &Path) -> Result<Option<PathBuf>, String> {
+        let Some(rules) = &self.allowlist else {
+            return Ok(None);
+        };
+        let canonical_cwd = cwd.canonicalize().map_err(|error| {
+            format!(
+                "failed to resolve shell command workdir {}: {error}",
+                cwd.display()
+            )
+        })?;
+        if !canonical_cwd.is_dir() {
+            return Err(format!(
+                "shell command workdir is not a directory: {}",
+                canonical_cwd.display()
+            ));
+        }
+        if canonical_cwd.to_str().is_none() {
+            return Err(
+                "shell command workdir is not valid UTF-8 and cannot be matched losslessly"
+                    .to_owned(),
+            );
+        }
+        if rules.iter().any(|rule| {
+            rule.workdir_matcher.is_match(&canonical_cwd) && rule.command_matcher.is_match(command)
+        }) {
+            return Ok(Some(canonical_cwd));
+        }
+        let mut message = format!(
+            "shell command denied by configured allowlist: no rule matched workdir {} and command\nallowed command/workdir glob pairs:",
+            canonical_cwd.display()
+        );
+        if rules.is_empty() {
+            message.push_str("\n- none");
+        } else {
+            for rule in rules {
+                let command = serde_json::to_string(&rule.command)
+                    .expect("serializing a string to JSON cannot fail");
+                let workdir = serde_json::to_string(&rule.workdir)
+                    .expect("serializing a string to JSON cannot fail");
+                let _ = write!(&mut message, "\n- command: {command}\n  workdir: {workdir}");
+            }
+        }
+        Err(message)
+    }
+
     fn command_for(&self, command: &str) -> Command {
         let mut argv = self.prefix.clone();
         argv.push(self.command.clone());

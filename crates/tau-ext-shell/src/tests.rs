@@ -660,6 +660,37 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
     writer.flush().expect("flush config");
 }
 
+/// Configure an explicit shell allowlist for integration tests.
+fn send_shell_allowlist_config(
+    writer: &mut EventWriter<BufWriter<UnixStream>>,
+    rules: Vec<(&str, &str)>,
+) {
+    let rules = rules
+        .into_iter()
+        .map(|(workdir, command)| {
+            cbor_map(vec![
+                ("workdir", CborValue::Text(workdir.to_owned())),
+                ("command", CborValue::Text(command.to_owned())),
+            ])
+        })
+        .collect();
+    writer
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name"),
+            config: cbor_map(vec![(
+                "shell",
+                cbor_map(vec![("allowlist", CborValue::Array(rules))]),
+            )]),
+            state_dir: None,
+            secrets: Default::default(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure shell allowlist");
+    writer.flush().expect("flush shell allowlist");
+}
+
 fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue, agent_id: &str) -> Event {
     Event::ToolStarted(ToolStarted {
         call_id: tau_proto::ToolCallId::new(call_id),
@@ -5903,6 +5934,210 @@ fn gpt_shell_tool_reports_progress_and_success() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+/// Ensures both model shell dialects deny before spawn and disclose paired
+/// command/workdir rules in the agent-facing error.
+#[test]
+fn model_shell_surfaces_enforce_allowlist_before_spawn() {
+    let workdir = TempDir::new().expect("workdir");
+    let sentinel = workdir.path().join("must-not-exist");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_shell_allowlist_config(
+        &mut writer,
+        vec![(
+            workdir.path().to_str().expect("UTF-8 workdir"),
+            "printf allowed",
+        )],
+    );
+
+    for (call_id, tool_name, directory_field) in [
+        ("deny-generic", SHELL_TOOL_NAME, "cwd"),
+        ("deny-chatgpt", GPT_SHELL_TOOL_NAME, "workdir"),
+    ] {
+        writer
+            .write_event(&Event::ToolStarted(ToolStarted {
+                call_id: call_id.into(),
+                tool_name: tau_proto::ToolName::new(tool_name),
+                arguments: cbor_map(vec![
+                    (
+                        "command",
+                        CborValue::Text(format!("touch {}", sentinel.display())),
+                    ),
+                    (
+                        directory_field,
+                        CborValue::Text(workdir.path().display().to_string()),
+                    ),
+                ]),
+                agent_id: tau_proto::AgentId::parse("allowlist-agent").expect("agent id"),
+                originator: tau_proto::PromptOriginator::User,
+            }))
+            .expect("invoke denied shell");
+        writer.flush().expect("flush denied shell");
+
+        let Event::ToolError(error) = reader.read_event().expect("read").expect("error") else {
+            panic!("expected tool error");
+        };
+        assert!(error.message.contains("denied by configured allowlist"));
+        assert!(error.message.contains(r#"command: "printf allowed""#));
+        assert!(error.message.contains("workdir:"));
+        assert!(!sentinel.exists(), "denied command must not spawn");
+    }
+}
+
+/// Ensures both `!` and `!!` execution semantics use the same paired allowlist
+/// and report one terminal denial without spawning a child.
+#[test]
+fn user_shell_context_modes_enforce_the_same_allowlist() {
+    let workdir = TempDir::new().expect("workdir");
+    let agent_id = tau_proto::AgentId::parse("allowlist-user-agent").expect("agent id");
+    let sentinel = workdir.path().join("must-not-exist");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_shell_allowlist_config(
+        &mut writer,
+        vec![(
+            workdir.path().to_str().expect("UTF-8 workdir"),
+            "printf allowed",
+        )],
+    );
+    writer
+        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+            agent_id: agent_id.clone(),
+            key: tau_proto::AgentMetadataKey::new("ext_test-extension_cwd"),
+            value: CborValue::Text(workdir.path().display().to_string()),
+            mutation_id: None,
+            inheritable: true,
+        }))
+        .expect("seed workdir");
+    writer.flush().expect("flush seed");
+
+    for (command_id, include_in_context) in [("deny-bang", true), ("deny-double-bang", false)] {
+        writer
+            .write_event(&Event::UiShellCommand(tau_proto::UiShellCommand {
+                session_id: "session-1".parse().expect("session id"),
+                command_id: test_shell_command_id(command_id),
+                command: format!("touch {}", sentinel.display()),
+                include_in_context,
+                target_agent_id: Some(agent_id.clone()),
+            }))
+            .expect("send user shell");
+        writer.flush().expect("flush user shell");
+        let finished = wait_for_user_shell_finished(&mut reader, command_id);
+        assert_eq!(finished.include_in_context, include_in_context);
+        assert!(finished.output.contains("denied by configured allowlist"));
+        assert!(finished.output.contains(r#"command: "printf allowed""#));
+        assert_eq!(finished.exit_code, None);
+        assert!(!sentinel.exists(), "denied user command must not spawn");
+    }
+}
+
+/// Ensures denial happens before RecordIfMissing can create an empty cassette
+/// and before ReplayOnly can report missing or malformed VCR state.
+#[test]
+fn shell_allowlist_denial_never_opens_vcr_state() {
+    let workdir = TempDir::new().expect("workdir");
+    let config: path_crate_config::ShellConfig =
+        serde_json::from_value(serde_json::json!({ "allowlist": [] })).expect("config");
+    let invoke = || {
+        let mut invoke = match tool_started(
+            "deny-before-vcr",
+            SHELL_TOOL_NAME,
+            cbor_map(vec![
+                ("command", CborValue::Text("printf denied".to_owned())),
+                ("cwd", CborValue::Text(workdir.path().display().to_string())),
+            ]),
+            "vcr-policy-agent",
+        ) {
+            Event::ToolStarted(invoke) => invoke,
+            _ => unreachable!("helper always returns ToolStarted"),
+        };
+        invoke.tool_name = tau_proto::ToolName::new(SHELL_TOOL_NAME);
+        invoke
+    };
+
+    let record_dir = TempDir::new().expect("record dir");
+    let error = world_after_shell_authorization(
+        &mut invoke(),
+        &config,
+        Some(tau_vcr::VcrConfig::new(
+            tau_vcr::VcrMode::RecordIfMissing,
+            record_dir.path(),
+        )),
+        workdir.path().to_path_buf(),
+    )
+    .err()
+    .expect("policy denial precedes recording");
+    assert!(error.message.contains("denied by configured allowlist"));
+    assert!(
+        std::fs::read_dir(record_dir.path())
+            .expect("read record dir")
+            .next()
+            .is_none(),
+        "denial must not create a cassette"
+    );
+
+    let invalid_record_dir = TempDir::new().expect("invalid record dir");
+    let mut invalid = match tool_started(
+        "invalid-before-vcr",
+        GPT_SHELL_TOOL_NAME,
+        cbor_map(vec![
+            ("command", CborValue::Text("printf allowed".to_owned())),
+            (
+                "workdir",
+                CborValue::Text(workdir.path().display().to_string()),
+            ),
+            ("cwd", CborValue::Text(workdir.path().display().to_string())),
+        ]),
+        "vcr-policy-agent",
+    ) {
+        Event::ToolStarted(invoke) => invoke,
+        _ => unreachable!("helper always returns ToolStarted"),
+    };
+    let error = world_after_shell_authorization(
+        &mut invalid,
+        &config,
+        Some(tau_vcr::VcrConfig::new(
+            tau_vcr::VcrMode::RecordIfMissing,
+            invalid_record_dir.path(),
+        )),
+        workdir.path().to_path_buf(),
+    )
+    .err()
+    .expect("surface validation precedes recording");
+    assert!(error.message.contains("`cwd` is not supported"));
+    assert!(
+        std::fs::read_dir(invalid_record_dir.path())
+            .expect("read invalid record dir")
+            .next()
+            .is_none(),
+        "invalid invocation must not create a cassette"
+    );
+
+    for malformed in [false, true] {
+        let replay_dir = TempDir::new().expect("replay dir");
+        if malformed {
+            std::fs::write(
+                replay_dir.path().join("deny-before-vcr.yaml"),
+                "not: [valid",
+            )
+            .expect("write malformed cassette");
+        }
+        let error = world_after_shell_authorization(
+            &mut invoke(),
+            &config,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::ReplayOnly,
+                replay_dir.path(),
+            )),
+            workdir.path().to_path_buf(),
+        )
+        .err()
+        .expect("policy denial precedes replay state");
+        assert!(error.message.contains("denied by configured allowlist"));
+        assert!(!error.message.contains("vcr"));
+    }
 }
 
 #[test]

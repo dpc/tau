@@ -3566,8 +3566,8 @@ profiles:
     assert_eq!(settings.default_role, None);
 }
 
-/// Ensures profiles accept only their explicit role and extension-enable
-/// surface rather than becoming a recursive second harness configuration.
+/// Ensures profiles reject harness and extension process settings outside their
+/// explicit role, extension-enable, and extension-config surface.
 #[test]
 fn selected_profile_rejects_unsupported_settings_and_extensions() {
     let td = TempDir::new().expect("tempdir");
@@ -3610,6 +3610,118 @@ profiles:
     )
     .expect_err("unsupported extension setting");
     assert!(error.to_string().contains("unknown field"), "{error}");
+}
+
+/// Ensures arbitrary extension config participates in base, selected-profile,
+/// drop-in, and ordered CLI precedence without replacing unrelated nested keys.
+#[test]
+fn selected_profile_recursively_merges_extension_config_before_cli() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+extensions:
+  core-shell:
+    config:
+      shell:
+        command: sh
+        nullable: base
+        extra_env:
+          BASE: base
+profiles:
+  focused:
+    extensions:
+      core-shell:
+        config:
+          shell:
+            allowlist:
+              - workdir: /base/**
+                command: cargo *
+"#,
+    )
+    .expect("write base profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-focused.yaml"),
+        r#"
+profiles:
+  focused:
+    extensions:
+      core-shell:
+        config:
+          shell:
+            nullable: null
+            extra_env:
+              PROFILE: selected
+"#,
+    )
+    .expect("write profile drop-in");
+    let profile = profile_name("focused");
+    let overrides =
+        [
+            HarnessConfigCliOverride::from_str("extensions.core-shell.config.shell.command=bash")
+                .expect("CLI override"),
+        ];
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &overrides,
+    )
+    .expect("load selected profile");
+    assert_eq!(
+        settings.extensions["core-shell"].config,
+        Some(serde_json::json!({
+            "shell": {
+                "command": "bash",
+                "nullable": null,
+                "extra_env": {
+                    "BASE": "base",
+                    "PROFILE": "selected"
+                },
+                "allowlist": [{
+                    "workdir": "/base/**",
+                    "command": "cargo *"
+                }]
+            }
+        }))
+    );
+}
+
+/// Ensures a top-level null profile extension config preserves the historical
+/// absent/no-op behavior rather than deleting the base config value.
+#[test]
+fn selected_profile_top_level_null_extension_config_is_no_op() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+extensions:
+  core-shell:
+    config:
+      marker: base
+profiles:
+  focused:
+    extensions:
+      core-shell:
+        config: null
+"#,
+    )
+    .expect("write profile");
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load profile");
+
+    assert_eq!(
+        settings.extensions["core-shell"].config,
+        Some(serde_json::json!({"marker": "base"}))
+    );
 }
 
 /// Ensures one-shot harness config accepts relative provider defaults, starts
