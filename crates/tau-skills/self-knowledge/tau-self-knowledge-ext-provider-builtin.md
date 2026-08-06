@@ -175,6 +175,17 @@ cost reaches the discrete break-even point after one five-minute read or two
 one-hour reads. Tau never converts that fact into a roughly four-minute cadence
 or traffic during unknown or unbounded idle.
 
+For an exact generic GPT-5.6 route using typed explicit OpenAI breakpoints,
+publish the 1,800-second lifetime as `minimum`, with unsupported renewal and an
+unknown output floor. OpenAI documents eligibility for at least 30 minutes and
+possible longer retention, not sliding renewal. Older models need a separate
+conservative policy: typical eviction is not a hard TTL, so use unknown
+residency and unsupported renewal unless the exact route has a stronger documented
+contract. OpenAI read/write counters remain observations, never TTL evidence.
+Tau has no cache-refresh experiment or scheduler; any future experiment needs
+separate approval, explicit opt-in, measured reads/writes, tightly bounded
+output, and a request/quota budget below expected avoided writes.
+
 Generic OpenAI-compatible cache request controls are opt-in and route-local:
 `compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat
 Completions accepts either legacy `retention: in_memory`/`"24h"` or explicit

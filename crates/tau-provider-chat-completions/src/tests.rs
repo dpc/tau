@@ -29,7 +29,9 @@ fn stream_usage_distinguishes_absent_from_zero() {
 }
 
 /// Cache counters are ignored unless the configured route explicitly declares
-/// the matching OpenAI-compatible usage schema.
+/// the matching OpenAI-compatible usage schema. Accepted counters remain
+/// ordinary-request observations with unknown expiry confidence, preventing
+/// reads or writes from becoming TTL or renewal facts.
 #[test]
 fn cache_usage_requires_explicit_route_capability() {
     let wire_usage = serde_json::json!({
@@ -53,6 +55,14 @@ fn cache_usage_requires_explicit_route_capability() {
     assert_eq!(cache.read_tokens, Some(80));
     assert_eq!(cache.write_tokens, Some(10));
     assert_eq!(cache.avoided_prefill_tokens, Some(80));
+    assert_eq!(
+        cache.refresh_reason,
+        Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest)
+    );
+    assert_eq!(
+        cache.expiry_confidence,
+        Some(tau_proto::ProviderCacheExpiryConfidence::Unknown)
+    );
 }
 
 /// An explicitly reported zero cache read remains distinguishable from a

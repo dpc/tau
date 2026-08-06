@@ -12,7 +12,8 @@ use tungstenite::handshake::server::Request as WebSocketRequest;
 use super::*;
 
 /// Public Responses usage preserves OpenAI cache reads and writes as separate
-/// normalized classes without exposing a cache key or prompt content.
+/// ordinary-request observations with unknown expiry confidence. This prevents
+/// counters from promoting observed reuse into a hard TTL or renewal guarantee.
 #[test]
 fn usage_parses_distinct_cache_read_and_write_classes() {
     let usage = parse_usage(Some(&serde_json::json!({
@@ -30,6 +31,14 @@ fn usage_parses_distinct_cache_read_and_write_classes() {
     assert_eq!(cache.read_tokens, Some(70));
     assert_eq!(cache.write_tokens, Some(20));
     assert_eq!(cache.avoided_prefill_tokens, Some(70));
+    assert_eq!(
+        cache.refresh_reason,
+        Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest)
+    );
+    assert_eq!(
+        cache.expiry_confidence,
+        Some(tau_proto::ProviderCacheExpiryConfidence::Unknown)
+    );
 }
 
 /// DeepSeek-style reasoning must stream as full thinking immediately, then

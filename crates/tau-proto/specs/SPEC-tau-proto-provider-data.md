@@ -211,3 +211,7 @@ separate exact route declarations rather than a selectable policy list.
 Consumers may derive a discrete equal-prefix break-even read count from explicit
 ordinary-input, cache-read, and cache-write prices, but the protocol does not
 publish or schedule a refresh cadence.
+
+A provider-documented minimum residency remains `ProviderCacheTtl::Minimum`
+even when ordinary responses report cache reads or writes. Such observations do
+not establish a hard deadline or sliding renewal.

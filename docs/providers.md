@@ -273,6 +273,44 @@ Anthropic pre-warm, refresh, or nested generic request controls. In particular,
 Tau never turns the five-minute TTL into a roughly four-minute cadence and
 never schedules traffic during unknown or unbounded idle.
 
+OpenAI's
+[prompt-caching documentation](https://developers.openai.com/api/docs/guides/prompt-caching)
+defines different contracts for GPT-5.6-and-later and older models. An exact
+GPT-5.6 generic route that opts into Tau's typed explicit breakpoint controls
+may declare `kind: explicit_breakpoint`, `ttl: { kind: minimum, seconds: 1800 }`,
+`renewal: unsupported`, and `output_floor: unknown`. The 30 minutes is a
+minimum eligibility lifetime, not a deadline: OpenAI may retain the prefix
+longer and does not document a cache read as resetting a sliding timer. Tau
+therefore schedules no refresh before 30 minutes—or afterward—and ordinary
+read/write observations never convert that minimum into a hard TTL.
+
+The same exact GPT-5.6 route may publish OpenAI's explicit ordinary-input,
+cached-read, and cache-write prices. For example, the short-context
+`gpt-5.6-sol` comparison rates are `$5`, `$0.50`, and `$6.25` per million
+tokens. The basic model fields do not represent OpenAI's long-context tier, so
+cost comparisons using them must exclude that tier; the central fallback is
+not a provider fact. Select `compat.cache_usage: open_ai` on Chat Completions
+only when the endpoint uses OpenAI's documented usage shape. Public Responses
+already parses `cached_tokens` and
+`cache_write_tokens`. Those counters measure an ordinary request; they do not
+prove expiry or renewal.
+
+Models before GPT-5.6 require a separate declaration. Their documented typical
+in-memory eviction after 5–10 minutes and possible retention for up to one hour
+are not a guaranteed TTL, so a conservative automatic-prefix declaration uses
+`ttl: { kind: unknown }`, `renewal: unsupported`, and `output_floor: unknown`.
+The legacy `prompt_cache_retention` request control selects an OpenAI retention
+policy; it does not turn typical behavior or a maximum into a minimum, fixed,
+or sliding policy fact.
+
+Tau has no cache-refresh experiment or scheduler. Adding an experiment would
+require separately approved opt-in configuration and request behavior. Any such
+future experiment must use explicit breakpoints, observe both cache reads and
+writes, tightly cap generated output, and stop before its request/quota cost
+exceeds the expected avoided cache-write cost. It must not infer renewal from a
+hit, run before GPT-5.6's documented minimum, or continue through unknown or
+unbounded idle.
+
 Hardcoded ChatGPT/Codex ordinary-input and output comparison prices come from OpenAI's provider-owned
 [API pricing table](https://developers.openai.com/api/docs/pricing). Configured
 compatible providers own their explicit values; refresh those profile fields from

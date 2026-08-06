@@ -542,6 +542,145 @@ fn model_publishes_configured_runtime_cache_contract() {
     ));
 }
 
+/// Proves the generic Chat Completions config owner publishes GPT-5.6's
+/// documented minimum and prices while keeping an older model's legacy request
+/// control and conservative unknown residency in a separate exact-route policy.
+#[test]
+fn openai_model_configs_publish_distinct_cache_policies() {
+    let gpt_5_6: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "gpt-5.6-sol",
+        "compat": {
+            "cache_usage": "open_ai",
+            "openai_prompt_cache": {
+                "key": "agent",
+                "options": {
+                    "mode": "explicit",
+                    "ttl": "30m",
+                    "boundary": "system_prompt"
+                }
+            }
+        },
+        "cache_contract": {
+            "kind": "explicit_breakpoint",
+            "ttl": {"kind": "minimum", "seconds": 1800},
+            "renewal": "unsupported",
+            "output_floor": "unknown",
+            "quota": {
+                "requests": "unknown",
+                "read_tokens": "unknown",
+                "write_tokens": "unknown",
+                "output_tokens": "unknown"
+            },
+            "privacy": {
+                "storage": "unknown",
+                "zero_data_retention": "unknown",
+                "data_residency": "unknown",
+                "manual_deletion": "unavailable"
+            }
+        },
+        "est_uncached_input_cost_1m_usd": "5",
+        "est_cached_input_cost_1m_usd": "0.50",
+        "est_cache_write_input_cost_1m_usd": "6.25"
+    }))
+    .expect("GPT-5.6 explicit cache model");
+    let older: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "gpt-5.5",
+        "compat": {
+            "openai_prompt_cache": {
+                "key": "agent",
+                "retention": "24h"
+            }
+        },
+        "cache_contract": {
+            "kind": "automatic_prefix",
+            "ttl": {"kind": "unknown"},
+            "renewal": "unsupported",
+            "output_floor": "unknown",
+            "quota": {
+                "requests": "unknown",
+                "read_tokens": "unknown",
+                "write_tokens": "unknown",
+                "output_tokens": "unknown"
+            },
+            "privacy": {
+                "storage": "unknown",
+                "zero_data_retention": "unknown",
+                "data_residency": "unknown",
+                "manual_deletion": "unavailable"
+            }
+        }
+    }))
+    .expect("older automatic cache model");
+    assert!(matches!(
+        gpt_5_6
+            .compat
+            .expect("GPT-5.6 compatibility")
+            .openai_prompt_cache
+            .expect("GPT-5.6 cache request control")
+            .policy,
+        OpenAiPromptCachePolicy::Explicit { .. }
+    ));
+    assert!(matches!(
+        older
+            .compat
+            .expect("older compatibility")
+            .openai_prompt_cache
+            .expect("older cache request control")
+            .policy,
+        OpenAiPromptCachePolicy::Legacy { .. }
+    ));
+
+    let provider = ChatCompletionsProvider {
+        models: vec![gpt_5_6, older],
+        ..ChatCompletionsProvider::default()
+    };
+    let published = models_for_provider(&tau_proto::ProviderName::new("openai"), &provider);
+    let gpt_5_6 = &published[0];
+    let gpt_policy = gpt_5_6.cache_policy.expect("published GPT-5.6 policy");
+    assert_eq!(
+        gpt_policy.kind,
+        tau_proto::ProviderCacheKind::ExplicitBreakpoint
+    );
+    assert!(matches!(
+        gpt_policy.ttl,
+        tau_proto::ProviderCacheTtl::Minimum { seconds } if seconds.get() == 1_800
+    ));
+    assert_eq!(
+        gpt_policy.renewal,
+        tau_proto::ProviderCacheRenewal::Unsupported
+    );
+    assert_eq!(
+        (
+            gpt_5_6
+                .est_uncached_input_cost_1m_usd
+                .expect("published uncached price")
+                .as_micro_usd(),
+            gpt_5_6
+                .est_cached_input_cost_1m_usd
+                .expect("published cache-read price")
+                .as_micro_usd(),
+            gpt_5_6
+                .est_cache_write_input_cost_1m_usd
+                .expect("published cache-write price")
+                .as_micro_usd(),
+        ),
+        (5_000_000, 500_000, 6_250_000)
+    );
+
+    let older_policy = published[1]
+        .cache_policy
+        .expect("published older-model policy");
+    assert_eq!(
+        older_policy.kind,
+        tau_proto::ProviderCacheKind::AutomaticPrefix
+    );
+    assert_eq!(older_policy.ttl, tau_proto::ProviderCacheTtl::Unknown);
+    assert_eq!(
+        older_policy.renewal,
+        tau_proto::ProviderCacheRenewal::Unsupported
+    );
+}
+
 /// Ensures the extension-owned sampler preserves the successful append-only
 /// event cadence: first semantic output immediately, later output batched,
 /// and an immediate terminal flush with chained stats.
