@@ -1,6 +1,105 @@
-use tau_proto::PromptMessageClass;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::io::{Cursor, Write};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use tau_proto::{
+    AgentPromptSteered, Configure, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter, PromptMessageClass,
+};
 
 use super::*;
+
+/// Thread-safe byte sink used by the manual extension writer thread.
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl SharedWriter {
+    /// Consume the only writer reference and return all protocol bytes.
+    fn into_bytes(self) -> Vec<u8> {
+        Arc::try_unwrap(self.0)
+            .expect("single writer reference")
+            .into_inner()
+            .expect("writer mutex")
+    }
+}
+
+impl Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("writer mutex")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_frames(
+    papercut_enabled: bool,
+    deliveries: impl IntoIterator<Item = HarnessOutputMessage>,
+) -> Vec<HarnessInputMessage> {
+    let config = papercut_enabled.then(|| {
+        CborValue::Map(vec![(
+            CborValue::Text("papercut".to_owned()),
+            CborValue::Map(vec![(
+                CborValue::Text("enable".to_owned()),
+                CborValue::Bool(true),
+            )]),
+        )])
+    });
+    let configure = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+        instance_name: tau_proto::ExtensionName::parse("std-utils").expect("extension name"),
+        config: config.unwrap_or_else(|| CborValue::Map(Vec::new())),
+        state_dir: None,
+        secrets: BTreeMap::new(),
+        settings_files: Default::default(),
+    });
+    let mut input = Vec::new();
+    let mut input_writer = HarnessOutputWriter::new(&mut input);
+    input_writer
+        .write_message(&configure)
+        .expect("configure input");
+    for delivery in deliveries {
+        input_writer
+            .write_message(&delivery)
+            .expect("delivery input");
+    }
+    input_writer.flush().expect("flush configure input");
+
+    let output = SharedWriter::default();
+    run(Cursor::new(input), output.clone()).expect("run std-utils");
+    let mut reader = HarnessInputReader::new(Cursor::new(output.into_bytes()));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("read output frame") {
+        frames.push(frame);
+    }
+    frames
+}
+
+fn startup_frames(papercut_enabled: bool) -> Vec<HarnessInputMessage> {
+    run_frames(papercut_enabled, [])
+}
+
+fn declared_tool_names(frames: &[HarnessInputMessage]) -> Vec<String> {
+    frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolRegistrationDeclared(registration) => {
+                    Some(registration.tool.name.to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
 
 fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
     CborValue::Map(
@@ -27,6 +126,29 @@ fn runtime() -> TimerRuntime {
         timers: HashMap::new(),
         pending_invocations: HashMap::new(),
         replay_complete_agents: HashSet::new(),
+        timer_tool_name: None,
+        papercut_tool_name: None,
+        session_id: None,
+        papercut_storage: None,
+    }
+}
+
+/// Deterministic in-memory session append target for papercut unit tests.
+#[derive(Clone, Default)]
+struct FakePapercutStorage {
+    /// Complete lines accepted by the fake harness.
+    lines: Rc<RefCell<Vec<Vec<u8>>>>,
+    /// Whether the next append should model a harness storage rejection.
+    fail: bool,
+}
+
+impl PapercutStorage for FakePapercutStorage {
+    fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String> {
+        if self.fail {
+            return Err("permission: session scope unavailable".to_owned());
+        }
+        self.lines.borrow_mut().push(contents);
+        Ok(())
     }
 }
 
@@ -520,4 +642,334 @@ fn schedule_validation_enforces_message_byte_limit() {
         parse_action(&schedule_args(oversized), "call-1").expect_err("oversized message"),
         format!("message must be 1..={MAX_MESSAGE_BYTES} bytes")
     );
+}
+
+fn papercut_started(call_id: &str, agent: &str, report: &str) -> ToolStarted {
+    ToolStarted {
+        call_id: tau_proto::ToolCallId::new(call_id),
+        tool_name: tau_proto::ToolName::new(PAPERCUT_TOOL_NAME),
+        arguments: cbor_map(vec![("report", CborValue::Text(report.to_owned()))]),
+        agent_id: AgentId::parse(agent).expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
+/// The extension must never declare papercut or its prompt until the
+/// per-instance opt-in setting enables it; normal enabled-by-default policy
+/// then leaves final role visibility to the ordinary harness policy pipeline.
+#[test]
+fn papercut_config_gates_visibility_and_prompt() {
+    let disabled: UtilsConfig =
+        serde_json::from_value(serde_json::json!({})).expect("default config");
+    let enabled: UtilsConfig = serde_json::from_value(serde_json::json!({
+        "papercut": {"enable": true}
+    }))
+    .expect("enabled config");
+
+    assert!(!disabled.papercut.enable);
+    assert!(enabled.papercut.enable);
+    assert_eq!(tool_registrations(false).len(), 1);
+    let registrations = tool_registrations(true);
+    let papercut = registrations
+        .iter()
+        .find(|registration| registration.tool.name.as_str() == PAPERCUT_TOOL_NAME)
+        .expect("enabled papercut registration");
+    assert!(papercut.tool.enabled_by_default);
+    assert!(
+        papercut
+            .prompt_fragment
+            .as_ref()
+            .expect("papercut prompt")
+            .template
+            .contains("do not retry")
+    );
+}
+
+/// Deferred startup must consume the actual encoded configuration before
+/// declaring tools, preserving configured prefixes and placing every accepted
+/// declaration before `Ready`.
+#[test]
+fn papercut_runtime_startup_gates_prefixed_declarations() {
+    let disabled = startup_frames(false);
+    let enabled = startup_frames(true);
+
+    assert_eq!(declared_tool_names(&disabled), ["work_timer"]);
+    assert_eq!(
+        declared_tool_names(&enabled),
+        ["work_timer", "work_papercut"]
+    );
+    for frames in [&disabled, &enabled] {
+        let ready = frames
+            .iter()
+            .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+            .expect("ready");
+        assert!(
+            frames[..ready]
+                .iter()
+                .any(|frame| matches!(frame, HarnessInputMessage::Subscribe(_)))
+        );
+        let last_declaration = frames
+            .iter()
+            .rposition(|frame| {
+                matches!(
+                    frame,
+                    HarnessInputMessage::Emit(emit)
+                        if matches!(emit.event.as_ref(), Event::ToolRegistrationDeclared(_))
+                )
+            })
+            .expect("tool declaration");
+        assert!(last_declaration < ready);
+    }
+}
+
+/// A live, prefixed papercut call after `session.started` reaches the
+/// session-storage path, while an unprefixed lookalike remains unhandled by
+/// the dynamically scoped runtime dispatch.
+#[test]
+fn papercut_runtime_dispatches_only_prefixed_live_calls() {
+    let session = Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: tau_proto::SessionId::parse("session-42").expect("session id"),
+        reason: tau_proto::SessionStartReason::Initial,
+    });
+    let mut prefixed = papercut_started("prefixed", "agent-one", "prefix dispatch");
+    prefixed.tool_name = tau_proto::ToolName::new("work_papercut");
+    let frames = run_frames(
+        true,
+        [
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(1),
+                session,
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(2),
+                Event::ToolStarted(papercut_started(
+                    "unprefixed",
+                    "agent-one",
+                    "must not dispatch",
+                )),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(3),
+                Event::ToolStarted(prefixed),
+            )),
+        ],
+    );
+
+    let appends = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::ExtensionDataRequest(request)
+                    if matches!(request.op, ExtensionDataRequestOp::AppendFile { .. })
+            )
+        })
+        .count();
+    let results: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolResultReported(result) => Some(result.call_id.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(appends, 1);
+    assert_eq!(results, ["prefixed"]);
+}
+
+/// Live session shutdown drops the current attribution before later calls, and
+/// replayed papercut starts remain observation-only rather than issuing a
+/// second session append.
+#[test]
+fn papercut_runtime_lifecycle_and_replay_do_not_append() {
+    let session_id = tau_proto::SessionId::parse("session-42").expect("session id");
+    let mut after_shutdown = papercut_started("after-shutdown", "agent-one", "late call");
+    after_shutdown.tool_name = tau_proto::ToolName::new("work_papercut");
+    let lifecycle_frames = run_frames(
+        true,
+        [
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(1),
+                Event::SessionStarted(tau_proto::SessionStarted {
+                    session_id: session_id.clone(),
+                    reason: tau_proto::SessionStartReason::Initial,
+                }),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(2),
+                Event::SessionShutdown(tau_proto::SessionShutdown { session_id }),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(3),
+                Event::ToolStarted(after_shutdown),
+            )),
+        ],
+    );
+    let mut replayed = papercut_started("replayed", "agent-one", "already handled");
+    replayed.tool_name = tau_proto::ToolName::new("work_papercut");
+    let replay_frames = run_frames(
+        true,
+        [HarnessOutputMessage::Deliver(tau_proto::EventDelivery {
+            event: Box::new(Event::ToolStarted(replayed)),
+            replay: true,
+            recorded_at: Some(UnixMicros::new(4)),
+        })],
+    );
+
+    for frames in [&lifecycle_frames, &replay_frames] {
+        assert!(frames.iter().all(|frame| !matches!(
+            frame,
+            HarnessInputMessage::ExtensionDataRequest(request)
+                if matches!(request.op, ExtensionDataRequestOp::AppendFile { .. })
+        )));
+    }
+}
+
+/// Invalid configuration must fail closed instead of silently exposing the
+/// opt-in diagnostic tool with a misspelled or unsupported setting.
+#[test]
+fn papercut_config_rejects_unknown_fields() {
+    assert!(
+        serde_json::from_value::<UtilsConfig>(serde_json::json!({
+            "papercut": {"enabled": true}
+        }))
+        .is_err()
+    );
+}
+
+/// The model-visible schema and runtime validation jointly bound Unicode scalar
+/// count and encoded bytes, rejecting empty reports before any storage request.
+#[test]
+fn papercut_schema_and_validation_bound_report() {
+    let schema = papercut_tool_spec()
+        .parameters
+        .expect("papercut parameter schema");
+    assert_eq!(
+        schema
+            .pointer("/required/0")
+            .and_then(serde_json::Value::as_str),
+        Some("report")
+    );
+    assert_eq!(
+        schema
+            .pointer("/properties/report/maxLength")
+            .and_then(serde_json::Value::as_u64),
+        Some(MAX_PAPERCUT_REPORT_CHARS as u64)
+    );
+
+    assert!(
+        parse_papercut_report(&cbor_map(vec![(
+            "report",
+            CborValue::Text(" \n".to_owned())
+        )]))
+        .is_err()
+    );
+    assert!(
+        parse_papercut_report(&cbor_map(vec![(
+            "report",
+            CborValue::Text("x".repeat(MAX_PAPERCUT_REPORT_CHARS + 1))
+        )]))
+        .is_err()
+    );
+    assert!(
+        parse_papercut_report(&cbor_map(vec![(
+            "report",
+            CborValue::Text("é".repeat(MAX_PAPERCUT_REPORT_BYTES / "é".len() + 1))
+        )]))
+        .is_err()
+    );
+}
+
+/// One accepted papercut writes exactly one newline-terminated compact JSON
+/// record whose attribution comes only from harness-owned tool and session
+/// facts, not from model arguments.
+#[test]
+fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
+    let mut rt = runtime();
+    rt.session_id = Some("session-42".to_owned());
+    let storage = FakePapercutStorage::default();
+    let lines = Rc::clone(&storage.lines);
+    rt.papercut_storage = Some(Box::new(storage));
+    let invoke = papercut_started("call-1", "agent-one", "tool output was confusing");
+
+    assert_eq!(
+        rt.record_papercut(&invoke, UnixMicros::new(1_234)),
+        "recorded; continue the primary task and do not retry"
+    );
+    let lines = lines.borrow();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].ends_with(b"\n"));
+    let record: serde_json::Value =
+        serde_json::from_slice(&lines[0]).expect("valid newline-delimited JSON");
+    assert_eq!(record["schema"], PAPERCUT_SCHEMA_VERSION);
+    assert_eq!(record["agent_id"], "agent-one");
+    assert_eq!(record["session_id"], "session-42");
+    assert_eq!(record["timestamp_us"], 1_234);
+    assert_eq!(record["report"], "tool output was confusing");
+    assert_eq!(record.as_object().expect("record object").len(), 5);
+}
+
+/// Failed session append, including ephemeral or quota denials reported by the
+/// harness, returns a non-distraction outcome and never creates a retry loop.
+#[test]
+fn papercut_append_failure_does_not_distract_the_primary_task() {
+    let mut rt = runtime();
+    rt.session_id = Some("session-42".to_owned());
+    let storage = FakePapercutStorage {
+        fail: true,
+        ..Default::default()
+    };
+    let lines = Rc::clone(&storage.lines);
+    rt.papercut_storage = Some(Box::new(storage));
+
+    let outcome = rt.record_papercut(
+        &papercut_started("call-1", "agent-one", "ephemeral session denied storage"),
+        UnixMicros::new(1),
+    );
+
+    assert!(outcome.starts_with("not recorded:"));
+    assert!(outcome.contains("continue the primary task"));
+    assert!(outcome.contains("do not retry"));
+    assert!(lines.borrow().is_empty());
+}
+
+/// Session rollover clears papercut attribution so a late call cannot append a
+/// record that falsely claims the previous session.
+#[test]
+fn papercut_session_lifecycle_drops_old_session_attribution() {
+    let mut rt = runtime();
+    rt.session_id = Some("old-session".to_owned());
+    rt.papercut_storage = Some(Box::new(FakePapercutStorage::default()));
+
+    rt.clear_session_state();
+
+    let outcome = rt.record_papercut(
+        &papercut_started("call-1", "agent-one", "late rollover call"),
+        UnixMicros::new(1),
+    );
+    assert!(outcome.contains("no active session"));
+}
+
+/// Replay folds timer history only. Replayed papercut calls must not append a
+/// second external record after the original live best-effort append.
+#[test]
+fn replayed_papercut_does_not_duplicate_append() {
+    let mut rt = runtime();
+    rt.session_id = Some("session-42".to_owned());
+    let storage = FakePapercutStorage::default();
+    let lines = Rc::clone(&storage.lines);
+    rt.papercut_storage = Some(Box::new(storage));
+    let invoke = papercut_started("call-1", "agent-one", "one-time report");
+
+    assert!(
+        rt.record_papercut(&invoke, UnixMicros::new(1))
+            .starts_with("recorded")
+    );
+    rt.handle_started_replay(&invoke);
+
+    assert_eq!(lines.borrow().len(), 1);
+    assert!(rt.pending_invocations.is_empty());
 }

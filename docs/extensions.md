@@ -171,6 +171,12 @@ Extension-specific settings remain under `config`. For example, std-slack's
 `prefix_agent_id` defaults to `false`; set it to `true` only when Slack posts
 should retain the legacy `[agent-id] ` presentation.
 
+`std-utils` keeps its best-effort `papercut` reporter disabled unless its
+instance config sets `papercut.enable: true`. See the
+[std-utils README](../crates/tau-ext-utils/README.md) for its exact JSONL
+record, session storage location, limits, privacy, retention, and inspection
+contract.
+
 Core-shell protects non-interactive model and user shell commands from pager
 prompts by applying `PAGER=cat`, `GIT_PAGER=cat`, `GH_PAGER=cat`,
 `JJ_PAGER=cat`, and `SYSTEMD_PAGER=cat` after inherited variables and

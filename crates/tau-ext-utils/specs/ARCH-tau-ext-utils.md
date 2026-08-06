@@ -1,7 +1,25 @@
 # ARCH-tau-ext-utils: tau-ext-utils architecture
 
-`tau-ext-utils` is a first-party utility extension. Its MVP owns one model-visible
-`timer` tool in the `timer` group.
+`tau-ext-utils` is a first-party utility extension. It owns the model-visible
+`timer` tool in the `timer` group and an opt-in `papercut` diagnostic reporter.
+The reporter is declared only when its configured instance enables
+`papercut.enable`; ordinary global and role tool policy still controls its
+effective visibility.
+
+`papercut` accepts only a bounded report string and uses the existing
+session-scoped extension-data `AppendFile` RPC to append one newline-terminated
+v1 JSONL record to its owned `papercuts.jsonl` relative filename. The record
+attributes the report from the routed tool caller and current live
+`session.started` fact; it never accepts model-supplied attribution. It is
+best-effort diagnostic data, not timer or journal state: memory-only/ephemeral
+storage denial, quota, RPC failure, and the accepted rare lifecycle rollover
+mismatch return a no-retry outcome without interrupting the primary task.
+Papercut calls are live-only and never replay-append.
+
+The extension uses deferred startup so it can validate this closed
+per-instance configuration before dynamically declaring its tools and prompt
+fragments. This preserves normal configured prefix scoping and avoids exposing
+papercut or its prompt when disabled.
 
 Timers are session-scoped operational state, not a separate durable database. The
 extension reconstructs active timers by folding catch-up input:

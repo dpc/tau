@@ -6050,6 +6050,7 @@ dependencies = [
 name = "tau-ext-utils"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tau-client",
  "tau-proto",

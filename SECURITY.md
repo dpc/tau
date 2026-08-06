@@ -384,6 +384,17 @@ semantic journals. Security review must revisit this boundary when changing the
 authority matrix, interception replacement/drop behavior, activation accounting,
 disconnect/respawn identity checks, or persistence classification. See
 [`SPEC-tool-declarations-and-canonical-state`](specs/SPEC-tool-declarations-and-canonical-state.md).
+
+When enabled, `std-utils` papercut reports persist unredacted model-supplied
+operational text plus harness-routed agent/session identity and an operation
+timestamp as plaintext session-scoped extension data. Session-state operators
+can read these records, there is no automatic redaction, and agents must not
+put secrets in reports. This is explicitly best-effort diagnostic data:
+ephemeral or memory-only storage denial, quota/RPC failure, and the accepted
+rare session-rollover mismatch can lose or misattribute a record. These
+limitations do not expand the configured-local extension boundary or imply
+additional append locking or hardening.
+
 The same configured-peer boundary admits transient `tool.progress_reported`
 observations. The report commits before routed-call authorization; only the
 downstream consumer may validate the captured live source, suppress backgrounded

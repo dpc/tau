@@ -1,9 +1,9 @@
 //! First-party utility extension.
 //!
-//! The MVP registers one `timer` tool. Timers are active-only, session-scoped
-//! state reconstructed from replayed `tool.started`, terminal tool results, and
-//! timer-generated `agent.prompt_submitted` facts; there is no separate timer
-//! store.
+//! The extension provides active-only `timer` reminders and an opt-in
+//! `papercut` reporter. Timers reconstruct session-scoped state from replayed
+//! tool and prompt facts; papercuts append independent diagnostic JSONL records
+//! through harness-managed session storage.
 
 #[cfg(test)]
 mod tests;
@@ -13,21 +13,27 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use tau_client::{
-    ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder, ManualExtensionRuntime,
-    ManualRuntimeInput, RawEventContext, TauExtension, TauExtensionRunner, ToolContext,
+    ClientHandle, ClientResult, ExtensionBuilder, ExtensionDataClient, ManualExtensionRuntime,
+    ManualRuntimeInput, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
-    AgentId, AgentPromptSteered, AgentPromptSubmitted, AgentReplayComplete, CborValue, Event,
-    EventName, EventSelector, ExtInternalPromptSubmitRequest, HarnessInputMessage,
-    SessionAgentUnloaded, SessionShutdown, SessionStarted, ToolError, ToolResult, ToolResultKind,
-    ToolSpec, ToolStarted, ToolType, ToolUseState, ToolUseStats, ToolUseStatus, UnixMicros,
+    AgentId, AgentPromptSubmitted, AgentReplayComplete, CborValue, Event, EventName, EventSelector,
+    ExtInternalPromptSubmitRequest, ExtensionDataPath, ExtensionDataRequestOp, ExtensionDataScope,
+    ExtensionDataValue, HarnessInputMessage, ToolError, ToolResult, ToolResultKind, ToolSpec,
+    ToolStarted, ToolType, ToolUseState, ToolUseStats, ToolUseStatus, UnixMicros,
 };
 
 /// Protocol/logging name for the utility extension.
 pub const EXTENSION_NAME: &str = "tau-ext-utils";
 /// Model-visible timer tool name.
 pub const TIMER_TOOL_NAME: &str = "timer";
+/// Model-visible best-effort diagnostic reporting tool name.
+pub const PAPERCUT_TOOL_NAME: &str = "papercut";
 
+const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
+const PAPERCUT_SCHEMA_VERSION: u64 = 1;
+const MAX_PAPERCUT_REPORT_CHARS: usize = 4096;
+const MAX_PAPERCUT_REPORT_BYTES: usize = 16 * 1024;
 const MAX_TIMERS_PER_AGENT: usize = 32;
 const MAX_TIMERS_TOTAL: usize = 128;
 const MAX_MESSAGE_BYTES: usize = 4096;
@@ -59,11 +65,27 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let runtime = TauExtensionRunner::new(UtilsExtension).start_manual_loop_with_state(
-        reader,
-        writer,
-        TimerRuntime::new,
-    )?;
+    let mut runtime = TauExtensionRunner::new(UtilsExtension)
+        .start_manual_loop_deferred_startup_with_state(reader, writer, TimerRuntime::new)?;
+    let Some(configure) = read_initial_config(&mut runtime)? else {
+        let _state = runtime.finish_detached();
+        return Ok(());
+    };
+    let config = match configure.config.deserialized::<UtilsConfig>() {
+        Ok(config) => config,
+        Err(error) => {
+            runtime.handle().config_error(error.to_string())?;
+            TimerRuntime::run(runtime)?;
+            return Ok(());
+        }
+    };
+    if config.papercut.enable {
+        let storage = RpcPapercutStorage {
+            client: runtime.extension_data_client(),
+        };
+        runtime.state_mut().papercut_storage = Some(Box::new(storage));
+    }
+    send_startup(&mut runtime, config.papercut.enable)?;
     TimerRuntime::run(runtime)?;
     Ok(())
 }
@@ -77,46 +99,7 @@ impl TauExtension for UtilsExtension {
         EXTENSION_NAME
     }
 
-    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
-        builder.ready_message("utils ready");
-        builder.tool_with_group_and_prompt_fragment(
-            timer_tool_spec(),
-            Some(tau_proto::ToolGroup {
-                name: tau_proto::ToolGroupName::new("timer"),
-                prompt_fragment: None,
-            }),
-            Some(tau_proto::PromptFragment::new(
-                "timer",
-                tau_proto::PromptPriority::new(0),
-                "Do not use timers to wait for or poll tools or commands; completion is delivered automatically. Use timers only for genuine external elapsed-time waits or wakeups.",
-            )),
-            handle_timer_tool,
-        );
-        builder
-            .on_restore::<ToolStarted>(handle_replay_tool_started)
-            .on_raw_restore(
-                EventSelector::Exact(EventName::TOOL_RESULT),
-                handle_replay_terminal_result,
-            )
-            .on_raw_restore(
-                EventSelector::Exact(EventName::PROVIDER_TOOL_RESULT),
-                handle_replay_terminal_result,
-            )
-            .on_raw_restore(
-                EventSelector::Exact(EventName::TOOL_ERROR),
-                handle_replay_terminal_error,
-            )
-            .on_raw_restore(
-                EventSelector::Exact(EventName::PROVIDER_TOOL_ERROR),
-                handle_replay_terminal_error,
-            )
-            .on_restore::<AgentPromptSubmitted>(handle_replay_prompt_submitted)
-            .on_restore::<AgentPromptSteered>(handle_replay_prompt_steered)
-            .on_live::<AgentReplayComplete>(handle_agent_replay_complete)
-            .on_live::<SessionStarted>(handle_session_started)
-            .on_live::<SessionShutdown>(handle_session_shutdown)
-            .on_live::<SessionAgentUnloaded>(handle_session_agent_unloaded);
-    }
+    fn register(self, _builder: &mut ExtensionBuilder<Self::State>) {}
 }
 
 /// Runtime and folded timer state owned by the single-threaded manual loop.
@@ -129,6 +112,78 @@ struct TimerRuntime {
     pending_invocations: HashMap<String, PendingInvocation>,
     /// Agents whose restore boundary succeeded and may receive timer prompts.
     replay_complete_agents: HashSet<AgentId>,
+    /// Configured wire name for timer calls after optional tool-prefix scoping.
+    timer_tool_name: Option<tau_proto::ToolName>,
+    /// Configured wire name for papercut calls after optional tool-prefix
+    /// scoping.
+    papercut_tool_name: Option<tau_proto::ToolName>,
+    /// Harness-authoritative current session identifier for papercut
+    /// attribution.
+    session_id: Option<String>,
+    /// Optional session-scoped append service enabled by extension
+    /// configuration.
+    papercut_storage: Option<Box<dyn PapercutStorage>>,
+}
+
+/// Closed operator configuration for this extension instance.
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UtilsConfig {
+    /// Opt-in best-effort papercut reporter configuration.
+    papercut: PapercutConfig,
+}
+
+/// Operator configuration controlling the model-visible papercut tool.
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PapercutConfig {
+    /// Exposes the papercut tool and its prompt guidance when true.
+    enable: bool,
+}
+
+/// Harness-mediated append operation used by the papercut reporter.
+trait PapercutStorage {
+    /// Append one complete JSONL record to the reporter-owned file.
+    fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String>;
+}
+
+/// Production papercut storage using the general session-scoped data RPC.
+struct RpcPapercutStorage {
+    /// Correlated client used to make the harness extension-data request.
+    client: ExtensionDataClient,
+}
+
+impl PapercutStorage for RpcPapercutStorage {
+    fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String> {
+        match self.client.request(
+            ExtensionDataScope::Session,
+            ExtensionDataRequestOp::AppendFile {
+                path: ExtensionDataPath::new(PAPERCUT_FILE_NAME),
+                contents,
+            },
+        ) {
+            Ok(ExtensionDataValue::AppendFile) => Ok(()),
+            Ok(other) => Err(format!(
+                "unexpected extension data append result: {other:?}"
+            )),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+/// One stable, compact record persisted by an accepted papercut report.
+#[derive(serde::Serialize)]
+struct PapercutRecord<'a> {
+    /// Schema version for batch readers.
+    schema: u64,
+    /// Harness-routed tool caller identity.
+    agent_id: &'a str,
+    /// Current harness-authored session identity.
+    session_id: &'a str,
+    /// Tool operation wall-clock time in Unix microseconds.
+    timestamp_us: u64,
+    /// Model-supplied concise report text.
+    report: &'a str,
 }
 
 /// Stable map key for one active timer.
@@ -258,6 +313,10 @@ impl TimerRuntime {
             timers: HashMap::new(),
             pending_invocations: HashMap::new(),
             replay_complete_agents: HashSet::new(),
+            timer_tool_name: None,
+            papercut_tool_name: None,
+            session_id: None,
+            papercut_storage: None,
         }
     }
 
@@ -269,14 +328,12 @@ impl TimerRuntime {
             };
             match input {
                 LoopInput::Message(message) => {
-                    match runtime.dispatch_one(message) {
-                        Ok(DispatchOutcome::Continue) => {}
-                        Ok(DispatchOutcome::Disconnect(_)) => {
-                            let _state = runtime.finish_detached();
-                            return Ok(());
-                        }
-                        Ok(DispatchOutcome::StopRequested) => break,
-                        Err(error) => return finish_with_error(runtime, error),
+                    if matches!(message, tau_proto::HarnessOutputMessage::Disconnect(_)) {
+                        let _state = runtime.finish_detached();
+                        return Ok(());
+                    }
+                    if let Err(error) = handle_delivery(&mut runtime, message) {
+                        return finish_with_error(runtime, error);
                     }
                     if let Err(error) = runtime.state_mut().fire_due_now() {
                         return finish_with_error(runtime, error);
@@ -366,7 +423,7 @@ impl TimerRuntime {
     }
 
     fn handle_started_replay(&mut self, started: &ToolStarted) {
-        if started.tool_name.as_str() != TIMER_TOOL_NAME {
+        if !self.is_timer_tool(&started.tool_name) {
             return;
         }
         self.pending_invocations.insert(
@@ -380,7 +437,7 @@ impl TimerRuntime {
     }
 
     fn handle_result_replay(&mut self, result: &ToolResult, now: UnixMicros) {
-        if result.tool_name.as_str() != TIMER_TOOL_NAME || result.kind != ToolResultKind::Final {
+        if !self.is_timer_tool(&result.tool_name) || result.kind != ToolResultKind::Final {
             return;
         }
         let call_id = result.call_id.to_string();
@@ -436,6 +493,20 @@ impl TimerRuntime {
         self.timers.clear();
         self.pending_invocations.clear();
         self.replay_complete_agents.clear();
+        self.session_id = None;
+    }
+
+    fn is_timer_tool(&self, name: &tau_proto::ToolName) -> bool {
+        self.timer_tool_name
+            .as_ref()
+            .is_some_and(|timer| timer == name)
+            || (self.timer_tool_name.is_none() && name.as_str() == TIMER_TOOL_NAME)
+    }
+
+    fn is_papercut_tool(&self, name: &tau_proto::ToolName) -> bool {
+        self.papercut_tool_name
+            .as_ref()
+            .is_some_and(|papercut| papercut == name)
     }
 
     fn unload_agent(&mut self, agent_id: &AgentId) {
@@ -474,6 +545,41 @@ impl TimerRuntime {
             result,
             display: timer_success_display(display_args, outcome),
         })
+    }
+
+    fn record_papercut(&self, invoke: &ToolStarted, now: UnixMicros) -> String {
+        let report = match parse_papercut_report(&invoke.arguments) {
+            Ok(report) => report,
+            Err(message) => return papercut_not_recorded(&message),
+        };
+        let Some(session_id) = self.session_id.as_deref() else {
+            return papercut_not_recorded("no active session is available");
+        };
+        let Some(storage) = &self.papercut_storage else {
+            return papercut_not_recorded("session storage is unavailable");
+        };
+        let record = PapercutRecord {
+            schema: PAPERCUT_SCHEMA_VERSION,
+            agent_id: invoke.agent_id.as_ref(),
+            session_id,
+            timestamp_us: now.get(),
+            report: &report,
+        };
+        let mut line = match serde_json::to_vec(&record) {
+            Ok(line) => line,
+            Err(error) => {
+                tracing::warn!(%error, "papercut serialization failed");
+                return papercut_not_recorded("record serialization failed");
+            }
+        };
+        line.push(b'\n');
+        match storage.append_papercut(line) {
+            Ok(()) => "recorded; continue the primary task and do not retry".to_owned(),
+            Err(error) => {
+                tracing::debug!(%error, "papercut append was not recorded");
+                papercut_not_recorded("session storage rejected the report")
+            }
+        }
     }
 
     fn apply_successful_invocation(
@@ -639,111 +745,206 @@ fn recv_next(runtime: &mut ManualExtensionRuntime<TimerRuntime>) -> ClientResult
     }
 }
 
-fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
+fn read_initial_config(
+    runtime: &mut ManualExtensionRuntime<TimerRuntime>,
+) -> ClientResult<Option<tau_proto::Configure>> {
+    loop {
+        match runtime.recv()? {
+            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Configure(configure)) => {
+                runtime.dispatch_one(tau_proto::HarnessOutputMessage::Configure(
+                    configure.clone(),
+                ))?;
+                return Ok(Some(configure));
+            }
+            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Disconnect(_))
+            | ManualRuntimeInput::InputClosed => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+fn send_startup(
+    runtime: &mut ManualExtensionRuntime<TimerRuntime>,
+    papercut_enabled: bool,
+) -> ClientResult<()> {
+    let handle = runtime.handle();
+    let scope = handle.tool_name_scope()?;
+    let timer_tool_name = scope.wire_tool(TIMER_TOOL_NAME)?;
+    let papercut_tool_name = papercut_enabled
+        .then(|| scope.wire_tool(PAPERCUT_TOOL_NAME))
+        .transpose()?;
+    runtime.state_mut().timer_tool_name = Some(timer_tool_name);
+    runtime.state_mut().papercut_tool_name = papercut_tool_name;
+    runtime.startup_subscribe_split(
+        [
+            EventSelector::Exact(EventName::TOOL_STARTED),
+            EventSelector::Exact(EventName::TOOL_RESULT),
+            EventSelector::Exact(EventName::PROVIDER_TOOL_RESULT),
+            EventSelector::Exact(EventName::TOOL_ERROR),
+            EventSelector::Exact(EventName::PROVIDER_TOOL_ERROR),
+            EventSelector::Exact(EventName::AGENT_PROMPT_SUBMITTED),
+            EventSelector::Exact(EventName::AGENT_PROMPT_STEERED),
+        ],
+        [
+            EventSelector::Exact(EventName::TOOL_STARTED),
+            EventSelector::Exact(EventName::AGENT_REPLAY_COMPLETE),
+            EventSelector::Exact(EventName::SESSION_STARTED),
+            EventSelector::Exact(EventName::SESSION_SHUTDOWN),
+            EventSelector::Exact(EventName::SESSION_AGENT_UNLOADED),
+        ],
+    )?;
+    for registration in tool_registrations(papercut_enabled) {
+        runtime.startup_local_tool(registration)?;
+    }
+    runtime.startup_ready(Some("utils ready".to_owned()))
+}
+
+fn tool_registrations(papercut_enabled: bool) -> Vec<tau_proto::ToolRegistrationDeclared> {
+    let mut registrations = vec![timer_registration()];
+    if papercut_enabled {
+        registrations.push(papercut_registration());
+    }
+    registrations
+}
+
+fn timer_registration() -> tau_proto::ToolRegistrationDeclared {
+    tau_proto::ToolRegistrationDeclared {
+        tool: timer_tool_spec(),
+        tool_group: Some(tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new("timer"),
+            prompt_fragment: None,
+        }),
+        prompt_fragment: Some(tau_proto::PromptFragment::new(
+            "timer",
+            tau_proto::PromptPriority::new(0),
+            "Do not use timers to wait for or poll tools or commands; completion is delivered automatically. Use timers only for genuine external elapsed-time waits or wakeups.",
+        )),
+    }
+}
+
+fn papercut_registration() -> tau_proto::ToolRegistrationDeclared {
+    tau_proto::ToolRegistrationDeclared {
+        tool: papercut_tool_spec(),
+        tool_group: Some(tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new("papercut"),
+            prompt_fragment: None,
+        }),
+        prompt_fragment: Some(tau_proto::PromptFragment::new(
+            "papercut",
+            tau_proto::PromptPriority::new(0),
+            "Use `papercut` once to report an incidental harness, tooling, environment, confusing, or suspicious problem you encounter while working. Do not report secrets. Continue the primary task after calling it; do not investigate solely because of the papercut, do not retry it, and do not file the report elsewhere unless the primary task already requires that work.",
+        )),
+    }
+}
+
+fn handle_delivery(
+    runtime: &mut ManualExtensionRuntime<TimerRuntime>,
+    message: tau_proto::HarnessOutputMessage,
+) -> ClientResult<()> {
+    let tau_proto::HarnessOutputMessage::Deliver(delivery) = message else {
+        return Ok(());
+    };
+    if delivery.replay {
+        match delivery.event.as_ref() {
+            Event::ToolStarted(started) => runtime.state_mut().handle_started_replay(started),
+            Event::ToolResult(result) | Event::ProviderToolResult(result) => runtime
+                .state_mut()
+                .handle_result_replay(result, delivery.recorded_at.unwrap_or_else(UnixMicros::now)),
+            Event::ToolError(error) | Event::ProviderToolError(error) => {
+                runtime
+                    .state_mut()
+                    .handle_error_replay(error.call_id.as_str());
+            }
+            Event::AgentPromptSubmitted(prompt) => runtime
+                .state_mut()
+                .handle_prompt_replay(prompt, delivery.recorded_at),
+            Event::AgentPromptSteered(prompt) => {
+                let submitted = AgentPromptSubmitted {
+                    inference_activation: false,
+                    agent_id: prompt.agent_id.clone(),
+                    text: prompt.text.clone(),
+                    message_class: prompt.message_class,
+                    internal_kind: None,
+                    originator: tau_proto::PromptOriginator::User,
+                    submission_source: Default::default(),
+                    display_name: None,
+                    ctx_id: prompt.ctx_id.clone(),
+                };
+                runtime
+                    .state_mut()
+                    .handle_prompt_replay(&submitted, delivery.recorded_at);
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    match delivery.event.as_ref() {
+        Event::ToolStarted(invoke) if runtime.state().is_timer_tool(&invoke.tool_name) => {
+            let handle = runtime.handle();
+            report_timer_tool(runtime.state_mut(), handle, invoke)?;
+        }
+        Event::ToolStarted(invoke) if runtime.state().is_papercut_tool(&invoke.tool_name) => {
+            report_papercut_tool(runtime.state(), runtime.handle(), invoke)?;
+        }
+        Event::AgentReplayComplete(event) => runtime.state_mut().complete_agent_replay(event)?,
+        Event::SessionStarted(event) => {
+            runtime.state_mut().clear_session_state();
+            runtime.state_mut().session_id = Some(event.session_id.to_string());
+        }
+        Event::SessionShutdown(_) => runtime.state_mut().clear_session_state(),
+        Event::SessionAgentUnloaded(event) => runtime.state_mut().unload_agent(&event.agent_id),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn report_timer_tool(
+    state: &mut TimerRuntime,
+    handle: ClientHandle,
+    invoke: &ToolStarted,
+) -> ClientResult<()> {
     let now = UnixMicros::now();
-    let result = cx.state.handle_live_tool(cx.invoke, now);
-    let display_args = timer_display_args(&cx.invoke.arguments, cx.invoke.call_id.as_str());
+    let result = state.handle_live_tool(invoke, now);
+    let display_args = timer_display_args(&invoke.arguments, invoke.call_id.as_str());
     match result {
-        Ok(completion) => cx.report_result(ToolResult {
-            call_id: cx.invoke.call_id.clone(),
-            tool_name: cx.invoke.tool_name.clone(),
+        Ok(completion) => handle.report_tool_result(ToolResult {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
             result: completion.result,
             provider_content: Vec::new(),
             kind: ToolResultKind::Final,
             display: Some(completion.display),
-            originator: cx.invoke.originator.clone(),
+            originator: invoke.originator.clone(),
         }),
-        Err(message) => cx.report_error(ToolError {
-            call_id: cx.invoke.call_id.clone(),
-            tool_name: cx.invoke.tool_name.clone(),
+        Err(message) => handle.report_tool_error(ToolError {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
             message,
             details: None,
             display: Some(error_display(display_args)),
-            originator: cx.invoke.originator.clone(),
+            originator: invoke.originator.clone(),
         }),
     }
 }
 
-fn handle_replay_tool_started(
-    cx: tau_client::EventContext<'_, TimerRuntime, ToolStarted>,
+fn report_papercut_tool(
+    state: &TimerRuntime,
+    handle: ClientHandle,
+    invoke: &ToolStarted,
 ) -> ClientResult<()> {
-    cx.state.handle_started_replay(cx.event);
-    Ok(())
-}
-
-fn handle_replay_terminal_result(cx: RawEventContext<'_, TimerRuntime>) -> ClientResult<()> {
-    let result = match cx.event() {
-        Event::ToolResult(result) | Event::ProviderToolResult(result) => result.clone(),
-        _ => return Ok(()),
-    };
-    let recorded_at = cx.recorded_at().unwrap_or_else(UnixMicros::now);
-    cx.state.handle_result_replay(&result, recorded_at);
-    Ok(())
-}
-
-fn handle_replay_terminal_error(cx: RawEventContext<'_, TimerRuntime>) -> ClientResult<()> {
-    let call_id = match cx.event() {
-        Event::ToolError(error) | Event::ProviderToolError(error) => error.call_id.to_string(),
-        _ => return Ok(()),
-    };
-    cx.state.handle_error_replay(&call_id);
-    Ok(())
-}
-
-fn handle_replay_prompt_submitted(
-    cx: tau_client::EventContext<'_, TimerRuntime, AgentPromptSubmitted>,
-) -> ClientResult<()> {
-    cx.state.handle_prompt_replay(cx.event, cx.recorded_at);
-    Ok(())
-}
-
-fn handle_replay_prompt_steered(
-    cx: tau_client::EventContext<'_, TimerRuntime, AgentPromptSteered>,
-) -> ClientResult<()> {
-    let submitted = AgentPromptSubmitted {
-        inference_activation: false,
-        agent_id: cx.event.agent_id.clone(),
-        text: cx.event.text.clone(),
-        message_class: cx.event.message_class,
-        internal_kind: None,
-        originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
-        display_name: None,
-        ctx_id: cx.event.ctx_id.clone(),
-    };
-    cx.state.handle_prompt_replay(&submitted, cx.recorded_at);
-    Ok(())
-}
-
-fn handle_agent_replay_complete(
-    cx: tau_client::EventContext<'_, TimerRuntime, AgentReplayComplete>,
-) -> ClientResult<()> {
-    cx.state.complete_agent_replay(cx.event)
-}
-
-fn handle_session_started(
-    cx: tau_client::EventContext<'_, TimerRuntime, SessionStarted>,
-) -> ClientResult<()> {
-    let _ = cx.event;
-    cx.state.clear_session_state();
-    Ok(())
-}
-
-fn handle_session_shutdown(
-    cx: tau_client::EventContext<'_, TimerRuntime, SessionShutdown>,
-) -> ClientResult<()> {
-    let _ = cx.event;
-    cx.state.clear_session_state();
-    Ok(())
-}
-
-fn handle_session_agent_unloaded(
-    cx: tau_client::EventContext<'_, TimerRuntime, SessionAgentUnloaded>,
-) -> ClientResult<()> {
-    cx.state.unload_agent(&cx.event.agent_id);
-    Ok(())
+    handle.report_tool_result(ToolResult {
+        call_id: invoke.call_id.clone(),
+        tool_name: invoke.tool_name.clone(),
+        tool_type: ToolType::Function,
+        result: text_result(state.record_papercut(invoke, UnixMicros::now())),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: Some(ok_display("papercut".to_owned())),
+        originator: invoke.originator.clone(),
+    })
 }
 
 fn timer_display_args(arguments: &CborValue, call_id: &str) -> String {
@@ -883,6 +1084,54 @@ fn timer_tool_spec() -> ToolSpec {
         background_support: None,
         examples: vec![],
     }
+}
+
+fn papercut_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: tau_proto::ToolName::new(PAPERCUT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Record one concise, best-effort report about an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Continue the primary task after calling it; do not retry."
+                .to_owned(),
+        ),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "report": {
+                    "type": "string",
+                    "maxLength": MAX_PAPERCUT_REPORT_CHARS,
+                    "description": format!("Concise report text; required, non-empty, and at most {MAX_PAPERCUT_REPORT_CHARS} Unicode scalars or {MAX_PAPERCUT_REPORT_BYTES} bytes.")
+                }
+            },
+            "required": ["report"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: vec![],
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![],
+    }
+}
+
+fn parse_papercut_report(value: &CborValue) -> Result<String, String> {
+    let report = tau_proto::cbor_text_field(value, "report")
+        .ok_or_else(|| "report is required".to_owned())?;
+    let char_count = report.chars().count();
+    if report.trim().is_empty() {
+        return Err("report must not be empty".to_owned());
+    }
+    if MAX_PAPERCUT_REPORT_CHARS < char_count || MAX_PAPERCUT_REPORT_BYTES < report.len() {
+        return Err(format!(
+            "report must contain at most {MAX_PAPERCUT_REPORT_CHARS} Unicode scalars and {MAX_PAPERCUT_REPORT_BYTES} bytes"
+        ));
+    }
+    Ok(report)
+}
+
+fn papercut_not_recorded(reason: &str) -> String {
+    format!("not recorded: {reason}; continue the primary task and do not retry")
 }
 
 fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String> {
