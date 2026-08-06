@@ -27,7 +27,7 @@ cannot submit a prompt for a successor or disconnected extension.
 
 ## Validation and prompt effects
 
-The committed request names a loaded agent, hidden internal text, and an
+The committed request names a loaded agent, internal model-classified text, and an
 optional submitter correlation `ctx_id`. It also carries optional typed
 activation provenance: absent or `internal_prompt` preserves ordinary internal
 prompt behavior, while `timer` classifies the resulting content-free queued
@@ -41,7 +41,12 @@ An accepted request enters the ordinary per-agent prompt queue as internal text.
 It has no user-message class and does not update latest-user-interaction
 metadata. The harness publishes canonical `agent.prompt_submitted` or
 `agent.prompt_steered` facts through the existing prompt path; steering retains
-the request's `ctx_id`.
+the request's `ctx_id`. The harness stamps those facts with the authenticated
+configured extension name as `PromptSubmissionSource::Extension`; it never
+trusts extension-supplied provenance. CLI presentation renders that source once
+as an attributed message block, while typed `HarnessInternal` prompt facts use
+the default-off `show_internal_prompts` diagnostic setting. Legacy provenance
+remains hidden, and the source changes neither model delivery nor replay.
 
 The request is operational traffic, not an extension-lifecycle activation
 declaration. Its typed provenance only classifies the harness-authored

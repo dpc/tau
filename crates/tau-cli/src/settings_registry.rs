@@ -48,6 +48,17 @@ const BOOL_VALUES: &[SettingValue] = &[
     },
 ];
 
+const ON_OFF_VALUES: &[SettingValue] = &[
+    SettingValue {
+        value: "on",
+        description: "show harness-internal prompts",
+    },
+    SettingValue {
+        value: "off",
+        description: "hide harness-internal prompts",
+    },
+];
+
 const SHOW_MESSAGES_VALUES: &[SettingValue] = &[
     SettingValue {
         value: "none",
@@ -220,6 +231,20 @@ pub const SETTINGS: &[SettingDef] = &[
         values: SHOW_MESSAGES_VALUES,
         validate: |value| validate_list(value, SHOW_MESSAGES_VALUES),
         get: |s| s.show_messages.as_str().to_owned(),
+    },
+    SettingDef {
+        name: "show-internal-prompts",
+        description: "Visibility of harness-internal prompt blocks",
+        value_hint: "on|off",
+        values: ON_OFF_VALUES,
+        validate: |value| validate_list(value, ON_OFF_VALUES),
+        get: |s| {
+            if s.show_internal_prompts {
+                "on".to_owned()
+            } else {
+                "off".to_owned()
+            }
+        },
     },
     SettingDef {
         name: "notice-level",

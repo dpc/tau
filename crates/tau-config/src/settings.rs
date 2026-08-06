@@ -231,6 +231,8 @@ pub struct CliSettings {
     pub show_tools: ShowTools,
     /// How inter-agent and user-agent messages are rendered in the transcript.
     pub show_messages: ShowMessages,
+    /// Whether to render harness-internal prompt facts in the transcript.
+    pub show_internal_prompts: bool,
     /// Default notice visibility threshold for harness/UI notices.
     pub notice_level: tau_proto::NoticeLevel,
     /// Deprecated compatibility setting for old routine status visibility.
@@ -273,6 +275,7 @@ impl CliSettings {
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
+            show_internal_prompts: self.show_internal_prompts,
             notice_level: self.notice_level,
             show_status: self.show_status,
             show_prompt_scroll_indicator: self.show_prompt_scroll_indicator,
@@ -352,6 +355,9 @@ pub struct CliState {
     /// How messages between the user and agents, or between agents, are
     /// rendered in the transcript. Controlled by `:set show-messages <mode>`.
     pub show_messages: ShowMessages,
+    /// Whether to render typed harness-internal prompt facts. Controlled by
+    /// `:set show-internal-prompts <on|off>`.
+    pub show_internal_prompts: bool,
     /// Notice visibility threshold. Controlled by
     /// `:set notice-level <critical|warning|info|debug|trace>`.
     pub notice_level: tau_proto::NoticeLevel,
@@ -372,6 +378,8 @@ struct CliStatePatch {
     show_ui_io: Option<bool>,
     show_tools: Option<ShowTools>,
     show_messages: Option<ShowMessages>,
+    /// Optional persisted diagnostic visibility override for harness prompts.
+    show_internal_prompts: Option<bool>,
     notice_level: Option<tau_proto::NoticeLevel>,
     show_status: Option<ShowStatus>,
     show_prompt_scroll_indicator: Option<bool>,
@@ -402,6 +410,9 @@ impl CliStatePatch {
         }
         if let Some(value) = self.show_messages {
             state.show_messages = value;
+        }
+        if let Some(value) = self.show_internal_prompts {
+            state.show_internal_prompts = value;
         }
         if let Some(value) = self.notice_level {
             state.notice_level = value;
@@ -617,6 +628,7 @@ impl Default for CliState {
             show_ui_io: false,
             show_tools: ShowTools::Full,
             show_messages: ShowMessages::AllFull,
+            show_internal_prompts: false,
             notice_level: tau_proto::NoticeLevel::Info,
             show_status: ShowStatus::All,
             show_prompt_scroll_indicator: true,

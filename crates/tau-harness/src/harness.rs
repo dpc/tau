@@ -12923,7 +12923,9 @@ impl Harness {
             self.discard_peer_activation_reservation(peer_context);
             return;
         }
-        if let Err(error) = self.handle_extension_internal_prompt_submit_request(request) {
+        if let Err(error) =
+            self.handle_extension_internal_prompt_submit_request(&extension.publisher, request)
+        {
             self.pending_publish_error.get_or_insert(error);
         }
     }
@@ -15351,6 +15353,7 @@ impl Harness {
 
     fn handle_extension_internal_prompt_submit_request(
         &mut self,
+        extension_name: &tau_proto::ExtensionName,
         request: &tau_proto::ExtInternalPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
         let agent_id = request.agent_id.to_string();
@@ -15368,6 +15371,9 @@ impl Harness {
         };
         let mut prompt =
             PendingPrompt::internal(request.text.clone()).with_ctx_id(request.ctx_id.clone());
+        prompt.submission_source = tau_proto::PromptSubmissionSource::Extension {
+            name: extension_name.clone(),
+        };
         if request.activation_kind == Some(tau_proto::InternalPromptActivationKind::Timer) {
             prompt.source = path_crate_agent::PendingPromptSource::Timer;
         }

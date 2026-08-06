@@ -49,13 +49,13 @@ agent restores that agent's own transcript instead of adopting overview history.
 The original sender and recipient projections remain in their respective agent
 transcripts.
 
-Internal prompt facts remain hidden by default. The only context-size alert
-presentation comes from a durable `agent.prompt_submitted` or
-`agent.prompt_steered` fact tagged with
-`internal_kind=context_size_alert`; the UI renders its exact text at that
-fact's live or replay position as `[tau-internal]: <text>`. Missing tags,
-untagged internal prompts, `ctx_id`, and prompt text never imply this
-presentation. This behavior is confirmed by
+Internal prompt facts use their typed `submission_source` at the same live or
+replay position. `Extension { name }` renders once as an attributed message;
+typed `HarnessInternal` renders as `[tau-internal]: <text>` only when the
+default-off `show_internal_prompts` setting is enabled; `Legacy` stays hidden.
+The `internal_kind=context_size_alert` presentation takes precedence and always
+renders its exact text once. Missing tags, `ctx_id`, and prompt text never
+imply trusted provenance or special presentation. This behavior is confirmed by
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
 Visible prompt facts, prompt recall/history, and transcript snapshots render the

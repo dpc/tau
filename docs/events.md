@@ -166,10 +166,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   distinguishes checkpoint-governed work from passive or legacy history;
   steered and injected facts use the same default-false marker. The optional
   harness-owned `internal_kind=context_size_alert` marks an alert delivery for
-  exact-position live and replay UI history; missing tags retain legacy hidden
-  internal presentation. Harness-stamped `submission_source` selects late
-  provider presentation; `HumanUi` facts keep raw canonical text but project as
-  fieldless `<user>...</user>` context.
+   exact-position live and replay UI history. Harness-stamped
+   `submission_source` selects provider and source-aware CLI presentation:
+   `Extension { name }` renders once as an attributed message,
+   `HarnessInternal` is controlled by the default-off internal-prompt setting,
+   and `Legacy` preserves hidden internal behavior. `HumanUi` facts keep raw
+   canonical text but project as fieldless `<user>...</user>` context.
 - **`agent.prompt_queued`** — A prompt arrived while the agent was busy and was
   queued instead of dispatched. Runtime UI state; not durable transcript truth.
 - **`agent.prompt_steered`** — A previously queued prompt folded into an
@@ -597,13 +599,14 @@ transient runtime observations and never enter semantic replay. See
   interception before the harness replaces the source/name prompt-assembly slot;
   declarations are not replayed or synthesized for late subscribers.
 - **`extension.internal_prompt_submit_request`** — A narrow extension request to
-  submit hidden internal control text to an already loaded agent. Every
+   submit internal model-classified text to an already loaded agent. Every
   authenticated configured extension kind may publish it; unconfigured/socket
   peers may not. The transient request commits before the harness validates the
-  exact live publisher generation and target agent and, when accepted, publishes an internal
-  `agent.prompt_submitted` fact; queued prompts folded into an in-flight turn
-  preserve the request `ctx_id` on `agent.prompt_steered`. It has no user-message
-  class. Optional typed provenance is absent/`internal_prompt` for ordinary
+   exact live publisher generation and target agent and, when accepted, publishes
+   one internal `agent.prompt_submitted` or `agent.prompt_steered` fact stamped
+   with the authenticated configured extension name; queued prompts preserve the
+   request `ctx_id`. It has no user-message class. Optional typed provenance is
+   absent/`internal_prompt` for ordinary
   internal prompts and `timer` for timer wakeups; it grants no additional
   authority and is copied only into content-free `agent.activation_queued`
   classification. The request remains transient, and replay/recovery never

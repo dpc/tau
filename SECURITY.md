@@ -77,6 +77,11 @@ minimum/maximum boundaries, tiny widths, owned-body suppression, and resize
 restoration whenever terminal layout or tool presentation changes. See
 [`ARCH-tau-term-screen`](crates/tau-term-screen/specs/ARCH-tau-term-screen.md)
 and [`ARCH-tau-cli`](crates/tau-cli/specs/ARCH-tau-cli.md).
+The harness alone stamps prompt provenance at the configured-extension boundary:
+an accepted internal-prompt request produces one canonical prompt fact with the
+authenticated configured extension name, never a request-supplied name. CLI
+attribution escapes that bounded name as visible metadata and does not create a
+second transport message or model activation.
 The built-in Swarm `blocker` tool has a narrower presentation boundary: the
 CLI permits only its finite `add`, `cancel`, or `list` action discriminant from
 the start arguments, and strips all other start, progress, and terminal display

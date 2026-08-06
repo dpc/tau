@@ -797,6 +797,7 @@ fn cli_state_round_trip_through_save_and_load() {
         show_ui_io: true,
         show_tools: path_crate_settings::ShowTools::SummarizeTurn,
         show_messages: path_crate_settings::ShowMessages::AllSummary,
+        show_internal_prompts: true,
         notice_level: tau_proto::NoticeLevel::Debug,
         show_status: path_crate_settings::ShowStatus::Minimal,
         show_prompt_scroll_indicator: false,
@@ -820,6 +821,7 @@ fn cli_state_defaults_missing_show_messages_to_all_full() {
 
     let loaded = CliState::load(&dirs);
     assert_eq!(loaded.show_messages, crate::settings::ShowMessages::AllFull);
+    assert!(!loaded.show_internal_prompts);
     assert!(loaded.show_prompt_scroll_indicator);
 }
 
@@ -1321,7 +1323,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
         config_dir.join("cli.yaml"),
-        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, redraw_history_size: 321, show_ui_io: true, show_tools: "compact", show_messages: "self-full", notice_level: "warning", show_status: "minimal", show_prompt_scroll_indicator: false }"#,
+        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, redraw_history_size: 321, show_ui_io: true, show_tools: "compact", show_messages: "self-full", show_internal_prompts: true, notice_level: "warning", show_status: "minimal", show_prompt_scroll_indicator: false }"#,
     )
     .expect("write");
 
@@ -1340,6 +1342,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
             show_ui_io: true,
             show_tools: ShowTools::Compact,
             show_messages: ShowMessages::SelfFull,
+            show_internal_prompts: true,
             notice_level: tau_proto::NoticeLevel::Warning,
             show_status: ShowStatus::Minimal,
             show_prompt_scroll_indicator: false,
@@ -1363,6 +1366,7 @@ fn partial_cli_state_overlays_cli_config_defaults() {
     let default = CliState {
         show_diff: true,
         redraw_history_size: 321,
+        show_internal_prompts: true,
         ..CliState::default()
     };
 
@@ -1370,6 +1374,7 @@ fn partial_cli_state_overlays_cli_config_defaults() {
 
     assert!(!state.show_diff);
     assert_eq!(state.redraw_history_size, 321);
+    assert!(state.show_internal_prompts);
 }
 
 /// Ensures persisted state values override CLI config defaults where state is

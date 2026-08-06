@@ -17,6 +17,18 @@ fn show_messages_values_are_registered() {
     );
 }
 
+/// `:set show-internal-prompts` uses the compact on/off vocabulary promised by
+/// the runtime setting contract.
+#[test]
+fn show_internal_prompts_values_are_registered() {
+    let setting = super::find("show-internal-prompts").expect("show-internal-prompts setting");
+    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
+
+    assert_eq!(values, vec!["on", "off"]);
+    assert!((setting.validate)("on"));
+    assert!(!(setting.validate)("true"));
+}
+
 /// `:set show-ui-io` is a boolean status-bar toggle, so it should use the
 /// standard true/false values that completion and validation expect.
 #[test]

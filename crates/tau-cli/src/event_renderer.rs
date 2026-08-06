@@ -490,6 +490,9 @@ pub(crate) struct EventRenderer {
     /// Durable message blocks and payloads, kept so `:set show-messages`
     /// can re-render the current transcript retroactively.
     message_history: Vec<MessageBlockEntry>,
+    /// Typed harness-internal prompt blocks retained for `:set
+    /// show-internal-prompts` reprojection.
+    internal_prompt_history: Vec<InternalPromptBlockEntry>,
     /// Where to persist `show_diff` / `show_thinking` /
     /// `show_turn_stats` / `show_tools` toggles.
     state_dirs: tau_config::settings::TauDirs,
@@ -563,6 +566,9 @@ pub(crate) struct EventRenderer {
     show_tools: tau_config::settings::ShowTools,
     /// Agent/user message visibility mode.
     show_messages: tau_config::settings::ShowMessages,
+    /// Whether typed harness-internal prompt facts are visible in the
+    /// transcript.
+    show_internal_prompts: bool,
     /// Harness/UI notice visibility threshold.
     notice_level: tau_proto::NoticeLevel,
     /// Whether to show an indicator when prompt input rows are hidden.
@@ -668,6 +674,8 @@ struct AgentUiState {
     turn_stats_history: Vec<TurnStatsBlockEntry>,
     tool_history: Vec<ToolBlockEntry>,
     message_history: Vec<MessageBlockEntry>,
+    /// Typed harness-internal prompt projection slots owned by this transcript.
+    internal_prompt_history: Vec<InternalPromptBlockEntry>,
     current_context_percent: Option<u8>,
     current_context_input_tokens: Option<u64>,
     current_context_window: Option<u64>,
@@ -854,6 +862,16 @@ enum MessageRenderMode {
 /// the transcript.
 struct ThinkingBlockEntry {
     block_id: tau_cli_term::BlockId,
+    text: String,
+}
+
+/// One typed harness-internal prompt block retained for live reprojection.
+struct InternalPromptBlockEntry {
+    /// Position-stable terminal block for this canonical prompt fact.
+    block_id: tau_cli_term::BlockId,
+    /// Authenticated source stamped on the canonical prompt fact.
+    submission_source: tau_proto::PromptSubmissionSource,
+    /// Canonical prompt payload.
     text: String,
 }
 
@@ -1736,6 +1754,7 @@ impl EventRenderer {
             show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
             show_messages: state.show_messages,
+            show_internal_prompts: state.show_internal_prompts,
             notice_level: state.notice_level,
             show_prompt_scroll_indicator: state.show_prompt_scroll_indicator,
             show_ui_io: state.show_ui_io,
@@ -1748,6 +1767,7 @@ impl EventRenderer {
             turn_stats_history: Vec::new(),
             tool_history: Vec::new(),
             message_history: Vec::new(),
+            internal_prompt_history: Vec::new(),
             state_dirs,
             current_model: None,
             quota_pacing: path_crate_provider_quota::QuotaPacingState::default(),
@@ -2446,6 +2466,7 @@ impl EventRenderer {
             turn_stats_history: std::mem::take(&mut self.turn_stats_history),
             tool_history: std::mem::take(&mut self.tool_history),
             message_history: std::mem::take(&mut self.message_history),
+            internal_prompt_history: std::mem::take(&mut self.internal_prompt_history),
             current_context_percent: self.current_context_percent.take(),
             current_context_input_tokens: self.current_context_input_tokens.take(),
             current_context_window: self.current_context_window.take(),
@@ -2496,6 +2517,7 @@ impl EventRenderer {
         self.turn_stats_history = state.turn_stats_history;
         self.tool_history = state.tool_history;
         self.message_history = state.message_history;
+        self.internal_prompt_history = state.internal_prompt_history;
         self.current_context_percent = state.current_context_percent;
         self.current_context_input_tokens = state.current_context_input_tokens;
         self.current_context_window = state.current_context_window;
@@ -2641,6 +2663,7 @@ impl EventRenderer {
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
+            show_internal_prompts: self.show_internal_prompts,
             notice_level: self.notice_level,
             show_status: path_tau_config_settings::ShowStatus::All,
             show_prompt_scroll_indicator: self.show_prompt_scroll_indicator,
@@ -2810,6 +2833,7 @@ impl EventRenderer {
                     self.set_show_messages(show_messages);
                 }
             }
+            "show-internal-prompts" => self.set_show_internal_prompts(value == "on"),
             "notice-level" => {
                 if let Some(level) = tau_proto::NoticeLevel::parse(value) {
                     self.set_notice_level(level);
@@ -3147,6 +3171,12 @@ impl EventRenderer {
             let block = self.render_turn_stats_entry(entry);
             self.handle.set_block(entry.block_id, block);
         }
+        for entry in &self.internal_prompt_history {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_source_aware_prompt_block(&entry.submission_source, &entry.text),
+            );
+        }
     }
 
     fn set_show_messages(&mut self, show_messages: tau_config::settings::ShowMessages) {
@@ -3155,6 +3185,23 @@ impl EventRenderer {
         }
         self.show_messages = show_messages;
         self.rerender_message_history();
+        self.invalidate_for_retroactive_toggle();
+        self.save_cli_state();
+    }
+
+    /// Reproject typed harness-internal prompt facts without changing model
+    /// state.
+    fn set_show_internal_prompts(&mut self, enabled: bool) {
+        if self.show_internal_prompts == enabled {
+            return;
+        }
+        self.show_internal_prompts = enabled;
+        for entry in &self.internal_prompt_history {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_source_aware_prompt_block(&entry.submission_source, &entry.text),
+            );
+        }
         self.invalidate_for_retroactive_toggle();
         self.save_cli_state();
     }
@@ -3298,6 +3345,7 @@ impl EventRenderer {
         self.turn_stats_history.clear();
         self.tool_history.clear();
         self.message_history.clear();
+        self.internal_prompt_history.clear();
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
         self.prompt_tool_summary_active = false;
@@ -5562,29 +5610,26 @@ impl EventRenderer {
             return;
         }
         if !prompt.message_class.is_internal()
+            && matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+                    | tau_proto::PromptSubmissionSource::Legacy
+            )
             && self.front_queued_user_prompt_matches(&prompt.text)
         {
             self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
             return;
         }
-        if !prompt.message_class.is_internal()
-            && matches!(
-                prompt.submission_source,
-                tau_proto::PromptSubmissionSource::Extension { .. }
-                    | tau_proto::PromptSubmissionSource::HarnessInternal
-            )
-        {
-            let block = self.marked_plain_block(
-                tau_themes::names::SYSTEM_INFO,
-                crate::transcript_markers::MESSAGE,
-                prompt.text.clone(),
-            );
-            self.handle.print_output("extension-prompt", block);
-        } else {
-            // Legacy records intentionally retain their historical rendering:
-            // there is no safe prefix-based way to reclassify them.
-            self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+        if self.handle_source_aware_prompt_projection(
+            &prompt.submission_source,
+            prompt.message_class,
+            &prompt.text,
+        ) {
+            return;
         }
+        // Legacy records intentionally retain their historical rendering:
+        // there is no safe prefix-based way to reclassify them.
+        self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
     }
 
     fn handle_visible_internal_prompt(
@@ -5627,6 +5672,66 @@ impl EventRenderer {
         );
         self.handle.print_output("timer-wakeup", block);
         true
+    }
+
+    /// Render source-aware prompt provenance before applying ordinary
+    /// user-prompt presentation. Returns true when the source owns the
+    /// projection.
+    fn handle_source_aware_prompt_projection(
+        &mut self,
+        submission_source: &tau_proto::PromptSubmissionSource,
+        _message_class: tau_proto::PromptMessageClass,
+        text: &str,
+    ) -> bool {
+        match submission_source {
+            tau_proto::PromptSubmissionSource::Extension { .. } => {
+                let block = self.render_source_aware_prompt_block(submission_source, text);
+                self.handle.print_output("extension-prompt", block);
+                true
+            }
+            tau_proto::PromptSubmissionSource::HarnessInternal => {
+                let block_id = self.handle.print_output(
+                    "harness-internal-prompt",
+                    self.render_source_aware_prompt_block(submission_source, text),
+                );
+                self.internal_prompt_history.push(InternalPromptBlockEntry {
+                    block_id,
+                    submission_source: submission_source.clone(),
+                    text: text.to_owned(),
+                });
+                true
+            }
+            tau_proto::PromptSubmissionSource::HumanUi
+            | tau_proto::PromptSubmissionSource::Legacy => false,
+        }
+    }
+
+    /// Render one canonical extension or harness-internal prompt projection.
+    fn render_source_aware_prompt_block(
+        &self,
+        submission_source: &tau_proto::PromptSubmissionSource,
+        text: &str,
+    ) -> tau_cli_term::StyledBlock {
+        match submission_source {
+            tau_proto::PromptSubmissionSource::Extension { name } => self.marked_plain_block(
+                tau_themes::names::SYSTEM_INFO,
+                crate::transcript_markers::MESSAGE,
+                format!(
+                    "External `{}` message:\n{text}",
+                    tau_proto::visible_escape_metadata(name.as_str())
+                ),
+            ),
+            tau_proto::PromptSubmissionSource::HarnessInternal if self.show_internal_prompts => {
+                self.marked_plain_block(
+                    tau_themes::names::SYSTEM_INFO,
+                    crate::transcript_markers::NOTICE,
+                    format!("[tau-internal]: {text}"),
+                )
+            }
+            tau_proto::PromptSubmissionSource::HarnessInternal
+            | tau_proto::PromptSubmissionSource::HumanUi
+            | tau_proto::PromptSubmissionSource::Legacy => Self::empty_block(),
+        }
     }
 
     fn handle_submitted_user_prompt(
@@ -5721,17 +5826,21 @@ impl EventRenderer {
         ) {
             return;
         }
-        if steered.message_class.is_internal() {
-            return;
-        }
-
         use tau_themes::names;
 
-        if self.front_queued_user_prompt_matches(&steered.text) {
+        if !steered.message_class.is_internal()
+            && matches!(
+                steered.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+                    | tau_proto::PromptSubmissionSource::Legacy
+            )
+            && self.front_queued_user_prompt_matches(&steered.text)
+        {
             // Queue records lack a submission source. A front-exact match is
-            // therefore authoritative user-prompt projection even if steering
-            // reports extension provenance. Never consume a different queued
-            // item merely because a later item happens to have the same text.
+            // authoritative only for user or legacy prompt provenance; extension
+            // and harness facts retain their source-aware presentation. Never
+            // consume a different queued item merely because a later item has
+            // the same text.
             let Some((queued_id, text)) = self.queued_user_blocks.pop_front() else {
                 return;
             };
@@ -5743,23 +5852,15 @@ impl EventRenderer {
             self.handle.redraw();
             return;
         }
-
-        let is_extension_message = matches!(
-            steered.submission_source,
-            tau_proto::PromptSubmissionSource::Extension { .. }
-        );
-        let is_harness_message = matches!(
-            steered.submission_source,
-            tau_proto::PromptSubmissionSource::HarnessInternal
-        );
-        if is_extension_message || is_harness_message {
-            let block = self.marked_plain_block(
-                names::SYSTEM_INFO,
-                crate::transcript_markers::MESSAGE,
-                steered.text.clone(),
-            );
-            self.handle.print_output("extension-prompt-steered", block);
+        if self.handle_source_aware_prompt_projection(
+            &steered.submission_source,
+            steered.message_class,
+            &steered.text,
+        ) {
             self.handle.redraw();
+            return;
+        }
+        if steered.message_class.is_internal() {
             return;
         }
 

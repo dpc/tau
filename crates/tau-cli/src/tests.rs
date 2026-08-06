@@ -2268,10 +2268,239 @@ fn extension_prompt_steered_uses_message_marker() {
         internal_kind: None,
         ctx_id: None,
     }));
+    for (text, submission_source) in [
+        (
+            "legacy internal payload",
+            tau_proto::PromptSubmissionSource::Legacy,
+        ),
+        (
+            "human internal payload",
+            tau_proto::PromptSubmissionSource::HumanUi,
+        ),
+    ] {
+        renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id("engineer_abc12345"),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source,
+            display_name: None,
+            ctx_id: None,
+        }));
+    }
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "■ extension-steered prompt"));
+    assert!(vt.screen_contains(100, "■ External `fixture` message:"));
+    assert!(vt.screen_contains(100, "extension-steered prompt"));
     assert!(!vt.screen_contains(100, "⬤ extension-steered prompt"));
+}
+
+/// Internal prompt facts use authenticated source rather than payload class:
+/// extensions are always attributed messages, while typed harness prompts
+/// reproject in place through the default-off diagnostic toggle.
+#[test]
+fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    let extension = tau_proto::PromptSubmissionSource::Extension {
+        name: tau_proto::ExtensionName::parse("std-swarm").expect("valid extension name"),
+    };
+    let harness = tau_proto::PromptSubmissionSource::HarnessInternal;
+
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "extension submitted payload".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: extension.clone(),
+        display_name: None,
+        ctx_id: Some("swarm-command-1".to_owned()),
+    }));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: extension,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "extension steered payload".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        ctx_id: Some("swarm-command-2".to_owned()),
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "harness submitted payload".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: harness.clone(),
+        display_name: None,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: harness,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "harness steered payload".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "External `std-swarm` message:"));
+    assert!(vt.screen_contains(100, "extension submitted payload"));
+    assert!(vt.screen_contains(100, "extension steered payload"));
+    assert!(!vt.screen_contains(100, "harness submitted payload"));
+    assert!(!vt.screen_contains(100, "harness steered payload"));
+    assert!(!vt.screen_contains(100, "legacy internal payload"));
+    assert!(!vt.screen_contains(100, "human internal payload"));
+
+    renderer.apply_setting("show-internal-prompts", "on");
+    sync(&handle);
+    let enabled = visible_lines(&vt, 100).join("\n");
+    assert_eq!(enabled.matches("harness submitted payload").count(), 1);
+    assert_eq!(enabled.matches("harness steered payload").count(), 1);
+    assert_eq!(enabled.matches("extension submitted payload").count(), 1);
+    assert_eq!(enabled.matches("extension steered payload").count(), 1);
+    assert!(!enabled.contains("legacy internal payload"));
+    assert!(!enabled.contains("human internal payload"));
+
+    renderer.apply_setting("show-internal-prompts", "off");
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "harness submitted payload"));
+    assert!(!vt.screen_contains(100, "harness steered payload"));
+    assert!(vt.screen_contains(100, "extension submitted payload"));
+    assert!(vt.screen_contains(100, "extension steered payload"));
+}
+
+/// A new session must discard hidden prompt slots before block identifiers are
+/// reused, so enabling diagnostics cannot disclose prior-session prompt text.
+#[test]
+fn internal_prompt_toggle_does_not_reproject_previous_session_history() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    let internal = |text: &str| {
+        Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id("engineer_abc12345"),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+
+    renderer.handle(&internal("session one hidden prompt"));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s2"),
+        reason: SessionStartReason::New,
+    }));
+    renderer.handle(&internal("session two hidden prompt"));
+    renderer.apply_setting("show-internal-prompts", "on");
+    sync(&handle);
+
+    assert!(!vt.screen_contains(100, "session one hidden prompt"));
+    assert!(vt.screen_contains(100, "session two hidden prompt"));
+}
+
+/// Timer and context-alert presentation own their canonical prompt facts before
+/// the diagnostic toggle, so enabling it cannot append generic notice blocks.
+#[test]
+fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "Timer `special` fired: exact once".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: Some("timer:special:1".to_owned()),
+    }));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "context alert exact once".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
+        ctx_id: None,
+    }));
+    renderer.apply_setting("show-internal-prompts", "on");
+    sync(&handle);
+
+    let lines = visible_lines(&vt, 100).join("\n");
+    assert_eq!(
+        lines
+            .matches("Timer `special` woke this agent: exact once")
+            .count(),
+        1
+    );
+    assert_eq!(lines.matches("context alert exact once").count(), 1);
+    assert!(!lines.contains("[tau-internal]: Timer `special` fired: exact once"));
+}
+
+/// Replayed Submitted and Steered facts retain their per-agent source-aware
+/// slots across snapshot switches, so repeated toggles restore each once.
+#[test]
+fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.switch_agent("replayed-agent".to_owned());
+    let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("replayed-agent"),
+        text: "replayed submitted internal".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: None,
+    });
+    let steered = Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        agent_id: agent_id("replayed-agent"),
+        text: "replayed steered internal".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        ctx_id: None,
+    });
+    renderer.handle(&submitted);
+    renderer.handle(&steered);
+    renderer.switch_agent("other-agent".to_owned());
+    renderer.switch_agent("replayed-agent".to_owned());
+    renderer.apply_setting("show-internal-prompts", "on");
+    sync(&handle);
+
+    let enabled = visible_lines(&vt, 100).join("\n");
+    assert_eq!(enabled.matches("replayed submitted internal").count(), 1);
+    assert_eq!(enabled.matches("replayed steered internal").count(), 1);
+    assert!(
+        enabled.find("replayed submitted internal") < enabled.find("replayed steered internal")
+    );
+
+    renderer.apply_setting("show-internal-prompts", "off");
+    renderer.apply_setting("show-internal-prompts", "on");
+    sync(&handle);
+    let retoggled = visible_lines(&vt, 100).join("\n");
+    assert_eq!(retoggled.matches("replayed submitted internal").count(), 1);
+    assert_eq!(retoggled.matches("replayed steered internal").count(), 1);
 }
 
 /// Semantic row markers keep messages and notices visually distinct while
@@ -2283,10 +2512,10 @@ fn semantic_row_markers_match_their_categories() {
     assert_eq!(transcript_markers::NOTICE, "□ ");
 }
 
-/// An unqueued harness-originated steered prompt is a message rather than an
-/// inferred user prompt, while queued user prompts retain their own promotion.
+/// Typed harness provenance remains hidden by default even for a user-class
+/// legacy-shaped fact, then the diagnostic toggle reveals it as a notice.
 #[test]
-fn unqueued_harness_prompt_steered_uses_message_marker() {
+fn unqueued_harness_prompt_steered_uses_toggle_controlled_notice() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle.clone());
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
@@ -2301,7 +2530,10 @@ fn unqueued_harness_prompt_steered_uses_message_marker() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "■ harness-steered message"));
+    assert!(!vt.screen_contains(100, "harness-steered message"));
+    renderer.apply_setting("show-internal-prompts", "on");
+    sync(&handle);
+    assert!(vt.screen_contains(100, "□ [tau-internal]: harness-steered message"));
     assert!(!vt.screen_contains(100, "⬤ harness-steered message"));
 }
 
@@ -2771,7 +3003,7 @@ fn queued_prompt_elides_at_layout_without_changing_authoritative_text() {
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         self_compaction_terminal: None,
         inference_activation: false,
-        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         text: text.into(),
         agent_id: agent_id("main"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -9388,7 +9620,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         self_compaction_terminal: None,
         inference_activation: false,
-        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         text: "folded queued prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -9417,11 +9649,10 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     );
 }
 
-/// A queued prompt has no provenance, so an extension steering event with the
-/// front-exact text promotes that queued user projection instead of duplicating
-/// it as a message.
+/// Extension provenance wins over an ambiguous queue-text match, preserving the
+/// queued user projection and rendering the extension's canonical fact once.
 #[test]
-fn extension_steering_promotes_matching_queued_user_prompt() {
+fn extension_steering_does_not_promote_matching_queued_user_prompt() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = marker_test_renderer(handle.clone());
 
@@ -9444,31 +9675,27 @@ fn extension_steering_promotes_matching_queued_user_prompt() {
     }));
     sync(&handle);
 
-    assert!(!vt.screen_contains(80, "queued extension collision (queued)"));
-    assert!(vt.screen_contains(80, "⬤ queued extension collision"));
-    assert!(!vt.screen_contains(80, "■ queued extension collision"));
+    assert!(vt.screen_contains(80, "queued extension collision (queued)"));
+    assert!(vt.screen_contains(80, "■ External `fixture` message:"));
+    assert!(!vt.screen_contains(80, "⬤ queued extension collision"));
     assert_eq!(
         vt.screen_text(80)
             .iter()
             .filter(|row| row.contains("queued extension collision"))
             .count(),
-        1,
-        "front-exact queued projection must be promoted once: {:?}",
+        2,
+        "queue and authenticated extension projections must remain distinct: {:?}",
         vt.screen_text(80)
     );
 }
 
-/// A steered prompt may match a later queued row, but only the front queue row
-/// can be promoted. Retaining that order prevents a later harness or extension
-/// message from consuming an unrelated user prompt.
+/// An extension message cannot consume a queued user prompt merely because its
+/// payload matches a later queued row.
 #[test]
 fn nonfront_queued_match_remains_a_message_without_consuming_the_front_prompt() {
-    for submission_source in [
-        tau_proto::PromptSubmissionSource::HarnessInternal,
-        tau_proto::PromptSubmissionSource::Extension {
-            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
-        },
-    ] {
+    for submission_source in [tau_proto::PromptSubmissionSource::Extension {
+        name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
+    }] {
         let (_term, handle, vt) = setup(80, 24);
         let mut renderer = marker_test_renderer(handle.clone());
         for text in ["first queued user prompt", "second queued user prompt"] {
@@ -9492,59 +9719,52 @@ fn nonfront_queued_match_remains_a_message_without_consuming_the_front_prompt() 
 
         assert!(vt.screen_contains(80, "◯ first queued user prompt (queued)"));
         assert!(!vt.screen_contains(80, "⬤ first queued user prompt"));
-        assert!(vt.screen_contains(80, "■ second queued user prompt"));
+        assert!(vt.screen_contains(80, "■ External `fixture` message:"));
         assert!(!vt.screen_contains(80, "⬤ second queued user prompt"));
     }
 }
 
-/// A submitted prompt with non-human provenance promotes its front-exact queued
-/// user projection before the subsequent start event can duplicate it.
+/// Human UI provenance promotes its front-exact queued projection before the
+/// subsequent start event can duplicate it.
 #[test]
-fn submitted_nonhuman_prompt_promotes_matching_front_queue_before_start() {
-    for submission_source in [
-        tau_proto::PromptSubmissionSource::HarnessInternal,
-        tau_proto::PromptSubmissionSource::Extension {
-            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
-        },
-    ] {
-        let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = marker_test_renderer(handle.clone());
-        let text = "accepted queued prompt";
-        renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
-            text: text.to_owned(),
-            agent_id: agent_id("main"),
-            message_class: tau_proto::PromptMessageClass::User,
-        }));
-        renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
-            inference_activation: true,
-            agent_id: agent_id("main"),
-            text: text.to_owned(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source,
-            display_name: None,
-            ctx_id: None,
-        }));
-        renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
-            "accepted-queued",
-            "s1",
-        )));
-        sync(&handle);
+fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    let text = "accepted queued prompt";
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: text.to_owned(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("main"),
+        text: text.to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
+        "accepted-queued",
+        "s1",
+    )));
+    sync(&handle);
 
-        assert!(vt.screen_contains(80, "⬤ accepted queued prompt"));
-        assert!(!vt.screen_contains(80, "■ accepted queued prompt"));
-        assert!(!vt.screen_contains(80, "accepted queued prompt (queued)"));
-        assert_eq!(
-            vt.screen_text(80)
-                .iter()
-                .filter(|row| row.contains(text))
-                .count(),
-            1,
-            "submitted queued prompt must render once: {:?}",
-            vt.screen_text(80)
-        );
-    }
+    assert!(vt.screen_contains(80, "⬤ accepted queued prompt"));
+    assert!(!vt.screen_contains(80, "■ accepted queued prompt"));
+    assert!(!vt.screen_contains(80, "accepted queued prompt (queued)"));
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains(text))
+            .count(),
+        1,
+        "submitted queued prompt must render once: {:?}",
+        vt.screen_text(80)
+    );
 }
 
 #[test]

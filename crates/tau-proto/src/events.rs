@@ -2117,13 +2117,14 @@ pub enum InternalPromptActivationKind {
     Timer,
 }
 
-/// Request from an extension to submit a hidden internal prompt to a loaded
-/// agent.
+/// Request from an extension to submit an internal model-classified prompt to a
+/// loaded agent.
 ///
 /// Requests default to transient delivery and never enter semantic history. The
 /// harness commits an admitted request before validating its target or
-/// submitting the prompt. It owns transcript publication; extensions must not
-/// publish `agent.prompt_submitted` directly.
+/// submitting the prompt. It owns transcript publication and stamps the
+/// authenticated configured extension name on its canonical prompt fact;
+/// extensions must not publish `agent.prompt_submitted` directly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtInternalPromptSubmitRequest {
     /// Loaded agent that should receive the prompt.

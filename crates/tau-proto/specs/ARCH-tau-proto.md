@@ -113,13 +113,15 @@ text. The summary projection contract is
 
 Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry an
 optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
-which that harness-owned alert reaches model context; missing tags preserve
-legacy hidden-internal presentation. The contract is
+which that harness-owned alert reaches model context; it has specialized
+presentation. The contract is
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 Both prompt facts also carry required harness-stamped
 `PromptSubmissionSource` provenance while retaining raw accepted prompt text.
-Core and harness use that typed source for provider-only presentation; protocol
-CBOR, durable authority, and UI consumers remain raw. See
+Core, harness, and CLI use that typed source for provider and source-aware
+presentation: authenticated extension prompts are attributed while typed
+HarnessInternal prompts use the diagnostic setting. Protocol CBOR, durable
+authority, and UI consumers retain the raw accepted text. See
 [SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 
 Protocol version 0 requires an extension's first harness response after

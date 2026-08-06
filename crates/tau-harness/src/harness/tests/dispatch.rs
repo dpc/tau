@@ -33921,6 +33921,11 @@ fn extension_internal_prompt_submit_request_routes_as_internal_prompt() {
             if prompt.agent_id == agent_id
                 && prompt.text == "timer fired"
                 && prompt.message_class == tau_proto::PromptMessageClass::Internal
+                && prompt.submission_source
+                    == tau_proto::PromptSubmissionSource::Extension {
+                        name: tau_proto::ExtensionName::parse("utils-ext")
+                            .expect("configured extension name"),
+                    }
                 && prompt.ctx_id.as_deref() == Some("timer:wake:1")
     )));
 
@@ -34009,6 +34014,11 @@ fn queued_extension_internal_prompt_submit_request_preserves_ctx_id_when_steered
             if steered.agent_id == agent_id
                 && steered.text == "timer fired"
                 && steered.message_class == tau_proto::PromptMessageClass::Internal
+                && steered.submission_source
+                    == tau_proto::PromptSubmissionSource::Extension {
+                        name: tau_proto::ExtensionName::parse("utils-ext")
+                            .expect("configured extension name"),
+                    }
                 && steered.ctx_id.as_deref() == Some("timer:wake:1")
     )));
 

@@ -223,9 +223,19 @@ impl GateFixture {
             tau_config.join("harness.yaml"),
             serde_json::to_vec_pretty(&harness)?,
         )?;
+        let show_internal_prompts = if mode == FixtureMode::MultiAgent {
+            // S8 deliberately asserts the harness-authored initial worker
+            // prompt in its restored terminal transcript.
+            "show_internal_prompts: true\n"
+        } else {
+            ""
+        };
         std::fs::write(
             tau_config.join("cli.yaml"),
-            b"greeting: false\nshow_tools: full\nshow_thinking: false\nshow_turn_stats: false\n",
+            format!(
+                "greeting: false\nshow_tools: full\nshow_thinking: false\nshow_turn_stats: false\n\
+                 {show_internal_prompts}"
+            ),
         )?;
         let tau_state = state_home.join("tau");
         std::fs::create_dir_all(&tau_state)?;

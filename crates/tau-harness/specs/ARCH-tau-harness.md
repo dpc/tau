@@ -59,8 +59,10 @@ readiness commit before the harness updates runtime prompt projections or releas
 waits. Exact connection-generation plus session/agent/initialization checks
 prevent stale publishers or old load attempts from mutating current state under
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
-Internal-prompt requests commit before loaded-agent validation or hidden prompt
-submission, and stale publisher generations cannot submit work. See
+Internal-prompt requests commit before loaded-agent validation or internal
+prompt submission, and stale publisher generations cannot submit work. The
+harness stamps accepted canonical prompt facts from the authenticated configured
+publisher rather than request payload provenance. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 Start-agent requests likewise commit before role/parent validation, duplicate
 route rebinding, acceptance/result routing, or child creation. See

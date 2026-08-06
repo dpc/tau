@@ -77,11 +77,13 @@ Extensions that need to turn an internal wakeup into an agent prompt use
 `extension.internal_prompt_submit_request`. The harness accepts this narrow
 request only from authenticated configured extension entries. It crosses
 ordinary interception and commit before the harness validates the target loaded agent and
-submits hidden internal text through the ordinary prompt queue. It has no
-user-message class and does not update user-interaction metadata, but still
-wakes queued agents. The durable transcript fact remains the harness-owned
-internal `agent.prompt_submitted`. External user messages use immutable
-`message.delivered` facts; extensions may not forge prompt transcript facts.
+submits internal model-classified text through the ordinary prompt queue. It
+has no user-message class and does not update user-interaction metadata, but
+still wakes queued agents. The durable transcript fact remains the
+harness-owned internal `agent.prompt_submitted` or `agent.prompt_steered`,
+stamped with the authenticated configured extension name. External user
+messages use immutable `message.delivered` facts; extensions may not forge
+prompt transcript facts.
 Pre-Ready requests are operational traffic ordered behind activation. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 
