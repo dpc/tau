@@ -476,6 +476,9 @@ fn cache_refresh_tool_windows_union_concurrent_cohorts() {
 fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let debug_log = harness
+        .enable_debug_log(&temp.path().join("cache-refresh-debug"))
+        .expect("enable debug log");
     harness.provider_cache_residency =
         ProviderCacheResidency::runtime(tau_config::settings::ProviderCacheRefresh {
             enabled: true,
@@ -489,8 +492,10 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     );
     let observer = connect_test_client(&mut harness, "observer", tau_proto::ClientKind::Ui);
     let model = cache_fixtures::model("provider");
-    let write = cache_fixtures::prompt("provider", "vertical-write");
-    let read = cache_fixtures::prompt("provider", "vertical-read");
+    let mut write = cache_fixtures::prompt("provider", "vertical-write");
+    write.system_prompt = "private stable cache prefix".to_owned();
+    let mut read = cache_fixtures::prompt("provider", "vertical-read");
+    read.system_prompt = write.system_prompt.clone();
     harness.provider_cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &write,
@@ -559,15 +564,16 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
                     if matches!(delivery.event.as_ref(), Event::AgentCacheRefreshRequested(_))
             ))
     );
-
+    let mut changed_prefix = read.clone();
+    changed_prefix.system_prompt = "changed Provider-visible system prefix".to_owned();
     provider.lock().expect("provider sink").clear();
-    harness.preempt_cache_refresh_for_prompt(&read);
+    harness.preempt_cache_refresh_for_prompt(&changed_prefix);
     harness
         .bus
         .send_to(
             &crate::test_connection_id("provider"),
             Some(crate::harness::harness_connection_id()),
-            HarnessOutputMessage::deliver(Event::AgentPromptCreated(read.clone())),
+            HarnessOutputMessage::deliver(Event::AgentPromptCreated(changed_prefix.clone())),
         )
         .expect("real prompt delivery");
     harness.clear_tool_call_tracking(foreground.as_str());
@@ -580,14 +586,14 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
         .expect("provider sink")
         .iter()
         .filter_map(|routed| match &routed.frame {
-            HarnessOutputMessage::Deliver(delivery)
-                if matches!(
-                    delivery.event.as_ref(),
-                    Event::AgentCacheRefreshCancelRequested(_) | Event::AgentPromptCreated(_)
-                ) =>
-            {
-                Some(delivery.event.name())
-            }
+            HarnessOutputMessage::Deliver(delivery) => match delivery.event.as_ref() {
+                Event::AgentCacheRefreshCancelRequested(_) => Some(delivery.event.name()),
+                Event::AgentPromptCreated(prompt) => {
+                    assert_eq!(prompt.system_prompt, changed_prefix.system_prompt);
+                    Some(delivery.event.name())
+                }
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -597,6 +603,41 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
             tau_proto::EventName::AGENT_CACHE_REFRESH_CANCEL_REQUESTED,
             tau_proto::EventName::AGENT_PROMPT_CREATED,
         ]
+    );
+    assert!(
+        observer
+            .lock()
+            .expect("observer sink")
+            .iter()
+            .all(|routed| !matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if matches!(
+                        delivery.event.as_ref(),
+                        Event::AgentCacheRefreshRequested(_)
+                            | Event::AgentCacheRefreshCancelRequested(_)
+                    )
+            )),
+        "the observer must not receive either sensitive directed refresh event"
+    );
+    assert!(
+        committed_events(&harness).into_iter().all(|(_, event)| {
+            !matches!(
+                event,
+                Event::AgentCacheRefreshRequested(_) | Event::AgentCacheRefreshCancelRequested(_)
+            )
+        }),
+        "sensitive refresh prefixes and correlation must stay out of generic diagnostics"
+    );
+    let jsonl = std::fs::read_to_string(debug_log).expect("read debug log");
+    assert!(
+        !jsonl.contains(&tau_proto::EventName::AGENT_CACHE_REFRESH_REQUESTED.to_string())
+            && !jsonl
+                .contains(&tau_proto::EventName::AGENT_CACHE_REFRESH_CANCEL_REQUESTED.to_string())
+            && !jsonl.contains(request.refresh_id.as_str())
+            && !jsonl.contains(&read.system_prompt)
+            && !jsonl.contains(&changed_prefix.system_prompt),
+        "refresh prefixes and cancellation correlation must stay out of debug JSONL"
     );
     harness
         .handle_extension_event_inner(
@@ -609,7 +650,8 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
         .expect("terminal report");
     assert!(harness.provider_cache_residency.next_deadline().is_none());
 
-    let deadline_read = cache_fixtures::prompt("provider", "vertical-deadline");
+    let mut deadline_read = cache_fixtures::prompt("provider", "vertical-deadline");
+    deadline_read.system_prompt = read.system_prompt.clone();
     harness.provider_cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &deadline_read,
@@ -667,7 +709,8 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
         "empty directed delivery releases ownership"
     );
 
-    let disconnect_read = cache_fixtures::prompt("provider", "vertical-disconnect");
+    let mut disconnect_read = cache_fixtures::prompt("provider", "vertical-disconnect");
+    disconnect_read.system_prompt = read.system_prompt.clone();
     harness.provider_cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &disconnect_read,

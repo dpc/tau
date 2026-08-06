@@ -62,6 +62,67 @@ impl CacheJitter for SequenceJitter {
     }
 }
 
+/// Scripted generic Provider fixture that feeds only cache-policy metadata and
+/// privacy-redacted usage into the harness-owned scheduler.
+struct ScriptedFakeProvider {
+    /// Captured configured Provider connection.
+    connection_id: tau_proto::ConnectionId,
+    /// Published route metadata used for each scripted completion.
+    model: ProviderModelInfo,
+    /// Response-local observations returned by successive ordinary prompts.
+    completions: VecDeque<tau_proto::ProviderTokenUsage>,
+}
+
+impl ScriptedFakeProvider {
+    /// Create one generic Provider with a finite ordinary-response script.
+    fn new(
+        model: ProviderModelInfo,
+        completions: impl IntoIterator<Item = tau_proto::ProviderTokenUsage>,
+    ) -> Self {
+        let provider = model.id.provider.as_str();
+        Self {
+            connection_id: tau_proto::ConnectionId::parse(format!("{provider}-connection"))
+                .expect("fixture connection id"),
+            model,
+            completions: completions.into_iter().collect(),
+        }
+    }
+
+    /// Deliver the next scripted ordinary completion through the scheduler's
+    /// production observation boundary.
+    fn complete<C: CacheClock, J: CacheJitter>(
+        &mut self,
+        scheduler: &mut ProviderCacheResidency<C, J>,
+        prompt_id: &str,
+    ) {
+        let prompt = prompt(self.model.id.provider.as_str(), prompt_id);
+        scheduler.track_prompt(self.connection_id.clone(), &prompt, Some(&self.model));
+        let usage = self
+            .completions
+            .pop_front()
+            .expect("fixture supplies a completion for every prompt");
+        scheduler.finish_prompt(&prompt.agent_prompt_id, true, Some(&usage));
+    }
+}
+
+/// One generic Provider policy case that must suppress automatic refresh work.
+struct IneligibleContractCase {
+    /// Stable label included when an ineligible contract unexpectedly
+    /// dispatches.
+    name: &'static str,
+    /// Published metadata for the exact fake Provider route.
+    model: ProviderModelInfo,
+}
+
+impl IneligibleContractCase {
+    /// Build a safe baseline model with one isolated unsupported policy fact.
+    fn new(name: &'static str, mutate: impl FnOnce(&mut ProviderModelInfo)) -> Self {
+        let mut model = model(name);
+        mutate(&mut model);
+        Self { name, model }
+    }
+}
+
 /// Build one fully eligible cache-policy model fixture.
 pub(crate) fn model(provider: &str) -> ProviderModelInfo {
     ProviderModelInfo {
@@ -175,6 +236,229 @@ fn observe_write_and_read(
     let read_prompt = prompt(provider, &format!("ap-{provider}-read"));
     owner.track_prompt(route, &read_prompt, Some(&model));
     owner.finish_prompt(&read_prompt.agent_prompt_id, true, Some(&usage(10, 0)));
+}
+
+/// Generic Provider policy scripts use a fake monotonic clock to prove the
+/// discrete two-read break-even point and TTL-minus-margin dispatch deadline
+/// without contacting a backend or waiting for wall time.
+#[test]
+fn cross_backend_policy_script_uses_exact_break_even_and_ttl_margin() {
+    let (clock, mut scheduler) = owner();
+    let mut model = model("anthropic-proxy");
+    model.cache_policy.as_mut().expect("policy").kind = ProviderCacheKind::ExplicitBreakpoint;
+    model.est_uncached_input_cost_1m_usd = Some(EstimatedUsdPerMillion::from_micro_usd(3_000_000));
+    model.est_cached_input_cost_1m_usd = Some(EstimatedUsdPerMillion::from_micro_usd(300_000));
+    model.est_cache_write_input_cost_1m_usd =
+        Some(EstimatedUsdPerMillion::from_micro_usd(6_000_000));
+    let mut provider = ScriptedFakeProvider::new(model, [usage(0, 10), usage(10, 0), usage(10, 0)]);
+
+    provider.complete(&mut scheduler, "break-even-write");
+    provider.complete(&mut scheduler, "break-even-read-one");
+    assert!(
+        scheduler.scheduled.is_empty(),
+        "the one-hour write premium needs two later reads, not one"
+    );
+    provider.complete(&mut scheduler, "break-even-read-two");
+    let scheduled = scheduler
+        .scheduled
+        .values()
+        .next()
+        .expect("second read reaches the exact discrete break-even");
+    assert_eq!(
+        scheduled.due,
+        clock.0.get() + Duration::from_secs(90),
+        "the fixed ten-second jitter dispatches at TTL minus margin"
+    );
+
+    scheduler.open_tool_window();
+    clock.0.set(clock.0.get() + Duration::from_secs(90));
+    let refresh = scheduler.admit().pop().expect("due refresh");
+    assert_eq!(refresh.connection_id, provider.connection_id);
+    assert_eq!(refresh.request.stop_after_millis.get(), 10_000);
+    assert!(
+        scheduler.finish(&provider.connection_id, &refresh.request.refresh_id),
+        "the scripted Provider's exact terminal consumes its slot"
+    );
+}
+
+/// Generic fake Provider contracts with unknown/minimum residency, bounded
+/// output, unsafe quota evidence, or named object operations must not turn
+/// otherwise qualifying response-local observations into scheduler traffic.
+#[test]
+fn cross_backend_policy_script_fails_closed_for_unsupported_contracts() {
+    let contracts = [
+        IneligibleContractCase::new("unknown-ttl", |model| {
+            model.cache_policy.as_mut().expect("policy").ttl = ProviderCacheTtl::Unknown;
+        }),
+        IneligibleContractCase::new("minimum-ttl", |model| {
+            model.cache_policy.as_mut().expect("policy").ttl = ProviderCacheTtl::Minimum {
+                seconds: NonZeroU64::new(100).expect("positive ttl"),
+            };
+        }),
+        IneligibleContractCase::new("one-output", |model| {
+            model.cache_policy.as_mut().expect("policy").output_floor =
+                ProviderCacheOutputFloor::One;
+        }),
+        IneligibleContractCase::new("reasoning-output", |model| {
+            model.cache_policy.as_mut().expect("policy").output_floor =
+                ProviderCacheOutputFloor::UnboundedReasoning;
+        }),
+        IneligibleContractCase::new("quota-unknown", |model| {
+            model.cache_policy.as_mut().expect("policy").quota.requests =
+                ProviderCacheQuotaCharge::Unknown;
+        }),
+        IneligibleContractCase::new("explicit-object", |model| {
+            let object = model.cache_policy.as_mut().expect("policy");
+            object.kind = ProviderCacheKind::ExplicitObject;
+            object.ttl = ProviderCacheTtl::Fixed {
+                seconds: NonZeroU64::new(100).expect("positive ttl"),
+            };
+            object.renewal = ProviderCacheRenewal::PatchExpiry;
+            object.privacy.storage = ProviderCacheStorageMode::NamedProviderObject;
+        }),
+    ];
+
+    for IneligibleContractCase { name, model } in contracts {
+        let (_, mut scheduler) = owner();
+        let mut provider =
+            ScriptedFakeProvider::new(model, [usage(0, 10), usage(10, 0), usage(10, 0)]);
+        provider.complete(&mut scheduler, "unsafe-write");
+        provider.complete(&mut scheduler, "unsafe-read");
+        provider.complete(&mut scheduler, "unsafe-second-read");
+        scheduler.open_tool_window();
+        assert!(
+            scheduler.admit().is_empty(),
+            "{name} must not dispatch an unsupported refresh operation"
+        );
+        assert!(
+            scheduler.evidence.is_empty() && scheduler.scheduled.is_empty(),
+            "{name} must reject its isolated policy fact before recording evidence"
+        );
+    }
+}
+
+/// Probabilistic response-local telemetry cannot promote an otherwise
+/// ineligible published cache policy into scheduler evidence.
+#[test]
+fn scripted_provider_probabilistic_usage_cannot_promote_unknown_ttl() {
+    let (_, mut scheduler) = owner();
+    let mut model = model("probabilistic-telemetry");
+    model.cache_policy.as_mut().expect("policy").ttl = ProviderCacheTtl::Unknown;
+    let mut probabilistic_read = usage(10, 0);
+    probabilistic_read
+        .cache
+        .as_deref_mut()
+        .expect("fixture cache")
+        .expiry_confidence = Some(tau_proto::ProviderCacheExpiryConfidence::Probabilistic);
+    let mut provider =
+        ScriptedFakeProvider::new(model, [usage(0, 10), probabilistic_read, usage(10, 0)]);
+
+    provider.complete(&mut scheduler, "write");
+    provider.complete(&mut scheduler, "probabilistic-read");
+    provider.complete(&mut scheduler, "second-read");
+    scheduler.open_tool_window();
+    assert!(
+        scheduler.evidence.is_empty()
+            && scheduler.scheduled.is_empty()
+            && scheduler.admit().is_empty(),
+        "probabilistic telemetry cannot override the unknown published TTL"
+    );
+}
+
+/// Missing usage and missing nested cache counters must not allocate evidence
+/// or authorize a refresh even when the configured Provider policy is otherwise
+/// eligible.
+#[test]
+fn scripted_provider_missing_usage_never_creates_evidence() {
+    let (_, mut scheduler) = owner();
+    let model = model("missing-usage");
+    for (prompt_id, usage) in [
+        ("absent-usage", None),
+        (
+            "absent-cache",
+            Some(tau_proto::ProviderTokenUsage::default()),
+        ),
+        (
+            "absent-counters",
+            Some(tau_proto::ProviderTokenUsage {
+                cache: Some(Box::default()),
+                ..Default::default()
+            }),
+        ),
+    ] {
+        let prompt = prompt("missing-usage", prompt_id);
+        scheduler.track_prompt(
+            tau_proto::ConnectionId::parse("missing-usage-connection").expect("connection"),
+            &prompt,
+            Some(&model),
+        );
+        scheduler.finish_prompt(&prompt.agent_prompt_id, true, usage.as_ref());
+        assert!(
+            scheduler.evidence.is_empty() && scheduler.scheduled.is_empty(),
+            "{prompt_id} must not become automatic refresh evidence"
+        );
+    }
+}
+
+/// A fresh cold write suppresses prior evidence; cancellation retains scheduler
+/// ownership until the scripted Provider returns its exact terminal, including
+/// after shutdown begins.
+#[test]
+fn scripted_provider_lifecycle_suppresses_cold_writes_and_retains_shutdown_owner() {
+    let (clock, mut scheduler) = owner();
+    let mut model = model("generic");
+    model.est_uncached_input_cost_1m_usd = Some(EstimatedUsdPerMillion::from_micro_usd(3_000_000));
+    model.est_cached_input_cost_1m_usd = Some(EstimatedUsdPerMillion::from_micro_usd(300_000));
+    model.est_cache_write_input_cost_1m_usd =
+        Some(EstimatedUsdPerMillion::from_micro_usd(6_000_000));
+    let mut provider = ScriptedFakeProvider::new(
+        model,
+        [
+            usage(0, 10),
+            usage(10, 0),
+            usage(0, 10),
+            usage(10, 0),
+            usage(10, 0),
+            usage(10, 0),
+        ],
+    );
+
+    provider.complete(&mut scheduler, "first-write");
+    provider.complete(&mut scheduler, "first-read");
+    provider.complete(&mut scheduler, "concurrent-cold-write");
+    provider.complete(&mut scheduler, "second-read");
+    assert!(
+        scheduler.scheduled.is_empty(),
+        "a later cold write resets the earlier read evidence"
+    );
+    provider.complete(&mut scheduler, "third-read");
+    assert_eq!(scheduler.scheduled.len(), 1);
+
+    scheduler.open_tool_window();
+    clock.0.set(clock.0.get() + Duration::from_secs(90));
+    let refresh = scheduler.admit().pop().expect("fresh generation refresh");
+    let cancellations = scheduler.cancel_real(
+        &tau_proto::ProviderName::new("generic"),
+        &tau_proto::AgentId::parse("agent").expect("fixture agent"),
+    );
+    assert_eq!(cancellations.len(), 1);
+    assert!(
+        !scheduler.finish(
+            &tau_proto::ConnectionId::parse("wrong-provider").expect("fixture connection"),
+            &refresh.request.refresh_id,
+        ),
+        "a raced terminal from another Provider cannot release ownership"
+    );
+    let shutdown = scheduler.clear(tau_proto::ProviderCacheRefreshCancelReason::Shutdown);
+    assert!(
+        shutdown.is_empty(),
+        "the prior cancellation remains the sole directed request for this attempt"
+    );
+    assert!(
+        scheduler.finish(&provider.connection_id, &refresh.request.refresh_id),
+        "shutdown retains ownership until the scripted Provider's exact terminal"
+    );
+    assert!(scheduler.next_deadline().is_none());
 }
 
 /// Injected monotonic time and fixed jitter produce an exact due deadline.

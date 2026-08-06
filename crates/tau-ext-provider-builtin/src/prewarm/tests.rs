@@ -93,10 +93,15 @@ fn provider_cooldown_cancels_transport_but_retains_owner() {
         ),
     };
     let mut supervisor = PrewarmSupervisor::default();
-    let (_, mut abort) = supervisor.begin(key).expect("begin");
+    let (generation, mut abort) = supervisor.begin(key.clone()).expect("begin");
     supervisor.cancel_provider(&tau_proto::ProviderName::new("chatgpt"));
     assert!(abort.is_aborted());
     assert!(!supervisor.is_empty());
+    supervisor.complete(&key, generation);
+    assert!(
+        supervisor.is_empty(),
+        "the canceled cooldown worker releases ownership only at exact completion"
+    );
 }
 
 /// Once cancellation enters a registered callback, guard drop must wait for
