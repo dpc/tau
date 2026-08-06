@@ -476,6 +476,75 @@ fn database_lifecycle_fails_closed() {
     assert!(runtime.block_on(Database::open(corrupt, first_id)).is_err());
 }
 
+/// Ensures an unavailable Rostra database produces the typed pre-Ready
+/// configuration failure rather than declarations or an unsafe ready state.
+#[test]
+fn locked_database_configuration_reports_storage_failure_before_ready() {
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let state_dir = temporary.path().join("state");
+    let database_path = state_dir.join("rostra.redb");
+    let secret = RostraIdSecretKey::generate();
+    fs::create_dir_all(&state_dir).expect("state directory");
+    let held_database = runtime
+        .block_on(Database::open(database_path, secret.id()))
+        .expect("hold database lock");
+    let (extension_input, harness_input) = UnixStream::pair().expect("input stream pair");
+    let output = SharedWriter::default();
+    let runner_output = output.clone();
+    let runner = thread::spawn(move || {
+        run(extension_input, runner_output).map_err(|error| error.to_string())
+    });
+    let mut writer = HarnessOutputWriter::new(harness_input);
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "identity_mnemonic_secret": "rostra_identity_mnemonic",
+            })),
+            instance_name: tau_proto::ExtensionName::parse("std-rostra").expect("extension name"),
+            tool_prefix: None,
+            state_dir: Some(state_dir),
+            secrets: BTreeMap::from([(
+                "rostra_identity_mnemonic".to_owned(),
+                tau_proto::SecretValue::new(secret.to_string()),
+            )]),
+            settings_files: Default::default(),
+        }))
+        .expect("configure Rostra");
+    writer.flush().expect("flush configuration");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !output_messages(&output).iter().any(|message| {
+        matches!(
+            message,
+            HarnessInputMessage::ConfigError(error)
+                if error.message.starts_with("storage_failure:")
+        )
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "locked database must report ConfigError"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !output_messages(&output)
+            .iter()
+            .any(|message| matches!(message, HarnessInputMessage::Ready(_))),
+        "failed initialization must not announce readiness"
+    );
+
+    drop(writer);
+    runner
+        .join()
+        .expect("Rostra runner thread")
+        .expect("Rostra runner succeeds after config rejection");
+    drop(held_database);
+}
+
 /// Ensures admission never queues a ninth retained database query and busy
 /// reconfiguration fails its precondition.
 #[test]
@@ -573,6 +642,17 @@ fn output_events(output: &SharedWriter) -> Vec<Event> {
         }
     }
     events
+}
+
+/// Decode every complete protocol frame currently captured by a writer.
+fn output_messages(output: &SharedWriter) -> Vec<HarnessInputMessage> {
+    let bytes = output.bytes();
+    let mut reader = HarnessInputReader::new(bytes.as_slice());
+    let mut messages = Vec::new();
+    while let Ok(Some(frame)) = reader.read_message() {
+        messages.push(frame);
+    }
+    messages
 }
 
 /// Wait for one expected extension event while its protocol input remains open.

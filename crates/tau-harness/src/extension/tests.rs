@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::os::unix::fs::PermissionsExt as _;
+use std::time::Duration;
 
 use super::*;
 
@@ -13,6 +14,7 @@ fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
         role: None,
         component: None,
         require: true,
+        startup_timeout: Duration::from_secs(2),
         cwd,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),

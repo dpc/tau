@@ -13,6 +13,17 @@ use tau_proto::{Event, HarnessInputMessage, PromptFragment, ToolRegistrationDecl
 use crate::event::SupervisedWriterHandle;
 use crate::extension::ExtensionEntry;
 
+/// One extension's initial readiness deadline and availability policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct StartupDeadline {
+    /// Absolute time at which this extension must already have sent `Ready`.
+    pub(super) deadline: Instant,
+    /// Stable configured identity used for a timeout diagnostic before connect.
+    pub(super) name: tau_proto::ExtensionName,
+    /// Whether deadline expiry fails startup rather than disabling this peer.
+    pub(super) require: bool,
+}
+
 /// Event payload staged while an extension is still handshaking.
 #[derive(Clone, Debug)]
 pub(super) struct StagedExtensionPublish {
@@ -112,6 +123,16 @@ pub(crate) struct ExtensionRuntimeState {
     pub(super) cleanup_deadlines: HashMap<tau_proto::ConnectionId, Instant>,
     /// Absolute delayed-restart deadlines for disconnected tool extensions.
     pub(super) restart_deadlines: HashMap<tau_proto::ConnectionId, Instant>,
+    /// Initial readiness deadlines, recorded at supervised spawn or, for
+    /// externally managed peers, from the one startup-wait instant. Entries
+    /// disappear at first `Ready` or disconnect.
+    pub(super) startup_deadlines: HashMap<tau_proto::ConnectionId, StartupDeadline>,
+    /// One general deadline established when initial startup begins, used for
+    /// queued and externally managed peers that lack a supervised spawn record.
+    pub(super) startup_wait_deadline: Option<Instant>,
+    /// Optional peers that expired before their queued connect command reached
+    /// the harness. They are disabled as soon as that command installs them.
+    pub(super) expired_startup_connects: HashMap<tau_proto::ConnectionId, StartupDeadline>,
     /// Connections disabled only because the current session exhausted restart
     /// budget.
     pub(super) restart_budget_disabled: HashSet<tau_proto::ConnectionId>,

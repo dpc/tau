@@ -96,6 +96,10 @@ An extension entry can:
 - use `enable: false` to stay completely disabled;
 - use `require: false` to let startup continue, with a visible notice, when an
   enabled extension cannot initialize;
+- set `startup_timeout_seconds` from 1 through 3,600 to bound its own
+  successful-spawn-to-`Ready` interval; ordinary extensions default to two
+  seconds, while bundled `std-rostra` defaults to ten seconds for local
+  database upgrade and compaction work;
 - set its command argv with `command`, wrap it with an argv `prefix`, or set its
   process working directory with `cwd`;
 - pass extension-specific data through `config`;

@@ -174,6 +174,13 @@ startup-critical; absence inherits lower layers/built-in defaults, and user-adde
 entries ultimately default to required. Both fields are ordinary layered config,
 so file/drop-in/CLI override tests should cover parsing and precedence.
 
+`ExtensionEntry::startup_timeout_seconds` is likewise an ordinary layered scalar:
+absence inherits a built-in value or the general two-second default, while a
+configured integer from one through 3,600 replaces it. Resolution rejects values
+outside that inclusive range. The harness uses the resolved value for the
+extension's initial readiness deadline as specified by
+[SPEC-tau-harness-extension-lifecycle](../../tau-harness/specs/SPEC-tau-harness-extension-lifecycle.md).
+
 `ExtensionEntry::tool_prefix` is presence-aware: absence inherits, explicit
 null clears, and a validated segmented ASCII string sets the immutable
 per-instance structural tool prefix. `toolPrefix` is normalized as a legacy

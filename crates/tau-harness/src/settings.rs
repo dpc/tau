@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{fmt, sync as path_std_sync};
 
 use tau_config::settings as path_tau_config_settings;
@@ -77,6 +78,9 @@ pub struct ExtensionConfig {
     pub tool_prefix: Option<tau_proto::ToolNamePrefix>,
     /// Whether harness startup requires this extension to initialize.
     pub require: bool,
+    /// Maximum time from successful supervised spawn until the extension sends
+    /// its initial `Ready`.
+    pub startup_timeout: Duration,
     /// Current working directory used when starting the extension process. When
     /// absent, the child inherits the harness process working directory.
     pub cwd: Option<PathBuf>,
@@ -102,6 +106,9 @@ pub struct BuiltinExtension {
     pub enable: bool,
     /// Whether this built-in must initialize when enabled.
     pub require: bool,
+    /// Maximum time from successful supervised spawn until this built-in sends
+    /// its initial `Ready`.
+    pub startup_timeout: Duration,
     /// Built-in default config for this extension, merged below any
     /// user-provided `config: { … }` object in `harness.yaml`.
     pub config: serde_json::Value,
@@ -117,6 +124,14 @@ pub enum ResolveExtensionsError {
     /// startup diagnostics instead. An argv wrapper prefix cannot satisfy this
     /// requirement.
     EmptyCommand(String),
+    /// An extension startup deadline is outside Tau's bounded configuration
+    /// range.
+    InvalidStartupTimeout {
+        /// Configured extension identity.
+        name: String,
+        /// Configured timeout in seconds.
+        seconds: u64,
+    },
     /// A CLI override named an extension absent from built-ins and user config.
     UnknownCliOverride(String),
     /// The public environment override named an unavailable extension.
@@ -129,6 +144,10 @@ impl fmt::Display for ResolveExtensionsError {
             Self::EmptyCommand(name) => write!(
                 f,
                 "required extension {name:?} has an empty `extensions.{name}.command`; set it to an executable, omit it and set a non-empty `extensions.{name}.suffix` to run a Tau subcommand, or disable the extension",
+            ),
+            Self::InvalidStartupTimeout { name, seconds } => write!(
+                f,
+                "extension `{name}` has invalid `extensions.{name}.startup_timeout_seconds` value {seconds}; expected an integer from 1 through 3600"
             ),
             Self::UnknownCliOverride(name) => {
                 write!(f, "unknown extension in CLI override: `{name}`")
@@ -154,6 +173,7 @@ struct ResolvedExtension {
     suffix: Vec<String>,
     enable: bool,
     require: bool,
+    startup_timeout: Duration,
     role: Option<String>,
     /// Tau-owned component authority retained only while the resolved
     /// command provenance remains built-in/current-Tau and its suffix
@@ -277,6 +297,7 @@ impl ResolvedExtension {
             suffix: builtin.suffix,
             enable: builtin.enable,
             require: builtin.require,
+            startup_timeout: builtin.startup_timeout,
             role: builtin.role,
             component,
             tool_prefix: None,
@@ -293,6 +314,10 @@ impl ResolvedExtension {
             suffix: user.suffix.clone().unwrap_or_default(),
             enable: user.enable.unwrap_or(true),
             require: user.require.unwrap_or(true),
+            startup_timeout: Duration::from_secs(
+                user.startup_timeout_seconds
+                    .unwrap_or(DEFAULT_EXTENSION_STARTUP_TIMEOUT_SECONDS),
+            ),
             role: user.role.clone(),
             component: user
                 .command
@@ -339,6 +364,9 @@ impl ResolvedExtension {
         if let Some(require) = user.require {
             self.require = require;
         }
+        if let Some(seconds) = user.startup_timeout_seconds {
+            self.startup_timeout = Duration::from_secs(seconds);
+        }
         if let Some(role) = user.role.as_ref() {
             self.role = Some(role.clone());
         }
@@ -360,6 +388,13 @@ impl ResolvedExtension {
         self,
         name: String,
     ) -> Result<Option<ExtensionConfig>, ResolveExtensionsError> {
+        let timeout_seconds = self.startup_timeout.as_secs();
+        if timeout_seconds == 0 || 3_600 < timeout_seconds {
+            return Err(ResolveExtensionsError::InvalidStartupTimeout {
+                name,
+                seconds: timeout_seconds,
+            });
+        }
         let command = match self.command {
             Some(command) if !command.is_empty() => command,
             None if !self.suffix.is_empty() => vec![current_tau_executable()],
@@ -384,6 +419,7 @@ impl ResolvedExtension {
             component: self.component,
             tool_prefix: self.tool_prefix,
             require: self.require,
+            startup_timeout: self.startup_timeout,
             cwd: self.cwd,
             config: self.config,
             secrets: self.secrets,
@@ -717,6 +753,7 @@ pub fn builtin_extensions() -> Vec<BuiltinExtension> {
             cwd: def.cwd.clone(),
             enable: def.enable,
             require: def.require,
+            startup_timeout: Duration::from_secs(def.startup_timeout_seconds),
             config: def.config.clone(),
             secrets: def.secrets.clone().unwrap_or_default(),
         })
@@ -745,6 +782,10 @@ pub(crate) struct BuiltInExtensionDef {
     pub enable: bool,
     #[serde(default = "default_true")]
     pub require: bool,
+    /// Initial readiness deadline in seconds, defaulting to Tau's general
+    /// extension startup budget.
+    #[serde(default = "default_extension_startup_timeout_seconds")]
+    pub startup_timeout_seconds: u64,
     pub config: serde_json::Value,
     #[serde(default)]
     pub secrets: Option<BTreeMap<String, ExtensionSecretEntry>>,
@@ -752,6 +793,13 @@ pub(crate) struct BuiltInExtensionDef {
 
 fn default_true() -> bool {
     true
+}
+
+/// Default initial readiness deadline for ordinary extensions.
+pub const DEFAULT_EXTENSION_STARTUP_TIMEOUT_SECONDS: u64 = 2;
+
+fn default_extension_startup_timeout_seconds() -> u64 {
+    DEFAULT_EXTENSION_STARTUP_TIMEOUT_SECONDS
 }
 
 pub(crate) fn built_in_extension_defs() -> &'static [BuiltInExtensionDef] {

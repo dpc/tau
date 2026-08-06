@@ -36,6 +36,7 @@
         suffix: ["component", "ext-rostra"],
         role: "tool",
         enable: false,
+        startup_timeout_seconds: 10,
         config: {},
     },
     {

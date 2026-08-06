@@ -29,7 +29,10 @@ uses `<tau-state>/secrets/rostra_identity_mnemonic.yaml`. It passes only the
 declared value through `configure`. The mnemonic is never in config, journals,
 tool inputs/results, or logging.
 
-The extension opens `<state_dir>/rostra.redb` read-only with the derived
+The bundled instance defaults to a ten-second startup deadline from successful
+spawn until `Ready`, rather than Tau's ordinary two-second default; an operator
+can override it with `extensions.std-rostra.startup_timeout_seconds`. This gives
+the extension time to open `<state_dir>/rostra.redb` read-only with the derived
 identity. The first signed tool call serializes with every other signed call,
 unlocks the client, and then publishes the requested event. This lazy
 activation avoids a signature merely from enabling the extension. Activation

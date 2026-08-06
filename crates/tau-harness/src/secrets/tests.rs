@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tau_config::settings::ExtensionSecretEntry;
 use tempfile::TempDir;
@@ -28,6 +29,7 @@ fn config_with_secret(optional: bool) -> Config {
                 role: None,
                 component: None,
                 require: true,
+                startup_timeout: Duration::from_secs(2),
                 cwd: None,
                 config: serde_json::json!({}),
                 secrets,

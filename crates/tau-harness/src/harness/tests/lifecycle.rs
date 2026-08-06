@@ -15,6 +15,7 @@ use crate::event::SUPERVISED_CLEANUP_GRACE;
 use crate::extension::{
     ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process, spawn_supervised,
 };
+use crate::harness::extensions::StartupDeadline;
 use crate::harness::provider_startup::{self, ProviderStartupSnapshot};
 use crate::harness::{
     EXTENSION_RESTART_DELAY, MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES,
@@ -311,6 +312,7 @@ fn supervised_test_config(name: &str, script: &str) -> ExtensionConfig {
         role: None,
         component: None,
         require: true,
+        startup_timeout: Duration::from_secs(2),
         cwd: None,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
@@ -667,6 +669,7 @@ fn configure_supervised_extension(
         role: (kind == tau_proto::ClientKind::Provider).then(|| "provider".to_owned()),
         component: None,
         require: true,
+        startup_timeout: Duration::from_secs(2),
         cwd: None,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
@@ -712,6 +715,7 @@ fn builtin_provider_startup_config(
                 component: Some(BuiltinComponentIdentity::Provider),
                 tool_prefix: None,
                 require: true,
+                startup_timeout: Duration::from_secs(2),
                 cwd: None,
                 config: serde_json::json!({}),
                 secrets: source_declaration
@@ -2851,6 +2855,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
                 role: None,
                 component: None,
                 require: false,
+                startup_timeout: Duration::from_secs(2),
                 cwd: None,
                 config: serde_json::json!({"token": "config-secret"}),
                 secrets: BTreeMap::new(),
@@ -3022,6 +3027,251 @@ fn required_startup_timeout_remains_startup_timeout() {
                     && info.message.contains("required-timeout-ext")
         )
     ));
+}
+
+/// Ensures a required extension's configured deadline fails only that expired
+/// peer, leaving a concurrently initializing peer with a later deadline out of
+/// the startup diagnostic.
+#[test]
+fn required_extension_startup_deadlines_are_independent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let expired = crate::test_connection_id("expired-required");
+    let later = crate::test_connection_id("later-required");
+    let _expired_sink = connect_handshaking_tool(&mut h, expired.as_str());
+    let _later_sink = connect_handshaking_tool(&mut h, later.as_str());
+    let now = Instant::now();
+    h.extensions.startup_deadlines.insert(
+        expired.clone(),
+        StartupDeadline {
+            deadline: now,
+            name: crate::test_extension_name("expired-required"),
+            require: true,
+        },
+    );
+    h.extensions.startup_deadlines.insert(
+        later.clone(),
+        StartupDeadline {
+            deadline: now + Duration::from_secs(10),
+            name: crate::test_extension_name("later-required"),
+            require: true,
+        },
+    );
+
+    let error = h
+        .handle_expired_extension_startup_deadlines(now)
+        .expect_err("expired required extension fails startup");
+
+    assert!(matches!(error, HarnessError::StartupTimeout));
+    assert!(event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::HarnessNotice(info)
+                if info.message.contains("expired-required")
+                    && !info.message.contains("later-required")
+        )
+    ));
+    assert_eq!(
+        h.extensions.startup_deadlines.get(&later),
+        Some(&StartupDeadline {
+            deadline: now + Duration::from_secs(10),
+            name: crate::test_extension_name("later-required"),
+            require: true,
+        })
+    );
+}
+
+/// Ensures an externally managed queued peer retains its one startup-wait
+/// deadline through unrelated events rather than receiving a fresh deadline for
+/// every event the harness processes.
+#[test]
+fn required_pending_external_extension_deadline_survives_event_churn() {
+    fn dormant_extension(mut reader: UnixStream, _writer: UnixStream) -> Result<(), String> {
+        let mut byte = [0_u8; 1];
+        let _ = reader.read(&mut byte).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let spawned = spawn_in_process(
+        "queued-required",
+        tau_proto::ClientKind::Tool,
+        dormant_extension,
+        &h.tx,
+    )
+    .expect("spawn queued extension");
+    let connection_id = spawned.connection_id.clone();
+    let (unrelated_client, _unrelated_peer) = UnixStream::pair().expect("unrelated client");
+    h.tx.send(HarnessEvent::NewClient(unrelated_client))
+        .expect("queue unrelated event");
+    h.queue_extension_connect(ExtensionConnectCommand {
+        entry: ExtensionEntry {
+            tool_prefix: None,
+            name: crate::test_extension_name("queued-required"),
+            instance_id: 701.into(),
+            connection_id: connection_id.clone(),
+            kind: tau_proto::ClientKind::Tool,
+            peer_capabilities: Default::default(),
+            require: true,
+            respawn_allowed: false,
+            pid: Some(std::process::id()),
+            in_process_thread: Some(spawned.thread),
+            supervised_config: None,
+            secrets: BTreeMap::new(),
+            restart_attempt: 0,
+            state: ExtensionState::Spawning,
+            protocol_io: spawned.protocol_io,
+        },
+        origin: ConnectionOrigin::InMemory,
+        writer_tx: spawned.writer_tx,
+        initialized_ack: spawned.initialized_ack,
+        supervised_writer: None,
+        replaces: None,
+    })
+    .expect("queue extension");
+
+    let error = h
+        .wait_for_extensions_ready_at(Instant::now() - Duration::from_secs(3))
+        .expect_err("expired pending required extension fails startup");
+
+    assert!(matches!(error, HarnessError::StartupTimeout));
+    assert!(h.extensions.entries.contains_key(&connection_id));
+    assert!(event_log_contains_source_event(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::HarnessNotice(info) if info.message.contains("queued-required")
+        )
+    ));
+}
+
+/// Ensures a queued Ready frame at the exact deadline cannot activate a
+/// required extension after its initial readiness budget has expired.
+#[test]
+fn ready_at_extension_startup_deadline_is_rejected_before_activation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let connection_id = crate::test_connection_id("deadline-ready");
+    let _sink = connect_handshaking_tool(&mut h, connection_id.as_str());
+    let deadline = Instant::now();
+    h.extensions.startup_deadlines.insert(
+        connection_id.clone(),
+        StartupDeadline {
+            deadline,
+            name: crate::test_extension_name("deadline-ready"),
+            require: true,
+        },
+    );
+    h.tx.send(HarnessEvent::from_connection_for_test(
+        connection_id.clone(),
+        HarnessInputMessage::Ready(Default::default()),
+    ))
+    .expect("queue ready");
+
+    let error = h
+        .wait_for_extensions_ready_at(deadline)
+        .expect_err("Ready at deadline fails startup");
+
+    assert!(matches!(error, HarnessError::StartupTimeout));
+    assert_eq!(
+        h.extensions.entries[&connection_id].state,
+        ExtensionState::Handshaking
+    );
+    assert!(!h.extensions.ready_received.contains(&connection_id));
+}
+
+/// Ensures an optional peer that expires before its queued connect installs is
+/// disconnected on install, while a later peer reaches Ready and closes the
+/// initial activation barrier.
+#[test]
+fn expired_optional_pending_extension_is_disabled_without_blocking_later_ready() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let later = crate::test_connection_id("later-ready");
+    let _later_sink = connect_handshaking_tool(&mut h, later.as_str());
+    let mut config = supervised_test_config("queued-optional", "exec sleep 60");
+    config.require = false;
+    let spawned = spawn_supervised(
+        &config,
+        tau_proto::ClientKind::Tool,
+        None,
+        &h.tx,
+        &h.state_dir,
+        h.storage_mode.is_memory_only(),
+    )
+    .expect("spawn optional extension");
+    let optional = spawned.connection_id.clone();
+    h.queue_extension_connect(ExtensionConnectCommand {
+        entry: ExtensionEntry {
+            tool_prefix: None,
+            name: crate::test_extension_name("queued-optional"),
+            instance_id: 702.into(),
+            connection_id: optional.clone(),
+            kind: tau_proto::ClientKind::Tool,
+            peer_capabilities: Default::default(),
+            require: false,
+            respawn_allowed: false,
+            pid: Some(spawned.child_pid),
+            in_process_thread: None,
+            supervised_config: Some(config),
+            secrets: BTreeMap::new(),
+            restart_attempt: 0,
+            state: ExtensionState::Spawning,
+            protocol_io: spawned.protocol_io,
+        },
+        origin: ConnectionOrigin::Supervised,
+        writer_tx: spawned.writer_tx,
+        initialized_ack: spawned.initialized_ack,
+        supervised_writer: Some(spawned.writer),
+        replaces: None,
+    })
+    .expect("queue optional extension");
+    let now = Instant::now();
+    h.extensions.startup_deadlines.insert(
+        optional.clone(),
+        StartupDeadline {
+            deadline: now,
+            name: crate::test_extension_name("queued-optional"),
+            require: false,
+        },
+    );
+    h.extensions.startup_deadlines.insert(
+        later.clone(),
+        StartupDeadline {
+            deadline: now + Duration::from_secs(10),
+            name: crate::test_extension_name("later-ready"),
+            require: true,
+        },
+    );
+    h.tx.send(HarnessEvent::from_connection_for_test(
+        later.clone(),
+        HarnessInputMessage::Ready(Default::default()),
+    ))
+    .expect("queue later Ready");
+
+    h.wait_for_extensions_ready_at(now)
+        .expect("optional expiry is nonfatal");
+
+    assert_eq!(
+        h.extensions.entries[&optional].state,
+        ExtensionState::Disconnected
+    );
+    assert_eq!(h.extensions.entries[&later].state, ExtensionState::Ready);
+    assert!(!h.extensions.startup_deadlines.contains_key(&optional));
+    assert!(!h.extensions.startup_deadlines.contains_key(&later));
+    assert!(h.initial_extension_tool_preflight_complete);
+    assert!(h.extensions.supervised_writers.contains_key(&optional));
+    assert!(h.extensions.cleanup_deadlines.contains_key(&optional));
+    h.shutdown()
+        .expect("supervised optional child is reaped during bounded shutdown");
 }
 
 #[test]

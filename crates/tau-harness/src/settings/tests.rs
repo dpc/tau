@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::time::Duration;
 use std::{ffi as path_std_ffi, path as path_std_path};
 
 use tau_config::settings as path_tau_config_settings;
@@ -26,6 +27,7 @@ fn builtin(
         cwd: None,
         enable,
         require: true,
+        startup_timeout: Duration::from_secs(DEFAULT_EXTENSION_STARTUP_TIMEOUT_SECONDS),
         config,
         secrets: BTreeMap::new(),
     }
@@ -200,6 +202,143 @@ fn resolve_extensions_returns_builtins_when_user_config_empty() {
     assert_eq!(resolved[1].name, "core-shell");
     assert_eq!(resolved[2].name, "std-notifications");
     assert_eq!(resolved[3].name, "std-websearch");
+}
+
+/// Ensures ordinary extensions retain the two-second default while the bundled
+/// Rostra client receives its approved migration-aware deadline and users can
+/// replace that value for one configured instance.
+#[test]
+fn extension_startup_timeout_defaults_and_overrides() {
+    let builtins = builtin_extensions();
+    assert_eq!(
+        builtins
+            .iter()
+            .find(|extension| extension.name == "std-rostra")
+            .expect("bundled Rostra extension")
+            .startup_timeout,
+        Duration::from_secs(10)
+    );
+
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "std-rostra".to_owned(),
+        ExtensionEntry {
+            enable: Some(true),
+            startup_timeout_seconds: Some(17),
+            ..Default::default()
+        },
+    );
+    settings.extensions.insert(
+        "external".to_owned(),
+        ExtensionEntry {
+            command: Some(vec!["external-extension".to_owned()]),
+            ..Default::default()
+        },
+    );
+
+    let resolved = resolve_extensions(&settings, builtins).expect("resolve extensions");
+    assert_eq!(
+        resolved
+            .iter()
+            .find(|extension| extension.name == "std-rostra")
+            .expect("enabled Rostra")
+            .startup_timeout,
+        Duration::from_secs(17)
+    );
+    assert_eq!(
+        resolved
+            .iter()
+            .find(|extension| extension.name == "external")
+            .expect("user extension")
+            .startup_timeout,
+        Duration::from_secs(DEFAULT_EXTENSION_STARTUP_TIMEOUT_SECONDS)
+    );
+}
+
+/// Ensures invalid per-extension readiness deadlines fail resolution rather
+/// than silently weakening or indefinitely extending startup availability.
+#[test]
+fn extension_startup_timeout_requires_one_through_3600_seconds() {
+    for seconds in [1, 3_600] {
+        let mut settings = HarnessSettings::built_in();
+        settings.extensions.insert(
+            "external".to_owned(),
+            ExtensionEntry {
+                command: Some(vec!["external-extension".to_owned()]),
+                startup_timeout_seconds: Some(seconds),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            resolve_extensions(&settings, builtins())
+                .expect("accept inclusive deadline")
+                .iter()
+                .find(|extension| extension.name == "external")
+                .expect("external extension")
+                .startup_timeout,
+            Duration::from_secs(seconds)
+        );
+    }
+    for seconds in [0, 3_601] {
+        let mut settings = HarnessSettings::built_in();
+        settings.extensions.insert(
+            "external".to_owned(),
+            ExtensionEntry {
+                command: Some(vec!["external-extension".to_owned()]),
+                startup_timeout_seconds: Some(seconds),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            resolve_extensions(&settings, builtins()).expect_err("reject invalid deadline"),
+            ResolveExtensionsError::InvalidStartupTimeout {
+                name: "external".to_owned(),
+                seconds,
+            }
+        );
+    }
+}
+
+/// Ensures the readiness deadline follows normal harness-file, drop-in, and
+/// command-line override precedence rather than becoming a special config path.
+#[test]
+fn extension_startup_timeout_layers_through_file_drop_in_and_cli() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let config_dir = temporary.path();
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        "extensions:\n  core-shell:\n    startup_timeout_seconds: 1\n",
+    )
+    .expect("base configuration");
+    std::fs::create_dir(config_dir.join("harness.d")).expect("drop-in directory");
+    std::fs::write(
+        config_dir.join("harness.d/10-startup-timeout.yaml"),
+        "extensions:\n  core-shell:\n    startup_timeout_seconds: 3600\n",
+    )
+    .expect("drop-in configuration");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.to_path_buf()),
+        state_dir: None,
+    };
+    let overrides =
+        [
+            HarnessConfigCliOverride::from_str("extensions.core-shell.startup_timeout_seconds=17")
+                .expect("override syntax"),
+        ];
+
+    let settings = load_settings_for_cli_overrides_in(&dirs, None, &[], &overrides)
+        .expect("load layered settings");
+    let resolved = resolve_extensions(&settings, builtin_extensions()).expect("resolve extensions");
+    assert_eq!(
+        resolved
+            .iter()
+            .find(|extension| extension.name == "core-shell")
+            .expect("core shell")
+            .startup_timeout,
+        Duration::from_secs(17)
+    );
 }
 
 #[test]

@@ -1952,6 +1952,14 @@ pub struct ExtensionEntry {
     /// this field because they are not desired at all.
     pub require: Option<bool>,
 
+    /// Maximum number of seconds the harness waits for this extension to send
+    /// its initial `Ready` after a successful supervised spawn.
+    ///
+    /// An absent value inherits the built-in value, or Tau's two-second general
+    /// default for user-added extensions. Values must be within one through
+    /// 3,600 seconds.
+    pub startup_timeout_seconds: Option<u64>,
+
     /// Role tag. Built-in providers use `role: "provider"`; entries
     /// without that role are treated as tool extensions.
     pub role: Option<String>,

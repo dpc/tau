@@ -22,7 +22,7 @@ use std::io::{Read, Write};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rostra_client::{Client, Database};
 use rostra_core::id::RostraIdSecretKey;
@@ -321,21 +321,46 @@ fn configure(
     })?;
     let database_path = state_dir.join("rostra.redb");
     let permissions_path = database_path.clone();
+    let initialization_started_at = Instant::now();
+    tracing::info!(target: LOG_TARGET, "opening Rostra database");
     let client = state
         .runtime
         .as_ref()
         .expect("runtime exists until state drop")
         .block_on(async {
-            let database = Database::open(database_path, identity)
-                .await
-                .map_err(|_| ())?;
+            let database = Database::open(database_path, identity).await.map_err(|_| {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    elapsed_ms = initialization_started_at.elapsed().as_millis(),
+                    phase = "database_open",
+                    "Rostra initialization failed"
+                );
+            })?;
+            tracing::info!(
+                target: LOG_TARGET,
+                elapsed_ms = initialization_started_at.elapsed().as_millis(),
+                "Rostra database opened"
+            );
             ensure_private_file(&permissions_path).map_err(|_| ())?;
-            Client::builder(identity)
+            let client = Client::builder(identity)
                 .db(database)
                 .public_mode(false)
                 .build()
                 .await
-                .map_err(|_| ())
+                .map_err(|_| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        elapsed_ms = initialization_started_at.elapsed().as_millis(),
+                        phase = "client_build",
+                        "Rostra initialization failed"
+                    );
+                })?;
+            tracing::info!(
+                target: LOG_TARGET,
+                elapsed_ms = initialization_started_at.elapsed().as_millis(),
+                "Rostra client started"
+            );
+            Ok::<_, ()>(client)
         })
         .map_err(|_| {
             ClientError::handler(

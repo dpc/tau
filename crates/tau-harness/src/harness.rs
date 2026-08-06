@@ -108,6 +108,7 @@ use crate::harness::extension_data::{
     run_extension_data_write_file, run_extension_data_write_file_with_limit,
     with_extension_data_scope_lock,
 };
+use crate::harness::extensions::StartupDeadline;
 
 /// Model-visible reminder to report meaningful work through the status tool.
 pub(crate) const STATUS_REMINDER: &str = "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible.";
@@ -4215,6 +4216,15 @@ impl Harness {
                 Err(error) => return Err(error),
             };
             let conn_id = spawned.connection_id.clone();
+            self.extensions.startup_deadlines.insert(
+                conn_id.clone(),
+                StartupDeadline {
+                    deadline: Instant::now() + ext_config.startup_timeout,
+                    name: tau_proto::ExtensionName::parse(ext_config.name.clone())
+                        .expect("validated extension config name must remain canonical"),
+                    require: ext_config.require,
+                },
+            );
             tracing::info!(
                 target: "tau_harness::startup",
                 extension = %ext_config.name,
@@ -4309,9 +4319,18 @@ impl Harness {
         &mut self,
         started_at: Instant,
     ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
+        self.recv_event_until(started_at + STARTUP_TIMEOUT)
+    }
+
+    /// Receive one harness event without crossing `deadline`, while continuing
+    /// to service ordinary runtime deadlines.
+    fn recv_event_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
         loop {
             self.process_runtime_deadlines();
-            let remaining = STARTUP_TIMEOUT.saturating_sub(started_at.elapsed());
+            let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(mpsc::RecvTimeoutError::Timeout);
             }
@@ -4326,8 +4345,7 @@ impl Harness {
             match self.rx.recv_timeout(wait) {
                 Ok(event) => return Ok(event),
                 Err(mpsc::RecvTimeoutError::Timeout)
-                    if started_at.elapsed() < STARTUP_TIMEOUT
-                        && self.next_runtime_deadline().is_some() =>
+                    if Instant::now() < deadline && self.next_runtime_deadline().is_some() =>
                 {
                     continue;
                 }
@@ -4730,12 +4748,28 @@ impl Harness {
                 .supervised_writers
                 .insert(connection_id.clone(), supervised_writer);
         }
-        self.extensions.entries.insert(connection_id, entry);
+        self.extensions.entries.insert(connection_id.clone(), entry);
         if 0 < self.extensions.pending_connects {
             self.extensions.pending_connects -= 1;
         }
         self.emit_extension_starting(&name);
         let _ = initialized_ack.send(());
+        if let Some(expired) = self
+            .extensions
+            .expired_startup_connects
+            .remove(&connection_id)
+        {
+            debug_assert!(!expired.require, "required startup timeout returned");
+            tracing::warn!(
+                target: "tau_harness::startup",
+                extension = %expired.name,
+                "optional extension did not initialize: timed out before connecting"
+            );
+            self.disable_optional_extension(
+                &connection_id,
+                &format!("optional extension {} did not initialize", expired.name),
+            );
+        }
         Ok(())
     }
 
@@ -9022,22 +9056,52 @@ impl Harness {
     /// state transitions are tracked per-extension so the same predicate
     /// can also gate runtime dispatch in `dispatch_blocked_for`.
     fn wait_for_extensions_ready(&mut self) -> Result<(), HarnessError> {
+        self.wait_for_extensions_ready_at(Instant::now())
+    }
+
+    /// Drive initial extension activation from one deadline anchor.
+    ///
+    /// Production records this anchor immediately before it begins waiting.
+    /// Tests supply an exact instant to exercise ordering at a deadline without
+    /// sleeping.
+    fn wait_for_extensions_ready_at(
+        &mut self,
+        wait_started_at: Instant,
+    ) -> Result<(), HarnessError> {
         self.maybe_finish_extension_activation(None)?;
         if self.extensions.pending_connects == 0 && self.extensions_all_ready() {
             return Ok(());
         }
-        let started_at = Instant::now();
+        self.extensions.startup_wait_deadline = Some(wait_started_at + STARTUP_TIMEOUT);
+        self.ensure_extension_startup_deadlines(wait_started_at);
         while self.extensions.pending_connects != 0 || !self.extensions_all_ready() {
-            let harness_evt = match self.recv_startup_event(started_at) {
-                Ok(event) => event,
-                Err(_) => return self.handle_extensions_startup_timeout(),
+            self.handle_expired_extension_startup_deadlines(Instant::now())?;
+            let deadline = self
+                .next_extension_startup_deadline()
+                .unwrap_or_else(|| Instant::now() + STARTUP_TIMEOUT);
+            let harness_evt = if deadline <= Instant::now() {
+                match self.rx.try_recv() {
+                    Ok(event) => event,
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                        return self.handle_extensions_startup_timeout();
+                    }
+                }
+            } else {
+                match self.recv_event_until(deadline) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        self.handle_expired_extension_startup_deadlines(Instant::now())?;
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return self.handle_extensions_startup_timeout();
+                    }
+                }
             };
             self.log_event(&harness_evt);
             // Do not allow a frame received just before the deadline to activate
-            // an extension after the absolute startup deadline.
-            if STARTUP_TIMEOUT <= started_at.elapsed() {
-                return self.handle_extensions_startup_timeout();
-            }
+            // an extension after its own startup deadline.
+            self.handle_expired_extension_startup_deadlines(Instant::now())?;
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
@@ -9068,18 +9132,107 @@ impl Harness {
                 }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
-            if STARTUP_TIMEOUT <= started_at.elapsed() {
-                if self.extensions.pending_connects != 0 || !self.extensions_all_ready() {
-                    return self.handle_extensions_startup_timeout();
-                }
-                return Err(HarnessError::StartupTimeout);
+            self.ensure_extension_startup_deadlines(wait_started_at);
+        }
+        self.extensions.startup_wait_deadline = None;
+        Ok(())
+    }
+
+    /// Assign the general startup deadline only to entries that an external
+    /// caller installed without a successful supervised spawn record.
+    fn ensure_extension_startup_deadlines(&mut self, now: Instant) {
+        let wait_deadline = self
+            .extensions
+            .startup_wait_deadline
+            .unwrap_or(now + STARTUP_TIMEOUT);
+        for connection_id in &self.extensions.order {
+            let Some(entry) = self.extensions.entries.get(connection_id) else {
+                continue;
+            };
+            if matches!(
+                entry.state,
+                ExtensionState::Ready | ExtensionState::Disconnected
+            ) || self.extensions.ready_received.contains(connection_id)
+            {
+                continue;
+            }
+            self.extensions
+                .startup_deadlines
+                .entry(connection_id.clone())
+                .or_insert(StartupDeadline {
+                    deadline: wait_deadline,
+                    name: entry.name.clone(),
+                    require: entry.require,
+                });
+        }
+    }
+
+    /// Return the next configured initial-readiness deadline.
+    fn next_extension_startup_deadline(&self) -> Option<Instant> {
+        self.extensions
+            .startup_deadlines
+            .values()
+            .map(|deadline| deadline.deadline)
+            .chain(
+                (self.extensions.pending_connects != 0)
+                    .then_some(self.extensions.startup_wait_deadline)
+                    .flatten(),
+            )
+            .min()
+    }
+
+    /// Apply every expired per-extension startup deadline.
+    fn handle_expired_extension_startup_deadlines(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), HarnessError> {
+        let mut expired = self
+            .extensions
+            .startup_deadlines
+            .iter()
+            .filter_map(|(connection_id, deadline)| {
+                (deadline.deadline <= now).then_some((connection_id.clone(), deadline.clone()))
+            })
+            .collect::<Vec<_>>();
+        expired.sort_by(|(_, left), (_, right)| left.name.cmp(&right.name));
+        if expired.is_empty() {
+            return Ok(());
+        }
+        let required = expired
+            .iter()
+            .filter_map(|(_, deadline)| deadline.require.then_some(deadline.name.as_str()))
+            .collect::<Vec<_>>();
+        if !required.is_empty() {
+            self.emit_info_important(&format!(
+                "startup timed out waiting for required extension(s): {}",
+                required.join(", ")
+            ));
+            return Err(HarnessError::StartupTimeout);
+        }
+        for (connection_id, deadline) in expired {
+            self.extensions.startup_deadlines.remove(&connection_id);
+            if self.extensions.entries.contains_key(&connection_id) {
+                tracing::warn!(
+                    target: "tau_harness::startup",
+                    extension = %deadline.name,
+                    "optional extension did not initialize: timed out before becoming ready"
+                );
+                self.disable_optional_extension(
+                    &connection_id,
+                    &format!("optional extension {} did not initialize", deadline.name),
+                );
+            } else {
+                self.extensions
+                    .expired_startup_connects
+                    .insert(connection_id, deadline);
             }
         }
+        self.maybe_finish_extension_activation(None)?;
         Ok(())
     }
 
     fn handle_extensions_startup_timeout(&mut self) -> Result<(), HarnessError> {
-        let blockers: Vec<_> = self
+        let blockers = self
             .extensions
             .entries
             .iter()
@@ -9089,8 +9242,29 @@ impl Harness {
                     ExtensionState::Ready | ExtensionState::Disconnected
                 ) && !self.extensions.ready_received.contains(*connection_id)
             })
-            .map(|(connection_id, entry)| {
-                (connection_id.clone(), entry.name.clone(), entry.require)
+            .map(|(connection_id, _)| connection_id.clone())
+            .collect();
+        self.handle_extensions_startup_timeout_for(blockers)
+    }
+
+    /// Apply startup timeout policy to the supplied non-ready connections.
+    fn handle_extensions_startup_timeout_for(
+        &mut self,
+        timed_out: Vec<tau_proto::ConnectionId>,
+    ) -> Result<(), HarnessError> {
+        let blockers: Vec<_> = timed_out
+            .into_iter()
+            .filter_map(|connection_id| {
+                self.extensions
+                    .entries
+                    .get(&connection_id)
+                    .and_then(|entry| {
+                        (!matches!(
+                            entry.state,
+                            ExtensionState::Ready | ExtensionState::Disconnected
+                        ) && !self.extensions.ready_received.contains(&connection_id))
+                        .then_some((connection_id, entry.name.clone(), entry.require))
+                    })
             })
             .collect();
         let required_blockers: Vec<_> = blockers
@@ -11767,6 +11941,8 @@ impl Harness {
                 }
             }
             HarnessInputMessage::Ready(_ready) => {
+                self.extensions.startup_deadlines.remove(source_id);
+                self.extensions.expired_startup_connects.remove(source_id);
                 self.extensions.ready_received.insert(source_id.clone());
                 self.maybe_finish_extension_activation(Some(source_id))?;
                 self.drain_pending_tool_invocations()?;
@@ -16451,6 +16627,10 @@ impl Harness {
 
     /// Stop routing immediately and begin supervised cleanup against `now`.
     fn handle_disconnect_at(&mut self, connection_id: &tau_proto::ConnectionId, now: Instant) {
+        self.extensions.startup_deadlines.remove(connection_id);
+        self.extensions
+            .expired_startup_connects
+            .remove(connection_id);
         self.cancel_rendered_previews(|request| match request {
             PendingRenderedPrompt::System {
                 connection_id: requester,
