@@ -105,8 +105,17 @@ impl OpenRouterProfile {
                 .cloned()
                 .map(|mut model| {
                     // OpenRouter is a known remote route; the explicit local
-                    // compactor assertion has no authority on this profile.
+                    // compactor assertion and cache contract have no authority
+                    // on this profile. The selected upstream may vary. A
+                    // model-level compatibility override retains unrelated
+                    // controls but cannot alter the telemetry-only cache route.
                     model.local_summary_compaction = None;
+                    model.cache_contract = None;
+                    if let Some(compat) = model.compat.as_mut() {
+                        compat.stream_options = true;
+                        compat.openai_prompt_cache = None;
+                        compat.cache_usage = super::CacheUsageCompat::OpenAi;
+                    }
                     model
                 })
                 .collect(),
@@ -119,9 +128,23 @@ impl OpenRouterProfile {
                 openai_prompt_cache: None,
                 reasoning_effort: true,
                 max_completion_tokens: true,
-                cache_usage: super::CacheUsageCompat::None,
+                // OpenRouter supplies this documented OpenAI-compatible usage
+                // shape. It remains response-local telemetry: selected upstream
+                // routing does not establish cache mechanism or residency.
+                cache_usage: super::CacheUsageCompat::OpenAi,
             },
         }
+    }
+
+    /// Reject model overrides that select cache telemetry without requesting
+    /// streamed usage.
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        for model in &self.models {
+            if let Some(compat) = model.compat {
+                compat.validate()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -281,7 +304,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             openai_prompt_cache: None,
             reasoning_effort: supports_reasoning,
             max_completion_tokens: true,
-            cache_usage: super::CacheUsageCompat::None,
+            cache_usage: super::CacheUsageCompat::OpenAi,
         }),
         tags: Vec::new(),
         supports_parallel_tool_calls: true,

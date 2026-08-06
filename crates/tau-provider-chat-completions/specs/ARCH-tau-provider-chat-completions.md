@@ -20,6 +20,17 @@ breakpoint. It does not mark conversation or tool suffixes, so it does not
 implicitly write a volatile suffix. The standalone compactor omits every cache
 field. Opaque `extra_body` cannot collide with these typed top-level members.
 
+## Cache telemetry route capabilities
+
+The adapter parses cache counters only after the extension selects
+`AttemptCompat.cache_usage` for the exact route. DeepSeek hit/miss counters
+therefore never become observations merely because a model or endpoint name
+looks like DeepSeek. Any selected cache schema requires
+`AttemptCompat.stream_options`, which requests the supported terminal streamed
+usage member. OpenRouter selects the documented OpenAI-compatible read/write
+shape, but its selected upstream can vary; those observations have unknown
+residency and never establish a cache policy, renewal, or keepalive operation.
+
 ## Function-call argument replay identity
 
 Chat Completions providers expose function-call arguments as JSON text. The

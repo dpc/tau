@@ -127,6 +127,40 @@ fn deepseek_cache_usage_normalizes_contradictory_counters() {
     assert_eq!(cache.hit_ratio_millionths(), Some(900_000));
 }
 
+/// OpenRouter's documented OpenAI-compatible counters remain ordinary-request
+/// telemetry because router and selected-upstream cache residency are unknown.
+#[test]
+fn openrouter_shape_keeps_cache_residency_unknown() {
+    let mut state = StreamState::new_with_cache_usage(CacheUsageCompat::OpenAi);
+    capture_usage(
+        &mut state,
+        &serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 4,
+            "prompt_tokens_details": {
+                "cached_tokens": 80,
+                "cache_write_tokens": 10
+            }
+        }),
+    );
+
+    let cache = state
+        .usage()
+        .expect("OpenRouter usage")
+        .cache
+        .expect("OpenRouter cache telemetry");
+    assert_eq!(cache.read_tokens, Some(80));
+    assert_eq!(cache.write_tokens, Some(10));
+    assert_eq!(
+        cache.expiry_confidence,
+        Some(tau_proto::ProviderCacheExpiryConfidence::Unknown)
+    );
+    assert_eq!(
+        cache.refresh_reason,
+        Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest)
+    );
+}
+
 /// Ensures historical XML-escaped and current exact-close web results remain
 /// byte-for-byte intact on the Chat Completions native tool-result path.
 #[test]

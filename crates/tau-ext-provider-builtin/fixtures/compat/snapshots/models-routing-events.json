@@ -175,7 +175,13 @@
           ],
           "stop_reason": "end_turn",
           "usage": {
-            "prompt_cached_tokens": 0,
+            "cache": {
+              "avoided_prefill_tokens": 4,
+              "expiry_confidence": "unknown",
+              "read_tokens": 4,
+              "refresh_reason": "ordinary_request"
+            },
+            "prompt_cached_tokens": 4,
             "prompt_sent_tokens": 10,
             "response_received_tokens": 2,
             "stats": {
@@ -859,6 +865,7 @@
       "backend": "chat_completions",
       "model": {
         "compat": {
+          "cache_usage": "open_ai",
           "max_completion_tokens": true,
           "reasoning_effort": true,
           "stream_options": true
@@ -873,6 +880,7 @@
       "provider": {
         "base_url": "https://openrouter.ai/api/v1",
         "compat": {
+          "cache_usage": "open_ai",
           "max_completion_tokens": true,
           "reasoning_effort": true,
           "stream_options": true

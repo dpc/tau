@@ -532,6 +532,24 @@ Responses and private ChatGPT routes use their native OpenAI response shape.
 Anthropic/Gemini compatibility routes remain best-effort and expose no native
 cache parsing or object lifecycle.
 
+DeepSeek Chat Completions routes must explicitly select both
+`compat.stream_options: true` and `compat.cache_usage: deep_seek`. The first
+uses the existing `stream_options.include_usage` request member; the second is
+the sole authority for parsing `prompt_cache_hit_tokens` and
+`prompt_cache_miss_tokens`. Those counters are response-local telemetry with
+probabilistic residency, not a cache-policy declaration or TTL evidence.
+
+OpenRouter profiles and discovered models select streamed OpenAI-compatible
+cache read/write telemetry by default. Tau publishes no OpenRouter cache policy,
+does not send cache controls, and drops configured generic cache contracts on
+that route: OpenRouter can choose a different upstream provider, so a response
+cannot establish cache mechanism, privacy, residency, renewal, or lifecycle.
+Its observations consequently retain unknown expiry confidence. Neither
+DeepSeek nor OpenRouter observations schedule a keepalive. Any future
+latency-oriented keepalive needs a separate explicit operator budget with
+privacy and quota visibility; it cannot infer a cadence from eviction or a
+recent cache hit.
+
 Generic OpenAI-compatible routes may opt into typed cache request controls only
 when the exact configured route supports them. Tau never infers these controls
 from a provider name, model name, base URL, or OpenRouter route. `extra_body`

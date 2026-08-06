@@ -21,6 +21,16 @@ extension owns mutable-profile resolution, model publication, event ordering,
 public response sampling, logical retries, cancellation, and supervised prewarm
 work. Backends return typed outcomes and never serialize harness frames.
 
+Chat Completions routes select cache-usage parsing only through their serialized
+compatibility capability. A selected cache schema requires streamed usage, so the
+adapter sends its existing `stream_options.include_usage` request member rather
+than relying on an undocumented terminal chunk. OpenRouter's built-in and
+discovered route capabilities select its documented OpenAI-compatible
+read/write counters and streamed usage, but publish no cache contract or
+cache-control request behavior. OpenRouter can select a different upstream
+provider for a request, so its counters cannot establish an upstream cache
+mechanism, residency, privacy posture, renewal operation, or lifecycle.
+
 ChatGPT profiles capture Responses mode at process startup. Model publication,
 prompt, prewarm, retry, and quota resolution share that value; credential reload
 and OAuth refresh do not change it. An on-disk mode edit takes effect after

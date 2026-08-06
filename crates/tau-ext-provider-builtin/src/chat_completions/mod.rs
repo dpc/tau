@@ -174,7 +174,7 @@ pub struct ChatCompletionsCompat {
     /// Use `max_completion_tokens`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub max_completion_tokens: bool,
-    /// Explicit provider cache usage response schema.
+    /// Explicit provider cache usage response schema, requiring streamed usage.
     #[serde(default, skip_serializing_if = "CacheUsageCompat::is_none")]
     pub cache_usage: CacheUsageCompat,
 }
@@ -213,6 +213,20 @@ impl Default for ChatCompletionsProvider {
     }
 }
 
+impl ChatCompletionsProvider {
+    /// Reject compatibility selections that cannot produce their declared
+    /// telemetry on this streaming-only adapter.
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        self.compat.validate()?;
+        for model in &self.models {
+            if let Some(compat) = model.compat {
+                compat.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ChatCompletionsCompat {
     /// Controls used for OpenAI-compatible public endpoints.
     #[must_use]
@@ -225,6 +239,19 @@ impl ChatCompletionsCompat {
             max_completion_tokens: true,
             cache_usage: CacheUsageCompat::OpenAi,
         }
+    }
+
+    /// Reject cache telemetry without the streamed-usage request surface.
+    ///
+    /// The Chat Completions adapter always streams output, but compatible
+    /// servers commonly require `stream_options.include_usage` before they
+    /// append usage to that stream. A selected cache schema without this
+    /// capability would make telemetry depend on undocumented server defaults.
+    fn validate(self) -> Result<(), &'static str> {
+        if self.cache_usage != CacheUsageCompat::None && !self.stream_options {
+            return Err("cache_usage requires stream_options");
+        }
+        Ok(())
     }
 }
 

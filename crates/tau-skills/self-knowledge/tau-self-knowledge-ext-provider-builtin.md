@@ -153,8 +153,17 @@ only.
 
 Chat Completions cache counters are ignored by default. Set
 `compat.cache_usage` to `open_ai` or `deep_seek` only when the exact route uses
-that response schema. Unsupported Anthropic/Gemini-compatible cache details
-remain absent; the extension has no native cache-object lifecycle client.
+that response schema, and pair a selected schema with
+`compat.stream_options: true` so the supported `include_usage` stream member
+requests terminal usage. DeepSeek hit/miss counters are parsed only through
+that explicit capability and remain response-local telemetry with probabilistic
+residency. OpenRouter profiles and discovered models select streamed
+OpenAI-compatible read/write telemetry by default, but never publish a cache
+policy or cache controls: router-selected upstreams leave cache mechanism,
+privacy, residency, renewal, and lifecycle unknown. Tau drops generic cache
+contracts on OpenRouter routes. Unsupported Anthropic/Gemini-compatible cache
+details remain absent; the extension has no native cache-object lifecycle
+client.
 
 Generic Chat Completions and public Responses model entries may add an optional
 `cache_contract` describing documented cache kind, TTL shape, renewal, output
@@ -203,7 +212,8 @@ residency and unsupported renewal unless the exact route has a stronger document
 contract. OpenAI read/write counters remain observations, never TTL evidence.
 Tau has no cache-refresh experiment or scheduler; any future experiment needs
 separate approval, explicit opt-in, measured reads/writes, tightly bounded
-output, and a request/quota budget below expected avoided writes.
+output, and a request/quota budget below expected avoided writes. Observed
+eviction or recent reads never infer a TTL or schedule keepalive traffic.
 
 Generic OpenAI-compatible cache request controls are opt-in and route-local:
 `compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat

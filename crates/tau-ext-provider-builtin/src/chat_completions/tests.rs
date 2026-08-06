@@ -56,6 +56,50 @@ fn profile_validates_exclusive_openai_prompt_cache_policies() {
     assert!(empty.is_err());
 }
 
+/// Cache telemetry must request the compatible stream usage field rather than
+/// treating a server's undocumented default as a declared route capability.
+#[test]
+fn cache_usage_requires_stream_options() {
+    let provider = ChatCompletionsProvider {
+        compat: ChatCompletionsCompat {
+            cache_usage: CacheUsageCompat::DeepSeek,
+            ..ChatCompletionsCompat::default()
+        },
+        ..ChatCompletionsProvider::default()
+    };
+    assert_eq!(
+        provider.validate(),
+        Err("cache_usage requires stream_options")
+    );
+
+    let model_override = ChatCompletionsModel {
+        id: tau_proto::ModelName::new("deepseek-v4-flash"),
+        display_name: None,
+        context_window: 128_000,
+        compat: Some(ChatCompletionsCompat {
+            cache_usage: CacheUsageCompat::DeepSeek,
+            ..ChatCompletionsCompat::default()
+        }),
+        tags: Vec::new(),
+        supports_parallel_tool_calls: true,
+        local_summary_compaction: None,
+        cache_contract: None,
+        est_uncached_input_cost_1m_usd: None,
+        est_cached_input_cost_1m_usd: None,
+        est_cache_write_input_cost_1m_usd: None,
+        est_output_cost_1m_usd: None,
+        est_cache_storage_cost_1m_token_hour_usd: None,
+    };
+    let provider = ChatCompletionsProvider {
+        models: vec![model_override],
+        ..ChatCompletionsProvider::default()
+    };
+    assert_eq!(
+        provider.validate(),
+        Err("cache_usage requires stream_options")
+    );
+}
+
 /// Ensures legacy model JSON omitting the additive capability remains
 /// parallel-capable, preserving phase-1 profile compatibility.
 #[test]
@@ -175,6 +219,39 @@ fn openrouter_suppresses_local_summary_compaction() {
         !models_for_provider(&tau_proto::ProviderName::new("openrouter"), &provider)[0]
             .supports_standalone_compaction
     );
+}
+
+/// OpenRouter enables only its documented streamed cache counters; unknown
+/// upstream selection cannot create a cache-policy declaration or controls.
+#[test]
+fn openrouter_defaults_to_telemetry_without_cache_policy() {
+    let model = ChatCompletionsModel {
+        id: tau_proto::ModelName::new("upstream/model"),
+        display_name: None,
+        context_window: 128_000,
+        compat: None,
+        tags: Vec::new(),
+        supports_parallel_tool_calls: true,
+        local_summary_compaction: None,
+        cache_contract: None,
+        est_uncached_input_cost_1m_usd: None,
+        est_cached_input_cost_1m_usd: None,
+        est_cache_write_input_cost_1m_usd: None,
+        est_output_cost_1m_usd: None,
+        est_cache_storage_cost_1m_token_hour_usd: None,
+    };
+    let provider = OpenRouterProfile {
+        api_key: String::new(),
+        models: vec![model],
+    }
+    .to_chat_completions();
+
+    assert!(provider.compat.stream_options);
+    assert_eq!(provider.compat.cache_usage, CacheUsageCompat::OpenAi);
+    assert!(provider.compat.openai_prompt_cache.is_none());
+    let models = models_for_provider(&tau_proto::ProviderName::new("router"), &provider);
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].cache_policy, None);
 }
 
 /// Ensures a provider output-token stop cannot commit a truncated checkpoint.

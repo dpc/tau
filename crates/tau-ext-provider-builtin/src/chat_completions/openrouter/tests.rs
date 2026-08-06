@@ -6,6 +6,7 @@ mod scripted_http_server;
 
 use scripted_http_server::ScriptedHttpServer;
 
+use super::super::{CacheUsageCompat, models_for_provider};
 use super::*;
 
 /// One valid bounded OpenRouter response used by cache tests.
@@ -36,13 +37,77 @@ fn authenticated_discovery_normalizes_models_and_refreshes_cache() {
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id.as_str(), "vendor/model");
     assert_eq!(models[0].context_window, 1234);
-    assert!(models[0].compat.as_ref().expect("compat").reasoning_effort);
+    let compat = models[0].compat.as_ref().expect("compat");
+    assert!(compat.reasoning_effort);
+    assert!(compat.stream_options);
+    assert_eq!(compat.cache_usage, CacheUsageCompat::OpenAi);
+    assert!(compat.openai_prompt_cache.is_none());
+    assert!(models[0].cache_contract.is_none());
     let request = server.finish();
     assert!(request.starts_with("GET /models HTTP/1.1\r\n"));
     assert!(request.contains("authorization: Bearer openrouter-key-canary\r\n"));
     let cached: Vec<ChatCompletionsModel> =
         serde_json::from_reader(fs::File::open(cache).expect("cache file")).expect("cache JSON");
     assert_eq!(cached.len(), 1);
+}
+
+/// OpenRouter routes may emit documented cache counters, but provider selection
+/// prevents an asserted upstream cache lifecycle from becoming model metadata.
+#[test]
+fn openrouter_conversion_strips_upstream_cache_contract() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "vendor/model",
+        "compat": {
+            "stream_options": true,
+            "parallel_tool_calls": true,
+            "openai_prompt_cache": {
+                "key": "agent",
+                "retention": "in_memory"
+            },
+            "reasoning_effort": false,
+            "cache_usage": "deep_seek"
+        },
+        "cache_contract": {
+            "kind": "automatic_prefix",
+            "ttl": {"kind": "unknown"},
+            "renewal": "unsupported",
+            "output_floor": "unknown",
+            "quota": {
+                "requests": "unknown",
+                "read_tokens": "unknown",
+                "write_tokens": "unknown",
+                "output_tokens": "unknown"
+            },
+            "privacy": {
+                "storage": "unknown",
+                "zero_data_retention": "unknown",
+                "data_residency": "unknown",
+                "manual_deletion": "unavailable"
+            }
+        }
+    }))
+    .expect("valid generic contract");
+    let provider = OpenRouterProfile {
+        api_key: String::new(),
+        models: vec![model],
+    }
+    .to_chat_completions();
+
+    assert!(provider.compat.stream_options);
+    assert_eq!(provider.compat.cache_usage, CacheUsageCompat::OpenAi);
+    assert_eq!(provider.models[0].cache_contract, None);
+    let compat = provider.models[0]
+        .compat
+        .expect("configured model compatibility");
+    assert!(compat.stream_options);
+    assert_eq!(compat.cache_usage, CacheUsageCompat::OpenAi);
+    assert!(compat.openai_prompt_cache.is_none());
+    assert!(compat.parallel_tool_calls);
+    assert!(!compat.reasoning_effort);
+    assert_eq!(
+        models_for_provider(&tau_proto::ProviderName::new("router"), &provider)[0].cache_policy,
+        None
+    );
 }
 
 /// Ensures only transport/status failures may use a prior non-empty cache;

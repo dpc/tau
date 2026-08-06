@@ -122,6 +122,18 @@ pub enum BuiltinProviderProfile {
     Responses(ResponsesProvider),
 }
 
+impl BuiltinProviderProfile {
+    /// Validate profile-wide invariants after serde has decoded its local
+    /// fields.
+    fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::ChatCompletions(provider) => provider.validate(),
+            Self::OpenRouter(profile) => profile.validate(),
+            Self::Chatgpt(_) | Self::Responses(_) => Ok(()),
+        }
+    }
+}
+
 /// ChatGPT/Codex provider profile.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1563,6 +1575,9 @@ fn parse_settings_profile(
         }
     }
     let profile: BuiltinProviderProfile = serde_json::from_value(value)
+        .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;
+    profile
+        .validate()
         .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;
     let profile_matches_kind = matches!(
         (&profile, reference.slot()),

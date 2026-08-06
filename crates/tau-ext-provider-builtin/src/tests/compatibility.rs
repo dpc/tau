@@ -346,12 +346,13 @@ fn compatibility_event_snapshot() -> serde_json::Value {
     let BuiltinProviderProfile::OpenRouter(router) = profiles.providers["router"].clone() else {
         panic!("router compatibility profile kind")
     };
-    let router_model = router.models[0].clone();
+    let router_provider = router.to_chat_completions();
+    let router_model = router_provider.models[0].clone();
     serde_json::json!({
         "responses": responses_event_snapshot(),
         "chat_completions": chat_completions_event_snapshot(local, local_model, "local"),
         "openrouter": chat_completions_event_snapshot(
-            router.to_chat_completions(),
+            router_provider,
             router_model,
             "router",
         ),
