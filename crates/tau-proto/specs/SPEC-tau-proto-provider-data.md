@@ -204,3 +204,10 @@ token-hour fields as its sole model metadata. Runtime policy must not reinterpre
 the central UI fallback as a provider price. Cache declarations remain part of
 transient provider model current state and live catch-up only; they add no
 semantic persistence, cold replay, or restart reconstruction.
+
+One cache policy and its prices describe one exact selected route mode. Where a
+provider offers multiple TTL/write-price modes, publishers represent them as
+separate exact route declarations rather than a selectable policy list.
+Consumers may derive a discrete equal-prefix break-even read count from explicit
+ordinary-input, cache-read, and cache-write prices, but the protocol does not
+publish or schedule a refresh cadence.

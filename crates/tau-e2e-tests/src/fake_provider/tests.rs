@@ -1,7 +1,126 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use tau_proto::ProviderFailureKind;
 
 use super::*;
 use crate::ScenarioLaneV2;
+
+/// Proves the generic model metadata can express Anthropic's documented
+/// explicit-breakpoint cache modes and their discrete price break-even points
+/// while both fixtures stay absent from the dispatchable model snapshot.
+#[test]
+fn anthropic_cache_policy_fixtures_are_exact_and_non_dispatchable() {
+    fn fixture(ttl_seconds: u64, cache_write_micro_usd: u64) -> ProviderModelInfo {
+        let mut model = model_snapshot(false)
+            .models
+            .into_iter()
+            .next()
+            .expect("fake provider publishes its dispatchable test model");
+        model.id = format!("fake/anthropic-cache-{ttl_seconds}s").into();
+        model.cache_policy = Some(tau_proto::ProviderCachePolicy {
+            kind: tau_proto::ProviderCacheKind::ExplicitBreakpoint,
+            ttl: tau_proto::ProviderCacheTtl::SlidingKnown {
+                seconds: NonZeroU64::new(ttl_seconds).expect("fixture TTL must be positive"),
+            },
+            renewal: tau_proto::ProviderCacheRenewal::Read,
+            output_floor: tau_proto::ProviderCacheOutputFloor::Zero,
+            quota: tau_proto::ProviderCacheQuotaAccounting {
+                requests: tau_proto::ProviderCacheQuotaCharge::Unknown,
+                read_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+                write_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+                output_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            },
+            prefix_identity_version: NonZeroU32::new(1)
+                .expect("fixture identity version must be positive"),
+            privacy: tau_proto::ProviderCachePrivacy {
+                storage: tau_proto::ProviderCacheStorageMode::Unknown,
+                zero_data_retention:
+                    tau_proto::ProviderCacheZeroDataRetentionCompatibility::Unknown,
+                data_residency: tau_proto::ProviderCacheDataResidencyEffect::Unknown,
+                manual_deletion: tau_proto::ProviderCacheDeletionAvailability::Unavailable,
+            },
+        });
+        // Claude Sonnet 4.6's documented $3 base, $0.30 read, $3.75
+        // five-minute write, and $6 one-hour write rates preserve the
+        // provider's general 1x/0.1x/1.25x/2x ratios in exact fixed-point
+        // values.
+        model.est_uncached_input_cost_1m_usd =
+            Some(tau_proto::EstimatedUsdPerMillion::from_micro_usd(3_000_000));
+        model.est_cached_input_cost_1m_usd =
+            Some(tau_proto::EstimatedUsdPerMillion::from_micro_usd(300_000));
+        model.est_cache_write_input_cost_1m_usd = Some(
+            tau_proto::EstimatedUsdPerMillion::from_micro_usd(cache_write_micro_usd),
+        );
+        model
+    }
+
+    fn first_break_even_read(model: &ProviderModelInfo) -> u64 {
+        let uncached = model
+            .est_uncached_input_cost_1m_usd
+            .expect("fixture has an uncached price")
+            .as_micro_usd();
+        let read = model
+            .est_cached_input_cost_1m_usd
+            .expect("fixture has a cache-read price")
+            .as_micro_usd();
+        let write = model
+            .est_cache_write_input_cost_1m_usd
+            .expect("fixture has a cache-write price")
+            .as_micro_usd();
+        (0..=10)
+            .find(|reads| write + reads * read <= (reads + 1) * uncached)
+            .expect("documented fixture prices break even within ten reads")
+    }
+
+    let five_minute = fixture(300, 3_750_000);
+    let one_hour = fixture(3_600, 6_000_000);
+
+    for (model, ttl_seconds, write_price, break_even_reads) in [
+        (&five_minute, 300, 3_750_000, 1),
+        (&one_hour, 3_600, 6_000_000, 2),
+    ] {
+        let policy = model.cache_policy.expect("fixture publishes cache policy");
+        assert_eq!(
+            policy.kind,
+            tau_proto::ProviderCacheKind::ExplicitBreakpoint
+        );
+        assert_eq!(policy.renewal, tau_proto::ProviderCacheRenewal::Read);
+        assert_eq!(
+            policy.output_floor,
+            tau_proto::ProviderCacheOutputFloor::Zero
+        );
+        assert!(matches!(
+            policy.ttl,
+            tau_proto::ProviderCacheTtl::SlidingKnown { seconds }
+                if seconds.get() == ttl_seconds
+        ));
+        assert_eq!(
+            (
+                model
+                    .est_uncached_input_cost_1m_usd
+                    .expect("fixture has an uncached price")
+                    .as_micro_usd(),
+                model
+                    .est_cached_input_cost_1m_usd
+                    .expect("fixture has a cache-read price")
+                    .as_micro_usd(),
+                model
+                    .est_cache_write_input_cost_1m_usd
+                    .expect("fixture has a cache-write price")
+                    .as_micro_usd(),
+            ),
+            (3_000_000, 300_000, write_price)
+        );
+        assert_eq!(first_break_even_read(model), break_even_reads);
+        assert!(
+            model_snapshot(false)
+                .models
+                .iter()
+                .all(|published| published.id != model.id),
+            "Anthropic policy fixtures must remain absent from dispatchable models"
+        );
+    }
+}
 
 /// Ensures standalone-compaction capability stays disabled for ordinary
 /// scenarios and is published only by each dedicated closed action type.

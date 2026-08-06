@@ -237,6 +237,42 @@ raw read/write/storage cache prices; the UI may still use its
 non-authoritative central fallback estimate. Those unknowns deliberately
 prevent safe scheduled renewal.
 
+Anthropic's
+[prompt-caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+defines explicit cache breakpoints with sliding five-minute and one-hour TTLs.
+A cache hit refreshes the selected TTL, and a request with `max_tokens: 0` can
+write or refresh a breakpoint without generating output.
+The corresponding generic policy facts are `kind: explicit_breakpoint`,
+`ttl: sliding_known` with `seconds: 300` or `3600`, `renewal: read`, and
+`output_floor: zero`. Each declaration describes one exact route and one
+selected TTL; it does not mean that Tau can select between TTLs or lower
+Anthropic's nested `cache_control`.
+
+Anthropic's
+[published cache prices](https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching)
+are `1.25U` for a five-minute write, `2U` for a one-hour write, and `0.1U` for
+a read, where `U` is the route's ordinary input price. For the same
+cached-prefix token count, the discrete break-even read count is the least
+integer `n` satisfying
+`W + nR <= (n + 1)U`: one read for the five-minute mode and two reads for the
+one-hour mode. This calculation uses only an exact route's explicit ordinary,
+cache-read, and cache-write price fields; never use Tau's fallback estimate.
+The result excludes uncached suffixes, output, mixed TTL breakpoints, Batch,
+regional, residency, and negotiated price modifiers.
+
+An operator may publish these facts for a generic route only when the configured
+proxy itself guarantees one exact Anthropic cache mode. For example, a Claude
+Sonnet 4.6 route with a proxy-enforced five-minute breakpoint can pair
+`est_uncached_input_cost_1m_usd: "3"`,
+`est_cached_input_cost_1m_usd: "0.30"`, and
+`est_cache_write_input_cost_1m_usd: "3.75"` with the 300-second policy above;
+a separately named proxy route that guarantees one-hour breakpoints uses
+`"6"` as its write price and 3,600 seconds. These are declaration examples,
+not built-in dispatch support. Tau has no native Anthropic backend and sends no
+Anthropic pre-warm, refresh, or nested generic request controls. In particular,
+Tau never turns the five-minute TTL into a roughly four-minute cadence and
+never schedules traffic during unknown or unbounded idle.
+
 Hardcoded ChatGPT/Codex ordinary-input and output comparison prices come from OpenAI's provider-owned
 [API pricing table](https://developers.openai.com/api/docs/pricing). Configured
 compatible providers own their explicit values; refresh those profile fields from

@@ -166,6 +166,15 @@ content, regions, timestamps, or hit history. They add no scheduler, refresh,
 PATCH, delete, journal, or restart behavior. Current generic backends reject
 manual-deletion support because none owns a typed delete operation.
 
+Anthropic documents explicit breakpoints with sliding 300-second or 3,600-second
+TTLs, read renewal, and zero-output `max_tokens: 0` writes. A generic declaration
+may describe one of those modes only when the exact configured proxy guarantees
+it; Tau does not lower Anthropic `cache_control` or dispatch refresh requests.
+With Anthropic's `1.25x`/`2x` write and `0.1x` read multipliers, equal-prefix
+cost reaches the discrete break-even point after one five-minute read or two
+one-hour reads. Tau never converts that fact into a roughly four-minute cadence
+or traffic during unknown or unbounded idle.
+
 Generic OpenAI-compatible cache request controls are opt-in and route-local:
 `compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat
 Completions accepts either legacy `retention: in_memory`/`"24h"` or explicit
