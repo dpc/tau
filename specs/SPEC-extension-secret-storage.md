@@ -34,7 +34,7 @@ This mount mask is defense in depth under Tau's trusted configured same-UID exec
 
 ## Provider registration and runtime
 
-The CLI owns credential-free provider settings below `$XDG_STATE_HOME/tau/provider-settings/<instance>/<provider>.json`. Each persistent configured Provider instance receives one immutable, bounded `Configure.settings_files` startup snapshot, and the launcher exposes only its selected settings tree read-only. Tool and memory-only instances receive neither the snapshot nor the mount. Settings, endpoint, model, and compatibility changes therefore require Provider restart.
+The CLI owns credential-free provider settings below `$XDG_STATE_HOME/tau/provider-settings/<instance>/<provider>.json`. Each configured Provider instance receives one immutable, bounded `Configure.settings_files` startup snapshot. A persistent Provider also receives its selected settings tree through a read-only mount; a memory-only preview receives the snapshot without that mount. Tool instances receive neither surface. Settings, endpoint, model, and compatibility changes therefore require Provider restart.
 
 Version-zero credential records use a typed `kind`: `chatgpt_oauth` contains complete access token, refresh token, expiry, and account id; `api_key` contains the complete API-key value. Provider settings contain only a typed credential reference into `providers/<provider>/`.
 
@@ -77,8 +77,9 @@ source-name-only warning. Direct-entry and keyless records have no binding and
 are never changed by startup refresh. Source I/O and decoding failures do not
 overwrite an older record: they fail a required provider or skip an optional
 provider with a redacted warning. Settings snapshot/materialization failures
-follow the same required/optional policy. Memory-only harnesses perform no
-settings snapshot, source resolution, or materialization and omit all
+follow the same required/optional policy. Memory-only harnesses take the same
+immutable credential-free settings snapshot for model advertisement, but
+perform no source resolution or credential materialization and omit all
 declaration values owned by the typed built-in provider component.
 
 Legacy `auth.d`, `ProviderStore`, `AuthFile`, inline API keys, and mixed settings/credential records have no runtime reader or migration. Users re-register providers and manually remove legacy files.

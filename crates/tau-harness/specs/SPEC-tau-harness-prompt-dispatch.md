@@ -72,7 +72,9 @@ Prompt dispatch snapshots the effective `ToolSpec` list for the selected prompt
 model. Provider tool calls are validated against that prompt-owned snapshot, not
 against mutable current role/model state after the user switches roles or models
 mid-turn. Staged tool registration can never expand a prompt snapshot after it
-was sent.
+was sent. Developer tool previews use the same model-aware effective selection
+and render aliases as provider-visible names, so their output matches the tool
+definitions delivered to the model.
 
 Policy-exclusive registrations may share a model-visible alias, but snapshot
 construction rejects an effective surface containing two enabled tools with the

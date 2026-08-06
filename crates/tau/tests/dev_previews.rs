@@ -294,6 +294,98 @@ fn previews_use_configured_default_role_unless_overridden() {
     assert_eq!(tool_names(&explicit_tools), ["grep"]);
 }
 
+/// Proves model-aware tool previews use provider-published metadata and
+/// preserve explicit role grants for both Codex-style and ordinary shell
+/// models.
+#[test]
+fn print_tools_matches_model_defaults_and_explicit_role_grants() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    let settings_dir = home
+        .path()
+        .join(".state/tau/provider-settings/provider-builtin");
+    std::fs::create_dir_all(&config_dir).expect("create config directory");
+    std::fs::create_dir_all(&settings_dir).expect("create provider settings directory");
+    std::fs::create_dir_all(home.path().join("work")).expect("create work directory");
+    std::fs::write(
+        settings_dir.join("chatgpt.json"),
+        r#"{
+  "kind": "chatgpt",
+  "credential": {
+    "kind": "oauth",
+    "secret_path": "providers/chatgpt/oauth.json"
+  }
+}"#,
+    )
+    .expect("write ChatGPT provider settings");
+    std::fs::write(
+        settings_dir.join("local.json"),
+        r#"{
+  "kind": "chat_completions",
+  "base_url": "http://127.0.0.1:1/v1",
+  "models": [{"id": "ordinary", "context_window": 32768}],
+  "credential": {
+    "kind": "api_key",
+    "secret_path": "providers/local/api-key.json"
+  }
+}"#,
+    )
+    .expect("write ordinary provider settings");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"agents:
+  role_groups:
+    preview:
+      roles:
+        codex-default:
+          model: chatgpt/gpt-5.6-luna
+        codex-explicit:
+          model: chatgpt/gpt-5.6-luna
+          tools: [read, grep, ls]
+        ordinary-default:
+          model: local/ordinary
+"#,
+    )
+    .expect("write harness config");
+
+    let names = |role: &str| {
+        let output = preview(&home, None, &["--role", role, "dev", "print-tools"]);
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let tools = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            .expect("tool preview JSON");
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.get("model_visible_name").is_none()),
+            "preview must expose only provider-visible names: {tools:?}"
+        );
+        tools
+            .into_iter()
+            .map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .expect("tool definition name")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let codex_default = names("codex-default");
+    assert!(codex_default.contains(&"apply_patch".to_owned()));
+    assert!(codex_default.contains(&"shell_command".to_owned()));
+    assert!(!codex_default.contains(&"read".to_owned()));
+    assert!(!codex_default.contains(&"grep".to_owned()));
+    assert!(!codex_default.contains(&"ls".to_owned()));
+    assert_eq!(names("codex-explicit"), ["grep", "ls", "read"]);
+
+    let ordinary_default = names("ordinary-default");
+    assert!(ordinary_default.contains(&"edit".to_owned()));
+    assert!(ordinary_default.contains(&"read".to_owned()));
+    assert!(ordinary_default.contains(&"grep".to_owned()));
+    assert!(ordinary_default.contains(&"ls".to_owned()));
+    assert!(!ordinary_default.contains(&"apply_patch".to_owned()));
+    assert!(!ordinary_default.contains(&"shell_command".to_owned()));
+}
+
 /// Ensures CLI subprocess fixtures clear inherited Tau profile, transport,
 /// secret, home, and XDG inputs before installing their private roots.
 #[test]

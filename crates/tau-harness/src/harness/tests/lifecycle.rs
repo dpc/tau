@@ -1965,7 +1965,7 @@ fn tool_configure_ignores_stale_provider_settings_directory() {
     let settings = tau_config::settings::extension_provider_settings_dir_of(&sp, "std-email")
         .expect("settings path");
     std::fs::create_dir_all(&settings).expect("stale settings directory");
-    std::fs::write(settings.join("provider.json"), b"must-not-cross").expect("stale settings");
+    std::fs::write(settings.join("provider.json"), b"preview-settings").expect("settings");
     let mut h = quiet_provider_harness(&sp).expect("start");
     let configure =
         configure_supervised_extension(&mut h, "std-email", tau_proto::ClientKind::Tool);
@@ -1997,10 +1997,10 @@ fn persistent_provider_configure_includes_settings_snapshot() {
     );
 }
 
-/// Proves a memory-only Provider receives no settings snapshot even when stale
-/// persistent data exists, preserving the storage-mode half of the boundary.
+/// Proves a memory-only provider receives the preloaded credential-free
+/// settings needed to advertise the models used by prompt and tool previews.
 #[test]
-fn memory_only_provider_configure_ignores_stale_settings() {
+fn memory_only_provider_configure_receives_settings_snapshot() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let settings = tau_config::settings::extension_provider_settings_dir_of(&sp, "provider-memory")
@@ -2013,17 +2013,24 @@ fn memory_only_provider_configure_ignores_stale_settings() {
         crate::HarnessStorageMode::MemoryOnly,
     )
     .expect("memory-only harness");
+    h.provider_settings_snapshots.insert(
+        "provider-memory".to_owned(),
+        BTreeMap::from([("provider.json".to_owned(), b"preview-settings".to_vec())]),
+    );
 
     let configure =
         configure_supervised_extension(&mut h, "provider-memory", tau_proto::ClientKind::Provider);
 
-    assert!(configure.settings_files.is_empty());
+    assert_eq!(
+        configure.settings_files["provider.json"],
+        b"preview-settings".to_vec()
+    );
 }
 
-/// Proves memory-only startup suppresses built-in provider declarations without
-/// reading settings or creating a persistent materialized credential.
+/// Proves memory-only startup snapshots settings and suppresses credential
+/// resolution and materialization.
 #[test]
-fn memory_only_provider_configure_omits_named_declaration_value() {
+fn memory_only_provider_snapshot_omits_named_declaration_value() {
     let temp = TempDir::new().expect("tempdir");
     let state = temp.path().join("state");
     std::fs::create_dir_all(state.join("secrets")).expect("source root");
@@ -2032,12 +2039,13 @@ fn memory_only_provider_configure_omits_named_declaration_value() {
         builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
             optional: false,
         }));
-    let bound_names = provider_startup::memory_only_provider_bound_names(&config);
+    let snapshot = provider_startup::snapshot_memory_only_provider_settings(&config, &state)
+        .expect("memory-only provider snapshot");
     let resolved = Harness::resolve_startup_extension_secrets(
         &config,
         &state,
         &SecretSources::default(),
-        &bound_names,
+        &snapshot.bound_names,
     )
     .expect("memory-only secret suppression");
     assert!(resolved.secrets["provider-work"].is_empty());

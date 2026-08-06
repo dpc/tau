@@ -238,6 +238,8 @@ and regression tests before they are emitted for ephemeral agents.
 The `tau dev print-prompt`, `print-tools`, and `print-system-prompt` commands
 instead launch a fresh harness in a harness-wide memory-only storage mode.
 They preserve configured-extension startup and the ordinary render protocol,
+including a read-only snapshot of credential-free provider settings so model
+metadata and model-specific tool defaults match an ordinary harness,
 but they do not create or mutate harness-managed session, agent, diagnostic,
 extension, cache, or retention state. Their owned runtime socket and discovery
 metadata may exist only until the preview child is reaped. Configured

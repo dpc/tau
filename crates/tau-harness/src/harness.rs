@@ -3909,10 +3909,7 @@ impl Harness {
             diagnostics: provider_diagnostics,
             skipped_extensions: provider_skipped_extensions,
         } = if launch.storage_mode.is_memory_only() {
-            ProviderStartupSnapshot {
-                bound_names: provider_startup::memory_only_provider_bound_names(config),
-                ..Default::default()
-            }
+            provider_startup::snapshot_memory_only_provider_settings(config, &state_dir)?
         } else {
             provider_startup::snapshot_and_materialize_named_provider_credentials(
                 config,
@@ -17854,17 +17851,15 @@ impl Harness {
                 },
             )
         };
-        let settings_files = if self.storage_mode.is_memory_only()
-            || entry.supervised_config.is_none()
-            || entry.kind != ClientKind::Provider
-        {
-            BTreeMap::new()
-        } else {
-            self.provider_settings_snapshots
-                .get(entry.name.as_str())
-                .cloned()
-                .unwrap_or_default()
-        };
+        let settings_files =
+            if entry.supervised_config.is_none() || entry.kind != ClientKind::Provider {
+                BTreeMap::new()
+            } else {
+                self.provider_settings_snapshots
+                    .get(entry.name.as_str())
+                    .cloned()
+                    .unwrap_or_default()
+            };
         if let Some(state_dir) = &state_dir
             && let Err(error) = std::fs::create_dir_all(state_dir)
         {

@@ -6,6 +6,37 @@ use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
 use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
+
+/// One tool definition rendered exactly as a provider exposes it to the model.
+#[derive(serde::Serialize)]
+struct ModelVisibleToolDefinition {
+    /// Provider-visible name used by model tool calls.
+    name: tau_proto::ToolName,
+    /// Optional model-visible description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// Whether the tool accepts JSON-schema function input or freeform input.
+    tool_type: tau_proto::ToolType,
+    /// Optional JSON Schema describing function-tool input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameters: Option<serde_json::Value>,
+    /// Optional freeform/custom input format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<tau_proto::ToolFormat>,
+}
+
+impl From<tau_proto::ToolDefinition> for ModelVisibleToolDefinition {
+    fn from(definition: tau_proto::ToolDefinition) -> Self {
+        Self {
+            name: definition.model_visible_name.unwrap_or(definition.name),
+            description: definition.description,
+            tool_type: definition.tool_type,
+            parameters: definition.parameters,
+            format: definition.format,
+        }
+    }
+}
+
 pub(crate) fn run_print_tools(
     role: Option<&str>,
     profile: Option<&tau_config::settings::ProfileName>,
@@ -36,7 +67,10 @@ pub(crate) fn run_print_tools(
         tau_harness::HarnessStorageMode::MemoryOnly,
     )?;
 
-    let tools = get_rendered_tool_definitions(&mut daemon, role)?;
+    let tools = get_rendered_tool_definitions(&mut daemon, role)?
+        .into_iter()
+        .map(ModelVisibleToolDefinition::from)
+        .collect::<Vec<_>>();
 
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer_pretty(&mut stdout, &tools).map_err(|error| {
@@ -80,3 +114,6 @@ fn get_rendered_tool_definitions(
         },
     )
 }
+
+#[cfg(test)]
+mod tests;

@@ -300,20 +300,69 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
     })
 }
 
-/// Suppress built-in provider declarations when persistent settings are
-/// intentionally unavailable in memory-only mode.
-pub(super) fn memory_only_provider_bound_names(
+/// Snapshot credential-free provider settings without resolving or
+/// materializing credentials for a memory-only preview.
+///
+/// Provider settings determine the advertised model metadata and are therefore
+/// required to render the same prompt and tool surface as an ordinary harness.
+/// The preview still binds every declared provider secret so the ordinary
+/// extension-secret path cannot expose credential values.
+pub(super) fn snapshot_memory_only_provider_settings(
     config: &Config,
-) -> BTreeMap<String, BTreeSet<String>> {
-    config
+    state_dir: &Path,
+) -> Result<ProviderStartupSnapshot, HarnessError> {
+    let mut snapshot = ProviderStartupSnapshot::default();
+    for extension in config
         .extensions
         .values()
-        .filter(|extension| extension.component == Some(BuiltinComponentIdentity::Provider))
-        .map(|extension| {
-            (
+        .filter(|extension| extension.role.as_deref() == Some("provider"))
+    {
+        if extension.component == Some(BuiltinComponentIdentity::Provider) {
+            snapshot.bound_names.insert(
                 extension.name.clone(),
                 extension.secrets.keys().cloned().collect(),
-            )
-        })
-        .collect()
+            );
+        }
+        let settings_lock =
+            match ProviderSettingsInstanceLock::acquire_existing(state_dir, &extension.name) {
+                Ok(lock) => lock,
+                Err(error) if extension.require => return Err(error.into()),
+                Err(_) => {
+                    snapshot.diagnostics.push(ExtensionStartupDiagnostic {
+                        extension: extension.name.clone(),
+                        message: format!(
+                            "optional provider extension '{}' did not initialize",
+                            extension.name
+                        ),
+                        kind: ExtensionStartupDiagnosticKind::OptionalSkip,
+                    });
+                    snapshot.skipped_extensions.insert(extension.name.clone());
+                    continue;
+                }
+            };
+        let settings_files = match settings_lock {
+            Some(lock) => load_extension_settings_files_at(lock.root()),
+            None => Ok(BTreeMap::new()),
+        };
+        match settings_files {
+            Ok(settings_files) => {
+                snapshot
+                    .settings
+                    .insert(extension.name.clone(), settings_files);
+            }
+            Err(error) if extension.require => return Err(HarnessError::Participant(error)),
+            Err(_) => {
+                snapshot.diagnostics.push(ExtensionStartupDiagnostic {
+                    extension: extension.name.clone(),
+                    message: format!(
+                        "optional provider extension '{}' did not initialize",
+                        extension.name
+                    ),
+                    kind: ExtensionStartupDiagnosticKind::OptionalSkip,
+                });
+                snapshot.skipped_extensions.insert(extension.name.clone());
+            }
+        }
+    }
+    Ok(snapshot)
 }

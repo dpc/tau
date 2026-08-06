@@ -916,9 +916,10 @@ across hosts and do not establish delivery order, latency, or happens-before.
 Tau keeps extension credentials in harness-mediated configured-instance Secret
 scope. Supervised extensions run in mandatory fail-closed Linux user and mount
 namespaces that hide the whole Tau secret root. Only configured Provider
-instances receive their selected provider settings through a read-only mount and
-`Configure.settings_files`; Tool and memory-only instances receive neither. This
-is defense in depth for trusted configured same-UID executables, not containment
+instances receive credential-free provider settings: persistent instances get a
+read-only mount and `Configure.settings_files`, while memory-only previews get
+only an immutable `Configure.settings_files` snapshot. Tool instances receive
+neither. This is defense in depth for trusted configured same-UID executables, not containment
 from malicious same-UID code or misuse of credentials returned to an authorized
 extension. Secret payloads remain absent from logs, events, journals, generic
 debug output, and errors. See

@@ -435,9 +435,10 @@ delivery. Exact wire behavior is specified by
 The harness owns configured-instance Secret storage, payload-opaque RPC routing,
 and the mandatory outer Linux namespace launcher. It masks the whole secret root,
 mounts CLI-owned provider settings read-only only for configured Provider
-instances, gives `Configure.settings_files` only to those persistent providers,
-and fails supervised startup closed. Tool and memory-only instances receive
-neither provider-settings surface, as specified by
+instances, and fails supervised startup closed. Every configured Provider gets
+an immutable credential-free `Configure.settings_files` snapshot; a memory-only
+preview gets that snapshot without the provider-settings mount, while Tool
+instances receive neither surface, as specified by
 [SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
 For built-in Providers, startup locks each instance settings directory, captures
 one bounded generation, resolves its valid named API-key bindings without
@@ -447,4 +448,5 @@ the second-level Secret lock, and retains the same generation for
 and prevents external replacement commands from gaining this authority. Actual
 absence suppresses stale credentials; source errors preserve the previous record
 and follow required/optional extension startup policy. Memory-only startup
-forwards no built-in provider declarations despite reading no settings.
+forwards the credential-free settings generation needed for model declarations
+without resolving or materializing credentials.
