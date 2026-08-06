@@ -14932,19 +14932,8 @@ impl Harness {
         }
         self.active_ui_shell_command_ids
             .insert(command.command_id.clone());
-        for ui in self
-            .bus
-            .connections()
-            .into_iter()
-            .filter(|connection| connection.kind == ClientKind::Ui)
-        {
-            let _ = self.bus.send_to(
-                &ui.id,
-                Some(client_id),
-                HarnessOutputMessage::deliver(Event::UiShellCommand(command.clone())),
-            );
-        }
         if command.session_id != self.current_session_id {
+            self.project_ui_shell_command_start(client_id, &command);
             self.finish_unroutable_ui_shell(
                 command,
                 "the shell command targets a stale session",
@@ -14959,6 +14948,7 @@ impl Harness {
             } else {
                 "multiple shell extension instances are available; select one explicitly before using ! or !!"
             };
+            self.project_ui_shell_command_start(client_id, &command);
             self.finish_unroutable_ui_shell(command, reason, false);
             return;
         }
@@ -14976,6 +14966,7 @@ impl Harness {
                 .map(|(_, agent_id)| agent_id)
         };
         let Some(target_agent_id) = target_agent_id else {
+            self.project_ui_shell_command_start(client_id, &command);
             self.finish_unroutable_ui_shell(
                 command,
                 "no unambiguous target agent is available",
@@ -14992,6 +14983,7 @@ impl Harness {
             .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
         let mut provider_command = command.clone();
         provider_command.command_id = route_id.as_protocol_id().clone();
+        self.project_ui_shell_command_start(client_id, &command);
         let delivered = self.bus.send_to(
             &provider,
             Some(client_id),
@@ -15016,6 +15008,26 @@ impl Harness {
             "the selected shell extension instance became unavailable",
             targets_ephemeral,
         );
+    }
+
+    /// Project the canonical public command identity to every attached UI.
+    fn project_ui_shell_command_start(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        command: &tau_proto::UiShellCommand,
+    ) {
+        for ui in self
+            .bus
+            .connections()
+            .into_iter()
+            .filter(|connection| connection.kind == ClientKind::Ui)
+        {
+            let _ = self.bus.send_to(
+                &ui.id,
+                Some(client_id),
+                HarnessOutputMessage::deliver(Event::UiShellCommand(command.clone())),
+            );
+        }
     }
 
     fn fail_pending_ui_shell_commands_for_provider(

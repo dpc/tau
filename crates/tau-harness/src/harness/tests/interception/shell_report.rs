@@ -7,15 +7,8 @@ use crate::{
     event_log as path_crate_event_log, extension as path_crate_extension,
 };
 
-/// Register one configured Tool/Core peer as the only generic shell provider
-/// and route a user-shell command to it.
-fn seed_routed_shell_command(
-    harness: &mut Harness,
-    source: &str,
-    kind: tau_proto::ClientKind,
-    ui_command_id: &str,
-    include_in_context: bool,
-) -> (tau_proto::UiShellCommand, UiShellRouteId) {
+/// Register one configured Tool/Core peer as the only generic shell provider.
+fn register_shell_provider(harness: &mut Harness, source: &str, kind: tau_proto::ClientKind) {
     for provider in crate::harness::ui_shell_provider_ids(&harness.registry) {
         harness.registry.unregister_connection(&provider);
     }
@@ -43,13 +36,34 @@ fn seed_routed_shell_command(
             examples: Vec::new(),
         },
     );
+}
+
+/// Register a shell provider and create the default loaded user agent.
+fn seed_shell_provider_and_default_agent(
+    harness: &mut Harness,
+    source: &str,
+    kind: tau_proto::ClientKind,
+) -> tau_proto::AgentId {
+    register_shell_provider(harness, source, kind);
     let cid = ensure_test_user_agent(harness);
-    let agent_id = crate::parse_agent_id(
+    crate::parse_agent_id(
         harness.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
-    );
+    )
+}
+
+/// Register one configured Tool/Core peer as the only generic shell provider
+/// and route a user-shell command to it.
+fn seed_routed_shell_command(
+    harness: &mut Harness,
+    source: &str,
+    kind: tau_proto::ClientKind,
+    ui_command_id: &str,
+    include_in_context: bool,
+) -> (tau_proto::UiShellCommand, UiShellRouteId) {
+    let agent_id = seed_shell_provider_and_default_agent(harness, source, kind);
     let command = tau_proto::UiShellCommand {
         session_id: harness.current_session_id.clone(),
         command_id: test_shell_command_id(ui_command_id),
@@ -65,6 +79,156 @@ fn seed_routed_shell_command(
         .expect("routed shell command")
         .clone();
     (command, route_id)
+}
+
+/// A targetless command without a loaded agent must retain its explicit
+/// no-agent identity from the start through its unroutable terminal.
+#[test]
+fn targetless_unroutable_shell_start_and_terminal_keep_none_target() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let ui_sink = connect_test_client(&mut harness, "shell-ui", tau_proto::ClientKind::Ui);
+    harness
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("shell-ui"),
+            Vec::new(),
+            vec![EventSelector::Prefix("shell.".to_owned())],
+        )
+        .expect("subscribe shell UI");
+    register_shell_provider(&mut harness, "shell-owner", tau_proto::ClientKind::Tool);
+    let _ = ensure_test_user_agent(&mut harness);
+    for conversation in harness.agents.values_mut() {
+        if conversation.originator.is_user() {
+            conversation.terminating = true;
+        }
+    }
+    let command = tau_proto::UiShellCommand {
+        session_id: harness.current_session_id.clone(),
+        command_id: test_shell_command_id("targetless-unroutable-shell"),
+        command: "pwd".to_owned(),
+        include_in_context: false,
+        target_agent_id: None,
+    };
+
+    harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
+
+    let lifecycle = ui_sink
+        .lock()
+        .expect("UI sink")
+        .iter()
+        .filter_map(|routed| peel_inner_event(&routed.frame))
+        .filter_map(|event| match event {
+            Event::UiShellCommand(start) if start.command_id == command.command_id => {
+                Some((start.command_id.clone(), start.target_agent_id.clone()))
+            }
+            Event::ShellCommandFinished(finished) if finished.command_id == command.command_id => {
+                Some((
+                    finished.command_id.clone(),
+                    finished.target_agent_id.clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle,
+        [
+            (command.command_id.clone(), None),
+            (command.command_id, None),
+        ],
+        "the UI must receive one internally consistent unroutable lifecycle"
+    );
+}
+
+/// A targetless start must use the harness-resolved default-agent identity
+/// through its terminal, so one UI renderer can retire its running block.
+#[test]
+fn targetless_shell_start_and_terminal_share_resolved_default_agent() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let ui_sink = connect_test_client(&mut harness, "shell-ui", tau_proto::ClientKind::Ui);
+    harness
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("shell-ui"),
+            Vec::new(),
+            vec![EventSelector::Prefix("shell.".to_owned())],
+        )
+        .expect("subscribe shell UI");
+    let default_agent_id = seed_shell_provider_and_default_agent(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    let command = tau_proto::UiShellCommand {
+        session_id: harness.current_session_id.clone(),
+        command_id: test_shell_command_id("targetless-shell"),
+        command: "pwd".to_owned(),
+        include_in_context: false,
+        target_agent_id: None,
+    };
+
+    harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
+
+    let route_id = harness
+        .pending_ui_shell_commands
+        .keys()
+        .next()
+        .expect("routed shell command")
+        .clone();
+    let routed = harness
+        .pending_ui_shell_commands
+        .get(&route_id)
+        .expect("pending route")
+        .command
+        .clone();
+    assert_eq!(routed.command_id, command.command_id);
+    assert_eq!(routed.target_agent_id, Some(default_agent_id.clone()));
+
+    let starts = ui_sink
+        .lock()
+        .expect("UI sink")
+        .iter()
+        .filter_map(|routed| peel_inner_event(&routed.frame))
+        .filter_map(|event| match event {
+            Event::UiShellCommand(start) if start.command_id == command.command_id => {
+                Some(start.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts.as_slice(),
+        std::slice::from_ref(&routed),
+        "the UI start must carry the resolved owner"
+    );
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(finished_report(&route_id, &routed, "done")),
+        )
+        .expect("commit terminal shell report");
+
+    let terminals = ui_sink
+        .lock()
+        .expect("UI sink")
+        .iter()
+        .filter_map(|routed| peel_inner_event(&routed.frame))
+        .filter_map(|event| match event {
+            Event::ShellCommandFinished(finished) if finished.command_id == command.command_id => {
+                Some(finished.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        terminals.as_slice(),
+        [finished]
+            if finished.command_id == command.command_id
+                && finished.target_agent_id == Some(default_agent_id)
+    ));
 }
 
 /// Build one progress report using the private provider route id.
