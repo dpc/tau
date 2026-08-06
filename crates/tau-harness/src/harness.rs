@@ -11757,6 +11757,7 @@ impl Harness {
                                 | HarnessInputMessage::ExtensionNoticeRequest(_)
                                 | HarnessInputMessage::InterceptReply(_)
                                 | HarnessInputMessage::GetAgentPromptCreated(_)
+                                | HarnessInputMessage::ProviderDebugCapture(_)
                                 | HarnessInputMessage::ExtensionDataRequest(_)
                                 | HarnessInputMessage::UiDebugEventStatsRequest(_)
                                 | HarnessInputMessage::UiDetachRequest(_)

@@ -157,6 +157,49 @@ fn provider_capture_attribution_survives_session_rollover() {
     assert_eq!(instance.as_str(), "provider");
 }
 
+/// Prevents steady-state Provider captures from being rejected after activation
+/// consumes the transient `ready_received` marker and leaves the peer `Ready`.
+#[test]
+fn ready_provider_capture_is_legal_operational_traffic() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let provider = harness
+        .extensions
+        .entries
+        .iter()
+        .find_map(|(connection_id, entry)| {
+            (entry.kind == tau_proto::ClientKind::Provider && entry.state == ExtensionState::Ready)
+                .then(|| connection_id.clone())
+        })
+        .expect("ready provider");
+    assert!(
+        !harness.extensions.ready_received.contains(&provider),
+        "completed activation consumes the transient Ready marker"
+    );
+
+    harness
+        .handle_extension_message(
+            &provider,
+            HarnessInputMessage::ProviderDebugCapture(tau_proto::ProviderDebugCapture {
+                session_id: test_session_id("missing-session"),
+                agent_prompt_id: test_agent_prompt_id("ready-capture"),
+                class: tau_proto::ProviderDebugCaptureClass::WebsocketRequest,
+                zstd: vec![1, 2, 3],
+            }),
+        )
+        .expect("Ready Provider capture must pass protocol phase validation");
+
+    assert_eq!(
+        harness
+            .extensions
+            .entries
+            .get(&provider)
+            .expect("provider remains registered")
+            .state,
+        ExtensionState::Ready
+    );
+}
+
 /// Proves session-ephemeral and memory-only harnesses never turn Provider
 /// attribution into a filesystem capture target.
 #[test]
