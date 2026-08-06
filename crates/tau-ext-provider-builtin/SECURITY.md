@@ -50,6 +50,24 @@ process. Rotation clears it; restart may retry once.
 The cross-component authority and no-guessed-applicability rule are defined by
 [GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).
 
+## Runtime cache contract
+
+Generic model `cache_contract` values are operator assertions for one exact
+configured route. The extension does not infer TTL, renewal, quota, privacy, or
+deletion semantics from endpoint, model/provider name, request controls, cache
+usage, OpenRouter routing, or recent hits. Provider-independent contradictions
+fail profile parsing, and current production profiles cannot claim a typed
+manual-delete operation because no existing backend owns one.
+
+Published contracts contain only closed capability/privacy categories,
+durations, quota classes, and adapter-owned prefix version `1`. They contain no
+prompt content, cache key, cache/object identifier, region, timestamp, hit
+history, or lifecycle state. They use the existing transient provider-model
+declaration and current-state path and add no refresh/delete traffic, semantic
+journal data, cold replay, or restart reconstruction. Unknown ZDR, residency,
+quota, output, price, or TTL facts remain unknown and cannot authorize automated
+renewal. A recent hit never becomes hard-TTL evidence.
+
 ## Scoped credential records
 
 Credential-free settings contain one deterministic `credential.secret_path`.

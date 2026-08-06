@@ -171,13 +171,26 @@ fn restore_replay_does_not_project_extension_provenance_as_connection_source() {
 }
 
 /// Subscribe-time provider current-state catch-up emits canonical harness state
-/// only and does not replay declarations or reapply the snapshot.
+/// only and ignores a declaration's explicit persistence request.
 #[test]
-fn provider_model_catch_up_replays_canonical_state_only() {
+fn provider_model_catch_up_ignores_requested_declaration_persistence() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let existing_source = h.provider_model_routes[&"test/model".into()].clone();
     let existing_publisher = h.extensions.entries[&existing_source].name.clone();
+    let existing_models = h.provider_models_by_extension[&existing_source].clone();
+    h.handle_extension_message(
+        &existing_source,
+        TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ProviderModelsDeclared(
+                tau_proto::ProviderModelsDeclared {
+                    models: existing_models,
+                },
+            )),
+            persist: true,
+        }),
+    )
+    .expect("publish explicitly transient model declaration");
     connect_ready_configured_extension(
         &mut h,
         "empty-provider-connection",

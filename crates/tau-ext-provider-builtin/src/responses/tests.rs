@@ -136,6 +136,7 @@ fn profile_publishes_default_responses_efforts() {
             context_window: 42,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
+            cache_contract: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_cache_write_input_cost_1m_usd: None,
@@ -156,6 +157,52 @@ fn profile_publishes_default_responses_efforts() {
     );
     assert_eq!(models[0].efforts, tau_proto::Effort::ALL.to_vec());
     assert!(!models[0].supports_compaction);
+}
+
+/// Proves public Responses models publish explicitly configured cache metadata
+/// without changing their request controls or creating lifecycle state.
+#[test]
+fn profile_publishes_configured_runtime_cache_contract() {
+    let model: ResponsesModel = serde_json::from_value(serde_json::json!({
+        "id": "cache-aware",
+        "cache_contract": {
+            "kind": "explicit_breakpoint",
+            "ttl": {"kind": "minimum", "seconds": 1800},
+            "renewal": "recreate",
+            "output_floor": "unbounded_reasoning",
+            "quota": {
+                "requests": "counts_fully",
+                "read_tokens": "counts_fully",
+                "write_tokens": "counts_fully",
+                "output_tokens": "provider_specific"
+            },
+            "privacy": {
+                "storage": "extended_provider_retention",
+                "zero_data_retention": "provider_specific",
+                "data_residency": "provider_specific",
+                "manual_deletion": "unavailable"
+            }
+        }
+    }))
+    .expect("cache-aware Responses model");
+    let provider = ResponsesProvider {
+        models: vec![model],
+        ..ResponsesProvider::default()
+    };
+
+    let policy = models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0]
+        .cache_policy
+        .expect("published cache policy");
+    assert_eq!(
+        policy.kind,
+        tau_proto::ProviderCacheKind::ExplicitBreakpoint
+    );
+    assert_eq!(
+        policy.ttl,
+        tau_proto::ProviderCacheTtl::Minimum {
+            seconds: std::num::NonZeroU64::new(1_800).expect("positive test duration")
+        }
+    );
 }
 
 /// The shared canonical list must retain the documented UI order so default

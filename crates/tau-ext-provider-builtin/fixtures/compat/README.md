@@ -13,6 +13,9 @@ JSON is canonical `BuiltinProviderProfile` output. The routing snapshot excludes
 credentials, normalizes loopback ports and elapsed microseconds, and otherwise
 records complete published models, resolved controls, and ordered events emitted
 through the production Responses and Chat Completions seams.
+The approved runtime-cache-contract change 590b extends the routing snapshot
+with the private ChatGPT/Codex model's conservative, content-free response-chain
+contract; generic profiles remain absent unless explicitly configured.
 
 Each `*.events.cbor` file is a length-prefixed, pre-`recorded_at`,
 pre-`observation_id` `PersistedAgentEvent` journal. Its matching JSON file is the

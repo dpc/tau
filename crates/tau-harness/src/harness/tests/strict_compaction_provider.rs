@@ -166,6 +166,7 @@ fn write_startup(
                 supports_compaction: false,
                 supports_standalone_compaction: true,
                 standalone_compaction_threshold: Some(50),
+                cache_policy: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
                 est_cache_write_input_cost_1m_usd: Default::default(),

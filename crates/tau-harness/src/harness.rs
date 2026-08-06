@@ -2752,6 +2752,7 @@ where
                 supports_compaction: true,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                cache_policy: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
                 est_cache_write_input_cost_1m_usd: Default::default(),
@@ -12362,11 +12363,10 @@ impl Harness {
                     .entry(source_id.clone())
                     .or_default() += 1;
             }
-            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
             self.enqueue_publish_with_admission(
                 Some(source_id),
                 event,
-                persist,
+                false,
                 false,
                 None,
                 admission,

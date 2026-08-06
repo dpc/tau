@@ -915,6 +915,7 @@ fn chat_model(id: &str) -> ChatCompletionsModel {
         tags: Vec::new(),
         supports_parallel_tool_calls: true,
         local_summary_compaction: None,
+        cache_contract: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
         est_cache_write_input_cost_1m_usd: Default::default(),

@@ -9,6 +9,7 @@
 use std::collections::hash_map as path_std_collections_hash_map;
 use std::io as path_std_io;
 
+mod cache_contract;
 mod chat_completions;
 mod credential_record;
 mod oauth_refresh_rejection;
@@ -31,6 +32,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub use cache_contract::ProviderCacheContract;
 pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
     LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
@@ -1171,6 +1173,7 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
+            cache_contract: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_cache_write_input_cost_1m_usd: None,
@@ -1198,6 +1201,7 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
                     context_window: 128_000,
                     tags: Vec::new(),
                     supports_parallel_tool_calls: true,
+                    cache_contract: None,
                     est_uncached_input_cost_1m_usd: None,
                     est_cached_input_cost_1m_usd: None,
                     est_cache_write_input_cost_1m_usd: None,

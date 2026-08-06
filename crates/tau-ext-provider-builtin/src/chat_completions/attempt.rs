@@ -53,6 +53,11 @@ pub fn models_for_provider(
                     .and_then(|config| config.validated_for(model.context_window))
                     .is_some(),
                 standalone_compaction_threshold: None,
+                cache_policy: model.cache_contract.map(|contract| {
+                    contract
+                        .runtime_policy()
+                        .expect("deserialized cache contract remains valid")
+                }),
                 est_uncached_input_cost_1m_usd: model
                     .est_uncached_input_cost_1m_usd
                     .or(builtin_uncached),

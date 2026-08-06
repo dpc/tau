@@ -2984,6 +2984,12 @@ pub struct ProviderModelInfo {
     /// compaction. `None` means no provider default is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_compaction_threshold: Option<u64>,
+    /// Optional documented runtime cache contract for this exact route.
+    ///
+    /// Absence means that no operational cache contract is declared; it does
+    /// not assert that the provider performs no caching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_policy: Option<crate::ProviderCachePolicy>,
     /// Estimated USD price per million uncached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_uncached_input_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,

@@ -247,6 +247,7 @@ Only authenticated configured provider extensions may publish transient,
 interceptable `provider.models_declared` replacement declarations. The generic
 publication envelope snapshots the configured connection and provider kind so
 parking, disconnect, or replacement cannot substitute publisher identity.
+Extension-supplied persistence requests are ignored categorically.
 Post-commit processing stages startup declarations until activation or publishes
 protected harness-authored `provider.models_updated` current state before applying
 the existing route, collision, availability, and restored-work reconciliation.
@@ -254,9 +255,10 @@ Canonical model state cannot be dropped or rewritten; the existing availability
 projections retain their existing interception behavior. Each canonical snapshot
 also carries the stable configured provider publisher so replacement and empty
 snapshots remain attributable even though their delivery source is the harness.
-Subscribe-time current-state replay synthesizes canonical updates with that stable
-publisher and harness source metadata only; it never replays declarations or reruns
-their side-effects. Session rollover retains a deferred declaration and applies it
+Subscribe-time current-state catch-up synthesizes canonical updates with that stable
+publisher and harness source metadata only. It is not durable replay, never
+regenerates declarations, and never reruns their side effects. Session rollover
+retains a deferred declaration and applies it
 when the captured connection/configured instance remains exact because model state
 is process-global. The payload and event-name contract is documented in
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md#provider-model-declarations-and-canonical-state).

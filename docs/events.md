@@ -300,15 +300,22 @@ current model state. Provider backends emit execution events for work routed to
 their selected models.
 
 - **`provider.models_declared`** — Transient, mutable replacement declaration from
-  a configured provider extension. It enters ordinary exact/prefix interception.
+  a configured provider extension. It enters ordinary exact/prefix interception;
+  an extension-supplied persistence request is ignored.
 - **`provider.models_updated`** — Transient, immutable harness-authored accepted
   current state derived after a model declaration commits. Its
   `publisher_extension_id` identifies the stable configured provider whose complete
   snapshot is replaced; an empty model list withdraws that provider's state. It
   includes the exact route's accepted prompt-input and native tool-result
   modalities; omitted modality metadata means text-only. The harness then publishes
+  an optional runtime-only cache contract with documented TTL shape, renewal,
+  quota, prefix-version, and privacy facts. The contract contains no cache key,
+  object id, prompt content, timestamp, history, or lifecycle state. It remains
+  transient current state and is never reconstructed by cold replay. The harness publishes
   `harness.models_available` and related role/model availability events. Current
-  state replay regenerates only this canonical event, never the declaration.
+  state catch-up synthesizes this canonical event for newly attached live
+  subscribers; it is not journal persistence or replay and never regenerates the
+  declaration.
 - **`provider.quota_replace_reported`**,
   **`provider.quota_patch_reported`**, and
   **`provider.quota_clear_reported`** — Transient provider-authored account-quota

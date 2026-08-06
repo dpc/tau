@@ -172,6 +172,9 @@ into a reusable agent profile. Controls can be changed for the current process;
 model-aware values are filtered or clamped to the model's supported surface. The
 UI also surfaces per-turn statistics, cache information, retry state, and
 conservative quota-pacing status when the provider supplies enough data.
+Provider model current state can carry a runtime-only cache capability/privacy
+contract without cache keys, object identities, lifecycle persistence, or
+refresh/delete traffic.
 
 The `completions API` route is HTTP/SSE Chat Completions and is suitable for
 local servers such as llama.cpp as well as remote compatible services. The

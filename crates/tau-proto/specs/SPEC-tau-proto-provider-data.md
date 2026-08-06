@@ -141,10 +141,17 @@ Declarations are mutable through same-name interception before commit. Canonical
 updates are harness-authored, immutable, and must-pass. Live delivery identifies
 the provider connection as the declaration source and the harness as the canonical
 source; canonical payload provenance remains the stable configured publisher.
-Current-state replay emits one canonical update for each active provider, including
-an active provider's empty snapshot, and must not regenerate declarations or
-model-application side effects. This is the provider-model row of
+Subscribe-time current-state catch-up emits one canonical update for each active
+provider, including an active provider's empty snapshot, and must not regenerate
+declarations or model-application side effects. It is synthesized from running
+state rather than durable replay. This is the provider-model row of
 [SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md).
+
+Provider model declarations are categorically transient. An extension-supplied
+request for persistence is ignored; neither the declaration nor its optional
+cache contract enters semantic journals. Newly attached live subscribers receive
+a canonical snapshot synthesized from running-harness current state. This
+subscribe-time catch-up is not durable replay or restart reconstruction.
 
 ## Provider tool-type metadata
 
@@ -182,3 +189,18 @@ independently to the central GPT-5.6-equivalent fallback. An omitted cache-write
 rate uses ordinary input; omitted storage has no charge. These values are basic
 equivalent-API comparison metadata, not billing facts; provider declarations
 must reject negative, malformed, or over-precise decimals.
+
+`ProviderModelInfo.cache_policy` is an optional runtime-only declaration of
+documented cache mechanism, TTL shape, renewal operation, output floor, quota
+treatment, prefix-identity version, and privacy posture for the exact route.
+Absence means no contract was declared, not that the provider performs no
+caching. Minimum, fixed, sliding, and unknown TTLs remain distinct; response
+observations never promote minimum or unknown residency into a hard deadline.
+The declaration contains no cache key, cache/object identifier, prompt content,
+timestamp, hit history, or lifecycle state.
+
+Cache pricing continues to use the existing optional read, write, and
+token-hour fields as its sole model metadata. Runtime policy must not reinterpret
+the central UI fallback as a provider price. Cache declarations remain part of
+transient provider model current state and live catch-up only; they add no
+semantic persistence, cold replay, or restart reconstruction.

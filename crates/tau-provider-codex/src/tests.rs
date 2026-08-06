@@ -53,10 +53,10 @@ fn debug_response_producer_submits_typed_compressed_capture_job() {
     );
 }
 
-/// Published ChatGPT models carry the basic OpenAI API prices used for
-/// equivalent-cost estimation.
+/// Published ChatGPT models carry public ordinary/output comparison prices but
+/// leave private-route cache billing to the non-authoritative central fallback.
 #[test]
-fn chatgpt_models_publish_provider_owned_basic_prices() {
+fn chatgpt_models_publish_basic_non_cache_prices() {
     let models = models_for_provider(&ProviderName::new("chatgpt"));
     let sol = models
         .iter()
@@ -88,17 +88,83 @@ fn chatgpt_models_publish_provider_owned_basic_prices() {
     assert_eq!(sol.cached_input.as_micro_usd(), 500_000);
     assert_eq!(sol.output.as_micro_usd(), 30_000_000);
     assert_eq!(terra.uncached_input.as_micro_usd(), 2_000_000);
-    assert_eq!(terra.cached_input.as_micro_usd(), 200_000);
+    assert_eq!(
+        terra.cached_input,
+        tau_proto::ESTIMATED_API_COST_FALLBACK.cached_input
+    );
     assert_eq!(terra.output.as_micro_usd(), 12_000_000);
     assert_eq!(luna.uncached_input.as_micro_usd(), 200_000);
-    assert_eq!(luna.cached_input.as_micro_usd(), 20_000);
+    assert_eq!(
+        luna.cached_input,
+        tau_proto::ESTIMATED_API_COST_FALLBACK.cached_input
+    );
     assert_eq!(luna.output.as_micro_usd(), 1_200_000);
     assert_eq!(gpt_5_4.uncached_input.as_micro_usd(), 2_500_000);
-    assert_eq!(gpt_5_4.cached_input.as_micro_usd(), 250_000);
+    assert_eq!(
+        gpt_5_4.cached_input,
+        tau_proto::ESTIMATED_API_COST_FALLBACK.cached_input
+    );
     assert_eq!(gpt_5_4.output.as_micro_usd(), 15_000_000);
     assert_eq!(mini.uncached_input.as_micro_usd(), 750_000);
-    assert_eq!(mini.cached_input.as_micro_usd(), 75_000);
+    assert_eq!(
+        mini.cached_input,
+        tau_proto::ESTIMATED_API_COST_FALLBACK.cached_input
+    );
     assert_eq!(mini.output.as_micro_usd(), 4_500_000);
+}
+
+/// Proves the private route publishes only its conservative response-chain
+/// capability and leaves undocumented TTL, quota, and privacy facts unknown.
+#[test]
+fn chatgpt_models_publish_conservative_runtime_cache_contract() {
+    let model = models_for_provider(&ProviderName::new("chatgpt"))
+        .into_iter()
+        .next()
+        .expect("published ChatGPT model");
+    let policy = model.cache_policy.expect("private cache policy");
+
+    assert_eq!(policy.kind, tau_proto::ProviderCacheKind::ResponseChain);
+    assert_eq!(policy.ttl, tau_proto::ProviderCacheTtl::Unknown);
+    assert_eq!(policy.renewal, tau_proto::ProviderCacheRenewal::Recreate);
+    assert_eq!(
+        policy.output_floor,
+        tau_proto::ProviderCacheOutputFloor::Zero
+    );
+    assert_eq!(
+        policy.quota.requests,
+        tau_proto::ProviderCacheQuotaCharge::Unknown
+    );
+    assert_eq!(
+        policy.quota.read_tokens,
+        tau_proto::ProviderCacheQuotaCharge::Unknown
+    );
+    assert_eq!(
+        policy.quota.write_tokens,
+        tau_proto::ProviderCacheQuotaCharge::Unknown
+    );
+    assert_eq!(
+        policy.quota.output_tokens,
+        tau_proto::ProviderCacheQuotaCharge::Unknown
+    );
+    assert_eq!(
+        policy.privacy.storage,
+        tau_proto::ProviderCacheStorageMode::Unknown
+    );
+    assert_eq!(
+        policy.privacy.zero_data_retention,
+        tau_proto::ProviderCacheZeroDataRetentionCompatibility::Unknown
+    );
+    assert_eq!(
+        policy.privacy.data_residency,
+        tau_proto::ProviderCacheDataResidencyEffect::Unknown
+    );
+    assert_eq!(
+        policy.privacy.manual_deletion,
+        tau_proto::ProviderCacheDeletionAvailability::Unavailable
+    );
+    assert_eq!(model.est_cached_input_cost_1m_usd, None);
+    assert_eq!(model.est_cache_write_input_cost_1m_usd, None);
+    assert_eq!(model.est_cache_storage_cost_1m_token_hour_usd, None);
 }
 
 #[derive(Default)]

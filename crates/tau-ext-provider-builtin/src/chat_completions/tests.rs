@@ -339,6 +339,7 @@ fn unpriced_local_model_uses_central_fallback() {
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
+            cache_contract: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_cache_write_input_cost_1m_usd: None,
@@ -395,6 +396,7 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
+            cache_contract: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_cache_write_input_cost_1m_usd: None,
@@ -476,6 +478,7 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
             tags: Vec::new(),
             supports_parallel_tool_calls: false,
             local_summary_compaction: None,
+            cache_contract: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
             est_cache_write_input_cost_1m_usd: Default::default(),
@@ -496,6 +499,47 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
         serde_json::to_value(&provider.models[0]).expect("model")["supports_parallel_tool_calls"],
         false
     );
+}
+
+/// Proves an operator-declared generic cache contract reaches transient model
+/// metadata without deriving identity or lifecycle state from response samples.
+#[test]
+fn model_publishes_configured_runtime_cache_contract() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "cache-aware",
+        "cache_contract": {
+            "kind": "automatic_prefix",
+            "ttl": {"kind": "sliding_known", "seconds": 300},
+            "renewal": "read",
+            "output_floor": "zero",
+            "quota": {
+                "requests": "counts_fully",
+                "read_tokens": "exempt",
+                "write_tokens": "counts_fully",
+                "output_tokens": "exempt"
+            },
+            "privacy": {
+                "storage": "volatile_memory",
+                "zero_data_retention": "compatible",
+                "data_residency": "preserves_route_policy",
+                "manual_deletion": "unavailable"
+            }
+        }
+    }))
+    .expect("cache-aware model");
+    let provider = ChatCompletionsProvider {
+        models: vec![model],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let policy = models_for_provider(&tau_proto::ProviderName::new("generic"), &provider)[0]
+        .cache_policy
+        .expect("published cache policy");
+    assert_eq!(policy.prefix_identity_version.get(), 1);
+    assert!(matches!(
+        policy.ttl,
+        tau_proto::ProviderCacheTtl::SlidingKnown { seconds } if seconds.get() == 300
+    ));
 }
 
 /// Ensures the extension-owned sampler preserves the successful append-only

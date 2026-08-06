@@ -142,8 +142,10 @@ are also accepted. Missing values resolve built-in default prices for known
 compatible model ids (currently `deepseek-v4-flash` from DeepSeek's standard API
 pricing) and otherwise use the central GPT-5.6-equivalent `$5`/`$.50`/`$30`
 fallback, including local and free models; explicit profile prices always take
-precedence. Hardcoded ChatGPT model values follow OpenAI's basic public API
-pricing table. A missing write price uses ordinary input; missing storage usage
+precedence. Hardcoded ChatGPT ordinary-input/output values follow OpenAI's basic
+public API pricing table, while private-route cache prices remain absent and use
+only the non-authoritative central display fallback. A missing write price uses
+ordinary input; missing storage usage
 or price contributes no storage charge. The harness accumulates ordinary input,
 cache reads, cache writes, output, and reported token-time storage into this
 deliberately rough equivalent-API estimate per agent for the current runtime
@@ -153,6 +155,16 @@ Chat Completions cache counters are ignored by default. Set
 `compat.cache_usage` to `open_ai` or `deep_seek` only when the exact route uses
 that response schema. Unsupported Anthropic/Gemini-compatible cache details
 remain absent; the extension has no native cache-object lifecycle client.
+
+Generic Chat Completions and public Responses model entries may add an optional
+`cache_contract` describing documented cache kind, TTL shape, renewal, output
+floor, quota treatment, and privacy posture for that exact route. This is an
+operator assertion, not discovery: Tau never derives a hard TTL from route names
+or recent hits. The adapter supplies prefix identity version `1`. Contracts are
+transient model current state and contain no cache keys, object names, prompt
+content, regions, timestamps, or hit history. They add no scheduler, refresh,
+PATCH, delete, journal, or restart behavior. Current generic backends reject
+manual-deletion support because none owns a typed delete operation.
 
 Generic OpenAI-compatible cache request controls are opt-in and route-local:
 `compat.openai_prompt_cache.key: agent` derives a stable Tau key. Chat

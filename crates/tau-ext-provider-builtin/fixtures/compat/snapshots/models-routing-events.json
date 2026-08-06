@@ -21,11 +21,11 @@
               "elapsed_micros": 0,
               "response_bytes_received": 196
             },
+            "first_semantic_output_elapsed_micros": 0,
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 0
-            },
-            "first_semantic_output_elapsed_micros": 0
+            }
           }
         }
       },
@@ -42,11 +42,11 @@
               "elapsed_micros": 0,
               "response_bytes_received": 196
             },
+            "first_semantic_output_elapsed_micros": 0,
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 196
-            },
-            "first_semantic_output_elapsed_micros": 0
+            }
           }
         }
       },
@@ -117,11 +117,11 @@
               "elapsed_micros": 0,
               "response_bytes_received": 196
             },
+            "first_semantic_output_elapsed_micros": 0,
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 0
-            },
-            "first_semantic_output_elapsed_micros": 0
+            }
           }
         }
       },
@@ -138,11 +138,11 @@
               "elapsed_micros": 0,
               "response_bytes_received": 196
             },
+            "first_semantic_output_elapsed_micros": 0,
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 196
-            },
-            "first_semantic_output_elapsed_micros": 0
+            }
           }
         }
       },
@@ -281,6 +281,27 @@
   },
   "models": [
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 353400,
       "default_affinity": 700,
       "efforts": [
@@ -292,8 +313,6 @@
         "xhigh",
         "max"
       ],
-      "est_cached_input_cost_1m_usd": "0.5",
-      "est_cache_write_input_cost_1m_usd": "6.25",
       "est_output_cost_1m_usd": "30",
       "est_uncached_input_cost_1m_usd": "5",
       "id": "chatgpt/gpt-5.6-sol",
@@ -330,6 +349,27 @@
       ]
     },
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 353400,
       "default_affinity": 600,
       "efforts": [
@@ -341,8 +381,6 @@
         "xhigh",
         "max"
       ],
-      "est_cached_input_cost_1m_usd": "0.2",
-      "est_cache_write_input_cost_1m_usd": "2.5",
       "est_output_cost_1m_usd": "12",
       "est_uncached_input_cost_1m_usd": "2",
       "id": "chatgpt/gpt-5.6-terra",
@@ -379,6 +417,27 @@
       ]
     },
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 353400,
       "default_affinity": 500,
       "efforts": [
@@ -390,8 +449,6 @@
         "xhigh",
         "max"
       ],
-      "est_cached_input_cost_1m_usd": "0.02",
-      "est_cache_write_input_cost_1m_usd": "0.25",
       "est_output_cost_1m_usd": "1.2",
       "est_uncached_input_cost_1m_usd": "0.2",
       "id": "chatgpt/gpt-5.6-luna",
@@ -428,6 +485,27 @@
       ]
     },
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 258400,
       "default_affinity": 400,
       "efforts": [
@@ -438,7 +516,6 @@
         "high",
         "xhigh"
       ],
-      "est_cached_input_cost_1m_usd": "0.5",
       "est_output_cost_1m_usd": "30",
       "est_uncached_input_cost_1m_usd": "5",
       "id": "chatgpt/gpt-5.5",
@@ -472,6 +549,27 @@
       ]
     },
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 258400,
       "default_affinity": 300,
       "efforts": [
@@ -482,7 +580,6 @@
         "high",
         "xhigh"
       ],
-      "est_cached_input_cost_1m_usd": "0.25",
       "est_output_cost_1m_usd": "15",
       "est_uncached_input_cost_1m_usd": "2.5",
       "id": "chatgpt/gpt-5.4",
@@ -516,6 +613,27 @@
       ]
     },
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 258400,
       "default_affinity": 100,
       "efforts": [
@@ -525,7 +643,6 @@
         "medium",
         "high"
       ],
-      "est_cached_input_cost_1m_usd": "0.075",
       "est_output_cost_1m_usd": "4.5",
       "est_uncached_input_cost_1m_usd": "0.75",
       "id": "chatgpt/gpt-5.4-mini",
@@ -559,6 +676,27 @@
       ]
     },
     {
+      "cache_policy": {
+        "kind": "response_chain",
+        "output_floor": "zero",
+        "prefix_identity_version": 1,
+        "privacy": {
+          "data_residency": "unknown",
+          "manual_deletion": "unavailable",
+          "storage": "unknown",
+          "zero_data_retention": "unknown"
+        },
+        "quota": {
+          "output_tokens": "unknown",
+          "read_tokens": "unknown",
+          "requests": "unknown",
+          "write_tokens": "unknown"
+        },
+        "renewal": "recreate",
+        "ttl": {
+          "kind": "unknown"
+        }
+      },
       "context_window": 258400,
       "default_affinity": 200,
       "efforts": [
@@ -569,7 +707,6 @@
         "high",
         "xhigh"
       ],
-      "est_cached_input_cost_1m_usd": "0.175",
       "est_output_cost_1m_usd": "14",
       "est_uncached_input_cost_1m_usd": "1.75",
       "id": "chatgpt/gpt-5.3-codex",
@@ -684,11 +821,11 @@
       "backend": "chat_completions",
       "model": {
         "compat": {
-          "parallel_tool_calls": true,
           "openai_prompt_cache": {
             "key": "agent",
             "retention": "in_memory"
           },
+          "parallel_tool_calls": true,
           "reasoning_effort": true,
           "stream_options": true
         },

@@ -66,6 +66,9 @@ pub struct ChatCompletionsModel {
     /// Absence keeps standalone compaction unsupported for this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_summary_compaction: Option<LocalSummaryCompactionConfig>,
+    /// Optional operator-declared runtime cache contract for this exact model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_contract: Option<crate::ProviderCacheContract>,
     /// Estimated USD price per million uncached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_uncached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,

@@ -71,6 +71,9 @@ pub struct ResponsesModel {
     /// Whether the model may issue several Function calls in one response.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
+    /// Optional operator-declared runtime cache contract for this exact model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_contract: Option<crate::ProviderCacheContract>,
     /// Estimated USD price per million uncached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_uncached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
@@ -220,6 +223,11 @@ pub fn models_for_provider(
                 supports_compaction: false,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                cache_policy: model.cache_contract.map(|contract| {
+                    contract
+                        .runtime_policy()
+                        .expect("deserialized cache contract remains valid")
+                }),
                 est_uncached_input_cost_1m_usd: model.est_uncached_input_cost_1m_usd,
                 est_cached_input_cost_1m_usd: model.est_cached_input_cost_1m_usd,
                 est_cache_write_input_cost_1m_usd: model.est_cache_write_input_cost_1m_usd,

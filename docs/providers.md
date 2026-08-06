@@ -131,6 +131,7 @@ struct ProviderModelInfo {
     efforts: Vec<Effort>,
     verbosities: Vec<Verbosity>,
     thinking_summaries: Vec<ThinkingSummary>,
+    cache_policy: Option<ProviderCachePolicy>,
     est_uncached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
     est_cached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
     est_cache_write_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
@@ -178,7 +179,65 @@ session/runtime and is not reconstructed from durable history.
 The display rounds aggressively to fit `$` plus three characters (`$.03`, `$2.1`,
 `$23`, `$12k`).
 
-Hardcoded ChatGPT/Codex model prices come from OpenAI's provider-owned
+### Runtime cache contracts
+
+Provider models may publish an optional runtime-only cache contract. It
+classifies the exact route as automatic-prefix, explicit-breakpoint,
+explicit-object, or response-chain caching and separately declares sliding,
+minimum, fixed, or unknown residency. Minimum residency is not a hard expiry,
+and Tau never turns recent hits into a TTL or renewal guarantee.
+
+The contract also declares read, expiry-patch, recreate, or unsupported renewal;
+zero, one, unbounded-reasoning, or unknown output floor; request/read/write/output
+quota treatment; an adapter-owned prefix-identity version; and privacy facts.
+Privacy distinguishes volatile memory, extended provider retention, named
+provider objects, proxy-specific state, and unknown storage. ZDR compatibility,
+data-residency effect, and manual deletion availability remain explicit.
+Unknown or provider-specific values must not be presented as compliant.
+Automatic caches generally cannot be manually cleared.
+
+The three existing raw model price fields remain the sole cache read, write, and
+token-hour storage price authority. The broad equivalent-API fallback used for
+display is not a provider fact and cannot drive cache policy. Contracts contain
+no prompt, cache key, object name, timestamp, or residency history. They travel
+only in transient model current state; Tau adds no refresh, PATCH, delete,
+journaling, restart recovery, or cache lifecycle operation.
+
+Generic Chat Completions and public Responses models may declare
+`cache_contract` metadata. The adapter supplies prefix identity version `1`.
+For example:
+
+```yaml
+cache_contract:
+  kind: automatic_prefix
+  ttl:
+    kind: sliding_known
+    seconds: 300
+  renewal: read
+  output_floor: zero
+  quota:
+    requests: counts_fully
+    read_tokens: exempt
+    write_tokens: counts_fully
+    output_tokens: exempt
+  privacy:
+    storage: volatile_memory
+    zero_data_retention: compatible
+    data_residency: preserves_route_policy
+    manual_deletion: unavailable
+```
+
+This is an operator assertion for one exact generic route. Tau does not infer it
+from endpoint, provider/model name, OpenRouter routing, typed request controls,
+cache usage, or recent responses. Current production backends have no typed
+cache-object deletion, so generic profiles cannot declare manual deletion
+support. The private ChatGPT/Codex route publishes response-chain recreation
+with zero output but unknown TTL, cache billing, quota, and privacy. It omits
+raw read/write/storage cache prices; the UI may still use its
+non-authoritative central fallback estimate. Those unknowns deliberately
+prevent safe scheduled renewal.
+
+Hardcoded ChatGPT/Codex ordinary-input and output comparison prices come from OpenAI's provider-owned
 [API pricing table](https://developers.openai.com/api/docs/pricing). Configured
 compatible providers own their explicit values; refresh those profile fields from
 that provider's basic public pricing table. The built-in Chat Completions

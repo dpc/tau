@@ -10,6 +10,7 @@
 #[cfg(test)]
 use std::collections as path_std_collections;
 use std::collections::hash_map as path_std_collections_hash_map;
+use std::num::NonZeroU32;
 use std::{cell as path_std_cell, sync as path_std_sync};
 
 use responses::pool as path_responses_pool;
@@ -1078,11 +1079,36 @@ fn model_info(
         supports_standalone_compaction: is_gpt_5_6(model),
         standalone_compaction_threshold: is_gpt_5_6(model)
             .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
+        cache_policy: Some(private_response_chain_cache_policy()),
         est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
-        est_cached_input_cost_1m_usd: Some(prices.cached_input),
-        est_cache_write_input_cost_1m_usd: prices.cache_write_input,
+        est_cached_input_cost_1m_usd: None,
+        est_cache_write_input_cost_1m_usd: None,
         est_output_cost_1m_usd: Some(prices.output),
-        est_cache_storage_cost_1m_token_hour_usd: prices.storage_per_million_token_hour,
+        est_cache_storage_cost_1m_token_hour_usd: None,
+    }
+}
+
+/// Return the conservative documented cache contract for the private
+/// ChatGPT/Codex response-chain route.
+fn private_response_chain_cache_policy() -> tau_proto::ProviderCachePolicy {
+    tau_proto::ProviderCachePolicy {
+        kind: tau_proto::ProviderCacheKind::ResponseChain,
+        ttl: tau_proto::ProviderCacheTtl::Unknown,
+        renewal: tau_proto::ProviderCacheRenewal::Recreate,
+        output_floor: tau_proto::ProviderCacheOutputFloor::Zero,
+        quota: tau_proto::ProviderCacheQuotaAccounting {
+            requests: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            read_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            write_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+            output_tokens: tau_proto::ProviderCacheQuotaCharge::Unknown,
+        },
+        prefix_identity_version: NonZeroU32::new(1).expect("one is nonzero"),
+        privacy: tau_proto::ProviderCachePrivacy {
+            storage: tau_proto::ProviderCacheStorageMode::Unknown,
+            zero_data_retention: tau_proto::ProviderCacheZeroDataRetentionCompatibility::Unknown,
+            data_residency: tau_proto::ProviderCacheDataResidencyEffect::Unknown,
+            manual_deletion: tau_proto::ProviderCacheDeletionAvailability::Unavailable,
+        },
     }
 }
 
