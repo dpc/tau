@@ -3,7 +3,7 @@
 //! The extension provides active-only `timer` reminders and an opt-in
 //! `papercut` reporter. Timers reconstruct session-scoped state from replayed
 //! tool and prompt facts; papercuts append independent diagnostic JSONL records
-//! through harness-managed session storage.
+//! through harness-managed per-instance storage.
 
 #[cfg(test)]
 mod tests;
@@ -120,7 +120,7 @@ struct TimerRuntime {
     /// Harness-authoritative current session identifier for papercut
     /// attribution.
     session_id: Option<String>,
-    /// Optional session-scoped append service enabled by extension
+    /// Optional per-instance User-scope append service enabled by extension
     /// configuration.
     papercut_storage: Option<Box<dyn PapercutStorage>>,
 }
@@ -147,7 +147,8 @@ trait PapercutStorage {
     fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String>;
 }
 
-/// Production papercut storage using the general session-scoped data RPC.
+/// Production papercut storage using the general per-instance User-scope data
+/// RPC.
 struct RpcPapercutStorage {
     /// Correlated client used to make the harness extension-data request.
     client: ExtensionDataClient,
@@ -156,7 +157,7 @@ struct RpcPapercutStorage {
 impl PapercutStorage for RpcPapercutStorage {
     fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String> {
         match self.client.request(
-            ExtensionDataScope::Session,
+            ExtensionDataScope::User,
             ExtensionDataRequestOp::AppendFile {
                 path: ExtensionDataPath::new(PAPERCUT_FILE_NAME),
                 contents,
@@ -556,7 +557,7 @@ impl TimerRuntime {
             return papercut_not_recorded("no active session is available");
         };
         let Some(storage) = &self.papercut_storage else {
-            return papercut_not_recorded("session storage is unavailable");
+            return papercut_not_recorded("papercut storage is unavailable");
         };
         let record = PapercutRecord {
             schema: PAPERCUT_SCHEMA_VERSION,
@@ -577,7 +578,7 @@ impl TimerRuntime {
             Ok(()) => "recorded; continue the primary task and do not retry".to_owned(),
             Err(error) => {
                 tracing::debug!(%error, "papercut append was not recorded");
-                papercut_not_recorded("session storage rejected the report")
+                papercut_not_recorded("papercut storage rejected the report")
             }
         }
     }

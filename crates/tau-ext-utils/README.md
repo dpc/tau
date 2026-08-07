@@ -30,12 +30,13 @@ policy.
 Each accepted call appends exactly one compact JSONL line to
 
 ```text
-$XDG_STATE_HOME/tau/sessions/<session-id>/ext/data/<std-utils-instance>/papercuts.jsonl
+$XDG_STATE_HOME/tau/ext/<std-utils-instance>/papercuts.jsonl
 ```
 
-This is `ExtensionDataScope::Session`: the harness chooses the authenticated
-configured instance directory and current session root. `std-utils` owns only
-the relative `papercuts.jsonl` filename and record content.
+This is `ExtensionDataScope::User`: the harness chooses the authenticated
+configured instance directory. The normal `std-utils` instance therefore uses
+`$XDG_STATE_HOME/tau/ext/std-utils/papercuts.jsonl`. `std-utils` owns only the
+relative `papercuts.jsonl` filename and record content.
 
 The stable v1 line schema is:
 
@@ -47,29 +48,33 @@ The stable v1 line schema is:
 the current harness-authored `session.started`; neither comes from model
 arguments. `timestamp_us` is the operation wall-clock Unix-microsecond time.
 
-Inspect a session's records in batches with standard JSONL tools:
+Inspect this configured instance's shared records in batches with standard JSONL
+tools:
 
 ```sh
-jq -c . "$XDG_STATE_HOME/tau/sessions/$session_id/ext/data/std-utils/papercuts.jsonl"
-jq -c 'select(.schema == 1)' "$XDG_STATE_HOME/tau/sessions/$session_id/ext/data/std-utils/papercuts.jsonl"
+jq -c . "$XDG_STATE_HOME/tau/ext/std-utils/papercuts.jsonl"
+jq -c 'select(.schema == 1)' "$XDG_STATE_HOME/tau/ext/std-utils/papercuts.jsonl"
 ```
 
 
 ## Limits and behavior
 
 `report` must contain non-whitespace text, at most 4,096 Unicode scalar values
-and 16 KiB UTF-8 bytes. The harness retains the whole session file without
+and 16 KiB UTF-8 bytes. The harness retains the whole per-instance file without
 rotation, retry, deduplication, redaction, upload, issue filing, or replay
 re-append. Its existing extension-data limit caps the resulting file at 16 MiB.
 
 One accepted call makes one `AppendFile` RPC and writes one trailing-newline
-record. The harness preserves its current normal single-writer order and
-synchronous `sync_all` behavior. Papercuts are best-effort and
-non-transactional: memory-only or ephemeral sessions, a full file, an RPC
-failure, and the rare session rollover timing mismatch can leave a report
-unrecorded. The tool returns a concise recorded/not-recorded outcome and tells
-the agent to continue its primary task without retrying.
+record. The harness serializes User-scope appends across harness processes that
+share this Tau state root and configured instance, then synchronously
+`sync_all`s the file. Papercuts are best-effort and non-transactional:
+memory-only mode, a full file, an RPC failure, and the rare session rollover
+timing mismatch can leave a report unrecorded. Ephemeral sessions use the same
+durable per-instance file. The tool returns a concise recorded/not-recorded outcome
+and tells the agent to continue its primary task without retrying.
 
-Reports are plaintext operational notes retained with their session. Do not put
-secrets, credentials, private keys, access tokens, or unnecessary personal data
-in a report. Operators who can inspect the session state can read papercuts.
+Reports are plaintext operational notes retained with per-instance extension state.
+Do not put secrets, credentials, private keys, access tokens, or unnecessary
+personal data in a report. Operators who can inspect Tau state can read
+papercuts. Older per-session papercut files remain historical artifacts; Tau
+does not migrate or merge them automatically.

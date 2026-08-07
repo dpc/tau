@@ -106,7 +106,7 @@ use crate::harness::extension_data::{
     run_extension_data_list_files, run_extension_data_read_file,
     run_extension_data_read_file_with_limit, run_extension_data_rename_file,
     run_extension_data_write_file, run_extension_data_write_file_with_limit,
-    with_extension_data_scope_lock,
+    run_user_extension_data_append_file, with_extension_data_scope_lock,
 };
 use crate::harness::extensions::StartupDeadline;
 
@@ -10216,6 +10216,7 @@ impl Harness {
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
         let is_secret = scope == tau_proto::ExtensionDataScope::Secret;
+        let is_user = scope == tau_proto::ExtensionDataScope::User;
         let root = self.extension_data_scope_root(connection_id, scope)?;
         match op {
             tau_proto::ExtensionDataRequestOp::ReadFile { path } => {
@@ -10283,6 +10284,8 @@ impl Harness {
                         tau_proto::ExtensionDataErrorKind::Permission,
                         "append is unavailable for secret data",
                     ))
+                } else if is_user {
+                    run_user_extension_data_append_file(&root, path.into_string(), contents)
                 } else {
                     run_extension_data_append_file(&root, path.into_string(), contents)
                 }

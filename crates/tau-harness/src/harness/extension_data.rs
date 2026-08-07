@@ -578,6 +578,18 @@ pub(super) fn run_extension_data_append_file(
     Ok(tau_proto::ExtensionDataValue::AppendFile)
 }
 
+/// Appends one User-scope file while serializing the complete append operation
+/// across harness processes sharing the per-instance extension root.
+pub(super) fn run_user_extension_data_append_file(
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    with_extension_data_scope_lock(root, || {
+        run_extension_data_append_file(root, path, contents)
+    })
+}
+
 /// Atomically replaces one complete file when its current BLAKE3 generation
 /// matches `expected_generation`.
 ///

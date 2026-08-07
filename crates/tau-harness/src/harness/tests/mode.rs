@@ -176,6 +176,44 @@ fn ephemeral_harness_rejects_session_scoped_extension_data() {
     );
 }
 
+/// Ensures an ephemeral session can retain extension-owned User data without
+/// recreating a session directory, because this scope is deliberately
+/// per-instance and shared across sessions under one Tau state root rather
+/// than session-owned.
+#[test]
+fn ephemeral_harness_appends_user_scoped_extension_data() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let h = quiet_provider_harness_ephemeral(&sp).expect("harness");
+    let provider_connection = h
+        .extension_connection_id("provider")
+        .expect("provider connection")
+        .to_owned();
+
+    let result = h
+        .run_extension_data_request(
+            &crate::test_connection_id(&provider_connection),
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::AppendFile {
+                path: tau_proto::ExtensionDataPath::from("papercuts.jsonl"),
+                contents: b"{\"schema\":1}\n".to_vec(),
+            },
+        )
+        .expect("User extension data remains durable");
+
+    assert_eq!(result, tau_proto::ExtensionDataValue::AppendFile);
+    assert_eq!(
+        std::fs::read(sp.join("ext/provider/papercuts.jsonl")).expect("User data"),
+        b"{\"schema\":1}\n"
+    );
+    assert!(
+        !tau_config::settings::sessions_dir_of(&sp)
+            .join("s1")
+            .exists(),
+        "User data must not create a session directory"
+    );
+}
+
 /// Memory-only mode rejects every delegated extension-data scope before path
 /// resolution and leaves the complete supplied state tree absent.
 #[test]

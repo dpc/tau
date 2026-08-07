@@ -403,13 +403,16 @@ disconnect/respawn identity checks, or persistence classification. See
 
 When enabled, `std-utils` papercut reports persist unredacted model-supplied
 operational text plus harness-routed agent/session identity and an operation
-timestamp as plaintext session-scoped extension data. Session-state operators
-can read these records, there is no automatic redaction, and agents must not
-put secrets in reports. This is explicitly best-effort diagnostic data:
-ephemeral or memory-only storage denial, quota/RPC failure, and the accepted
-rare session-rollover mismatch can lose or misattribute a record. These
+timestamp as plaintext per-instance `ExtensionDataScope::User` data. It is
+shared across sessions that use one Tau state root and configured instance.
+Tau-state operators can read these records, there is no automatic redaction,
+and agents must not put secrets in reports. The harness serializes User-scope
+appends across harness processes sharing that state root and instance. This is
+explicitly best-effort diagnostic data: memory-only denial, quota/RPC failure,
+and the accepted rare session-rollover mismatch can lose or misattribute a
+record; ephemeral sessions intentionally use the same durable file. These
 limitations do not expand the configured-local extension boundary or imply
-additional append locking or hardening.
+hostile-process hardening.
 
 The same configured-peer boundary admits transient `tool.progress_reported`
 observations. The report commits before routed-call authorization; only the

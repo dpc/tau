@@ -133,7 +133,7 @@ fn runtime() -> TimerRuntime {
     }
 }
 
-/// Deterministic in-memory session append target for papercut unit tests.
+/// Deterministic in-memory append target for papercut unit tests.
 #[derive(Clone, Default)]
 struct FakePapercutStorage {
     /// Complete lines accepted by the fake harness.
@@ -145,7 +145,7 @@ struct FakePapercutStorage {
 impl PapercutStorage for FakePapercutStorage {
     fn append_papercut(&self, contents: Vec<u8>) -> Result<(), String> {
         if self.fail {
-            return Err("permission: session scope unavailable".to_owned());
+            return Err("permission: memory-only storage unavailable".to_owned());
         }
         self.lines.borrow_mut().push(contents);
         Ok(())
@@ -726,9 +726,9 @@ fn papercut_runtime_startup_gates_prefixed_declarations() {
     }
 }
 
-/// A live, prefixed papercut call after `session.started` reaches the
-/// session-storage path, while an unprefixed lookalike remains unhandled by
-/// the dynamically scoped runtime dispatch.
+/// A live, prefixed papercut call after `session.started` reaches the shared
+/// per-instance User-storage path, while an unprefixed lookalike remains
+/// unhandled by the dynamically scoped runtime dispatch.
 #[test]
 fn papercut_runtime_dispatches_only_prefixed_live_calls() {
     let session = Event::SessionStarted(tau_proto::SessionStarted {
@@ -759,16 +759,17 @@ fn papercut_runtime_dispatches_only_prefixed_live_calls() {
         ],
     );
 
-    let appends = frames
+    let appends: Vec<_> = frames
         .iter()
-        .filter(|frame| {
-            matches!(
-                frame,
-                HarnessInputMessage::ExtensionDataRequest(request)
-                    if matches!(request.op, ExtensionDataRequestOp::AppendFile { .. })
-            )
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::ExtensionDataRequest(request)
+                if matches!(request.op, ExtensionDataRequestOp::AppendFile { .. }) =>
+            {
+                Some(request)
+            }
+            _ => None,
         })
-        .count();
+        .collect();
     let results: Vec<_> = frames
         .iter()
         .filter_map(|frame| match frame {
@@ -780,7 +781,8 @@ fn papercut_runtime_dispatches_only_prefixed_live_calls() {
         })
         .collect();
 
-    assert_eq!(appends, 1);
+    assert_eq!(appends.len(), 1);
+    assert_eq!(appends[0].scope, ExtensionDataScope::User);
     assert_eq!(results, ["prefixed"]);
 }
 
@@ -916,8 +918,8 @@ fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
     assert_eq!(record.as_object().expect("record object").len(), 5);
 }
 
-/// Failed session append, including ephemeral or quota denials reported by the
-/// harness, returns a non-distraction outcome and never creates a retry loop.
+/// A failed append, including memory-only, quota, or RPC rejection, returns a
+/// non-distraction outcome and never creates a retry loop.
 #[test]
 fn papercut_append_failure_does_not_distract_the_primary_task() {
     let mut rt = runtime();
@@ -930,7 +932,7 @@ fn papercut_append_failure_does_not_distract_the_primary_task() {
     rt.papercut_storage = Some(Box::new(storage));
 
     let outcome = rt.record_papercut(
-        &papercut_started("call-1", "agent-one", "ephemeral session denied storage"),
+        &papercut_started("call-1", "agent-one", "memory-only storage denied"),
         UnixMicros::new(1),
     );
 

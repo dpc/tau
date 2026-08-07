@@ -182,6 +182,12 @@ In ephemeral session mode, `ExtensionDataScope::Session` is rejected before any
 session data root is created. `User` and `Cache` scopes remain durable because
 they are extension-owned non-session storage.
 
+`ExtensionDataScope::User` `AppendFile` holds the selected per-instance root's
+exclusive lock from validation through quota check, append, and synchronous
+file durability. This serializes append requests from harness processes sharing
+one Tau state root and configured extension instance; it does not provide a
+general extension-data transaction or session-consistency guarantee.
+
 In memory-only harness mode, Session, User, and Cache extension-data requests
 all return Permission before resolving or creating any root.
 

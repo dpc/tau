@@ -64,6 +64,57 @@ fn append_file_rejects_growth_beyond_extension_data_limit() {
     assert_eq!(err.kind, tau_proto::ExtensionDataErrorKind::QuotaExceeded);
 }
 
+/// Ensures a User-scope append waits for the per-instance lock, so its quota
+/// check and synchronous append cannot race another harness process sharing the
+/// same root.
+#[test]
+fn user_scope_append_serializes_on_the_extension_root_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use fs2::FileExt as _;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let root = tempdir.path().join("user");
+    run_user_extension_data_append_file(&root, "papercuts.jsonl".to_owned(), b"first\n".to_vec())
+        .expect("first append");
+    let lock = path_std_fs::File::open(&root).expect("open extension root");
+    lock.lock_exclusive().expect("hold extension root lock");
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let append_root = root.clone();
+    let append = std::thread::spawn(move || {
+        started_tx.send(()).expect("report append start");
+        let result = run_user_extension_data_append_file(
+            &append_root,
+            "papercuts.jsonl".to_owned(),
+            b"second\n".to_vec(),
+        );
+        finished_tx.send(result).expect("report append result");
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("append worker start");
+    assert!(
+        finished_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "User append must wait for the held extension root lock"
+    );
+    fs2::FileExt::unlock(&lock).expect("release extension root lock");
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("append completion")
+            .is_ok()
+    );
+    append.join().expect("append thread");
+    assert_eq!(
+        std::fs::read(root.join("papercuts.jsonl")).expect("read appends"),
+        b"first\nsecond\n"
+    );
+}
+
 /// Ensures directory listing has a hard collection cap before sorting entries
 /// for extension-controlled data.
 #[test]

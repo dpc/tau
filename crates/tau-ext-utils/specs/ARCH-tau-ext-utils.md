@@ -7,14 +7,19 @@ The reporter is declared only when its configured instance enables
 effective visibility.
 
 `papercut` accepts only a bounded report string and uses the existing
-session-scoped extension-data `AppendFile` RPC to append one newline-terminated
-v1 JSONL record to its owned `papercuts.jsonl` relative filename. The record
-attributes the report from the routed tool caller and current live
-`session.started` fact; it never accepts model-supplied attribution. It is
-best-effort diagnostic data, not timer or journal state: memory-only/ephemeral
-storage denial, quota, RPC failure, and the accepted rare lifecycle rollover
-mismatch return a no-retry outcome without interrupting the primary task.
-Papercut calls are live-only and never replay-append.
+per-instance `ExtensionDataScope::User` `AppendFile` RPC to append one
+newline-terminated v1 JSONL record to its owned `papercuts.jsonl` relative
+filename. The harness resolves it to
+`<tau-state>/ext/<configured-std-utils-instance>/papercuts.jsonl` and
+serializes User-scope appends across harness processes sharing that state root
+and instance. The record attributes the report from the routed tool caller and
+current live `session.started` fact; it never accepts model-supplied
+attribution. It is best-effort diagnostic data, not timer or journal state:
+memory-only storage denial, quota, RPC failure, and the accepted rare lifecycle
+rollover mismatch return a no-retry outcome without interrupting the primary
+task. Ephemeral sessions append to the same durable file. Papercut calls are
+live-only and never replay-append. Existing per-session papercut files remain
+historical artifacts and are not migrated.
 
 The extension uses deferred startup so it can validate this closed
 per-instance configuration before dynamically declaring its tools and prompt
