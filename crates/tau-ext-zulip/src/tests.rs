@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use super::*;
 use crate::api::{MessagePage, RejectedOperation, SentMessage, ZulipClient};
+use crate::config::ConfiguredStreamRoute;
 
 /// Cloneable in-memory sink used to inspect tracing output.
 #[derive(Clone, Default)]
@@ -38,6 +39,16 @@ impl std::io::Write for SharedTraceWriter {
 struct FakeClient {
     /// Next queue registration outcome.
     register_error: Mutex<Option<ApiError>>,
+    /// Next configured-channel resolution outcome.
+    resolve_error: Mutex<Option<ApiError>>,
+    /// Next all-message subscription outcome.
+    subscribe_error: Mutex<Option<ApiError>>,
+    /// Optional per-name native IDs used for collision tests.
+    resolved_stream_ids: Mutex<HashMap<String, u64>>,
+    /// Ordered route-resolution, subscription, and registration calls.
+    queue_setup_calls: Mutex<Vec<&'static str>>,
+    /// All channel-name batches submitted for bot subscription.
+    subscriptions: Mutex<Vec<Vec<String>>>,
     /// Sent route and content observations.
     sends: Mutex<Vec<(NativeRoute, String)>>,
     /// Reaction observations.
@@ -59,7 +70,42 @@ struct FakeClient {
 }
 
 impl ZulipClient for FakeClient {
+    fn resolve_stream_id(&self, _cfg: &RuntimeConfig, name: &str) -> Result<u64, ApiError> {
+        self.queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .push("resolve");
+        if let Some(error) = self.resolve_error.lock().expect("resolve error").take() {
+            return Err(error);
+        }
+        Ok(*self
+            .resolved_stream_ids
+            .lock()
+            .expect("resolved stream IDs")
+            .get(name)
+            .unwrap_or(&7))
+    }
+
+    fn subscribe(&self, _cfg: &RuntimeConfig, names: &[String]) -> Result<(), ApiError> {
+        self.queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .push("subscribe");
+        self.subscriptions
+            .lock()
+            .expect("subscriptions")
+            .push(names.to_vec());
+        if let Some(error) = self.subscribe_error.lock().expect("subscribe error").take() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn register_queue(&self, _cfg: &RuntimeConfig) -> Result<EventQueue, ApiError> {
+        self.queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .push("register");
         if let Some(started) = self
             .register_started
             .lock()
@@ -83,7 +129,6 @@ impl ZulipClient for FakeClient {
             queue_id: "queue-secret".to_owned(),
             last_event_id: 10,
             bot_user_id: 99,
-            bot_full_name: Some("Tau Bot".to_owned()),
             poll_request_timeout: Duration::from_secs(100),
         })
     }
@@ -185,6 +230,180 @@ impl ZulipClient for FakeClient {
     }
 }
 
+/// Channel names resolve to native routing IDs before an all-message
+/// subscription, so queue registration cannot expose a broad receive route.
+#[test]
+fn all_message_channel_subscription_precedes_queue_registration() {
+    let config = validated_config(serde_json::json!([{
+        "name": "Engineering",
+        "receive": "all_messages"
+    }]))
+    .expect("valid all-message channel");
+    let client = Arc::new(FakeClient::default());
+    let ext = Extension::new(client.clone(), mpsc::channel().0, ToolNames::logical());
+
+    let (resolved, _queue) = ext.acquire_queue(&config).expect("queue setup");
+
+    assert_eq!(resolved.routes[0].stream_id, 7);
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve", "subscribe", "register"]
+    );
+    assert_eq!(
+        client
+            .subscriptions
+            .lock()
+            .expect("subscriptions")
+            .as_slice(),
+        &[vec!["Engineering".to_owned()]]
+    );
+}
+
+/// Mention-only channels still resolve private routing IDs but must not create
+/// subscriptions, preserving their operator-managed membership boundary.
+#[test]
+fn mention_only_channel_does_not_subscribe() {
+    let config = validated_config(serde_json::json!([{
+        "name": "Operations",
+        "topic": "deploy",
+        "receive": "mentions_only"
+    }]))
+    .expect("valid mention-only channel");
+    let client = Arc::new(FakeClient::default());
+    let ext = Extension::new(client.clone(), mpsc::channel().0, ToolNames::logical());
+
+    let (resolved, _queue) = ext.acquire_queue(&config).expect("queue setup");
+
+    assert_eq!(resolved.routes[0].stream_id, 7);
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve", "register"]
+    );
+    assert!(
+        client
+            .subscriptions
+            .lock()
+            .expect("subscriptions")
+            .is_empty()
+    );
+}
+
+/// Resolution or subscription failure must stop before a queue installs an
+/// unresolved route or broadens the all-message receive surface.
+#[test]
+fn queue_setup_failure_prevents_registration() {
+    let config = validated_config(serde_json::json!([{
+        "name": "Engineering",
+        "receive": "all_messages"
+    }]))
+    .expect("valid all-message channel");
+    let client = Arc::new(FakeClient::default());
+    let ext = Extension::new(client.clone(), mpsc::channel().0, ToolNames::logical());
+    *client.resolve_error.lock().expect("resolve error") = Some(ApiError::unavailable());
+    assert!(ext.acquire_queue(&config).is_err());
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve"]
+    );
+
+    client
+        .queue_setup_calls
+        .lock()
+        .expect("queue setup calls")
+        .clear();
+    *client.subscribe_error.lock().expect("subscribe error") = Some(ApiError::unavailable());
+    assert!(ext.acquire_queue(&config).is_err());
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve", "subscribe"]
+    );
+}
+
+/// Distinct configured names that resolve to one overlapping native channel
+/// must fail before subscription or queue registration makes routing ambiguous.
+#[test]
+fn colliding_resolved_receive_routes_fail_before_queue_registration() {
+    let config = validated_config(serde_json::json!([
+        {"name":"Engineering", "topic":"deploy", "receive":"all_messages"},
+        {"name":"Engineering mirror", "topic":"deploy", "receive":"mentions_only"}
+    ]))
+    .expect("distinct configured names");
+    let client = Arc::new(FakeClient::default());
+    client
+        .resolved_stream_ids
+        .lock()
+        .expect("resolved stream IDs")
+        .extend([
+            ("Engineering".to_owned(), 7),
+            ("Engineering mirror".to_owned(), 7),
+        ]);
+    let ext = Extension::new(client.clone(), mpsc::channel().0, ToolNames::logical());
+
+    assert!(ext.acquire_queue(&config).is_err());
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve", "resolve"]
+    );
+}
+
+/// Each queue replacement must resolve names and repeat the idempotent
+/// all-message subscription before registering the replacement queue.
+#[test]
+fn queue_recovery_repeats_resolution_subscription_and_registration() {
+    let config = validated_config(serde_json::json!([{
+        "name": "Engineering",
+        "receive": "all_messages"
+    }]))
+    .expect("valid all-message channel");
+    let client = Arc::new(FakeClient::default());
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(client.clone(), tx, ToolNames::logical());
+    ext.apply_config(config.clone(), publisher());
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+
+    handle_queue_expiry(&ext, &config, generation, registration);
+    handle_queue_expiry(&ext, &config, generation, registration);
+
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &[
+            "resolve",
+            "subscribe",
+            "register",
+            "resolve",
+            "subscribe",
+            "register"
+        ]
+    );
+}
+
 fn cfg() -> RuntimeConfig {
     RuntimeConfig {
         email: "bot@example.test".to_owned(),
@@ -192,8 +411,15 @@ fn cfg() -> RuntimeConfig {
         api_base: "http://127.0.0.1:1/api/v1".to_owned(),
         allowed_user_ids: HashSet::from([42]),
         sender_aliases: HashMap::from([(42, "alice".to_owned())]),
+        configured_routes: vec![ConfiguredStreamRoute {
+            name: "ops".to_owned(),
+            topic: Some("deploy".to_owned()),
+            receive: Some(ReceiveMode::MentionsOnly),
+            proactive: ProactiveRoute::ExactTopic("deploy".to_owned()),
+            description: Some("Operations".to_owned()),
+        }],
         routes: vec![StreamRoute {
-            alias: "ops".to_owned(),
+            name: "ops".to_owned(),
             stream_id: 7,
             topic: Some("deploy".to_owned()),
             receive: Some(ReceiveMode::MentionsOnly),
@@ -253,8 +479,7 @@ fn validated_config_with_direct_messages(
 #[test]
 fn offline_message_catch_up_defaults_to_disabled() {
     let config = validated_config(serde_json::json!([{
-        "alias": "ops",
-        "stream_id": 7,
+        "name": "ops",
         "topic": "deploy",
         "receive": "all_messages"
     }]))
@@ -279,12 +504,17 @@ fn extension() -> (
 
 /// Build a configured extension with deterministic local I/O.
 fn extension_with_config(
-    config: RuntimeConfig,
+    mut config: RuntimeConfig,
 ) -> (
     Extension,
     mpsc::Receiver<HarnessInputMessage>,
     Arc<FakeClient>,
 ) {
+    config.routes = config
+        .configured_routes
+        .iter()
+        .map(|route| route.resolve(7))
+        .collect();
     let (tx, rx) = mpsc::channel();
     let client = Arc::new(FakeClient::default());
     let ext = Extension::new(client.clone(), tx, ToolNames::logical());
@@ -296,7 +526,6 @@ fn extension_with_config(
             queue_id: "queue-secret".to_owned(),
             last_event_id: 0,
             bot_user_id: 99,
-            bot_full_name: Some("Tau Bot".to_owned()),
             poll_request_timeout: Duration::from_secs(100),
         });
         state.registration_generation = 1;
@@ -458,7 +687,6 @@ fn failed_report_submission_blocks_baseline_checkpoint() {
             queue_id: "queue".to_owned(),
             last_event_id: 0,
             bot_user_id: 99,
-            bot_full_name: Some("Tau Bot".to_owned()),
             poll_request_timeout: Duration::from_secs(1),
         });
         state.registration_generation = 1;
@@ -476,7 +704,6 @@ fn failed_report_submission_blocks_baseline_checkpoint() {
         1,
         1,
         99,
-        Some("Tau Bot"),
     );
     let mut state = ext.state.lock();
     let checkpoint = state.checkpoint.as_mut().expect("checkpoint");
@@ -742,7 +969,7 @@ fn agent_chosen_topic_configuration_fails_closed() {
         .expect("config schema")
     };
     let Err(error) = parse(serde_json::json!({
-        "alias":"channel", "stream_id":7, "topic":"deploy",
+        "name":"channel", "topic":"deploy",
         "proactive_send":true, "agent_chosen_topic":true
     }))
     .validate(&secrets) else {
@@ -753,7 +980,7 @@ fn agent_chosen_topic_configuration_fails_closed() {
         "zulip `agent_chosen_topic` routes must omit the configured `topic`"
     );
     let Err(error) = parse(serde_json::json!({
-        "alias":"channel", "stream_id":7, "receive":"mentions_only",
+        "name":"channel", "receive":"mentions_only",
         "agent_chosen_topic":true
     }))
     .validate(&secrets) else {
@@ -764,13 +991,17 @@ fn agent_chosen_topic_configuration_fails_closed() {
         "zulip `agent_chosen_topic` requires `proactive_send: true`"
     );
     let config = parse(serde_json::json!({
-        "alias":"channel", "stream_id":7,
+        "name":"channel",
         "proactive_send":true, "agent_chosen_topic":true
     }))
     .validate(&secrets)
     .expect("valid channel-wide authority");
-    assert!(config.routes[0].proactive.allows_agent_chosen_topic());
-    assert!(config.routes[0].topic.is_none());
+    assert!(
+        config.configured_routes[0]
+            .proactive
+            .allows_agent_chosen_topic()
+    );
+    assert!(config.configured_routes[0].topic.is_none());
 }
 
 /// A topicless agent-chosen route may receive every topic in its stream, while
@@ -779,7 +1010,7 @@ fn agent_chosen_topic_configuration_fails_closed() {
 #[test]
 fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
     let all_topics = validated_config(serde_json::json!([{
-        "alias":"channel", "stream_id":7, "receive":"mentions_only",
+        "name":"channel", "receive":"mentions_only",
         "proactive_send":true, "agent_chosen_topic":true
     }]))
     .expect("valid all-topic receive route");
@@ -798,7 +1029,6 @@ fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
         generation,
         registration,
         99,
-        Some("Tau Bot"),
     );
     assert!(matches!(
         event_from(rx.recv().expect("all-topic receive report")),
@@ -807,11 +1037,11 @@ fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
 
     let send_and_exact_receive = validated_config(serde_json::json!([
         {
-            "alias":"channel", "stream_id":7,
+            "name":"channel",
             "proactive_send":true, "agent_chosen_topic":true
         },
         {
-            "alias":"deploy", "stream_id":7, "topic":"deploy",
+            "name":"deploy", "topic":"deploy",
             "receive":"mentions_only"
         }
     ]));
@@ -819,20 +1049,17 @@ fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
 
     let Err(error) = validated_config(serde_json::json!([
         {
-            "alias":"channel", "stream_id":7, "receive":"mentions_only",
+            "name":"channel", "receive":"mentions_only",
             "proactive_send":true, "agent_chosen_topic":true
         },
         {
-            "alias":"deploy", "stream_id":7, "topic":"deploy",
+            "name":"channel", "topic":"deploy",
             "receive":"mentions_only"
         }
     ])) else {
         panic!("overlapping receive routes accepted")
     };
-    assert_eq!(
-        error,
-        "a receive-all-topics Zulip route cannot overlap another receive route"
-    );
+    assert_eq!(error, "zulip conversation names must be unique");
 }
 
 /// Proactive direct-message aliases carry exactly one independently configured
@@ -867,7 +1094,7 @@ fn proactive_direct_message_configuration_fails_closed() {
     };
     let valid = parse(
         serde_json::json!([{
-            "alias":"ops", "stream_id":7, "topic":"deploy", "proactive_send":true
+            "name":"ops", "topic":"deploy", "proactive_send":true
         }]),
         serde_json::json!([{
             "alias":"dpc", "recipient":1180954, "description":"Operator escalation"
@@ -909,7 +1136,7 @@ fn proactive_direct_message_configuration_fails_closed() {
 
     let Err(error) = parse(
         serde_json::json!([{
-            "alias":"ops", "stream_id":7, "topic":"deploy", "proactive_send":true
+            "name":"ops", "topic":"deploy", "proactive_send":true
         }]),
         serde_json::json!([{"alias":"ops", "recipient":1180954}]),
     )
@@ -924,8 +1151,7 @@ fn proactive_direct_message_configuration_fails_closed() {
     let routes = (0..64)
         .map(|index| {
             serde_json::json!({
-                "alias":format!("stream{index}"),
-                "stream_id":index,
+                "name":format!("stream{index}"),
                 "topic":"deploy",
                 "proactive_send":true
             })
@@ -1006,8 +1232,8 @@ fn identity_key_is_independent_of_api_credentials() {
     assert_ne!(original.id_key, identity_rotated.id_key);
 }
 
-/// Mention-only stream ingress admits an exact allowlisted sender, strips one
-/// leading transport mention, and emits no native authority.
+/// Mention-only stream ingress admits an exact allowlisted sender, preserves a
+/// leading address, and emits no native authority.
 #[test]
 fn stream_ingress_emits_bounded_report() {
     let (ext, rx, _) = extension();
@@ -1025,13 +1251,12 @@ fn stream_ingress_emits_bounded_report() {
         generation,
         registration,
         99,
-        Some("Tau Bot"),
     );
     let Event::MessageDeliveredReported(report) = event_from(rx.recv().expect("delivery report"))
     else {
         panic!("wrong report")
     };
-    assert_eq!(report.text, "restart service");
+    assert_eq!(report.text, "@**Tau Bot** restart service");
     assert_eq!(report.sender.display_name.as_deref(), Some("alice"));
     assert_eq!(
         report
@@ -1048,6 +1273,59 @@ fn stream_ingress_emits_bounded_report() {
     assert!(!wire.contains("topic:deploy"));
     assert!(!wire.contains("\"42\""));
     assert!(!wire.contains("\"500\""));
+}
+
+/// Admitted stream reports preserve leading and middle bot mentions plus
+/// non-mentioned content so canonical publication never loses addressed
+/// context.
+#[test]
+fn stream_ingress_preserves_verbatim_markdown_content() {
+    let config = validated_config(serde_json::json!([{
+        "name": "ops",
+        "topic": "deploy",
+        "receive": "all_messages"
+    }]))
+    .expect("valid all-messages route");
+    let (ext, rx, _) = extension_with_config(config);
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+
+    let cases = [
+        (
+            12,
+            501,
+            serde_json::json!(["mentioned"]),
+            "@**Tau Bot** restart service",
+        ),
+        (
+            13,
+            502,
+            serde_json::json!(["mentioned"]),
+            "restart @**Tau Bot** service",
+        ),
+        (14, 503, serde_json::json!([]), "ordinary service message"),
+    ];
+    for (event_id, native_id, flags, expected_text) in cases {
+        ext.process_event(
+            serde_json::json!({
+                "id": event_id, "type": "message", "flags": flags, "message": {
+                    "id": native_id, "type": "stream", "sender_id": 42, "stream_id": 7,
+                    "subject": "deploy", "content": expected_text
+                }
+            }),
+            generation,
+            registration,
+            99,
+        );
+        let Event::MessageDeliveredReported(report) =
+            event_from(rx.recv().expect("delivery report"))
+        else {
+            panic!("wrong report")
+        };
+        assert_eq!(report.text, expected_text);
+    }
 }
 
 /// Direct-message identity derives from sorted participant IDs and source
@@ -1069,7 +1347,6 @@ fn direct_message_reply_is_source_bound() {
         generation,
         registration,
         99,
-        Some("Tau Bot"),
     );
     let reference = message_fact_id(&cfg(), 501).as_str().to_owned();
     let result = ext.handle_send(tool(
@@ -1093,8 +1370,7 @@ fn direct_message_reply_is_source_bound() {
 fn proactive_direct_message_alias_is_fixed_and_coexists_with_other_routes() {
     let config = validated_config_with_direct_messages(
         serde_json::json!([{
-            "alias":"ops",
-            "stream_id":7,
+            "name":"ops",
             "topic":"deploy",
             "receive":"mentions_only",
             "proactive_send":true,
@@ -1162,7 +1438,6 @@ fn proactive_direct_message_alias_is_fixed_and_coexists_with_other_routes() {
         generation,
         registration,
         99,
-        Some("Tau Bot"),
     );
     let source_reply = ext.handle_send(tool(
         SEND_TOOL_NAME,
@@ -1329,7 +1604,10 @@ fn send_report_precedes_tool_result() {
 #[test]
 fn agent_chosen_topic_destination_sends_to_general_chat() {
     let mut config = cfg();
-    let route = config.routes.first_mut().expect("configured route");
+    let route = config
+        .configured_routes
+        .first_mut()
+        .expect("configured route");
     route.topic = None;
     route.proactive = ProactiveRoute::AgentChosenTopic;
     let (ext, _rx, client) = extension_with_config(config);
@@ -1479,7 +1757,6 @@ fn exact_and_reply_sends_reject_caller_selected_topics() {
         generation,
         registration,
         99,
-        Some("Tau Bot"),
     );
     let reply = ext.handle_send(tool(
         SEND_TOOL_NAME,
@@ -1501,7 +1778,10 @@ fn exact_and_reply_sends_reject_caller_selected_topics() {
 #[test]
 fn discovery_marks_agent_chosen_topic_authority() {
     let mut config = cfg();
-    let route = config.routes.first_mut().expect("configured route");
+    let route = config
+        .configured_routes
+        .first_mut()
+        .expect("configured route");
     route.topic = None;
     route.proactive = ProactiveRoute::AgentChosenTopic;
     let (ext, _rx, _client) = extension_with_config(config);
@@ -1534,9 +1814,9 @@ fn duplicate_and_self_messages_are_suppressed() {
     let registration = state.registration_generation;
     drop(state);
     let event = serde_json::json!({"id":13,"type":"message","message":{"id":502,"type":"private","sender_id":42,"content":"once","flags":[],"display_recipient":[{"id":42},{"id":99}]}});
-    ext.process_event(event.clone(), generation, registration, 99, Some("Tau Bot"));
-    ext.process_event(event, generation, registration, 99, Some("Tau Bot"));
-    ext.process_event(serde_json::json!({"id":14,"type":"message","message":{"id":503,"type":"private","sender_id":99,"content":"echo","flags":[]}}), generation, registration, 99, Some("Tau Bot"));
+    ext.process_event(event.clone(), generation, registration, 99);
+    ext.process_event(event, generation, registration, 99);
+    ext.process_event(serde_json::json!({"id":14,"type":"message","message":{"id":503,"type":"private","sender_id":99,"content":"echo","flags":[]}}), generation, registration, 99);
     assert!(matches!(
         event_from(rx.recv().expect("one report")),
         Event::MessageDeliveredReported(_)
@@ -1551,7 +1831,7 @@ fn stale_generation_drops_ingress() {
     let (ext, rx, _) = extension();
     let generation = ext.state.lock().config_generation;
     ext.state.lock().registration_generation = 2;
-    ext.process_event(serde_json::json!({"id":15,"type":"message","message":{"id":504,"type":"private","sender_id":42,"content":"stale","flags":[]}}), generation, 1, 99, Some("Tau Bot"));
+    ext.process_event(serde_json::json!({"id":15,"type":"message","message":{"id":504,"type":"private","sender_id":42,"content":"stale","flags":[]}}), generation, 1, 99);
     assert!(rx.try_recv().is_err());
 }
 
@@ -1670,16 +1950,15 @@ fn mutations_emit_immutable_reports_and_delete_revokes() {
     let generation = state.config_generation;
     let registration = state.registration_generation;
     drop(state);
-    ext.process_event(serde_json::json!({"id":20,"type":"message","message":{"id":600,"type":"private","sender_id":42,"content":"base","flags":[],"display_recipient":[{"id":42},{"id":99}]}}), generation, registration, 99, Some("Tau Bot"));
+    ext.process_event(serde_json::json!({"id":20,"type":"message","message":{"id":600,"type":"private","sender_id":42,"content":"base","flags":[],"display_recipient":[{"id":42},{"id":99}]}}), generation, registration, 99);
     let _ = rx.recv().expect("base report");
-    ext.process_event(serde_json::json!({"id":21,"type":"update_message","message_id":600,"user_id":42,"message":{"content":"edited"}}), generation, registration, 99, Some("Tau Bot"));
-    ext.process_event(serde_json::json!({"id":22,"type":"reaction","message_id":600,"user_id":42,"op":"add","emoji_name":"thumbs_up"}), generation, registration, 99, Some("Tau Bot"));
+    ext.process_event(serde_json::json!({"id":21,"type":"update_message","message_id":600,"user_id":42,"message":{"content":"edited"}}), generation, registration, 99);
+    ext.process_event(serde_json::json!({"id":22,"type":"reaction","message_id":600,"user_id":42,"op":"add","emoji_name":"thumbs_up"}), generation, registration, 99);
     ext.process_event(
         serde_json::json!({"id":23,"type":"delete_message","message_id":600,"user_id":42}),
         generation,
         registration,
         99,
-        Some("Tau Bot"),
     );
     assert!(matches!(
         event_from(rx.recv().expect("edit")),
@@ -1799,6 +2078,78 @@ fn http_history_uses_anchor_pagination_without_id_narrow() {
         .expect("history page");
     assert!(page.found_newest);
     assert_eq!(page.messages[0]["id"], 42);
+    server.join().expect("server");
+}
+
+/// Name-only channel configuration must resolve a private native ID and submit
+/// the same configured name for the all-message subscription before queue
+/// setup.
+#[test]
+fn http_resolves_and_subscribes_named_channel() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Zulip");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut resolve_socket, _) = listener.accept().expect("accept stream resolution");
+        let resolve_request = read_http_request(&mut resolve_socket);
+        let request_line = resolve_request.lines().next().expect("request line");
+        assert!(request_line.starts_with("GET /api/v1/get_stream_id?"));
+        let query = request_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|target| target.split_once('?'))
+            .map(|(_, query)| query)
+            .expect("query");
+        let query: BTreeMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(query.get("stream").map(String::as_str), Some("Engineering"));
+        let resolve_body = r#"{"result":"success","stream_id":7}"#;
+        write!(
+            resolve_socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{resolve_body}",
+            resolve_body.len()
+        )
+        .expect("respond with stream ID");
+
+        let (mut subscribe_socket, _) = listener.accept().expect("accept subscription");
+        let subscribe_request = read_http_request(&mut subscribe_socket);
+        assert!(subscribe_request.starts_with("POST /api/v1/users/me/subscriptions "));
+        let (_, form) = subscribe_request
+            .split_once("\r\n\r\n")
+            .expect("subscription form");
+        let form: BTreeMap<_, _> = url::form_urlencoded::parse(form.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(
+            form.get("subscriptions")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
+            Some(serde_json::json!([{"name":"Engineering"}]))
+        );
+        assert_eq!(
+            form.get("authorization_errors_fatal").map(String::as_str),
+            Some("true")
+        );
+        let subscribe_body = r#"{"result":"success"}"#;
+        write!(
+            subscribe_socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{subscribe_body}",
+            subscribe_body.len()
+        )
+        .expect("respond with subscription");
+    });
+    let mut config = cfg();
+    config.api_base = format!("http://{address}/api/v1");
+    let client = HttpZulipClient::default();
+
+    assert_eq!(
+        client
+            .resolve_stream_id(&config, "Engineering")
+            .expect("stream ID"),
+        7
+    );
+    client
+        .subscribe(&config, &["Engineering".to_owned()])
+        .expect("subscription");
     server.join().expect("server");
 }
 
@@ -1932,7 +2283,12 @@ fn http_register_uses_basic_auth_and_native_queue_api() {
             form.get("fetch_event_types")
                 .is_some_and(|value| value == "[\"realm\"]"),
             "registration must request the `realm` section containing the \
-             long-poll timeout"
+              long-poll timeout"
+        );
+        assert_eq!(
+            form.get("all_public_streams").map(String::as_str),
+            Some("false"),
+            "queue registration must not broaden stream visibility"
         );
         assert_eq!(
             form.get("event_types")
@@ -1977,7 +2333,6 @@ fn http_register_uses_basic_auth_and_native_queue_api() {
         .expect("register queue");
     assert_eq!(queue.queue_id, "opaque-q");
     assert_eq!(queue.bot_user_id, 99);
-    assert_eq!(queue.bot_full_name.as_deref(), Some("Bridge Bot"));
     let (identity_request, register_request) = server.join().expect("server");
     assert!(!identity_request.contains("queue-secret"));
     assert!(!register_request.contains("queue-secret"));

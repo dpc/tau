@@ -272,12 +272,12 @@ fn replay_message_fact() -> Event {
             sender_auth: None,
         },
         None,
-        "hello",
+        "@**Tau Bot** replay this",
     ))
 }
 
-/// Durable fallback facts publish live only after append and replay with exact
-/// payload/provenance; duplicate emits remain two independent records.
+/// Durable fallback facts publish a leading bot mention live only after append
+/// and replay it unchanged; duplicate emits remain two independent records.
 #[test]
 fn fallback_message_fact_live_and_restart_replay_are_exact() {
     let td = TempDir::new().expect("tempdir");
@@ -594,7 +594,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
             sender_auth: None,
         },
         None,
-        "hello",
+        "@**Tau Bot** preserve addressed context",
     ));
     let prompts_before = event_log_events(&h)
         .iter()
@@ -643,6 +643,22 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
                                 message.content.first(),
                                 Some(tau_proto::ContentPart::Text { text })
                                     if text.contains("<message event=\"created\"")
+                            )
+                ))
+        )
+    }));
+    assert!(projected_prompt.context.blocks.iter().any(|block| {
+        matches!(
+            block,
+            tau_proto::ContextBlock::UserInput(input)
+                if input.items.iter().any(|item| matches!(
+                    item,
+                    tau_proto::ContextItem::Message(message)
+                        if message.role == tau_proto::ContextRole::User
+                            && matches!(
+                                message.content.first(),
+                                Some(tau_proto::ContentPart::Text { text })
+                                    if text.contains("@**Tau Bot** preserve addressed context")
                             )
                 ))
         )

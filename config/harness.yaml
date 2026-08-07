@@ -162,7 +162,7 @@
 #       allowed_user_ids: [42]
 #       direct_messages: { receive: all_messages }
 #       conversations:
-#         - { alias: ops, stream_id: 7, topic: deploy, receive: mentions_only, proactive_send: true }
+#         - { name: Operations, topic: deploy, receive: mentions_only, proactive_send: true }
 #   std-xmpp:
 #     enable: true
 #     secrets:

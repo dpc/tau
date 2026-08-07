@@ -16,9 +16,6 @@ pub(crate) struct EventQueue {
     pub(crate) last_event_id: i64,
     /// Authenticated bot user ID.
     pub(crate) bot_user_id: u64,
-    /// Authenticated bot full name used only for exact Markdown mention
-    /// removal.
-    pub(crate) bot_full_name: Option<String>,
     /// Server-advertised long-poll interval plus bounded transport grace.
     pub(crate) poll_request_timeout: Duration,
 }
@@ -136,13 +133,22 @@ impl ApiError {
     pub(crate) fn unavailable() -> Self {
         Self::Unavailable { rejection: None }
     }
+
+    /// Return a generic local validation failure without remote response data.
+    pub(crate) fn invalid_request() -> Self {
+        Self::InvalidRequest { rejection: None }
+    }
 }
 
-/// The only startup requests whose rejection diagnostics name an operation.
+/// Startup requests whose rejection diagnostics name an operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RejectedOperation {
     /// The authenticated-bot identity request.
     UsersMe,
+    /// Resolve a configured channel name to its native ID.
+    StreamId,
+    /// Subscribe the bot to configured all-message channels.
+    Subscribe,
     /// The event-queue registration request.
     Register,
 }
@@ -152,6 +158,8 @@ impl RejectedOperation {
     fn label(self) -> &'static str {
         match self {
             Self::UsersMe => "users_me",
+            Self::StreamId => "get_stream_id",
+            Self::Subscribe => "subscribe",
             Self::Register => "register",
         }
     }
@@ -205,6 +213,10 @@ const MAX_ZULIP_ERROR_CODE_BYTES: usize = 64;
 
 /// Small Zulip HTTP API surface used by the bridge and fake-server tests.
 pub(crate) trait ZulipClient: Send + Sync + 'static {
+    /// Resolve one configured Zulip channel name to its private native ID.
+    fn resolve_stream_id(&self, cfg: &RuntimeConfig, name: &str) -> Result<u64, ApiError>;
+    /// Subscribe the bot to the named configured all-message channels.
+    fn subscribe(&self, cfg: &RuntimeConfig, names: &[String]) -> Result<(), ApiError>;
     /// Register a fresh live-only event queue.
     fn register_queue(&self, cfg: &RuntimeConfig) -> Result<EventQueue, ApiError>;
     /// Long-poll one queue from the supplied event ID.
@@ -354,7 +366,7 @@ impl HttpZulipClient {
         self.read_json(response, context)
     }
 
-    fn current_user(&self, cfg: &RuntimeConfig) -> Result<(u64, Option<String>), ApiError> {
+    fn current_user_id(&self, cfg: &RuntimeConfig) -> Result<u64, ApiError> {
         let response = self
             .agent
             .get(&format!("{}/users/me", cfg.api_base))
@@ -369,12 +381,7 @@ impl HttpZulipClient {
             .get("user_id")
             .and_then(serde_json::Value::as_u64)
             .ok_or(ApiError::MalformedResponse)?;
-        let full_name = value
-            .get("full_name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty() && value.len() <= 256)
-            .map(str::to_owned);
-        Ok((user_id, full_name))
+        Ok(user_id)
     }
 
     fn get_messages(
@@ -416,8 +423,52 @@ impl HttpZulipClient {
 }
 
 impl ZulipClient for HttpZulipClient {
+    fn resolve_stream_id(&self, cfg: &RuntimeConfig, name: &str) -> Result<u64, ApiError> {
+        let response = self
+            .agent
+            .get(&format!("{}/get_stream_id", cfg.api_base))
+            .header("Authorization", &Self::auth(cfg))
+            .query("stream", name)
+            .call()
+            .map_err(|_| ApiError::unavailable())?;
+        let value = self.read_json(
+            response,
+            ResponseContext::Startup(RejectedOperation::StreamId),
+        )?;
+        value
+            .get("stream_id")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|id| *id != 0)
+            .ok_or(ApiError::MalformedResponse)
+    }
+
+    fn subscribe(&self, cfg: &RuntimeConfig, names: &[String]) -> Result<(), ApiError> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        self.post_form(
+            cfg,
+            "users/me/subscriptions",
+            vec![
+                (
+                    "subscriptions".to_owned(),
+                    serde_json::to_string(
+                        &names
+                            .iter()
+                            .map(|name| serde_json::json!({"name": name}))
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|_| ApiError::invalid_request())?,
+                ),
+                ("authorization_errors_fatal".to_owned(), "true".to_owned()),
+            ],
+            ResponseContext::Startup(RejectedOperation::Subscribe),
+        )?;
+        Ok(())
+    }
+
     fn register_queue(&self, cfg: &RuntimeConfig) -> Result<EventQueue, ApiError> {
-        let (bot_user_id, bot_full_name) = self.current_user(cfg)?;
+        let bot_user_id = self.current_user_id(cfg)?;
         let value = self.post_form(
             cfg,
             "register",
@@ -460,7 +511,6 @@ impl ZulipClient for HttpZulipClient {
             queue_id,
             last_event_id,
             bot_user_id,
-            bot_full_name,
             poll_request_timeout: Duration::from_secs(longpoll_seconds + 10),
         })
     }

@@ -475,6 +475,44 @@ impl Extension {
         }
     }
 
+    /// Resolve configured channel names, establish required subscriptions, and
+    /// create a queue whose routes use only authenticated native IDs.
+    fn acquire_queue(&self, cfg: &RuntimeConfig) -> Result<(RuntimeConfig, EventQueue), ApiError> {
+        let mut resolved = cfg.clone();
+        resolved.routes = cfg
+            .configured_routes
+            .iter()
+            .map(|route| {
+                self.client
+                    .resolve_stream_id(cfg, &route.name)
+                    .map(|stream_id| route.resolve(stream_id))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if resolved.routes.iter().enumerate().any(|(index, route)| {
+            resolved.routes[index + 1..].iter().any(|other| {
+                route.stream_id == other.stream_id
+                    && route.receive.is_some()
+                    && other.receive.is_some()
+                    && (route.topic.is_none()
+                        || other.topic.is_none()
+                        || route.topic == other.topic)
+            })
+        }) {
+            return Err(ApiError::invalid_request());
+        }
+        let all_messages = resolved
+            .routes
+            .iter()
+            .filter(|route| route.receive == Some(ReceiveMode::AllMessages))
+            .map(|route| route.name.clone())
+            .collect::<Vec<_>>();
+        if !all_messages.is_empty() {
+            self.client.subscribe(&resolved, &all_messages)?;
+        }
+        let queue = self.client.register_queue(&resolved)?;
+        Ok((resolved, queue))
+    }
+
     fn handle_register(&self, invoke: ToolStarted, registration_epoch: Option<u64>) -> Event {
         if let Err(error) = validate_fields(&invoke.arguments, &["enabled"]) {
             return tool_error(invoke, error);
@@ -518,9 +556,9 @@ impl Extension {
                 state.queue.is_none(),
             )
         };
-        let queue = if needs_queue {
-            match self.client.register_queue(&cfg) {
-                Ok(queue) => Some(queue),
+        let prepared = if needs_queue {
+            match self.acquire_queue(&cfg) {
+                Ok(value) => Some(value),
                 Err(error) => return tool_error(invoke, error.diagnostic()),
             }
         } else {
@@ -555,7 +593,8 @@ impl Extension {
                 "zulip configuration changed during registration".to_owned(),
             );
         }
-        if let Some(queue) = queue {
+        if let Some((cfg, queue)) = prepared {
+            state.config = Some(cfg);
             state.queue = Some(queue);
         }
         if let Some(checkpoint) = checkpoint {
@@ -615,7 +654,7 @@ impl Extension {
             .filter(|route| route.proactive.is_enabled())
             .map(|route| {
                 serde_json::json!({
-                    "alias": route.alias,
+                    "alias": route.name,
                     "kind": if route.proactive.allows_agent_chosen_topic() {
                         "stream"
                     } else {
@@ -723,7 +762,7 @@ impl Extension {
                     }
                     direct_conversation(&cfg, route)
                 } else {
-                    let Some(route) = cfg.routes.iter().find(|route| route.alias == alias) else {
+                    let Some(route) = cfg.routes.iter().find(|route| route.name == alias) else {
                         return tool_error(
                             invoke,
                             "unknown or unauthorized Zulip destination alias".to_owned(),
@@ -906,7 +945,6 @@ impl Extension {
         generation: u64,
         registration_generation: u64,
         bot_user_id: u64,
-        bot_full_name: Option<&str>,
     ) {
         let event_id = match event.get("id").and_then(serde_json::Value::as_i64) {
             Some(value) => value,
@@ -920,13 +958,9 @@ impl Extension {
             return;
         }
         match kind {
-            "message" => self.process_message(
-                &event,
-                generation,
-                registration_generation,
-                bot_user_id,
-                bot_full_name,
-            ),
+            "message" => {
+                self.process_message(&event, generation, registration_generation, bot_user_id)
+            }
             "update_message" => self.process_mutation(
                 event_id,
                 &event,
@@ -958,7 +992,6 @@ impl Extension {
         generation: u64,
         registration_generation: u64,
         bot_user_id: u64,
-        bot_full_name: Option<&str>,
     ) {
         let message = event.get("message").unwrap_or(event);
         let Some(native_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
@@ -1007,7 +1040,6 @@ impl Extension {
             let sender_alias = cfg.sender_aliases.get(&sender_id).cloned();
             (agent_id, conversation, sender_alias)
         };
-        let normalized = normalize_mention(text, mentioned, bot_full_name);
         let mut state = self.state.lock();
         if state.config_generation != generation
             || state.registration_generation != registration_generation
@@ -1025,7 +1057,7 @@ impl Extension {
             fact_id.clone(),
             sender_party(cfg, sender_id, sender_alias),
             Some(conversation.fact()),
-            normalized,
+            text,
         ));
         if let Some(checkpoint) = state.checkpoint.as_mut() {
             checkpoint.submitted(native_id, fact_id.clone());
@@ -1054,43 +1086,24 @@ impl Extension {
         generation: u64,
         registration_generation: u64,
         bot_user_id: u64,
-        bot_full_name: Option<&str>,
     ) {
         let message = event.get("message").unwrap_or(&event);
         let Some(native_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
-            self.process_event(
-                event,
-                generation,
-                registration_generation,
-                bot_user_id,
-                bot_full_name,
-            );
+            self.process_event(event, generation, registration_generation, bot_user_id);
             return;
         };
         {
             let mut state = self.state.lock();
             let Some(checkpoint) = state.checkpoint.as_mut() else {
                 drop(state);
-                self.process_event(
-                    event,
-                    generation,
-                    registration_generation,
-                    bot_user_id,
-                    bot_full_name,
-                );
+                self.process_event(event, generation, registration_generation, bot_user_id);
                 return;
             };
             if !checkpoint.begin(native_id) {
                 return;
             }
         }
-        self.process_event(
-            event,
-            generation,
-            registration_generation,
-            bot_user_id,
-            bot_full_name,
-        );
+        self.process_event(event, generation, registration_generation, bot_user_id);
         let mut state = self.state.lock();
         let fact_id = state
             .owners
@@ -1308,7 +1321,6 @@ impl Extension {
                 generation,
                 registration_generation,
                 queue.bot_user_id,
-                queue.bot_full_name.as_deref(),
             );
             return Ok(());
         }
@@ -1341,7 +1353,6 @@ impl Extension {
                     generation,
                     registration_generation,
                     queue.bot_user_id,
-                    queue.bot_full_name.as_deref(),
                 );
             }
             exhausted = page.found_newest;
@@ -1362,7 +1373,6 @@ impl Extension {
                         generation,
                         registration_generation,
                         queue.bot_user_id,
-                        queue.bot_full_name.as_deref(),
                     );
                 }
             }
@@ -1525,7 +1535,6 @@ fn worker_loop(ext: Arc<Extension>) {
                             generation,
                             registration_generation,
                             queue.bot_user_id,
-                            queue.bot_full_name.as_deref(),
                         );
                     } else {
                         ext.process_event(
@@ -1533,7 +1542,6 @@ fn worker_loop(ext: Arc<Extension>) {
                             generation,
                             registration_generation,
                             queue.bot_user_id,
-                            queue.bot_full_name.as_deref(),
                         );
                     }
                 }
@@ -1608,7 +1616,7 @@ fn handle_queue_expiry(
     }
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     loop {
-        let queue = ext.client.register_queue(cfg);
+        let prepared = ext.acquire_queue(cfg);
         let mut state = ext.state.lock();
         if state.shutdown_requested
             || state.config_generation != generation
@@ -1616,8 +1624,9 @@ fn handle_queue_expiry(
         {
             return;
         }
-        match queue {
-            Ok(queue) => {
+        match prepared {
+            Ok((cfg, queue)) => {
+                state.config = Some(cfg);
                 state.queue = Some(queue);
                 if let Some(checkpoint) = state.checkpoint.as_mut() {
                     checkpoint.set_more_history(true);
@@ -1725,15 +1734,16 @@ fn admitted_conversation(
 fn stream_conversation(cfg: &RuntimeConfig, route: &StreamRoute, topic: &str) -> Conversation {
     let mut hasher = blake3::Hasher::new_keyed(&cfg.id_key);
     hasher.update(b"tau-ext-zulip/stream-conversation/v1\0");
-    hasher.update(&route.stream_id.to_le_bytes());
+    let stream_id = route.stream_id;
+    hasher.update(&stream_id.to_le_bytes());
     hasher.update(topic.as_bytes());
     Conversation {
         route: NativeRoute::Stream {
-            stream_id: route.stream_id,
+            stream_id,
             topic: topic.to_owned(),
         },
         stable_id: format!("zulip-stream:{}", hasher.finalize().to_hex()),
-        alias: Some(route.alias.clone()),
+        alias: Some(route.name.clone()),
     }
 }
 
@@ -1758,23 +1768,6 @@ fn validate_agent_topic(value: &str) -> Result<(), String> {
     valid.then_some(()).ok_or_else(|| {
         "zulip agent-chosen topics must be empty or visible and at most 256 bytes".to_owned()
     })
-}
-
-fn normalize_mention(text: &str, mentioned: bool, bot_full_name: Option<&str>) -> String {
-    if !mentioned {
-        return text.to_owned();
-    }
-    // With register(apply_markdown=false), Zulip preserves Markdown. Remove only
-    // one syntactically complete leading personal mention and retain all others.
-    let Some(bot_full_name) = bot_full_name else {
-        return text.to_owned();
-    };
-    let trimmed = text.trim_start();
-    let exact_mention = format!("@**{bot_full_name}**");
-    if let Some(rest) = trimmed.strip_prefix(&exact_mention) {
-        return rest.trim_start().to_owned();
-    }
-    text.to_owned()
 }
 
 fn message_fact_id(cfg: &RuntimeConfig, native_id: u64) -> MessageFactId {

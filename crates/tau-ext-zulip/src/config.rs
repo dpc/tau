@@ -47,14 +47,13 @@ pub(crate) struct SenderAliasConfig {
     pub(crate) alias: String,
 }
 
-/// Configured exact Zulip stream route.
+/// Configured Zulip stream route resolved to a private native ID at
+/// registration.
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConversationConfig {
-    /// Operator-chosen proactive route alias.
-    pub(crate) alias: String,
-    /// Stable Zulip stream ID.
-    pub(crate) stream_id: u64,
+    /// Exact Zulip channel name resolved before queue registration.
+    pub(crate) name: String,
     /// Optional exact topic; omission covers every topic in the stream.
     pub(crate) topic: Option<String>,
     /// Optional ingress mode for this route.
@@ -88,12 +87,41 @@ pub(crate) enum ReceiveMode {
     AllMessages,
 }
 
-/// Validated route retained as extension-private authority.
+/// Configured channel route before registration resolves its native ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConfiguredStreamRoute {
+    /// Exact configured Zulip channel name.
+    pub(crate) name: String,
+    /// Optional exact topic.
+    pub(crate) topic: Option<String>,
+    /// Optional receive authority.
+    pub(crate) receive: Option<ReceiveMode>,
+    /// Proactive destination authority derived from operator configuration.
+    pub(crate) proactive: ProactiveRoute,
+    /// Trusted bounded description.
+    pub(crate) description: Option<String>,
+}
+
+impl ConfiguredStreamRoute {
+    /// Bind this configured route to one resolved native channel ID.
+    pub(crate) fn resolve(&self, stream_id: u64) -> StreamRoute {
+        StreamRoute {
+            name: self.name.clone(),
+            stream_id,
+            topic: self.topic.clone(),
+            receive: self.receive,
+            proactive: self.proactive.clone(),
+            description: self.description.clone(),
+        }
+    }
+}
+
+/// Resolved route retained as extension-private native authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StreamRoute {
-    /// Operator alias.
-    pub(crate) alias: String,
-    /// Exact stream ID.
+    /// Exact configured Zulip channel name.
+    pub(crate) name: String,
+    /// Native stream ID resolved before installing a live queue.
     pub(crate) stream_id: u64,
     /// Optional exact topic.
     pub(crate) topic: Option<String>,
@@ -142,7 +170,9 @@ pub(crate) struct RuntimeConfig {
     pub(crate) allowed_user_ids: HashSet<u64>,
     /// Presentation aliases indexed by sender ID.
     pub(crate) sender_aliases: HashMap<u64, String>,
-    /// Configured stream routes.
+    /// Configured stream routes awaiting native ID resolution.
+    pub(crate) configured_routes: Vec<ConfiguredStreamRoute>,
+    /// Resolved stream routes installed with the current queue.
     pub(crate) routes: Vec<StreamRoute>,
     /// Configured proactive direct-message routes.
     pub(crate) direct_routes: Vec<DirectRoute>,
@@ -202,11 +232,10 @@ impl ExtConfig {
                 );
             }
         }
-        let mut route_aliases = HashSet::new();
-        let mut native_routes = HashSet::new();
-        let mut routes = Vec::new();
+        let mut destination_names = HashSet::new();
+        let mut configured_routes = Vec::new();
         for route in self.conversations {
-            validate_alias(&route.alias)?;
+            validate_stream_name(&route.name)?;
             validate_topic(route.topic.as_deref())?;
             validate_description(route.description.as_deref())?;
             if route.receive.is_none() && !route.proactive_send {
@@ -227,13 +256,8 @@ impl ExtConfig {
                      `agent_chosen_topic: true`"
                     .to_owned());
             }
-            if !route_aliases.insert(route.alias.clone())
-                || !native_routes.insert((route.stream_id, route.topic.clone()))
-            {
-                return Err(
-                    "zulip conversation aliases and exact stream/topic routes must be unique"
-                        .to_owned(),
-                );
+            if !destination_names.insert(route.name.clone()) {
+                return Err("zulip conversation names must be unique".to_owned());
             }
             let proactive = if route.agent_chosen_topic {
                 ProactiveRoute::AgentChosenTopic
@@ -247,9 +271,8 @@ impl ExtConfig {
             } else {
                 ProactiveRoute::Disabled
             };
-            routes.push(StreamRoute {
-                alias: route.alias,
-                stream_id: route.stream_id,
+            configured_routes.push(ConfiguredStreamRoute {
+                name: route.name,
                 topic: route.topic,
                 receive: route.receive,
                 proactive,
@@ -258,22 +281,7 @@ impl ExtConfig {
         }
         let mut direct_routes = Vec::new();
         for route in self.proactive_direct_messages {
-            direct_routes.push(route.validate(&mut route_aliases)?);
-        }
-        for (index, route) in routes.iter().enumerate() {
-            if route.receive.is_none() {
-                continue;
-            }
-            if routes[index + 1..].iter().any(|other| {
-                other.receive.is_some()
-                    && other.stream_id == route.stream_id
-                    && (route.topic.is_none() || other.topic.is_none())
-            }) {
-                return Err(
-                    "a receive-all-topics Zulip route cannot overlap another receive route"
-                        .to_owned(),
-                );
-            }
+            direct_routes.push(route.validate(&mut destination_names)?);
         }
         let receive_direct_messages = match self.direct_messages {
             None => false,
@@ -288,7 +296,8 @@ impl ExtConfig {
             api_base,
             allowed_user_ids: self.allowed_user_ids.into_iter().collect(),
             sender_aliases: aliases,
-            routes,
+            configured_routes,
+            routes: Vec::new(),
             direct_routes,
             receive_direct_messages,
             max_message_bytes,
@@ -297,6 +306,15 @@ impl ExtConfig {
             state_dir: None,
         })
     }
+}
+
+fn validate_stream_name(value: &str) -> Result<(), String> {
+    let valid = !value.trim().is_empty()
+        && value.len() <= 256
+        && !value.chars().any(tau_proto::requires_visible_escape);
+    valid
+        .then_some(())
+        .ok_or_else(|| "zulip channel names must be visible and at most 256 bytes".to_owned())
 }
 
 fn secret(

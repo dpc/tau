@@ -406,7 +406,9 @@ upgraded to verified identity.
 
 Native routes, allowlist evidence, reply authority, and transport policy remain
 extension-local. The published text is the original normalized body rather than
-a transport prefix. These mappings create no transport-specific wire fields.
+a transport prefix. Zulip preserves its inbound Markdown exactly, including a
+leading addressed bot mention. These mappings create no transport-specific wire
+fields.
 
 ## Security and visibility
 
