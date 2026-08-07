@@ -344,11 +344,14 @@ or provider assembly changes. See
 
 ## Local IPC and external ingress
 
-Configured extension processes are trusted local executables. “Less-trusted
-extension” means protocol authority is limited—the harness still validates phase,
-source ownership, routing identity, configuration, and collisions—not that the
-stdio stream is a hostile availability boundary or process sandbox. Operation
-quotas do not promise to bound protocol deserialization; see
+Configured extensions, including Providers, are trusted same-user executables
+under
+[GATE-configured-extension-trust-boundary](specs/GATE-configured-extension-trust-boundary.md).
+“Less-trusted extension” means protocol authority is limited—the harness still
+validates phase, source ownership, routing identity, configuration, and
+collisions—not that the stdio stream is a hostile availability boundary or
+process sandbox. Operation quotas do not promise to bound protocol
+deserialization; see
 [`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md#extension-data)
 and [`ARCH-tau-supervisor`](crates/tau-supervisor/specs/ARCH-tau-supervisor.md#child-environment).
 Every configured extension kind may request per-agent metadata mutations, while
