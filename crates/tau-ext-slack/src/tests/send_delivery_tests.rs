@@ -3,7 +3,7 @@
 use std::io as path_std_io;
 
 use super::*;
-use crate::send_delivery::{InternalSourceMention, PostCompositionError};
+use crate::send_delivery::{InternalSourceMention, PostCompositionError, SendLedgerDisposition};
 
 /// Multi-step scheduler exposing every logical wait to a deterministic test.
 struct StepScheduler {
@@ -162,8 +162,8 @@ fn proactive_send_submits_report_before_tool_result() {
     assert_eq!(client.sent_pairs().len(), 1);
 }
 
-/// Replaying a completed send returns its stable ordinary tool result without
-/// posting or submitting another sent report.
+/// Canonical sent correlation requires exact type, agent, publisher, and
+/// message ID before it installs authority and exposes stable replay.
 #[test]
 fn accepted_proactive_replay_returns_stable_result_without_reposting() {
     let (ext, rx, client) = extension();
@@ -176,15 +176,92 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         ),
     );
     assert!(ext.handle_send(invoke.clone()).is_none());
-    let _report = rx.recv().expect("sent report");
+    let HarnessInputMessage::Emit(report) = rx.recv().expect("sent report") else {
+        panic!("expected sent report");
+    };
+    let Event::MessageSentReported(report) = *report.event else {
+        panic!("expected sent report");
+    };
+    let message_id = report.message_id.clone();
     let HarnessInputMessage::Emit(first) = rx.recv().expect("first result") else {
         panic!("expected result emission");
     };
     let Event::ToolResultReported(first_result) = first.event.as_ref() else {
         panic!("expected result report");
     };
+    assert!(
+        ext.handle_send(invoke.clone()).is_none(),
+        "local report flush must not terminalize the ledger"
+    );
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::PendingCanonical(_))
+    ));
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .reactions
+            .targets
+            .contains_key(&message_id)
+    );
+    let Event::MessageSent(canonical) = Event::MessageSentReported(report)
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("canonical sent fact")
+    else {
+        panic!("expected canonical sent fact");
+    };
+    let mut wrong_publisher = canonical.clone();
+    wrong_publisher.publisher_extension_id =
+        tau_proto::MessagePublisherId::parse("other-slack").expect("publisher");
+    ext.apply_live_event(&Event::MessageSent(wrong_publisher));
+    assert!(
+        ext.handle_send(invoke.clone()).is_none(),
+        "another configured publisher must not complete the send"
+    );
+    let mut wrong_message = canonical.clone();
+    wrong_message.message_id = MessageFactId::new("slack-message:wrong");
+    ext.apply_live_event(&Event::MessageSent(wrong_message));
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    let mut wrong_agent = canonical.clone();
+    wrong_agent.agent_id = MessageAgentTarget::new("agent-b");
+    ext.apply_live_event(&Event::MessageSent(wrong_agent));
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .reactions
+            .targets
+            .contains_key(&message_id)
+    );
+    ext.apply_live_event(&Event::MessageSent(canonical));
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::Completed { .. })
+    ));
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .reactions
+            .targets
+            .contains_key(&message_id)
+    );
     let Some(replay) = ext.handle_send(invoke.clone()) else {
-        panic!("completed replay must return a result");
+        panic!("canonical acknowledgement must complete replay");
     };
     let Event::ToolResult(replay_result) = replay else {
         panic!("completed replay must return an internal result");
@@ -192,6 +269,114 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
     assert_eq!(first_result, &replay_result);
     assert!(rx.try_recv().is_err());
     assert_eq!(client.sent_pairs().len(), 1);
+}
+
+/// A canonical echo that races ahead of typed-result submission is retained and
+/// completes authority after the independent result write succeeds.
+#[test]
+fn canonical_echo_during_result_submission_is_reconciled() {
+    let (ext, rx, _client) = extension();
+    apply_test_config(&ext, proactive_cfg());
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks.sent_report_boundary.lock().expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let invoke = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message": "update", "destination": "team-ops"}),
+        ),
+    );
+    let ext = Arc::new(ext);
+    let sending = Arc::clone(&ext);
+    let worker = std::thread::spawn(move || sending.handle_send(invoke));
+    let HarnessInputMessage::Emit(report) = rx.recv().expect("sent report") else {
+        panic!("expected sent report");
+    };
+    let Event::MessageSentReported(report) = *report.event else {
+        panic!("expected sent report");
+    };
+    reached_rx.recv().expect("report boundary");
+    let canonical = Event::MessageSentReported(report)
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("canonical sent fact");
+    ext.apply_live_event(&canonical);
+    release_tx.send(()).expect("release result write");
+    assert!(worker.join().expect("send worker").is_none());
+    assert!(matches!(
+        rx.recv().expect("tool result"),
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
+    ));
+    assert!(ext.state.lock().expect("state").reactions.targets.len() == 1);
+}
+
+/// An early canonical echo cannot install authority when the later independent
+/// typed-result write fails and retires protocol output.
+#[test]
+fn canonical_echo_before_result_failure_installs_no_authority() {
+    let (ext, rx, _client) = extension();
+    apply_test_config(&ext, proactive_cfg());
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (failure_tx, failure_rx) = mpsc::channel();
+    let (finish_failure_tx, finish_failure_rx) = mpsc::channel();
+    *ext.test_hooks.sent_report_boundary.lock().expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    *ext.test_hooks.output_failure_boundary.lock().expect("hook") = Some(BlockingTestHook {
+        reached: failure_tx,
+        release: finish_failure_rx,
+    });
+    let invoke = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message": "update", "destination": "team-ops"}),
+        ),
+    );
+    let call_id = invoke.call_id.clone();
+    let ext = Arc::new(ext);
+    let sending = Arc::clone(&ext);
+    let worker = std::thread::spawn(move || sending.handle_send(invoke));
+    let HarnessInputMessage::Emit(report) = rx.recv().expect("sent report") else {
+        panic!("expected sent report");
+    };
+    let Event::MessageSentReported(report) = *report.event else {
+        panic!("expected sent report");
+    };
+    reached_rx.recv().expect("report boundary");
+    let canonical = Event::MessageSentReported(report)
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("canonical sent fact");
+    ext.apply_live_event(&canonical);
+    drop(rx);
+    release_tx.send(()).expect("release failed result write");
+    failure_rx.recv().expect("result failure boundary");
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(state.reactions.targets.is_empty());
+        assert!(matches!(
+            state
+                .send_ledger
+                .get(&call_id)
+                .map(|entry| &entry.disposition),
+            Some(SendLedgerDisposition::Submitting {
+                canonical_echoed: true,
+                ..
+            })
+        ));
+    }
+    finish_failure_tx.send(()).expect("release retirement");
+    assert!(worker.join().expect("send worker").is_none());
 }
 
 /// Production SendWake notification interrupts a long SystemSendScheduler wait

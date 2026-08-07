@@ -18,11 +18,15 @@ After remote success, the serialized writer flushes `message.sent_reported` and
 then transient `tool.result_reported`; the harness derives canonical facts
 downstream. This is not a remote/durable transaction or harness commit ACK.
 Confirmed writer failure latches output failure, retires Slack authority, wakes
-workers, and requests shutdown. Local success installs state only after both
-writes and current lifecycle validation.
+workers, and requests shutdown. After both writes, the ledger remains pending and
+installs no posted-message or reaction authority. Only the originating configured
+publisher's matching event type, target agent, and stable message ID on the
+canonical `message.sent` live downpath completes the ledger and installs that
+authority after current lifecycle validation.
 
-Same-call replay is stable and causes no I/O or second report; conflicting call-ID
-reuse fails. A new ID is new intent. The ledger is non-evicting with capacity
+Same-call replay coalesces while canonical confirmation is pending and returns
+the stable result after confirmation; it causes no I/O or second report.
+Conflicting call-ID reuse fails. A new ID is new intent. The ledger is non-evicting with capacity
 1,024 and at most 64 active sends; both clear with session/process lifetime.
 Ambiguous outcomes may yield zero, one, or two remote copies. Definitive auth,
 permission, target, and request rejection are not retried. Errors and

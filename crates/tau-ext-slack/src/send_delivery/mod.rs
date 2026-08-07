@@ -96,8 +96,19 @@ pub(super) struct PreparedSend {
     pub(super) authority: FrozenSendAuthority,
 }
 
+/// Slack-success state retained until the matching canonical sent fact returns.
+pub(super) struct PendingCanonicalSend {
+    /// Stable ordinary tool result already submitted independently of the fact.
+    pub(super) result: Box<ToolResult>,
+    /// Exact cumulative remote-copy range.
+    pub(super) copies: RemoteCopyPossibility,
+    /// Publisher-scoped report identifier used for canonical correlation.
+    pub(super) message_id: MessageFactId,
+    /// Slack-native post coordinates kept private for later mutation routing.
+    pub(super) posted: PostedMessage,
+}
+
 /// Bounded non-evicting state for one accepted send intent.
-#[derive(Clone)]
 pub(super) enum SendLedgerDisposition {
     /// Reserved before its bounded worker starts.
     Reserved,
@@ -116,7 +127,16 @@ pub(super) enum SendLedgerDisposition {
         reason: SendFailureCategory,
     },
     /// Slack accepted and the sent report/result pair is being flushed.
-    Submitting,
+    Submitting {
+        /// Publisher-scoped report identifier used for canonical correlation.
+        message_id: MessageFactId,
+        /// Whether the canonical echo raced ahead of typed-result submission.
+        canonical_echoed: bool,
+    },
+    /// Slack accepted and the typed result was submitted, but canonical message
+    /// authority still awaits the originating report's post-commit downpath
+    /// echo.
+    PendingCanonical(PendingCanonicalSend),
     /// Terminal failure with no unresolved provider attempt.
     DefinitiveFailure {
         /// Safe failure category.
@@ -229,7 +249,6 @@ impl RemoteCopyPossibility {
 }
 
 /// Fingerprint, frozen authority, and disposition for one accepted tool call.
-#[derive(Clone)]
 pub(super) struct SendLedgerEntry {
     /// Agent and arguments are also present in `prepared.invoke`; keeping the
     /// prepared intent whole prevents route/body resampling during replay.
@@ -306,6 +325,98 @@ impl State {
                     })
             }
         }
+    }
+
+    /// Reconcile one canonical sent fact with an in-flight or pending Slack
+    /// report, preserving an echo that races typed-result submission.
+    pub(super) fn acknowledge_canonical_send(&mut self, fact: &MessageSent) {
+        if self
+            .instance_name
+            .as_ref()
+            .is_none_or(|publisher| publisher.as_str() != fact.publisher_extension_id.as_str())
+        {
+            return;
+        }
+        let call_id = self.send_ledger.iter().find_map(|(call_id, entry)| {
+            let message_id = match &entry.disposition {
+                SendLedgerDisposition::Submitting { message_id, .. } => message_id,
+                SendLedgerDisposition::PendingCanonical(pending) => &pending.message_id,
+                _ => return None,
+            };
+            (message_id == &fact.message_id
+                && entry.prepared.invoke.agent_id.as_str() == fact.agent_id.as_str())
+            .then(|| call_id.clone())
+        });
+        let Some(call_id) = call_id else {
+            return;
+        };
+        let pending = match self
+            .send_ledger
+            .get_mut(&call_id)
+            .map(|entry| &mut entry.disposition)
+        {
+            Some(SendLedgerDisposition::Submitting {
+                canonical_echoed, ..
+            }) => {
+                *canonical_echoed = true;
+                false
+            }
+            Some(SendLedgerDisposition::PendingCanonical(_)) => true,
+            _ => false,
+        };
+        if pending {
+            self.complete_pending_canonical_send(&call_id);
+        }
+    }
+
+    /// Install local mutation authority by moving one confirmed pending payload
+    /// into its stable completed ledger state.
+    fn complete_pending_canonical_send(&mut self, call_id: &tau_proto::ToolCallId) {
+        let authority_current = self
+            .send_ledger
+            .get(call_id)
+            .is_some_and(|entry| self.send_authority_is_current(&entry.prepared));
+        if !authority_current {
+            return;
+        }
+        let Some(mut entry) = self.send_ledger.remove(call_id) else {
+            return;
+        };
+        let SendLedgerDisposition::PendingCanonical(pending) =
+            std::mem::replace(&mut entry.disposition, SendLedgerDisposition::Reserved)
+        else {
+            self.send_ledger.insert(call_id.clone(), entry);
+            return;
+        };
+        let PendingCanonicalSend {
+            result,
+            copies,
+            message_id,
+            posted,
+        } = pending;
+        let prepared = &entry.prepared;
+        let _ = self.reactions.insert_target(
+            message_id.clone(),
+            ReactionTarget {
+                agent_id: prepared.invoke.agent_id.clone(),
+                conversation: prepared.route.clone(),
+                message_ts: posted.ts.clone(),
+                installation_team_id: prepared.authority.installation_team_id.clone(),
+                authority: prepared.reaction_authority.clone(),
+            },
+        );
+        self.posted_messages.insert(
+            PostedMessageKey::new(&prepared.route.channel_id, &posted.ts),
+            PostedMessageOwner {
+                agent_id: prepared.invoke.agent_id.clone(),
+                message_id,
+                thread_ts: prepared.route.thread_ts.clone(),
+                conversation: prepared.route.clone(),
+                installation_team_id: prepared.authority.installation_team_id.clone(),
+            },
+        );
+        entry.disposition = SendLedgerDisposition::Completed { result, copies };
+        self.send_ledger.insert(call_id.clone(), entry);
     }
 }
 
@@ -653,7 +764,8 @@ impl Extension {
                 );
                 SendReplay::Coalesced
             }
-            SendLedgerDisposition::Submitting => SendReplay::Coalesced,
+            SendLedgerDisposition::Submitting { .. } => SendReplay::Coalesced,
+            SendLedgerDisposition::PendingCanonical(_) => SendReplay::Coalesced,
             SendLedgerDisposition::Completed { result, copies } => {
                 tracing::trace!(
                     target: LOG_TARGET,
@@ -1152,7 +1264,8 @@ impl SendDeliveryWorker {
             }
             if matches!(
                 entry.disposition,
-                SendLedgerDisposition::Submitting
+                SendLedgerDisposition::Submitting { .. }
+                    | SendLedgerDisposition::PendingCanonical(_)
                     | SendLedgerDisposition::DefinitiveFailure {
                         category: _,
                         copies: _
@@ -1205,7 +1318,8 @@ impl SendDeliveryWorker {
             }
             if matches!(
                 entry.disposition,
-                SendLedgerDisposition::Submitting
+                SendLedgerDisposition::Submitting { .. }
+                    | SendLedgerDisposition::PendingCanonical(_)
                     | SendLedgerDisposition::DefinitiveFailure {
                         category: _,
                         copies: _
@@ -1312,7 +1426,10 @@ impl SendDeliveryWorker {
             if entry.prepared.authority.token != prepared.authority.token {
                 return;
             }
-            entry.disposition = SendLedgerDisposition::Submitting;
+            entry.disposition = SendLedgerDisposition::Submitting {
+                message_id: message_id.clone(),
+                canonical_echoed: false,
+            };
             Event::MessageSentReported(MessageSent::new(
                 tau_proto::RawMessagePublisherId::new(instance_name),
                 MessageAgentTarget::new(prepared.invoke.agent_id.to_string()),
@@ -1325,6 +1442,10 @@ impl SendDeliveryWorker {
         let report_sent = self
             .output
             .send_confirmed(HarnessInputMessage::emit_with_persist(report, false));
+        #[cfg(test)]
+        if report_sent {
+            run_blocking_test_hook(&self.test_hooks.sent_report_boundary);
+        }
         let result_sent = report_sent && self.output.report_tool_result_confirmed(result.clone());
         if !result_sent {
             self.output_failed.store(true, Ordering::Release);
@@ -1333,34 +1454,25 @@ impl SendDeliveryWorker {
         }
         if result_sent {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state.send_authority_is_current(prepared) {
-                let _ = state.reactions.insert_target(
-                    message_id.clone(),
-                    ReactionTarget {
-                        agent_id: prepared.invoke.agent_id.clone(),
-                        conversation: prepared.route.clone(),
-                        message_ts: posted.ts.clone(),
-                        installation_team_id: prepared.authority.installation_team_id.clone(),
-                        authority: prepared.reaction_authority.clone(),
-                    },
+            if state.send_authority_is_current(prepared)
+                && let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id)
+                && entry.prepared.authority.token == prepared.authority.token
+            {
+                let canonical_echoed = matches!(
+                    entry.disposition,
+                    SendLedgerDisposition::Submitting {
+                        canonical_echoed: true,
+                        ..
+                    }
                 );
-                state.posted_messages.insert(
-                    PostedMessageKey::new(&prepared.route.channel_id, &posted.ts),
-                    PostedMessageOwner {
-                        agent_id: prepared.invoke.agent_id.clone(),
-                        message_id,
-                        thread_ts: prepared.route.thread_ts.clone(),
-                        conversation: prepared.route.clone(),
-                        installation_team_id: prepared.authority.installation_team_id.clone(),
-                    },
-                );
-                if let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id)
-                    && entry.prepared.authority.token == prepared.authority.token
-                {
-                    entry.disposition = SendLedgerDisposition::Completed {
-                        result: Box::new(result),
-                        copies,
-                    };
+                entry.disposition = SendLedgerDisposition::PendingCanonical(PendingCanonicalSend {
+                    result: Box::new(result),
+                    copies,
+                    message_id,
+                    posted,
+                });
+                if canonical_echoed {
+                    state.complete_pending_canonical_send(&prepared.invoke.call_id);
                 }
             }
         }

@@ -29,11 +29,14 @@ cache drops recent Slack repeats; it has no restart or cross-agent guarantee.
    report submission; disconnect/EOF retires authority before workers are woken.
   A successful remote post writes transient `message.sent_reported` and then
   transient `tool.result_reported` observations through one serialized
-  write-and-flush gate; the harness later derives canonical facts. Any confirmed
+  write-and-flush gate; the harness later derives canonical facts. Only the
+  configured publisher's matching canonical `message.sent` downpath echo installs
+  posted-message/reaction authority and completes the pending ledger. Any confirmed
   writer failure latches output failure, retires the entire Slack session and all
   receive/send/reaction authority, wakes workers, and requests shutdown. Replay
-  coalesces per call id and returns the retained stable result without reposting.
-  Awaiting-submission, completed, definitive, cumulative
+  coalesces per call id while canonical confirmation is pending and returns the
+  retained stable result after confirmation without reposting. Awaiting-submission,
+  pending-canonical, completed, definitive, cumulative
   ambiguity/copy range, and cancellation states are retained. Full capacity
   rejects before freeze/I/O. One
   initial-plus-one byte-identical retry is deliberately at-least-once: an

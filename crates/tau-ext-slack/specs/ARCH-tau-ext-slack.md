@@ -115,13 +115,19 @@ claim.
 
 After Slack reports success, the extension writes `message.sent_reported` and then
 `tool.result_reported` through one serialized local write-and-flush gate. This
-preserves frame order but does not acknowledge a harness commit. The result's
-`message_ref` becomes local reaction authority keyed to the sent report's ID. Its
+preserves frame order but does not acknowledge a harness commit. The typed result
+remains the explicit tool result and Slack's HTTP response remains remote-effect
+authority. The sent report stays pending until the configured publisher observes
+the same event type, target agent, configured publisher, and stable message ID in
+its canonical `message.sent` fact on the post-commit live downpath. Only that echo
+completes the ledger entry and makes the result's
+`message_ref` local reaction authority. A lost echo retains pending state and may
+cause replay after lifecycle loss; it cannot claim canonical publication. Its
 documented `slack-message:<opaque-digest>` representation exposes no native
 coordinates and is accepted only when it resolves to an exact retained target.
-Same-call replay returns the retained stable result without posting again or
-submitting another sent report. Conflicting call-ID reuse fails, while a new call
-ID is new intent.
+Same-call replay coalesces while canonical confirmation is pending, then returns
+the retained stable result without posting again or submitting another sent
+report. Conflicting call-ID reuse fails, while a new call ID is new intent.
 
 Agent-authored text is unchanged by default. The presentation-only
 `prefix_agent_id` setting may add the legacy `[agent-id] ` prefix. Raw `<@`,

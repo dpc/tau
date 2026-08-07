@@ -1502,6 +1502,8 @@ struct BlockingTestHook {
 #[cfg(test)]
 #[derive(Default)]
 struct ExtensionTestHooks {
+    /// Runs after the sent report write and before typed-result submission.
+    sent_report_boundary: Mutex<Option<BlockingTestHook>>,
     /// Runs after the failure latch is set but before submission-gate release.
     output_failure_boundary: Mutex<Option<BlockingTestHook>>,
     /// Runs immediately before deletion acquires the submission gate.
@@ -4852,6 +4854,10 @@ impl TauExtension for SlackExtension {
                 handle_tool_invocation,
             )
             .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_SENT),
+                handle_live_event,
+            )
+            .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
                 handle_live_event,
             )
@@ -4942,64 +4948,71 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, SlackRuntime>) -> Clie
 }
 
 fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> ClientResult<()> {
-    match cx.event() {
-        Event::AgentDisplayNameSet(name) => {
-            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state
-                .agent_labels
-                .insert(name.agent_id.clone(), name.display_name.clone());
-        }
-        Event::AgentStarted(started) => {
-            if let Some(display_name) = started.display_name.clone() {
-                let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+    cx.state.ext.apply_live_event(cx.event());
+    Ok(())
+}
+
+impl Extension {
+    /// Apply one event delivered through the registered production live-event
+    /// path.
+    fn apply_live_event(&self, event: &Event) {
+        match event {
+            Event::MessageSent(fact) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .acknowledge_canonical_send(fact);
+            }
+            Event::AgentDisplayNameSet(name) => {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 state
                     .agent_labels
-                    .insert(started.agent_id.clone(), display_name);
+                    .insert(name.agent_id.clone(), name.display_name.clone());
             }
-        }
-        Event::SessionStarted(_) => {
-            {
-                let mut state = cx
-                    .state
-                    .ext
-                    .state
+            Event::AgentStarted(started) => {
+                if let Some(display_name) = started.display_name.clone() {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state
+                        .agent_labels
+                        .insert(started.agent_id.clone(), display_name);
+                }
+            }
+            Event::SessionStarted(_) => {
+                {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+                    state.session_generation = state.session_generation.wrapping_add(1);
+                    state.session_active = true;
+                }
+                self.send_wake.notify_lifecycle_change();
+            }
+            Event::SessionAgentUnloaded(unloaded) => {
+                self.unload_agent(&unloaded.agent_id);
+            }
+            Event::SessionShutdown(_) => {
+                let _submission = self
+                    .output_submission_gate
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+                state.agent_generation = state.agent_generation.wrapping_add(1);
                 state.session_generation = state.session_generation.wrapping_add(1);
-                state.session_active = true;
+                state.session_active = false;
+                state.registered_agents.clear();
+                state.send_agent_generations.clear();
+                state.agent_labels.clear();
+                state.selected_agent_by_route.clear();
+                state.clear_reply_routes();
+                state.clear_incoming_messages();
+                state.clear_send_ledger();
+                state.posted_messages.clear();
+                state.reactions.clear();
+                self.send_wake.notify_lifecycle_change();
             }
-            cx.state.ext.send_wake.notify_lifecycle_change();
+            _ => {}
         }
-        Event::SessionAgentUnloaded(unloaded) => {
-            cx.state.ext.unload_agent(&unloaded.agent_id);
-        }
-        Event::SessionShutdown(_) => {
-            let _submission = cx
-                .state
-                .ext
-                .output_submission_gate
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
-            state.agent_generation = state.agent_generation.wrapping_add(1);
-            state.session_generation = state.session_generation.wrapping_add(1);
-            state.session_active = false;
-            state.registered_agents.clear();
-            state.send_agent_generations.clear();
-            state.agent_labels.clear();
-            state.selected_agent_by_route.clear();
-            state.clear_reply_routes();
-            state.clear_incoming_messages();
-            state.clear_send_ledger();
-            state.posted_messages.clear();
-            state.reactions.clear();
-            cx.state.ext.send_wake.notify_lifecycle_change();
-        }
-        _ => {}
     }
-    Ok(())
 }
 
 fn immutable_config_error() -> String {

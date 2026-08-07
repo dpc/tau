@@ -120,15 +120,18 @@ A live per-channel FIFO holds each logical call through provider I/O and its
 possible retry; unrelated channels remain independent. After remote success,
 Slack writes transient `message.sent_reported` and then transient
 `tool.result_reported` observations through one serialized write-and-flush gate;
-the harness later derives canonical facts. Any confirmed writer failure latches
+the harness later derives canonical facts. The typed result remains independent;
+posted-message and reaction authority activates only after the configured
+publisher receives the matching canonical `message.sent` downpath echo. Any
+confirmed writer failure latches
 output failure, retires the entire Slack session and all receive/send/reaction
-authority, wakes workers, and requests shutdown. Same-`ToolCallId` replay within
-the retained session returns its
-stable completed result/error without reposting or submitting a duplicate report;
+authority, wakes workers, and requests shutdown. Same-`ToolCallId` replay
+coalesces while canonical confirmation is pending, then returns its stable
+completed result/error without reposting or submitting a duplicate report;
 a new call id is new intent.
 Writer flush does not acknowledge the downstream harness-authored canonical
-fact; interception, append failure, or a crash can leave a Slack effect without
-that fact.
+fact; interception, append failure, a lost echo, or a crash can leave a Slack
+effect without local message authority or a known canonical fact.
 There is no durable outbox, `client_msg_id`, restart guarantee, or exactly-once
 claim. Apart from the optional prefix, Tau does not split the supplied message.
 Agent text containing raw Slack `<@`, `<!`, or `<#` controls is rejected; the

@@ -123,9 +123,12 @@ zero, one, or two. Successful retry results report
 `delivery_copies: one_or_two_possible`. After remote success Slack writes
 transient `message.sent_reported` and then transient `tool.result_reported`
 observations through one serialized local write-and-flush gate; the harness later
-derives canonical facts. Same-id/same-argument replay returns only the stable result
-without reposting or republishing; conflicting reuse errors and a new call id is
-new intent. Unregister, unload, route/config/session changes, and shutdown cancel
+derives canonical facts. The configured publisher's matching canonical
+`message.sent` live echo completes the pending ledger and installs local
+message/reaction authority; the typed result remains separate.
+Same-id/same-argument replay coalesces before that echo, then returns only the
+stable result without reposting or republishing; conflicting reuse errors and a
+new call id is new intent. Unregister, unload, route/config/session changes, and shutdown cancel
 retry and stale publication authority. The ledger clears on
 session/process retirement, so there is no durable outbox, `client_msg_id`,
 restart guarantee, or exactly-once claim. Provider diagnostics are closed

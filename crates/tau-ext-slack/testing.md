@@ -16,11 +16,15 @@ responsive and stale peers, off-phase Pong deadlines, non-Pong traffic, and
 shutdown/deadline interruption of blocked socket writes.
 Delivery coverage fixes the absolute retry horizon, active-worker/ledger bounds,
 report-before-result ordering, `persist=false` metadata, cancellation, writer failure, and stable replay
-without reposting or rewriting. Native IDs are rejected as route arguments, not
-merely hidden.
+without reposting or rewriting. It also covers exact canonical sent-fact
+correlation, echoes racing typed-result submission, pending replay, and
+post-confirmation authority installation. Native IDs are rejected as route
+arguments, not merely hidden.
 
-These tests own bridge-local admission and serialized report submission. Harness
-tests own interception, canonical persistence, replay, projection, and wake.
+These tests own bridge-local admission, serialized report submission, canonical
+echo correlation, pending-ledger transitions, and local authority installation.
+Harness tests own interception, canonical persistence, replay, projection,
+broadcast, and sink-delivery mechanics.
 
 Reaction coverage includes separate authorization, strict arguments, ownership
 and idempotency, ambiguous effects, deletion, late completion, target/owner/

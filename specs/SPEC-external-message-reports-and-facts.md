@@ -228,16 +228,25 @@ synchronous acceptance protocol. Every committed report may produce one
 separate canonical fact. Journal sequence is canonical commit order only;
 there is no native ordering, revision, or deduplication contract.
 
-For the originating Zulip bridge connection, ordinary publication does not
-exclude the source. Its subscription to canonical `message.delivered` may
-correlate the bridge's own fact by stable message ID. Canonical subscription
-delivery occurs only after the selected durable append completes, so Zulip
-catch-up uses this asynchronous downpath self-observation as its post-commit
-boundary. A missing observation supplies no negative acknowledgement and causes
-Zulip to retry conservatively.
+For an originating bridge connection, ordinary publication does not exclude the
+source. Exact canonical event type and target agent, the configured publisher
+identity, and a stable bridge-generated occurrence or report ID preserved in the
+canonical payload identify the bridge's own fact; `source_id` is not downpath
+identity. Canonical subscription
+delivery occurs only after the selected semantic append completes, so a bridge
+may use this asynchronous downpath self-observation as its post-commit boundary.
+Acknowledgements advance only a contiguous confirmed checkpoint prefix. A
+missing observation supplies no negative acknowledgement and causes
+conservative replay or retained pending state rather than skipped input.
 
-The user approved exactly this Zulip created-message self-observation semantics
-for catch-up in clank ticket `1k2c`, satisfying
+This observation acknowledges semantic append/publication and delivery to the
+originating extension sink. It does not acknowledge stable-media synchronization,
+delivery to every subscriber, model completion, or a remote transport effect.
+Explicit request/result protocols and best-effort telemetry remain separate.
+
+The user approved these semantics for Zulip created-message catch-up in clank
+ticket `1k2c` and the audited missing first-party bridge paths in ticket `hv2u`,
+satisfying
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 
 For a selected agent journal, raw durable append records an owned fact with the
