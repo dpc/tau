@@ -32,7 +32,8 @@ use gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayMessageDelivery, GatewaySocketResponse,
 };
 use live_checkpoint::{
-    ExistingUpdate, LiveCheckpoints, RoutedUpdate, TelegramUpdateId, TelegramUpdateOffset,
+    ExistingUpdate, LiveCheckpoints, RoutedUpdate, TelegramReportId, TelegramUpdateId,
+    TelegramUpdateOffset,
 };
 use pending_retry_backoff::PendingRetryBackoff;
 use stream_owner::{
@@ -376,6 +377,21 @@ struct State {
     next_update_offset: Option<TelegramUpdateOffset>,
     /// Ordered mixed checkpoints controlling local Telegram cursor advancement.
     live_checkpoints: LiveCheckpoints,
+    /// Gateway reports awaiting exact canonical echoes in this live sidecar.
+    gateway_pending_deliveries: HashMap<TelegramReportId, GatewayPendingDelivery>,
+}
+
+/// Exact sidecar correlation retained between gateway report and canonical
+/// fact.
+struct GatewayPendingDelivery {
+    /// Gateway connection that supplied the report.
+    gateway: Arc<GatewayClient>,
+    /// Exact target agent expected on the canonical fact.
+    agent_id: AgentId,
+    /// Exact message identity expected on the canonical fact.
+    message_id: MessageFactId,
+    /// Exact configured publisher claim installed on the report.
+    publisher_name: tau_proto::ExtensionName,
 }
 
 /// Submit reports for all gateway delivery records targeting the current
@@ -383,6 +399,7 @@ struct State {
 fn emit_gateway_deliveries(
     state: &SharedState,
     output: &Output,
+    gateway: Arc<GatewayClient>,
     deliveries: Vec<GatewayMessageDelivery>,
 ) {
     for delivery in deliveries {
@@ -413,10 +430,19 @@ fn emit_gateway_deliveries(
             );
             continue;
         };
-        output.emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
+        let Some(report_id) = TelegramReportId::from_gateway(delivery.request_id.clone()) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                request_id = delivery.request_id,
+                "telegram gateway delivery had invalid report id"
+            );
+            continue;
+        };
+        let message_id = telegram_message_ref(&delivery.conversation_id, &delivery.message_id);
+        let mut report = MessageDelivered::new(
             RawMessagePublisherId::new(publisher_name.as_str()),
             MessageAgentTarget::new(agent_id.as_ref()),
-            telegram_message_ref(&delivery.conversation_id, &delivery.message_id),
+            message_id.clone(),
             MessageParty {
                 stable_id: telegram_sender_ref(&delivery.sender_id),
                 display_name: bounded_display_name(&delivery.source),
@@ -428,7 +454,18 @@ fn emit_gateway_deliveries(
                 alias: None,
             }),
             delivery.text,
-        )));
+        );
+        report.extension_data = report_id.extension_data();
+        state.lock().gateway_pending_deliveries.insert(
+            report_id,
+            GatewayPendingDelivery {
+                gateway: Arc::clone(&gateway),
+                agent_id,
+                message_id,
+                publisher_name,
+            },
+        );
+        output.emit_message_report(Event::MessageDeliveredReported(report));
     }
 }
 
@@ -597,6 +634,7 @@ impl State {
         self.poller_drained_initial_backlog = false;
         self.next_update_offset = None;
         self.live_checkpoints.clear();
+        self.gateway_pending_deliveries.clear();
     }
 }
 
@@ -750,6 +788,27 @@ impl Extension {
             .live_checkpoints
             .acknowledge_canonical(publisher_matches, fact);
         if !acknowledged {
+            let Some(report_id) = TelegramReportId::from_extension_data(&fact.extension_data)
+            else {
+                return;
+            };
+            let Some(pending) = state.gateway_pending_deliveries.get(&report_id) else {
+                return;
+            };
+            if pending.publisher_name.as_str() != fact.publisher_extension_id.as_str()
+                || pending.agent_id.as_ref() != fact.agent_id.as_str()
+                || pending.message_id != fact.message_id
+            {
+                return;
+            }
+            let gateway = Arc::clone(&pending.gateway);
+            drop(state);
+            if gateway.acknowledge_delivery(report_id.as_str()).is_ok() {
+                self.state
+                    .lock()
+                    .gateway_pending_deliveries
+                    .remove(&report_id);
+            }
             return;
         }
         let next_update_offset = state.next_update_offset;
@@ -869,7 +928,12 @@ impl Extension {
                     break;
                 }
                 match gateway.heartbeat() {
-                    Ok(response) => emit_gateway_deliveries(&state, &output, response.deliveries),
+                    Ok(response) => emit_gateway_deliveries(
+                        &state,
+                        &output,
+                        Arc::clone(&gateway),
+                        response.deliveries,
+                    ),
                     Err(message) => {
                         if fail_gateway_client_if_current(&gateway_cell, &state, &gateway) {
                             output.request_notice(message, NoticeLevel::Warning);
@@ -885,7 +949,10 @@ impl Extension {
         if response.reannounce_required {
             self.reannounce_gateway_registrations();
         }
-        emit_gateway_deliveries(&self.state, &self.output, response.deliveries);
+        let Some(gateway) = self.gateway_client() else {
+            return;
+        };
+        emit_gateway_deliveries(&self.state, &self.output, gateway, response.deliveries);
     }
 
     fn reannounce_gateway_registrations(&self) {

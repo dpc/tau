@@ -126,10 +126,10 @@ Gateway daemon tests use a fake Telegram client plus test-only gateway resources
 to cover durable state round-trips/reconciliation, retry-vs-offset advancement
 semantics, same-batch redelivery stops, allowlist/group-chat behavior, local
 socket parser/response bounds, sidecar heartbeat/lease cleanup, disconnect and
-unregister pruning, gateway restart reannouncement hints, command routing,
-chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
+unregister suppression, gateway restart replay, command routing,
+chat/user-scoped selections, stable alias churn, durable mixed checkpoints,
 exact serialized delivery-response batching through send and heartbeat paths,
-boundary/escaping/multibyte accounting, ordered maximum-depth draining, socket
+boundary/escaping/multibyte accounting, ordered bounded replay, socket
 delivery response shape, and CLI/env parsing. Gateway-client sidecar
 tests use fake Unix sockets and in-memory harness channels to cover no-poll
 registration, inbound report submission, gateway-client outbound send forwarding,
@@ -142,4 +142,9 @@ The bridge is disabled by default and requires an explicit bot-token secret and 
 
 Long polling is single-owner per API base and bot token, protected by the non-secret stream lock described above. Active webhooks and HTTP 409 conflicts fail visibly rather than deleting remote state or pretending the stream remains owned. Production endpoints require HTTPS; plaintext is loopback-test-only and endpoint overrides reject userinfo, queries, and fragments. Diagnostics never expose bot tokens, token-bearing API URLs, or unexpected private message content.
 
-Gateway mode delegates polling, allowlist, destination, durable offset, and duplicate-suppression authority to [ARCH-tau-telegram-gateway](ARCH-tau-telegram-gateway.md). The sidecar has no bot token, filters deliveries against current local registrations, and clears leases on local or socket lifecycle loss. Its same-UID socket is a trusted local boundary rather than a sandbox, and its bounded live delivery queue is not a durable acknowledgement protocol.
+Gateway mode delegates polling, allowlist, destination, and durable mixed
+checkpoint authority to
+[ARCH-tau-telegram-gateway](ARCH-tau-telegram-gateway.md). The sidecar has no
+bot token, filters deliveries against current local registrations, correlates
+the configured publisher's exact live canonical echo, and sends the durable
+ACK. Its same-UID socket is a trusted local boundary rather than a sandbox.

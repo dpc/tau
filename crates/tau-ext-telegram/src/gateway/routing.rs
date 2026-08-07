@@ -2,6 +2,7 @@
 
 use super::GatewayRegistrationKey;
 use crate::TgMessage;
+use crate::live_checkpoint::TelegramReportId;
 
 /// Deterministic live registry snapshot used by command routing.
 pub(super) struct GatewayRegistrySnapshot {
@@ -131,10 +132,10 @@ pub(super) struct GatewayAgentView {
 }
 
 /// Inbound delivery record queued for a sidecar client.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct GatewayDelivery {
     /// Gateway-minted request id for this live queued delivery.
-    pub(super) request_id: String,
+    pub(super) request_id: TelegramReportId,
     /// Target Tau session id.
     pub(super) session_id: String,
     /// Target Tau agent id.

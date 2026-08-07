@@ -1,6 +1,6 @@
 # ARCH-tau-telegram-gateway: Telegram gateway daemon
 
-The gateway socket, lease, durable-state, loss-window, routing, and resource contracts
+The gateway socket, lease, durable-state, acknowledgement, routing, and resource contracts
 are [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md). Shared stream
 ownership is [SPEC-tau-ext-telegram-stream-owner](SPEC-tau-ext-telegram-stream-owner.md).
 
@@ -13,12 +13,15 @@ loads durable per-stream JSON state, binds a private Unix status socket, and the
 
 The durable state is scoped by the same non-secret stream fingerprint used for locking.
 It stores the next update offset, an optional private-chat link, chat/user-scoped
-selected route, recent update ids for restart duplicate suppression, and small counters;
-it does not store pending sidecar deliveries. The gateway persists after each update is
-intentionally handled or rejected. Successful enqueue into the bounded live sidecar
-queue counts as handling, so a gateway exit after offset advancement but before sidecar
-drain can lose that queued delivery before report submission; the queue is not a
-durable acknowledgement protocol.
+selected route, recent update ids, small counters, and ordered mixed update
+checkpoints. Routed checkpoints retain the exact sidecar delivery and opaque
+report ID; non-routed checkpoints record completed local work. The gateway
+persists routing before socket exposure and advances only the contiguous
+acknowledged prefix. Socket threads and the polling owner share one transactional
+owner for that existing state file. A canonical ACK commits its prefix advancement
+there directly and retains one of 128 content-free recent report-ID/route pairs
+for idempotent response-loss retries; no second journal participates. A
+post-rename durability error poisons this owner and forces restart.
 On startup the loaded state is reconciled with the current config: fixed-chat mode
 clears private-chat links, and links or selections that no longer match the configured
 chat/user allowlist are cleared and persisted before polling starts.
@@ -30,20 +33,22 @@ The allowlist is checked before any side effects. Without a fixed `chat_id`, onl
 allowlisted private chat can link with `/start`; unconfigured group/supergroup chats are
 ignored rather than linked or replied to. The local socket accepts a one-shot versioned
 JSON-line `status` request and persistent sidecar `hello`, `heartbeat`,
-`register_agent`, `unregister_agent`, `send_message`, and `goodbye` requests up to a
-small fixed byte limit. It returns bounded status snapshots, sidecar lease parameters,
-and queued inbound delivery records on sidecar responses; `send_message` returns
+`register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, and
+`goodbye` requests up to a small fixed byte limit. It returns bounded status snapshots,
+sidecar lease parameters,
+and pending durable inbound delivery records on sidecar responses;
+`ack_delivery` confirms an exact canonical echo, and `send_message` returns
 bounded operation errors while keeping Telegram destination selection inside the
 gateway. Sidecar registrations are live-only leases: they are removed on explicit
 unregister, goodbye, socket disconnect, heartbeat expiry, or gateway
-restart/reannouncement. Pending deliveries are bounded per sidecar and are dropped if
-their route unregisters, transfers ownership, disconnects, or expires before the sidecar
-drains them. The socket is private same-UID local IPC, not an authentication boundary;
+restart/reannouncement. Lease loss suppresses delivery but does not delete or
+retarget durable routed checkpoints. The socket is private same-UID local IPC,
+not an authentication boundary;
 this MVP bounds request size and closes protocol-error connections but does not attempt
 to defend against all same-user local denial-of-service patterns.
-Successful sidecar operations drain only the oldest delivery prefix whose exact
+Successful sidecar operations expose only the oldest delivery prefix whose exact
 serialized JSON line fits the shared 65,536-byte response limit. A record that cannot
-fit alone is rejected at enqueue with no private content in the diagnostic. The tested
+fit alone is rejected before persistence with no private content in the diagnostic. The tested
 implementation covers maximum-depth batching through both send and heartbeat response
 paths, exact boundaries, JSON escaping, and multibyte UTF-8.
 
@@ -53,7 +58,9 @@ for this architecture. In that mode its startup configuration names
 existing register/send tools, subscribes to session/agent lifecycle facts, sends `hello`
 and persistent `register_agent`/`unregister_agent`/`heartbeat` requests to the gateway,
 and emits gateway-delivered inbound text as `message.delivered_reported` to its own
-harness. The gateway supplies native update/message, numeric sender, and chat
+harness. It retains exact correlation before output and sends `ack_delivery`
+only after the configured publisher's matching live canonical
+`message.delivered` echo. The gateway supplies native update/message, numeric sender, and chat
 identity while retaining routing authority. It does not acquire the stream lock,
 check webhooks, or call Telegram
 `getUpdates`; those remain solely in the gateway daemon. Outbound `telegram_send` is

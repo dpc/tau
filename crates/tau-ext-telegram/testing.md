@@ -13,8 +13,15 @@ checkpoint, exact canonical-echo, missing-echo replay, out-of-order echo,
 reconnect/backlog-drain, and non-routed duplicate-reply interleavings without
 wall-clock races. Cover both direct polling and gateway client paths. Gateway
 response conformance uses the real gateway client to cover
-the 32-record maximum queue, both send and heartbeat producers, and repeated
-ordered bounded drain. Focused serialization tests cover the exact
+the 32-record maximum response prefix, both send and heartbeat producers, and
+repeated exact replay before ACK. Gateway tests force mixed-prefix ordering,
+restart/re-registration replay, ACK progress independent of long polling,
+lease-expiry authorization, dropped ACK responses, bounded retry state,
+corrupt typed IDs, concurrent update/ACK commit, and deterministic routed/ACK
+state-save cuts at write, file sync, rename, and parent-directory sync. These
+assert rollback before installation and fail-stop restart recovery after
+installation.
+Focused serialization tests cover the exact
 newline-inclusive 65,536-byte boundary, JSON escaping, and multibyte UTF-8.
 
 Harness tests own report authority and interception, downstream canonical fact

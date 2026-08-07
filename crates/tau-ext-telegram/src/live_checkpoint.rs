@@ -9,13 +9,33 @@ use tau_proto::{
 use crate::RuntimeConfig;
 
 /// Extension-data key carrying one local-poll report identity.
-const TELEGRAM_REPORT_ID_KEY: &str = "telegram_report_id";
+pub(super) const TELEGRAM_REPORT_ID_KEY: &str = "telegram_report_id";
 
 /// Typed Telegram update identity accepted by the local checkpoint queue.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+#[serde(try_from = "i64", into = "i64")]
 pub(super) struct TelegramUpdateId {
     /// Raw Telegram Bot API update identifier.
     value: i64,
+}
+
+impl TryFrom<i64> for TelegramUpdateId {
+    type Error = String;
+
+    /// Validate a raw persisted or wire update identifier.
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        Self::new(value)
+            .ok_or_else(|| "Telegram update ID has no representable successor".to_owned())
+    }
+}
+
+impl From<TelegramUpdateId> for i64 {
+    /// Return the raw update identifier for persistence or transport.
+    fn from(update_id: TelegramUpdateId) -> Self {
+        update_id.as_i64()
+    }
 }
 
 impl TelegramUpdateId {
@@ -62,10 +82,38 @@ impl TelegramUpdateOffset {
 }
 
 /// Typed opaque identity shared by a routed report and its canonical fact.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub(super) struct TelegramReportId {
     /// Opaque domain-separated digest value.
     value: String,
+}
+
+impl TryFrom<String> for TelegramReportId {
+    type Error = String;
+
+    /// Validate one persisted or wire report identity.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let digest = value
+            .strip_prefix("telegram-report:")
+            .or_else(|| value.strip_prefix("telegram-gateway-report:"))
+            .ok_or_else(|| "Telegram report ID has an unknown domain".to_owned())?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("Telegram report ID has an invalid digest".to_owned());
+        }
+        Ok(Self { value })
+    }
+}
+
+impl From<TelegramReportId> for String {
+    /// Return the validated opaque report identity.
+    fn from(report_id: TelegramReportId) -> Self {
+        report_id.value
+    }
 }
 
 impl TelegramReportId {
@@ -82,8 +130,34 @@ impl TelegramReportId {
         }
     }
 
+    /// Derive a stable gateway report identity from its persisted stream
+    /// fingerprint and update ID.
+    pub(super) fn for_gateway(stream_hash: &str, update_id: TelegramUpdateId) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tau-ext-telegram/gateway-report-id/v1\0");
+        hasher.update(stream_hash.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&update_id.value.to_be_bytes());
+        Self {
+            value: format!("telegram-gateway-report:{}", hasher.finalize().to_hex()),
+        }
+    }
+
+    /// Wrap one report identity received from the cooperative gateway.
+    pub(super) fn from_gateway(value: String) -> Option<Self> {
+        value
+            .starts_with("telegram-gateway-report:")
+            .then(|| Self::try_from(value).ok())
+            .flatten()
+    }
+
+    /// Return the opaque wire value.
+    pub(super) fn as_str(&self) -> &str {
+        &self.value
+    }
+
     /// Parse the exact private report correlation field from a canonical fact.
-    fn from_extension_data(data: &MessageExtensionData) -> Option<Self> {
+    pub(super) fn from_extension_data(data: &MessageExtensionData) -> Option<Self> {
         let CborValue::Map(fields) = data.value() else {
             return None;
         };
@@ -92,16 +166,14 @@ impl TelegramReportId {
                 return None;
             }
             match value {
-                CborValue::Text(value) => Some(Self {
-                    value: value.clone(),
-                }),
+                CborValue::Text(value) => Self::try_from(value.clone()).ok(),
                 _ => None,
             }
         })
     }
 
     /// Encode the report identity preserved unchanged by canonicalization.
-    fn extension_data(&self) -> MessageExtensionData {
+    pub(super) fn extension_data(&self) -> MessageExtensionData {
         MessageExtensionData::new(CborValue::Map(vec![(
             CborValue::Text(TELEGRAM_REPORT_ID_KEY.to_owned()),
             CborValue::Text(self.value.clone()),

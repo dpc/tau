@@ -8,12 +8,14 @@
 
 use std::io as path_std_io;
 
+mod checkpoint;
+mod durable_store;
 mod routing;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -23,13 +25,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, thread};
 
+use checkpoint::GatewayCheckpoints;
+use durable_store::GatewayDurableStore;
+#[cfg(test)]
+use durable_store::GatewayStorePause;
 use routing::{
     GatewayDelivery, GatewayRegistrationSnapshot, GatewayRegistrySnapshot, GatewaySessionSnapshot,
     agent_alias, safe_metadata, session_alias, short_id, split_target_and_text,
     telegram_source_label,
 };
 
-use crate::live_checkpoint::TelegramUpdateId;
+use crate::live_checkpoint::{TelegramReportId, TelegramUpdateId};
 use crate::stream_owner::{
     UpdateStreamLock, telegram_contention_diagnostic, webhook_active_message,
 };
@@ -61,6 +67,10 @@ const OUTBOUND_SEND_RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Number of update ids kept for restart duplicate suppression.
 const RECENT_UPDATE_LIMIT: usize = 128;
 
+/// Maximum committed ACK identities retained for idempotent response-loss
+/// recovery.
+const RECENT_ACKNOWLEDGEMENT_LIMIT: usize = 128;
+
 /// Version of the local gateway status socket protocol.
 ///
 /// This stays at zero under `GATE-no-backward-compatibility`.
@@ -90,6 +100,9 @@ enum UpdateOutcome {
     /// A required side effect failed; do not advance this update's offset and
     /// stop processing later updates in the same batch.
     NeedsRedelivery,
+    /// The update produced one exact report that requires canonical
+    /// acknowledgement.
+    Routed,
 }
 
 impl UpdateOutcome {
@@ -282,10 +295,10 @@ struct Gateway {
     cfg: RuntimeConfig,
     /// HTTP client used for Telegram Bot API calls.
     client: Arc<dyn TelegramClient>,
-    /// Durable state file path scoped to the stream fingerprint.
-    state_path: PathBuf,
     /// Mutable durable gateway state.
     durable: GatewayDurableState,
+    /// Shared transactional owner of the existing durable state file.
+    durable_store: Arc<GatewayDurableStore>,
     /// Shared socket state served by the local socket.
     socket_state: Arc<GatewaySocketState>,
     /// Resources that keep production stream/socket ownership alive.
@@ -324,22 +337,29 @@ impl Gateway {
         let state_path = config.state_dir.join(format!("{stream_hash}.json"));
         let mut durable = GatewayDurableState::load(&state_path, &stream_hash)?;
         if durable.reconcile_with_config(&cfg) {
-            durable.save(&state_path)?;
+            durable
+                .save(&state_path)
+                .map_err(|error| error.to_string())?;
         }
+        let durable_store = Arc::new(GatewayDurableStore::new(
+            state_path.clone(),
+            durable.clone(),
+        ));
         let socket_path = config.runtime_dir.join(format!("{stream_hash}.sock"));
-        let socket_state = Arc::new(GatewaySocketState::new(
+        let socket_state = Arc::new(GatewaySocketState::new_with_durable_store(
             &cfg,
             &durable,
             stream_hash.clone(),
             socket_path.clone(),
             Arc::clone(&client),
+            Arc::clone(&durable_store),
         ));
         let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&socket_state))?;
         Ok(Self {
             cfg,
             client,
-            state_path,
             durable,
+            durable_store,
             socket_state,
             _resources: GatewayResources::Production {
                 _update_stream_lock: update_stream_lock,
@@ -355,10 +375,9 @@ impl Gateway {
             self.socket_state.socket_path.display()
         );
         loop {
-            match self
-                .client
-                .get_updates(&self.cfg, self.durable.next_update_offset)
-            {
+            self.durable = self.durable_store.snapshot()?;
+            let next_update_offset = self.durable.next_update_offset;
+            match self.client.get_updates(&self.cfg, next_update_offset) {
                 Ok(updates) => self.process_updates(updates)?,
                 Err(message) => {
                     if let Some(diagnostic) = telegram_contention_diagnostic(&message) {
@@ -383,42 +402,54 @@ impl Gateway {
 
     /// Process one update and durably advance the offset after handling.
     fn process_update(&mut self, update: TgUpdate) -> Result<UpdateOutcome, String> {
+        self.durable = self.durable_store.snapshot()?;
         let update_id = update.update_id;
-        if self.durable.has_recent_update(update_id.as_i64()) {
-            self.advance_offset(update_id)?;
+        if self.durable.checkpoints.contains(update_id) {
             return Ok(UpdateOutcome::AdvanceOffset);
         }
-        if let Some(message) = update.message.as_ref()
-            && self.process_message(message, update_id) == UpdateOutcome::NeedsRedelivery
-        {
+        if self.durable.has_recent_update(update_id.as_i64()) {
+            return Ok(UpdateOutcome::AdvanceOffset);
+        }
+        let mut outcome = update
+            .message
+            .as_ref()
+            .map_or(UpdateOutcome::AdvanceOffset, |message| {
+                self.process_message(message, update_id)
+            });
+        if outcome == UpdateOutcome::NeedsRedelivery {
             return Ok(UpdateOutcome::NeedsRedelivery);
         }
         self.durable.remember_update(update_id.as_i64());
         self.durable.processed_update_count = self.durable.processed_update_count.saturating_add(1);
-        self.advance_offset(update_id)?;
-        Ok(UpdateOutcome::AdvanceOffset)
-    }
-
-    /// Advance and persist the next update offset.
-    fn advance_offset(&mut self, update_id: TelegramUpdateId) -> Result<(), String> {
-        let next = update_id.next_offset().as_i64();
-        if self
-            .durable
-            .next_update_offset
-            .is_none_or(|offset| offset < next)
-        {
-            self.durable.next_update_offset = Some(next);
+        if self.durable.checkpoints.contains(update_id) {
+            outcome = UpdateOutcome::Routed;
+        } else {
+            self.durable.checkpoints.insert_non_routed(update_id);
         }
-        self.persist()
-    }
-
-    /// Persist durable state and publish an updated local status snapshot.
-    fn persist(&mut self) -> Result<(), String> {
-        self.durable.save(&self.state_path)?;
-        let stream_hash = self.durable.stream_hash.clone();
-        self.socket_state
-            .set_status(GatewayStatus::new(&self.cfg, &self.durable, stream_hash));
-        Ok(())
+        match self
+            .durable_store
+            .commit_processed_update(&self.durable, update_id)
+        {
+            Ok(committed) => self.durable = committed,
+            Err(error) => {
+                if let Ok(committed) = self.durable_store.snapshot() {
+                    self.durable = committed;
+                    self.socket_state
+                        .replace_durable_deliveries(self.durable.checkpoints.pending_deliveries());
+                }
+                return Err(error);
+            }
+        }
+        self.socket_state.set_status(GatewayStatus::new(
+            &self.cfg,
+            &self.durable,
+            self.durable.stream_hash.clone(),
+        ));
+        if outcome == UpdateOutcome::Routed {
+            self.socket_state
+                .replace_durable_deliveries(self.durable.checkpoints.pending_deliveries());
+        }
+        Ok(outcome)
     }
 
     /// Handle a Telegram message after update decoding.
@@ -751,7 +782,7 @@ impl Gateway {
     }
 
     /// Route one explicit `/to` command.
-    fn route_to(&self, message: &TgMessage, update_id: TelegramUpdateId, rest: &str) -> bool {
+    fn route_to(&mut self, message: &TgMessage, update_id: TelegramUpdateId, rest: &str) -> bool {
         let Some((target, text)) = split_target_and_text(rest) else {
             return self.reply(
                 message.chat_id,
@@ -784,7 +815,12 @@ impl Gateway {
     }
 
     /// Route plain text through the selected target or only live registration.
-    fn route_plain(&self, message: &TgMessage, update_id: TelegramUpdateId, text: &str) -> bool {
+    fn route_plain(
+        &mut self,
+        message: &TgMessage,
+        update_id: TelegramUpdateId,
+        text: &str,
+    ) -> bool {
         let snapshot = self.socket_state.registry_snapshot();
         if let Some(selection) = self.selection_for_message(Some(message))
             && let Some(agent_id) = selection.agent_id.clone()
@@ -867,17 +903,23 @@ impl Gateway {
     /// Queue a routed delivery record for the target sidecar or explain
     /// failure.
     fn queue_route_or_reply(
-        &self,
+        &mut self,
         message: &TgMessage,
         update_id: TelegramUpdateId,
         target: GatewayRegistrationKey,
         text: &str,
     ) -> bool {
-        match self
-            .socket_state
-            .enqueue_delivery(&target, message, update_id, text)
-        {
-            Ok(()) => true,
+        match self.socket_state.build_delivery(
+            &self.durable.stream_hash,
+            &target,
+            message,
+            update_id,
+            text,
+        ) {
+            Ok(delivery) => {
+                self.durable.checkpoints.insert_routed(update_id, delivery);
+                true
+            }
             Err(error) => self.reply(message.chat_id, &error),
         }
     }
@@ -905,8 +947,17 @@ struct GatewaySelectedRoute {
     agent_id: Option<String>,
 }
 
+/// Content-free durable authorization for retrying one committed ACK.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+struct GatewayRecentAcknowledgement {
+    /// Validated report identity used as the bounded idempotency key.
+    report_id: TelegramReportId,
+    /// Exact sidecar route authorized to retry after response loss.
+    route: GatewayRegistrationKey,
+}
+
 /// Durable gateway state scoped to one stream fingerprint.
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct GatewayDurableState {
     /// Non-secret stream fingerprint this state belongs to.
@@ -923,6 +974,55 @@ struct GatewayDurableState {
     rejected_update_count: u64,
     /// Telegram-chat-scoped selected Tau route.
     selected_route: Option<GatewaySelectedRoute>,
+    /// Ordered mixed update checkpoints retained until contiguous
+    /// acknowledgement.
+    checkpoints: GatewayCheckpoints,
+    /// Oldest-first bounded committed ACK identities retained for retries.
+    recent_acknowledgements: VecDeque<GatewayRecentAcknowledgement>,
+}
+
+/// State-file save failure annotated with whether rename already installed the
+/// candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GatewayStateSaveError {
+    /// Human-readable filesystem operation failure.
+    message: String,
+    /// Whether the candidate was renamed over the prior state before failure.
+    installed: bool,
+}
+
+impl std::fmt::Display for GatewayStateSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+/// Deterministic save cut used to verify every persistence boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewaySaveCut {
+    /// Perform the complete state-file transaction.
+    None,
+    /// Fail before writing candidate bytes.
+    #[cfg(test)]
+    Write,
+    /// Fail after writing but before syncing the candidate file.
+    #[cfg(test)]
+    FileSync,
+    /// Fail after file sync but before installing the candidate.
+    #[cfg(test)]
+    Rename,
+    /// Fail after rename but before syncing the parent directory.
+    #[cfg(test)]
+    ParentSync,
+}
+
+/// Build one deterministic state-save failure at a named boundary.
+#[cfg(test)]
+fn injected_gateway_save_error(operation: &str, installed: bool) -> GatewayStateSaveError {
+    GatewayStateSaveError {
+        message: format!("injected Telegram gateway state {operation} failure"),
+        installed,
+    }
 }
 
 impl GatewayDurableState {
@@ -935,7 +1035,14 @@ impl GatewayDurableState {
                 if state.stream_hash != stream_hash {
                     return Err("Telegram gateway state stream hash mismatch".to_owned());
                 }
+                state
+                    .checkpoints
+                    .validate_report_ids(&state.stream_hash)
+                    .map_err(|error| format!("reading Telegram gateway state: {error}"))?;
                 state.recent_update_ids.truncate(RECENT_UPDATE_LIMIT);
+                while RECENT_ACKNOWLEDGEMENT_LIMIT < state.recent_acknowledgements.len() {
+                    state.recent_acknowledgements.pop_front();
+                }
                 Ok(state)
             }
             Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(Self {
@@ -947,11 +1054,24 @@ impl GatewayDurableState {
     }
 
     /// Save state atomically with private file permissions.
-    fn save(&self, path: &Path) -> Result<(), String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| "Telegram gateway state path has no parent".to_owned())?;
-        create_private_dir(parent)?;
+    fn save(&self, path: &Path) -> Result<(), GatewayStateSaveError> {
+        self.save_with_cut(path, GatewaySaveCut::None)
+    }
+
+    /// Save state with one optional deterministic filesystem cut.
+    fn save_with_cut(
+        &self,
+        path: &Path,
+        _cut: GatewaySaveCut,
+    ) -> Result<(), GatewayStateSaveError> {
+        let parent = path.parent().ok_or_else(|| GatewayStateSaveError {
+            message: "Telegram gateway state path has no parent".to_owned(),
+            installed: false,
+        })?;
+        create_private_dir(parent).map_err(|message| GatewayStateSaveError {
+            message,
+            installed: false,
+        })?;
         let tmp_path = path.with_extension("json.tmp");
         let mut file = OpenOptions::new()
             .create(true)
@@ -959,17 +1079,54 @@ impl GatewayDurableState {
             .write(true)
             .mode(0o600)
             .open(&tmp_path)
-            .map_err(|error| format!("opening Telegram gateway state file: {error}"))?;
-        let bytes = serde_json::to_vec_pretty(self)
-            .map_err(|error| format!("encoding Telegram gateway state: {error}"))?;
+            .map_err(|error| GatewayStateSaveError {
+                message: format!("opening Telegram gateway state file: {error}"),
+                installed: false,
+            })?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|error| GatewayStateSaveError {
+            message: format!("encoding Telegram gateway state: {error}"),
+            installed: false,
+        })?;
+        #[cfg(test)]
+        if _cut == GatewaySaveCut::Write {
+            return Err(injected_gateway_save_error("writing", false));
+        }
         file.write_all(&bytes)
-            .map_err(|error| format!("writing Telegram gateway state: {error}"))?;
+            .map_err(|error| GatewayStateSaveError {
+                message: format!("writing Telegram gateway state: {error}"),
+                installed: false,
+            })?;
         file.write_all(b"\n")
-            .map_err(|error| format!("writing Telegram gateway state: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("syncing Telegram gateway state: {error}"))?;
-        fs::rename(&tmp_path, path)
-            .map_err(|error| format!("installing Telegram gateway state: {error}"))?;
+            .map_err(|error| GatewayStateSaveError {
+                message: format!("writing Telegram gateway state: {error}"),
+                installed: false,
+            })?;
+        #[cfg(test)]
+        if _cut == GatewaySaveCut::FileSync {
+            return Err(injected_gateway_save_error("file sync", false));
+        }
+        file.sync_all().map_err(|error| GatewayStateSaveError {
+            message: format!("syncing Telegram gateway state: {error}"),
+            installed: false,
+        })?;
+        #[cfg(test)]
+        if _cut == GatewaySaveCut::Rename {
+            return Err(injected_gateway_save_error("rename", false));
+        }
+        fs::rename(&tmp_path, path).map_err(|error| GatewayStateSaveError {
+            message: format!("installing Telegram gateway state: {error}"),
+            installed: false,
+        })?;
+        #[cfg(test)]
+        if _cut == GatewaySaveCut::ParentSync {
+            return Err(injected_gateway_save_error("parent sync", true));
+        }
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| GatewayStateSaveError {
+                message: format!("syncing Telegram gateway state directory: {error}"),
+                installed: true,
+            })?;
         Ok(())
     }
 
@@ -1018,6 +1175,26 @@ impl GatewayDurableState {
         if 0 < excess {
             self.recent_update_ids.drain(0..excess);
         }
+    }
+
+    /// Retain one committed ACK without refreshing an existing entry's age.
+    fn remember_acknowledgement(
+        &mut self,
+        report_id: TelegramReportId,
+        route: GatewayRegistrationKey,
+    ) {
+        if self
+            .recent_acknowledgements
+            .iter()
+            .any(|acknowledgement| acknowledgement.report_id == report_id)
+        {
+            return;
+        }
+        if RECENT_ACKNOWLEDGEMENT_LIMIT <= self.recent_acknowledgements.len() {
+            self.recent_acknowledgements.pop_front();
+        }
+        self.recent_acknowledgements
+            .push_back(GatewayRecentAcknowledgement { report_id, route });
     }
 }
 
@@ -1100,18 +1277,40 @@ struct GatewaySocketState {
     next_connection_id: AtomicU64,
     /// Per-process generation that tells reconnecting sidecars to reannounce.
     generation: String,
-    /// Monotonic request id allocator for queued inbound delivery records.
-    next_delivery_id: AtomicU64,
+    /// Exact unacknowledged deliveries mirrored from durable checkpoints.
+    durable_deliveries: Mutex<Vec<GatewayDelivery>>,
+    /// Shared transaction owner for canonical ACK persistence.
+    durable_store: Arc<GatewayDurableStore>,
 }
 
 impl GatewaySocketState {
     /// Build shared socket state for a newly started gateway process.
+    #[cfg(test)]
     fn new(
         cfg: &RuntimeConfig,
         durable: &GatewayDurableState,
         stream_hash: String,
         socket_path: PathBuf,
         client: Arc<dyn TelegramClient>,
+    ) -> Self {
+        Self::new_with_durable_store(
+            cfg,
+            durable,
+            stream_hash,
+            socket_path,
+            client,
+            Arc::new(GatewayDurableStore::in_memory(durable.clone())),
+        )
+    }
+
+    /// Build shared socket state with the gateway's durable transaction owner.
+    fn new_with_durable_store(
+        cfg: &RuntimeConfig,
+        durable: &GatewayDurableState,
+        stream_hash: String,
+        socket_path: PathBuf,
+        client: Arc<dyn TelegramClient>,
+        durable_store: Arc<GatewayDurableStore>,
     ) -> Self {
         Self {
             socket_path,
@@ -1122,7 +1321,8 @@ impl GatewaySocketState {
             outbound_send_times: Mutex::new(VecDeque::new()),
             next_connection_id: AtomicU64::new(1),
             generation: gateway_generation(),
-            next_delivery_id: AtomicU64::new(1),
+            durable_deliveries: Mutex::new(durable.checkpoints.pending_deliveries()),
+            durable_store,
         }
     }
 
@@ -1198,6 +1398,38 @@ impl GatewaySocketState {
     }
 
     /// Queue one inbound delivery record for a registered sidecar.
+    fn build_delivery(
+        &self,
+        stream_hash: &str,
+        target: &GatewayRegistrationKey,
+        message: &TgMessage,
+        update_id: TelegramUpdateId,
+        text: &str,
+    ) -> Result<GatewayDelivery, String> {
+        let mut registry = self.registry.lock().expect("registry lock");
+        registry.prune_expired(Instant::now());
+        if !registry.registrations.contains_key(target) {
+            return Err("The selected Telegram gateway target is no longer live.".to_owned());
+        }
+        let report_id = TelegramReportId::for_gateway(stream_hash, update_id);
+        let delivery = GatewayDelivery {
+            request_id: report_id,
+            session_id: target.session_id.clone(),
+            agent_id: target.agent_id.clone(),
+            message_id: format!("telegram:{}:{update_id}", message.chat_id),
+            sender_id: message.user_id.to_string(),
+            source: telegram_source_label(message),
+            conversation_id: message.chat_id.to_string(),
+            text: text.to_owned(),
+        };
+        if !delivery_response_fits(&self.generation, std::slice::from_ref(&delivery)) {
+            return Err(DELIVERY_TOO_LARGE_MESSAGE.to_owned());
+        }
+        Ok(delivery)
+    }
+
+    /// Build and mirror one delivery directly for focused socket tests.
+    #[cfg(test)]
     fn enqueue_delivery(
         &self,
         target: &GatewayRegistrationKey,
@@ -1205,17 +1437,87 @@ impl GatewaySocketState {
         update_id: TelegramUpdateId,
         text: &str,
     ) -> Result<(), String> {
-        let request_id = self.next_delivery_id.fetch_add(1, Ordering::Relaxed);
-        let mut registry = self.registry.lock().expect("registry lock");
-        registry.prune_expired(Instant::now());
-        registry.enqueue_delivery(
-            target,
-            message,
-            update_id,
-            text,
-            request_id,
-            &self.generation,
-        )
+        let delivery = self.build_delivery("test-stream", target, message, update_id, text)?;
+        self.durable_deliveries
+            .lock()
+            .expect("durable deliveries lock")
+            .push(delivery);
+        Ok(())
+    }
+
+    /// Replace the live mirror after a durable checkpoint transition.
+    fn replace_durable_deliveries(&self, deliveries: Vec<GatewayDelivery>) {
+        *self
+            .durable_deliveries
+            .lock()
+            .expect("durable deliveries lock") = deliveries;
+    }
+
+    /// Remove one delivery after its ACK becomes durable.
+    fn remove_durable_delivery(&self, report_id: &TelegramReportId) {
+        self.durable_deliveries
+            .lock()
+            .expect("durable deliveries lock")
+            .retain(|delivery| delivery.request_id != *report_id);
+    }
+
+    /// Select a bounded non-destructive prefix for routes owned by a sidecar.
+    fn durable_deliveries_for_connection(&self, connection_id: u64) -> Vec<GatewayDelivery> {
+        let owned = {
+            let registry = self.registry.lock().expect("registry lock");
+            registry
+                .registrations
+                .iter()
+                .filter(|(_, registration)| registration.connection_id == connection_id)
+                .map(|(key, _)| key.clone())
+                .collect::<HashSet<_>>()
+        };
+        let deliveries = self
+            .durable_deliveries
+            .lock()
+            .expect("durable deliveries lock");
+        let eligible = deliveries
+            .iter()
+            .filter(|delivery| {
+                owned.contains(&GatewayRegistrationKey {
+                    session_id: delivery.session_id.clone(),
+                    agent_id: delivery.agent_id.clone(),
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        select_delivery_prefix(&self.generation, &eligible)
+    }
+
+    /// Validate route ownership and synchronously persist one canonical ACK.
+    fn acknowledge_delivery(&self, connection_id: u64, report_id: String) -> Result<(), String> {
+        let report_id = TelegramReportId::from_gateway(report_id)
+            .ok_or_else(|| "Telegram gateway report ID is invalid.".to_owned())?;
+        let route = self
+            .durable_store
+            .acknowledgement_route(&report_id)?
+            .ok_or_else(|| "Telegram gateway report is not pending.".to_owned())?;
+        let owns_route = {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.prune_expired(Instant::now());
+            registry
+                .registrations
+                .get(&route)
+                .is_some_and(|registration| registration.connection_id == connection_id)
+        };
+        if !owns_route {
+            return Err("Telegram gateway report does not belong to this sidecar.".to_owned());
+        }
+        let durable = self
+            .durable_store
+            .acknowledge_delivery(&report_id, &route)?;
+        self.remove_durable_delivery(&report_id);
+        self.set_status(GatewayStatus::new(
+            &self.cfg,
+            &durable,
+            durable.stream_hash.clone(),
+        ));
+        Ok(())
     }
 
     /// Send one outbound Telegram message for a currently registered route.
@@ -1307,8 +1609,6 @@ struct GatewayRegistry {
     sidecars: HashMap<u64, GatewaySidecar>,
     /// Registered agent routes owned by connected sidecars.
     registrations: HashMap<GatewayRegistrationKey, GatewayRegistration>,
-    /// Delivery records waiting for each sidecar's next socket response.
-    pending_deliveries: HashMap<u64, Vec<GatewayDelivery>>,
     /// Stable alias numbers assigned to live or previously-seen session ids.
     session_aliases: HashMap<String, usize>,
     /// Stable alias numbers assigned to live or previously-seen agent routes.
@@ -1324,7 +1624,6 @@ impl Default for GatewayRegistry {
         Self {
             sidecars: HashMap::new(),
             registrations: HashMap::new(),
-            pending_deliveries: HashMap::new(),
             session_aliases: HashMap::new(),
             agent_aliases: HashMap::new(),
             next_session_alias: 1,
@@ -1373,11 +1672,6 @@ impl GatewayRegistry {
             session_id,
             agent_id,
         };
-        if let Some(previous) = self.registrations.get(&key)
-            && previous.connection_id != connection_id
-        {
-            self.remove_pending_for_key(&key);
-        }
         if !self.session_aliases.contains_key(&key.session_id) {
             self.session_aliases
                 .insert(key.session_id.clone(), self.next_session_alias);
@@ -1418,7 +1712,6 @@ impl GatewayRegistry {
             .is_some_and(|registration| registration.connection_id == connection_id)
         {
             self.registrations.remove(&key);
-            self.remove_pending_for_key(&key);
         }
         Ok(())
     }
@@ -1439,19 +1732,8 @@ impl GatewayRegistry {
     /// Remove all routes owned by a disconnected sidecar.
     fn disconnect(&mut self, connection_id: u64) {
         self.sidecars.remove(&connection_id);
-        let removed_keys = self
-            .registrations
-            .iter()
-            .filter_map(|(key, registration)| {
-                (registration.connection_id == connection_id).then_some(key.clone())
-            })
-            .collect::<Vec<_>>();
         self.registrations
             .retain(|_, registration| registration.connection_id != connection_id);
-        self.pending_deliveries.remove(&connection_id);
-        for key in removed_keys {
-            self.remove_pending_for_key(&key);
-        }
     }
 
     /// Return a deterministic snapshot of the currently live registry.
@@ -1498,77 +1780,6 @@ impl GatewayRegistry {
         }
     }
 
-    /// Queue one inbound delivery record for the sidecar that owns `target`.
-    fn enqueue_delivery(
-        &mut self,
-        target: &GatewayRegistrationKey,
-        message: &TgMessage,
-        update_id: TelegramUpdateId,
-        text: &str,
-        request_id: u64,
-        gateway_generation: &str,
-    ) -> Result<(), String> {
-        let registration = self
-            .registrations
-            .get(target)
-            .ok_or_else(|| "The selected Telegram gateway target is no longer live.".to_owned())?;
-        let pending = self
-            .pending_deliveries
-            .entry(registration.connection_id)
-            .or_default();
-        if pending.len() >= MAX_PENDING_DELIVERIES_PER_SIDECAR {
-            return Err(
-                "Telegram gateway delivery queue is full; wait for the sidecar heartbeat."
-                    .to_owned(),
-            );
-        }
-        let delivery = GatewayDelivery {
-            request_id: format!("telegram-{request_id}"),
-            session_id: target.session_id.clone(),
-            agent_id: target.agent_id.clone(),
-            message_id: format!("telegram:{}:{update_id}", message.chat_id),
-            sender_id: message.user_id.to_string(),
-            source: telegram_source_label(message),
-            conversation_id: message.chat_id.to_string(),
-            text: text.to_owned(),
-        };
-        if !delivery_response_fits(gateway_generation, std::slice::from_ref(&delivery)) {
-            return Err(DELIVERY_TOO_LARGE_MESSAGE.to_owned());
-        }
-        pending.push(delivery);
-        Ok(())
-    }
-
-    /// Remove the oldest delivery prefix whose response fits the wire limit.
-    fn take_deliveries(
-        &mut self,
-        connection_id: u64,
-        gateway_generation: &str,
-    ) -> Vec<GatewayDelivery> {
-        let Some(pending) = self.pending_deliveries.get_mut(&connection_id) else {
-            return Vec::new();
-        };
-        let selected_count = (1..=pending.len())
-            .take_while(|end| delivery_response_fits(gateway_generation, &pending[..*end]))
-            .count();
-        let selected = pending.drain(..selected_count).collect();
-        if pending.is_empty() {
-            self.pending_deliveries.remove(&connection_id);
-        }
-        selected
-    }
-
-    /// Remove queued deliveries for one route after ownership becomes stale.
-    fn remove_pending_for_key(&mut self, key: &GatewayRegistrationKey) {
-        for deliveries in self.pending_deliveries.values_mut() {
-            deliveries.retain(|delivery| {
-                delivery.session_id != key.session_id || delivery.agent_id != key.agent_id
-            });
-        }
-        self.pending_deliveries
-            .retain(|_, deliveries| !deliveries.is_empty());
-    }
-
     /// Return live registry counts for a status response.
     fn counts(&self, now: Instant) -> GatewayRegistryCounts {
         let oldest_registration_age_seconds = self
@@ -1606,8 +1817,6 @@ impl GatewayRegistry {
         }
         self.registrations
             .retain(|_, registration| registration.expires_at > now);
-        self.pending_deliveries
-            .retain(|connection_id, _| self.sidecars.contains_key(connection_id));
     }
 }
 
@@ -1618,7 +1827,7 @@ struct GatewaySidecar {
 }
 
 /// Key identifying one registered Tau agent route.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 struct GatewayRegistrationKey {
     /// Tau session id announced by the sidecar.
     session_id: String,
@@ -1645,7 +1854,8 @@ struct GatewaySocketRequest {
     /// Protocol version expected by the client.
     protocol_version: u32,
     /// Request kind such as `status`, `hello`, `heartbeat`,
-    /// `register_agent`, `unregister_agent`, `send_message`, or `goodbye`.
+    /// `register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, or
+    /// `goodbye`.
     kind: String,
     /// Tau session id for registration requests.
     session_id: Option<String>,
@@ -1655,6 +1865,8 @@ struct GatewaySocketRequest {
     message: Option<String>,
     /// Optional display name supplied by the sidecar.
     display_name: Option<String>,
+    /// Opaque report identity for canonical delivery acknowledgement.
+    report_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -1667,6 +1879,7 @@ impl Default for GatewaySocketRequest {
             agent_id: None,
             message: None,
             display_name: None,
+            report_id: None,
         }
     }
 }
@@ -1788,6 +2001,14 @@ fn handle_gateway_socket_request(
         "send_message" => socket_result(state, connection_id, || {
             state.send_agent_message(connection_id, request)
         }),
+        "ack_delivery" => {
+            let report_id = request
+                .report_id
+                .ok_or_else(|| "telegram gateway request requires `report_id`".to_owned());
+            socket_result(state, connection_id, || {
+                state.acknowledge_delivery(connection_id, report_id?)
+            })
+        }
         "goodbye" => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
             "ok": true,
@@ -1808,11 +2029,7 @@ where
 {
     let result = f();
     let deliveries = if result.is_ok() {
-        state
-            .registry
-            .lock()
-            .expect("registry lock")
-            .take_deliveries(connection_id, &state.generation)
+        state.durable_deliveries_for_connection(connection_id)
     } else {
         Vec::new()
     };
@@ -1824,16 +2041,15 @@ fn registry_result<F>(state: &GatewaySocketState, connection_id: u64, f: F) -> s
 where
     F: FnOnce(&mut GatewayRegistry) -> Result<(), String>,
 {
-    let (result, deliveries) = {
+    let result = {
         let mut registry = state.registry.lock().expect("registry lock");
         registry.prune_expired(Instant::now());
-        let result = f(&mut registry);
-        let deliveries = if result.is_ok() {
-            registry.take_deliveries(connection_id, &state.generation)
-        } else {
-            Vec::new()
-        };
-        (result, deliveries)
+        f(&mut registry)
+    };
+    let deliveries = if result.is_ok() {
+        state.durable_deliveries_for_connection(connection_id)
+    } else {
+        Vec::new()
     };
     socket_response(state, result, deliveries)
 }
@@ -1874,6 +2090,26 @@ fn successful_socket_response(
 fn delivery_response_fits(gateway_generation: &str, deliveries: &[GatewayDelivery]) -> bool {
     serde_json::to_vec(&successful_socket_response(gateway_generation, deliveries))
         .is_ok_and(|response| response.len() < MAX_GATEWAY_RESPONSE_BYTES)
+}
+
+/// Select the oldest bounded delivery prefix without removing durable records.
+fn select_delivery_prefix(
+    gateway_generation: &str,
+    deliveries: &[GatewayDelivery],
+) -> Vec<GatewayDelivery> {
+    let mut selected = Vec::new();
+    for delivery in deliveries {
+        if MAX_PENDING_DELIVERIES_PER_SIDECAR <= selected.len() {
+            break;
+        }
+        let mut candidate = selected.clone();
+        candidate.push(delivery.clone());
+        if !delivery_response_fits(gateway_generation, &candidate) {
+            break;
+        }
+        selected.push(delivery.clone());
+    }
+    selected
 }
 
 /// Write one JSON-line response to a gateway socket client.

@@ -8,6 +8,14 @@ use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, T
 
 use super::*;
 
+/// Valid fake gateway report IDs used across sidecar correlation tests.
+const GATEWAY_REPORT_1: &str =
+    "telegram-gateway-report:1111111111111111111111111111111111111111111111111111111111111111";
+const GATEWAY_REPORT_2: &str =
+    "telegram-gateway-report:2222222222222222222222222222222222222222222222222222222222222222";
+const GATEWAY_REPORT_EXACT: &str =
+    "telegram-gateway-report:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 #[derive(Clone, Default)]
 struct SharedWriter {
     /// Shared byte buffer written by the tau-client writer thread.
@@ -615,7 +623,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                     "protocol_version": 0,
                     "ok": true,
                     "deliveries": [{
-                        "request_id": "telegram-1",
+                        "request_id": GATEWAY_REPORT_1,
                         "session_id": "s1",
                         "agent_id": "agent-1",
                         "message_id": "telegram:10:99",
@@ -865,6 +873,9 @@ fn gateway_client_register_before_session_started_does_not_announce() {
 fn gateway_delivery_requires_live_local_registration() {
     let (tx, rx) = mpsc::channel();
     let state = SharedState::new();
+    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
+        socket_path: PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
+    }));
     {
         let mut state = state.lock();
         state.current_session_id = Some(
@@ -877,8 +888,9 @@ fn gateway_delivery_requires_live_local_registration() {
     emit_gateway_deliveries(
         &state,
         &Output::Channel(tx.clone()),
+        Arc::clone(&gateway),
         vec![GatewayMessageDelivery {
-            request_id: "telegram-1".to_owned(),
+            request_id: GATEWAY_REPORT_1.to_owned(),
             session_id: "s1".to_owned(),
             agent_id: "agent-1".to_owned(),
             message_id: "telegram:1:1".to_owned(),
@@ -894,8 +906,9 @@ fn gateway_delivery_requires_live_local_registration() {
     emit_gateway_deliveries(
         &state,
         &Output::Channel(tx),
+        gateway,
         vec![GatewayMessageDelivery {
-            request_id: "telegram-2".to_owned(),
+            request_id: GATEWAY_REPORT_2.to_owned(),
             session_id: "s1".to_owned(),
             agent_id: "agent-1".to_owned(),
             message_id: "telegram:1:2".to_owned(),
@@ -909,6 +922,91 @@ fn gateway_delivery_requires_live_local_registration() {
     assert_eq!(delivered.text, "hello again");
     assert_eq!(delivered.sender.stable_id, telegram_sender_ref("7"));
     assert_eq!(delivered.conversation.expect("conversation").stable_id, "1");
+}
+
+/// Ensures gateway mode ignores a partial canonical collision and sends
+/// `ack_delivery` only for the exact configured-publisher echo.
+#[test]
+fn gateway_delivery_ack_requires_exact_canonical_echo() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
+    let seen_ack = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_ack_server = Arc::clone(&seen_ack);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut hello = String::new();
+        reader.read_line(&mut hello).expect("read hello");
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "protocol_version": 0,
+                "ok": true,
+                "gateway_generation": "test",
+                "deliveries": [],
+            })
+        )
+        .expect("write hello response");
+        stream.flush().expect("flush hello");
+        let mut ack = String::new();
+        reader.read_line(&mut ack).expect("read ack");
+        *seen_ack_server.lock().expect("seen ack") =
+            Some(serde_json::from_str(&ack).expect("ack JSON"));
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "protocol_version": 0,
+                "ok": true,
+                "deliveries": [],
+            })
+        )
+        .expect("write ack response");
+        stream.flush().expect("flush ack");
+    });
+
+    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig { socket_path }));
+    gateway.connect().expect("connect gateway client");
+    let (tx, rx) = mpsc::channel();
+    let client = FakeClient::new();
+    let ext = test_extension(client, tx);
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
+        state.publisher_name =
+            Some(tau_proto::ExtensionName::parse("std-telegram").expect("publisher"));
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    emit_gateway_deliveries(
+        &ext.state,
+        &ext.output,
+        Arc::clone(&gateway),
+        vec![GatewayMessageDelivery {
+            request_id: GATEWAY_REPORT_EXACT.to_owned(),
+            session_id: "s1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            message_id: "telegram:10:99".to_owned(),
+            sender_id: "42".to_owned(),
+            source: "alice".to_owned(),
+            conversation_id: "10".to_owned(),
+            text: "hello".to_owned(),
+        }],
+    );
+    let report = expect_delivered(&rx);
+    let mut wrong = canonical_delivered(report.clone());
+    wrong.message_id = MessageFactId::new("wrong");
+    ext.acknowledge_live_delivery(&wrong);
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+    server.join().expect("fake gateway server");
+
+    let ack = seen_ack.lock().expect("seen ack").clone().expect("ack");
+    assert_eq!(ack["kind"], "ack_delivery");
+    assert_eq!(ack["report_id"], GATEWAY_REPORT_EXACT);
 }
 
 /// A heartbeat failure from a stale gateway connection must not clear

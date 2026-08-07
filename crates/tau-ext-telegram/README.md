@@ -101,7 +101,7 @@ must supervise. This
 single-token multi-session gateway owns one
 Telegram update stream, takes the same advisory stream lock as the legacy
 extension, checks for active webhooks before polling, enforces
-`allowed_user_ids`, keeps a durable update offset/recent-update state file, and
+`allowed_user_ids`, keeps durable offset/checkpoint state, and
 opens a private local status socket.
 
 Allowlisted users can use `/start`, `/help`, `/status`, `/sessions`, `/agents`,
@@ -111,14 +111,20 @@ queue inbound delivery records for the owning sidecar. Plain text routes only
 when the selected target is live or exactly one agent is registered; ambiguous
 text gets a Telegram explanation instead of being guessed. Unconfigured
 group/supergroup chats are ignored instead of linked or replied to.
-Queued inbound deliveries are bounded live gateway state: they are removed when
-the sidecar drains them, unregisters, disconnects, or loses the route lease.
-Each response, including its newline, is limited to 65,536 bytes. The gateway
-returns only the oldest delivery prefix whose actual serialized JSON fits and
-leaves the remainder for later requests. A record that cannot fit by itself is
-rejected without reflecting its content in the diagnostic. A selected prefix is
-removed before socket write, so a write failure can still lose it; the queue has
-no durable acknowledgement or retry contract.
+Routed inbound deliveries are persisted before socket exposure. Each response,
+including its newline, is limited to 65,536 bytes. The gateway returns only the
+oldest delivery prefix whose actual serialized JSON fits and retains it until
+the owning sidecar confirms the exact canonical harness echo. Unregister,
+disconnect, lease expiry, and gateway restart suppress delivery without
+deleting or retargeting it; re-registration replays the exact report. A record
+that cannot fit by itself is rejected without reflecting its content in the
+diagnostic. Canonical ACK and contiguous cursor advancement commit together in
+the same per-stream state file before the socket returns success. That file
+retains the 128 most recent content-free report-ID/route pairs so a reconnecting
+sidecar can safely retry an ACK whose successful response was lost.
+Failures before state-file installation roll back cleanly. If parent-directory
+sync fails after rename, the gateway marks the outcome commit-unknown, refuses
+further state operations, and requires restart instead of claiming rollback.
 
 Run it with the bot token in an environment variable rather than on the command
 line:
@@ -136,7 +142,8 @@ Gateway and sidecar must run the same current socket protocol, which uses
 transport-neutral message-fact identity
 fields and original message bodies.
 It also accepts persistent sidecar requests: `hello`, `heartbeat`,
-`register_agent`, `unregister_agent`, `send_message`, and `goodbye`. The gateway
+`register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, and
+`goodbye`. The gateway
 treats registrations as live leases, refreshes them on heartbeat, removes them on
 explicit unregister/goodbye or socket disconnect, and prunes them on lease expiry.
 `hello`/status responses include a gateway generation and reannouncement hint so
@@ -160,12 +167,15 @@ token, allowlist, chat policy, polling, and update offset. The sidecar still
 publishes the same logical `telegram_register`/`telegram_send` tools (with the
 generic `tool_prefix` when configured), tracks the local session and registered agents, registers
 live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
-deliveries locally as `message.delivered_reported`. Outbound
+deliveries locally as `message.delivered_reported`. The sidecar sends
+`ack_delivery` only after the configured publisher receives a live canonical
+`message.delivered` with the exact report ID, target, and message identity.
+Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram
 chat without accepting a model-supplied destination. A successful local or
 gateway send submits `message.sent_reported` before transient
 `tool.result_reported`. The harness intercepts committed reports and publishes
-the canonical durable facts downstream. Sidecar submission does not acknowledge canonical commit, so
-interception, append failure, or a crash may leave transport effects without a
-canonical fact.
+the canonical durable facts downstream. Missing echoes or uncommitted ACKs
+replay the exact retained report. Telegram replies and reports can duplicate
+across crashes, so remote effects are not exactly once.

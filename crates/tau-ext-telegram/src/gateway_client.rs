@@ -85,6 +85,7 @@ impl GatewayClient {
                 agent_id: Some(agent_id.to_owned()),
                 message: None,
                 display_name,
+                report_id: None,
             },
         )
     }
@@ -102,6 +103,7 @@ impl GatewayClient {
                 agent_id: Some(agent_id.to_owned()),
                 message: None,
                 display_name: None,
+                report_id: None,
             },
         )
     }
@@ -120,6 +122,22 @@ impl GatewayClient {
                 agent_id: Some(agent_id.to_owned()),
                 message: Some(message.to_owned()),
                 display_name: None,
+                report_id: None,
+            },
+        )
+    }
+
+    /// Confirm that one exact gateway delivery reached its canonical harness
+    /// fact.
+    pub(crate) fn acknowledge_delivery(
+        &self,
+        report_id: &str,
+    ) -> Result<GatewaySocketResponse, String> {
+        self.request(
+            GatewayRequestKind::AcknowledgeDelivery,
+            GatewayClientRequest {
+                report_id: Some(report_id.to_owned()),
+                ..GatewayClientRequest::default()
             },
         )
     }
@@ -147,6 +165,7 @@ impl GatewayClient {
             agent_id: request.agent_id,
             message: request.message,
             display_name: request.display_name,
+            report_id: request.report_id,
         };
         let request = serde_json::to_string(&request)
             .map_err(|error| format!("encoding Telegram gateway request: {error}"))?;
@@ -206,6 +225,8 @@ enum GatewayRequestKind {
     UnregisterAgent,
     /// Send one Telegram message from a registered agent.
     SendMessage,
+    /// Persist canonical acknowledgement for one inbound delivery.
+    AcknowledgeDelivery,
     /// Close this sidecar connection.
     Goodbye,
 }
@@ -219,6 +240,7 @@ impl GatewayRequestKind {
             Self::RegisterAgent => "register_agent",
             Self::UnregisterAgent => "unregister_agent",
             Self::SendMessage => "send_message",
+            Self::AcknowledgeDelivery => "ack_delivery",
             Self::Goodbye => "goodbye",
         }
     }
@@ -235,6 +257,8 @@ struct GatewayClientRequest {
     message: Option<String>,
     /// Optional display name metadata.
     display_name: Option<String>,
+    /// Opaque canonical report identity.
+    report_id: Option<String>,
 }
 
 /// JSON-line request sent by the gateway-client sidecar.
@@ -256,6 +280,9 @@ struct GatewayWireRequest<'a> {
     /// Optional display name metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    /// Opaque canonical report identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_id: Option<String>,
 }
 
 /// JSON-line response returned by the gateway socket.

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::io as path_std_io;
 use std::io::BufRead as _;
+use std::sync::Barrier;
 
 use super::*;
 use crate::gateway_client::{GatewayClient, GatewayClientConfig, GatewaySocketResponse};
@@ -65,6 +66,8 @@ fn durable_state_round_trips_with_recent_updates() {
         processed_update_count: 1,
         rejected_update_count: 0,
         selected_route: None,
+        checkpoints: GatewayCheckpoints::default(),
+        recent_acknowledgements: VecDeque::new(),
     };
     state.remember_update(42);
     state.save(&path).expect("save durable state");
@@ -74,6 +77,111 @@ fn durable_state_round_trips_with_recent_updates() {
     assert_eq!(loaded.next_update_offset, Some(43));
     assert!(loaded.has_recent_update(42));
     assert_eq!(loaded.linked_chat.expect("link").chat_id, 10);
+}
+
+/// Ensures committed ACK retry authorization stays oldest-first, bounded, and
+/// content-free inside the existing gateway state schema.
+#[test]
+fn recent_acknowledgements_are_bounded_and_content_free() {
+    let mut state = GatewayDurableState {
+        stream_hash: "stream".to_owned(),
+        ..GatewayDurableState::default()
+    };
+    let route = GatewayRegistrationKey {
+        session_id: "session-alpha".to_owned(),
+        agent_id: "agent-alpha".to_owned(),
+    };
+    for update_id in 0..=RECENT_ACKNOWLEDGEMENT_LIMIT {
+        state.remember_acknowledgement(
+            TelegramReportId::for_gateway(
+                "stream",
+                TelegramUpdateId::new(update_id as i64).expect("valid update"),
+            ),
+            route.clone(),
+        );
+    }
+
+    assert_eq!(
+        state.recent_acknowledgements.len(),
+        RECENT_ACKNOWLEDGEMENT_LIMIT
+    );
+    assert_eq!(
+        state
+            .recent_acknowledgements
+            .front()
+            .expect("oldest retained ACK")
+            .report_id,
+        TelegramReportId::for_gateway("stream", TelegramUpdateId::new(1).expect("valid update"))
+    );
+    let encoded = serde_json::to_string(&state).expect("encode durable state");
+    assert!(!encoded.contains("\"text\""));
+    assert!(!encoded.contains("\"message_id\""));
+}
+
+/// Ensures corrupt persisted retry authorization cannot construct an untyped
+/// report identity during gateway restart.
+#[test]
+fn durable_state_rejects_invalid_recent_ack_report_id() {
+    let json = r#"{
+        "stream_hash":"stream",
+        "recent_acknowledgements":[{
+            "report_id":"not-a-gateway-report",
+            "route":{"session_id":"session","agent_id":"agent"}
+        }]
+    }"#;
+
+    assert!(serde_json::from_str::<GatewayDurableState>(json).is_err());
+}
+
+/// Ensures restart rejects malformed, wrong-domain, and wrong-derived routed
+/// report identities instead of replaying an unacknowledgeable checkpoint.
+#[test]
+fn durable_state_rejects_invalid_checkpoint_report_ids() {
+    let update_id = TelegramUpdateId::new(42).expect("valid update");
+    let expected = TelegramReportId::for_gateway("stream", update_id);
+    let mut state = GatewayDurableState {
+        stream_hash: "stream".to_owned(),
+        ..GatewayDurableState::default()
+    };
+    state.checkpoints.insert_routed(
+        update_id,
+        GatewayDelivery {
+            request_id: expected,
+            session_id: "session".to_owned(),
+            agent_id: "agent".to_owned(),
+            message_id: "telegram:10:42".to_owned(),
+            sender_id: "7".to_owned(),
+            source: "sender".to_owned(),
+            conversation_id: "10".to_owned(),
+            text: "body".to_owned(),
+        },
+    );
+    let original = serde_json::to_value(&state).expect("encode durable state");
+    let invalid_report_ids = [
+        "malformed".to_owned(),
+        format!("telegram-report:{}", "a".repeat(64)),
+        TelegramReportId::for_gateway(
+            "other-stream",
+            TelegramUpdateId::new(43).expect("valid update"),
+        )
+        .as_str()
+        .to_owned(),
+    ];
+
+    for report_id in invalid_report_ids {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("state.json");
+        let mut candidate = original.clone();
+        candidate["checkpoints"][0]["checkpoint"]["delivery"]["request_id"] =
+            serde_json::Value::String(report_id);
+        fs::write(
+            &path,
+            serde_json::to_vec(&candidate).expect("encode corrupt state"),
+        )
+        .expect("write corrupt state");
+
+        assert!(GatewayDurableState::load(&path, "stream").is_err());
+    }
 }
 
 /// Ensures the handler rejects unallowlisted Telegram users before any
@@ -659,11 +767,10 @@ fn routing_session_aliases_survive_registry_churn() {
     assert!(sent.iter().any(|(_, text)| text.contains("Selected")));
 }
 
-/// Ensures pending deliveries are removed if a route unregisters before the
-/// sidecar drains them, so stale delivery records cannot become submitted
-/// reports after ownership loss.
+/// Ensures unregister suppresses a durable delivery until its exact route
+/// becomes live again, without deleting the checkpoint.
 #[test]
-fn routing_unregister_drops_pending_delivery() {
+fn routing_unregister_suppresses_pending_delivery() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
     fixture.register_route(1, "session-alpha", "agent-alpha");
     fixture
@@ -676,7 +783,7 @@ fn routing_unregister_drops_pending_delivery() {
     assert!(fixture.take_deliveries(1).is_empty());
 }
 
-/// Ensures a sidecar cannot accumulate an unbounded inbound delivery queue.
+/// Ensures one socket response exposes at most the bounded durable prefix.
 #[test]
 fn routing_pending_delivery_queue_is_bounded() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -694,14 +801,13 @@ fn routing_pending_delivery_queue_is_bounded() {
 
     let deliveries = fixture.take_deliveries(1);
     assert_eq!(deliveries.len(), MAX_PENDING_DELIVERIES_PER_SIDECAR);
-    let sent = fixture.client.sent.lock().expect("sent lock");
-    assert!(sent.iter().any(|(_, text)| text.contains("queue is full")));
+    assert!(fixture.client.sent.lock().expect("sent lock").is_empty());
 }
 
 /// Ensures queued inbound delivery records are exposed through the persistent
-/// sidecar socket response shape and drained after one successful response.
+/// sidecar socket response shape and replayed until canonical ACK.
 #[test]
-fn sidecar_heartbeat_drains_queued_delivery_response() {
+fn sidecar_heartbeat_replays_pending_delivery_response() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
     fixture.register_route(1, "session-alpha", "agent-alpha");
     fixture
@@ -722,7 +828,7 @@ fn sidecar_heartbeat_drains_queued_delivery_response() {
     assert_eq!(deliveries[0]["session_id"], "session-alpha");
     assert_eq!(deliveries[0]["agent_id"], "agent-alpha");
 
-    let drained = handle_gateway_socket_request(
+    let replayed = handle_gateway_socket_request(
         &fixture.gateway.socket_state,
         1,
         GatewaySocketRequest {
@@ -731,12 +837,418 @@ fn sidecar_heartbeat_drains_queued_delivery_response() {
         },
     );
     assert_eq!(
-        drained["deliveries"]
+        replayed["deliveries"]
             .as_array()
             .expect("deliveries array")
             .len(),
-        0
+        1
     );
+}
+
+/// Ensures an expired registration cannot acknowledge a routed delivery even
+/// when no intervening heartbeat or send request pruned its lease.
+#[test]
+fn canonical_ack_prunes_expired_route_before_authorization() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(150, message(7, 10, "routed")))
+        .expect("persist routed checkpoint");
+    let delivery = fixture.take_deliveries(1).pop().expect("pending delivery");
+    let key = GatewayRegistrationKey {
+        session_id: "session-alpha".to_owned(),
+        agent_id: "agent-alpha".to_owned(),
+    };
+    fixture
+        .gateway
+        .socket_state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .registrations
+        .get_mut(&key)
+        .expect("registered route")
+        .expires_at = Instant::now();
+
+    let error = fixture
+        .gateway
+        .socket_state
+        .acknowledge_delivery(1, delivery.request_id.as_str().to_owned())
+        .expect_err("expired route must not acknowledge delivery");
+
+    assert_eq!(
+        error,
+        "Telegram gateway report does not belong to this sidecar."
+    );
+    assert_eq!(fixture.take_deliveries(1).len(), 0);
+    assert_eq!(
+        fixture
+            .gateway
+            .socket_state
+            .durable_deliveries
+            .lock()
+            .expect("durable deliveries lock")
+            .len(),
+        1
+    );
+}
+
+/// Ensures a routed checkpoint blocks the durable cursor across a later
+/// completed command, then one persisted canonical ACK advances the mixed
+/// prefix and survives restart.
+#[test]
+fn canonical_ack_advances_durable_mixed_prefix() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(200, message(7, 10, "routed")))
+        .expect("persist routed checkpoint");
+    fixture
+        .gateway
+        .process_update(update(201, message(7, 10, "/status")))
+        .expect("persist non-routed checkpoint");
+
+    assert_eq!(fixture.gateway.durable.next_update_offset, None);
+    let delivery = fixture.take_deliveries(1).pop().expect("pending delivery");
+    fixture
+        .gateway
+        .socket_state
+        .acknowledge_delivery(1, delivery.request_id.as_str().to_owned())
+        .expect("persist acknowledgement");
+    fixture.gateway.durable = fixture
+        .gateway
+        .durable_store
+        .snapshot()
+        .expect("healthy store");
+
+    assert_eq!(fixture.gateway.durable.next_update_offset, Some(202));
+    assert!(fixture.take_deliveries(1).is_empty());
+    let restored = GatewayDurableState::load(
+        &fixture._tempdir.path().join("state.json"),
+        &fixture.gateway.durable.stream_hash,
+    )
+    .expect("restart durable state");
+    assert_eq!(restored.next_update_offset, Some(202));
+    assert!(restored.checkpoints.pending_deliveries().is_empty());
+}
+
+/// Ensures every routed-update save cut either cleanly rolls back before
+/// installation or poisons after installation while restart sees the candidate.
+#[test]
+fn routed_checkpoint_save_cuts_have_deterministic_recovery() {
+    for cut in [
+        GatewaySaveCut::Write,
+        GatewaySaveCut::FileSync,
+        GatewaySaveCut::Rename,
+        GatewaySaveCut::ParentSync,
+    ] {
+        let mut fixture = GatewayFixture::new(Some(10), [7]);
+        fixture.register_route(1, "session-alpha", "agent-alpha");
+        let before = fixture
+            .gateway
+            .durable_store
+            .snapshot()
+            .expect("healthy store");
+        fixture.gateway.durable_store.fail_next_save_at(cut);
+
+        let error = fixture
+            .gateway
+            .process_update(update(205, message(7, 10, "routed")))
+            .expect_err("injected routed checkpoint save failure");
+        let restored =
+            GatewayDurableState::load(&fixture._tempdir.path().join("state.json"), "test-stream")
+                .expect("restart state");
+
+        assert!(fixture.take_deliveries(1).is_empty(), "cut: {cut:?}");
+        if cut == GatewaySaveCut::ParentSync {
+            assert!(error.contains("commit-unknown"), "cut: {cut:?}");
+            assert!(fixture.gateway.durable_store.snapshot().is_err());
+            assert_eq!(restored.processed_update_count, 1);
+            assert_eq!(restored.checkpoints.pending_deliveries().len(), 1);
+        } else {
+            assert_eq!(
+                fixture
+                    .gateway
+                    .durable_store
+                    .snapshot()
+                    .expect("healthy rollback"),
+                before,
+                "cut: {cut:?}"
+            );
+            assert_eq!(restored, before, "cut: {cut:?}");
+        }
+    }
+}
+
+/// Ensures every ACK save cut either keeps the old pending state or poisons
+/// after installation while restart sees the committed ACK.
+#[test]
+fn canonical_ack_save_cuts_have_deterministic_recovery() {
+    for cut in [
+        GatewaySaveCut::Write,
+        GatewaySaveCut::FileSync,
+        GatewaySaveCut::Rename,
+        GatewaySaveCut::ParentSync,
+    ] {
+        let mut fixture = GatewayFixture::new(Some(10), [7]);
+        fixture.register_route(1, "session-alpha", "agent-alpha");
+        fixture
+            .gateway
+            .process_update(update(206, message(7, 10, "routed")))
+            .expect("persist routed checkpoint");
+        let before = fixture
+            .gateway
+            .durable_store
+            .snapshot()
+            .expect("healthy store");
+        let delivery = fixture.take_deliveries(1).pop().expect("pending delivery");
+        fixture.gateway.durable_store.fail_next_save_at(cut);
+
+        let error = fixture
+            .gateway
+            .socket_state
+            .acknowledge_delivery(1, delivery.request_id.as_str().to_owned())
+            .expect_err("injected canonical ACK save failure");
+        let restored =
+            GatewayDurableState::load(&fixture._tempdir.path().join("state.json"), "test-stream")
+                .expect("restart state");
+
+        assert_eq!(fixture.take_deliveries(1).len(), 1, "cut: {cut:?}");
+        if cut == GatewaySaveCut::ParentSync {
+            assert!(error.contains("commit-unknown"), "cut: {cut:?}");
+            assert!(fixture.gateway.durable_store.snapshot().is_err());
+            assert_eq!(restored.next_update_offset, Some(207));
+            assert!(restored.checkpoints.pending_deliveries().is_empty());
+            assert_eq!(restored.recent_acknowledgements.len(), 1);
+        } else {
+            assert_eq!(
+                fixture
+                    .gateway
+                    .durable_store
+                    .snapshot()
+                    .expect("healthy rollback"),
+                before,
+                "cut: {cut:?}"
+            );
+            assert_eq!(restored, before, "cut: {cut:?}");
+        }
+    }
+}
+
+/// Ensures an update waiter that passed an initial health check before another
+/// transaction poisoned the store rechecks health after acquiring the lock and
+/// cannot mutate or save the commit-unknown state.
+#[test]
+fn commit_unknown_poison_stops_waiter_after_initial_health_check() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(206, message(7, 10, "routed")))
+        .expect("persist routed checkpoint");
+    let report_id = fixture
+        .take_deliveries(1)
+        .pop()
+        .expect("pending delivery")
+        .request_id;
+    let route = GatewayRegistrationKey {
+        session_id: "session-alpha".to_owned(),
+        agent_id: "agent-alpha".to_owned(),
+    };
+    let later_update = TelegramUpdateId::new(207).expect("valid later update");
+    let mut candidate = fixture
+        .gateway
+        .durable_store
+        .snapshot()
+        .expect("healthy store");
+    candidate.remember_update(later_update.as_i64());
+    candidate.processed_update_count = candidate.processed_update_count.saturating_add(1);
+    candidate.checkpoints.insert_non_routed(later_update);
+
+    let ack_entered = Arc::new(Barrier::new(2));
+    let ack_resume = Arc::new(Barrier::new(2));
+    fixture
+        .gateway
+        .durable_store
+        .pause_next_ack_after_locked_health_check(GatewayStorePause {
+            entered: Arc::clone(&ack_entered),
+            resume: Arc::clone(&ack_resume),
+        });
+    fixture
+        .gateway
+        .durable_store
+        .fail_next_save_at(GatewaySaveCut::ParentSync);
+    let ack_store = Arc::clone(&fixture.gateway.durable_store);
+    let ack_thread = std::thread::spawn(move || ack_store.acknowledge_delivery(&report_id, &route));
+    ack_entered.wait();
+
+    let waiter_entered = Arc::new(Barrier::new(2));
+    let waiter_resume = Arc::new(Barrier::new(2));
+    fixture
+        .gateway
+        .durable_store
+        .pause_next_after_initial_health_check(GatewayStorePause {
+            entered: Arc::clone(&waiter_entered),
+            resume: Arc::clone(&waiter_resume),
+        });
+    let waiter_store = Arc::clone(&fixture.gateway.durable_store);
+    let waiter_thread =
+        std::thread::spawn(move || waiter_store.commit_processed_update(&candidate, later_update));
+    waiter_entered.wait();
+    waiter_resume.wait();
+    ack_resume.wait();
+
+    let ack_error = ack_thread
+        .join()
+        .expect("ACK thread")
+        .expect_err("parent sync must be commit-unknown");
+    let waiter_error = waiter_thread
+        .join()
+        .expect("waiter thread")
+        .expect_err("poisoned waiter must fail");
+    assert!(ack_error.contains("commit-unknown"));
+    assert!(waiter_error.contains("commit-unknown"));
+
+    let restored =
+        GatewayDurableState::load(&fixture._tempdir.path().join("state.json"), "test-stream")
+            .expect("restart state");
+    assert_eq!(restored.next_update_offset, Some(207));
+    assert_eq!(restored.processed_update_count, 1);
+    assert!(!restored.has_recent_update(207));
+    assert_eq!(restored.recent_acknowledgements.len(), 1);
+}
+
+/// Ensures a committed ACK remains authorized after its response is dropped,
+/// sidecar reconnection, route reannouncement, and gateway restart.
+#[test]
+fn committed_ack_retry_survives_response_loss_and_restart() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(207, message(7, 10, "routed")))
+        .expect("persist routed checkpoint");
+    let report_id = fixture
+        .take_deliveries(1)
+        .pop()
+        .expect("pending delivery")
+        .request_id;
+
+    let _dropped_response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "ack_delivery".to_owned(),
+            report_id: Some(report_id.as_str().to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    fixture.unregister_route(1, "session-alpha", "agent-alpha");
+    fixture.register_route(2, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .socket_state
+        .acknowledge_delivery(2, report_id.as_str().to_owned())
+        .expect("retry committed ACK after reannouncement");
+
+    let path = fixture._tempdir.path().join("state.json");
+    let restored = GatewayDurableState::load(&path, "test-stream").expect("restart durable state");
+    assert_eq!(restored.next_update_offset, Some(208));
+    assert!(restored.checkpoints.pending_deliveries().is_empty());
+    assert_eq!(restored.recent_acknowledgements.len(), 1);
+
+    let restarted_store = Arc::new(GatewayDurableStore::new(path, restored.clone()));
+    let restarted_socket = GatewaySocketState::new_with_durable_store(
+        &fixture.gateway.cfg,
+        &restored,
+        "test-stream".to_owned(),
+        PathBuf::from("/tmp/restarted-test.sock"),
+        Arc::clone(&fixture.gateway.client),
+        restarted_store,
+    );
+    let now = Instant::now();
+    {
+        let mut registry = restarted_socket.registry.lock().expect("registry lock");
+        registry.hello(3, now);
+        registry
+            .register_agent(3, register_request("session-alpha", "agent-alpha"), now)
+            .expect("reannounce restarted route");
+    }
+    restarted_socket
+        .acknowledge_delivery(3, report_id.as_str().to_owned())
+        .expect("retry committed ACK after restart");
+}
+
+/// Ensures an ACK racing a separately processed update is retained when that
+/// update commits, preserving one contiguous mixed prefix.
+#[test]
+fn processed_update_commit_preserves_concurrent_ack() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(208, message(7, 10, "routed")))
+        .expect("persist routed checkpoint");
+    let report_id = fixture
+        .take_deliveries(1)
+        .pop()
+        .expect("pending delivery")
+        .request_id;
+    let mut candidate = fixture
+        .gateway
+        .durable_store
+        .snapshot()
+        .expect("healthy store");
+    let later_update = TelegramUpdateId::new(209).expect("valid later update");
+    candidate.remember_update(later_update.as_i64());
+    candidate.processed_update_count = candidate.processed_update_count.saturating_add(1);
+    candidate.checkpoints.insert_non_routed(later_update);
+    let route = GatewayRegistrationKey {
+        session_id: "session-alpha".to_owned(),
+        agent_id: "agent-alpha".to_owned(),
+    };
+    fixture
+        .gateway
+        .durable_store
+        .acknowledge_delivery(&report_id, &route)
+        .expect("commit racing ACK");
+
+    let committed = fixture
+        .gateway
+        .durable_store
+        .commit_processed_update(&candidate, later_update)
+        .expect("commit separately processed update");
+
+    assert_eq!(committed.next_update_offset, Some(210));
+    assert!(committed.checkpoints.pending_deliveries().is_empty());
+    assert_eq!(committed.recent_acknowledgements.len(), 1);
+}
+
+/// Ensures restart and registration churn suppress but never delete or
+/// retarget an exact pending routed report.
+#[test]
+fn restart_and_reregistration_replay_exact_routed_report() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(210, message(7, 10, "exact body")))
+        .expect("persist routed checkpoint");
+    let original = fixture.take_deliveries(1);
+    assert_eq!(original.len(), 1);
+
+    let restored = GatewayDurableState::load(
+        &fixture._tempdir.path().join("state.json"),
+        &fixture.gateway.durable.stream_hash,
+    )
+    .expect("restart durable state");
+    assert_eq!(restored.checkpoints.pending_deliveries(), original);
+    fixture.unregister_route(1, "session-alpha", "agent-alpha");
+    assert!(fixture.take_deliveries(1).is_empty());
+    fixture.register_route(2, "session-alpha", "agent-alpha");
+    assert_eq!(fixture.take_deliveries(2), original);
 }
 
 /// Proves the response limit includes the newline and accepts an exact
@@ -831,8 +1343,7 @@ fn enqueue_checks_missing_route_before_singleton_size() {
     assert!(error.contains("no longer live"), "{error}");
 }
 
-/// Ensures queue-capacity rejection precedes singleton-size validation so full
-/// live queues preserve their existing bounded backpressure outcome.
+/// Ensures durable backlog depth does not hide singleton-size validation.
 #[test]
 fn enqueue_checks_full_queue_before_singleton_size() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -859,14 +1370,14 @@ fn enqueue_checks_full_queue_before_singleton_size() {
         )
         .expect_err("full queue must be rejected first");
 
-    assert!(error.contains("queue is full"), "{error}");
+    assert_eq!(error, DELIVERY_TOO_LARGE_MESSAGE);
 }
 
 /// Reproduces 32 queued 3,500-byte records through the real client,
-/// exercises both send and heartbeat response producers, and proves every
-/// bounded batch preserves ordered exactly-once delivery.
+/// exercises both send and heartbeat response producers, and proves the oldest
+/// bounded prefix replays unchanged while canonical ACK is missing.
 #[test]
-fn gateway_client_drains_32_3500_byte_deliveries_in_bounded_ordered_batches() {
+fn gateway_client_replays_bounded_durable_prefix_in_order() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
     let tempdir = tempfile::tempdir().expect("socket tempdir");
     let socket_path = tempdir.path().join("gateway.sock");
@@ -895,7 +1406,7 @@ fn gateway_client_drains_32_3500_byte_deliveries_in_bounded_ordered_batches() {
 
     let first =
         bounded_gateway_response(client.send_message("session-alpha", "agent-alpha", "outbound"));
-    let mut request_ids = first
+    let request_ids = first
         .deliveries
         .into_iter()
         .map(|delivery| delivery.request_id)
@@ -905,33 +1416,15 @@ fn gateway_client_drains_32_3500_byte_deliveries_in_bounded_ordered_batches() {
         "the reproduction must require more than one response"
     );
 
-    for _ in 0..MAX_PENDING_DELIVERIES_PER_SIDECAR {
-        if request_ids.len() == MAX_PENDING_DELIVERIES_PER_SIDECAR {
-            break;
-        }
-        let response = bounded_gateway_response(client.heartbeat());
-        request_ids.extend(
-            response
-                .deliveries
-                .into_iter()
-                .map(|delivery| delivery.request_id),
-        );
-    }
-    assert_eq!(
-        request_ids.len(),
-        MAX_PENDING_DELIVERIES_PER_SIDECAR,
-        "bounded heartbeat draining made no sufficient progress"
-    );
-    let drained = bounded_gateway_response(client.heartbeat());
-    assert!(drained.deliveries.is_empty());
-
-    let expected = (1..=MAX_PENDING_DELIVERIES_PER_SIDECAR)
-        .map(|id| format!("telegram-{id}"))
+    let replayed = bounded_gateway_response(client.heartbeat())
+        .deliveries
+        .into_iter()
+        .map(|delivery| delivery.request_id)
         .collect::<Vec<_>>();
-    assert_eq!(request_ids, expected);
+    assert_eq!(replayed, request_ids);
     assert_eq!(
         request_ids.iter().collect::<HashSet<_>>().len(),
-        MAX_PENDING_DELIVERIES_PER_SIDECAR
+        request_ids.len()
     );
 
     drop(client);
@@ -1459,19 +1952,25 @@ impl GatewayFixture {
         let client = Arc::new(FakeGatewayClient::default());
         let gateway_client: Arc<dyn TelegramClient> = client.clone();
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let socket_state = Arc::new(GatewaySocketState::new(
+        let state_path = tempdir.path().join("state.json");
+        let durable_store = Arc::new(GatewayDurableStore::new(
+            state_path.clone(),
+            durable.clone(),
+        ));
+        let socket_state = Arc::new(GatewaySocketState::new_with_durable_store(
             &cfg,
             &durable,
             "test-stream".to_owned(),
             PathBuf::from("/tmp/test.sock"),
             Arc::clone(&gateway_client),
+            Arc::clone(&durable_store),
         ));
         Self {
             gateway: Gateway {
                 cfg,
                 client: gateway_client,
-                state_path: tempdir.path().join("state.json"),
                 durable,
+                durable_store,
                 socket_state,
                 _resources: GatewayResources::Test,
             },
@@ -1518,10 +2017,7 @@ impl GatewayFixture {
     fn take_deliveries(&self, connection_id: u64) -> Vec<GatewayDelivery> {
         self.gateway
             .socket_state
-            .registry
-            .lock()
-            .expect("registry lock")
-            .take_deliveries(connection_id, &self.gateway.socket_state.generation)
+            .durable_deliveries_for_connection(connection_id)
     }
 }
 
@@ -1572,7 +2068,10 @@ fn register_request(session_id: &str, agent_id: &str) -> GatewaySocketRequest {
 /// Build one deterministic delivery record for response-boundary tests.
 fn test_delivery(request_id: u64, text: &str) -> GatewayDelivery {
     GatewayDelivery {
-        request_id: format!("telegram-{request_id}"),
+        request_id: TelegramReportId::for_gateway(
+            "delivery-response-test",
+            TelegramUpdateId::new(request_id as i64).expect("valid update"),
+        ),
         session_id: "session-alpha".to_owned(),
         agent_id: "agent-alpha".to_owned(),
         message_id: format!("telegram:10:{request_id}"),
@@ -1608,19 +2107,10 @@ fn assert_delivery_batch_splits_two_records(text: &str) {
         generation,
         &[first.clone(), second.clone()]
     ));
-    let mut registry = GatewayRegistry::default();
-    registry
-        .pending_deliveries
-        .insert(1, vec![first.clone(), second.clone()]);
-
-    let selected = registry.take_deliveries(1, generation);
+    let selected = select_delivery_prefix(generation, &[first.clone(), second]);
 
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].request_id, first.request_id);
-    assert_eq!(
-        registry.pending_deliveries[&1][0].request_id,
-        second.request_id
-    );
     assert!(successful_response_wire_bytes(generation, &selected) <= MAX_GATEWAY_RESPONSE_BYTES);
 }
 
