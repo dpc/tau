@@ -1687,6 +1687,7 @@ fn dir_lock_display(command: &str, dir: &Path) -> ToolUseState {
 
 fn tool_result(invoke: &ToolStarted, result: CborValue, display: ToolUseState) -> Event {
     Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,
@@ -1709,6 +1710,7 @@ fn tool_error_with_args(
     args: Option<String>,
 ) -> Event {
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,
@@ -1726,6 +1728,7 @@ fn tool_error_with_args(
 
 fn cancelled_event(invoke: ToolStarted) -> Event {
     Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: ToolType::Function,

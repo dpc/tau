@@ -7911,6 +7911,7 @@ fn reported_lock_wait_duration_seconds_rounds_only_slow_waits() {
 fn lock_wait_duration_header_wraps_non_map_results() {
     let event = with_lock_wait_duration(
         Event::ToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id: "call-lock-wait".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,
@@ -7937,6 +7938,7 @@ fn lock_wait_duration_header_wraps_non_map_results() {
 fn lock_wait_duration_header_extends_tool_error_details() {
     let event = with_lock_wait_duration(
         Event::ToolError(tau_proto::ToolError {
+            presentation: Default::default(),
             call_id: "call-lock-wait".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,

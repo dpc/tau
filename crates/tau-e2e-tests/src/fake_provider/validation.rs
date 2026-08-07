@@ -97,15 +97,15 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                         || call_id.is_empty()
                         || call_id.len() > 256
                         || !matches!(
-                            lane.actions.get(action_index + 1),
-                            Some(ScenarioActionV2::DummyToolResult {
-                                call_id: result_id,
-                                ..
-                            }) | Some(ScenarioActionV2::DummyToolRepair {
-                                call_id: result_id,
-                                ..
-                            }) if result_id == call_id
-                        ) =>
+                                lane.actions.get(action_index + 1),
+                                Some(ScenarioActionV2::DummyToolResult {
+                        call_id: result_id,
+                                    ..
+                                }) | Some(ScenarioActionV2::DummyToolRepair {
+                                    call_id: result_id,
+                                    ..
+                                }) if result_id == call_id
+                            ) =>
                 {
                     return Err(ClientError::handler(
                         "scenario requires exactly one unique bounded dummy call/result pair",

@@ -158,6 +158,7 @@ fn protocol_io_meter_attributes_tool_result_fields_without_contents() {
     let mut meter = TestMeter::default();
     finish_protocol_io_cold_attach(&mut meter);
     let result = tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("read"),
         tool_type: ToolType::Function,
@@ -256,6 +257,7 @@ fn protocol_io_meter_attributes_provider_tool_results() {
     let mut meter = TestMeter::default();
     finish_protocol_io_cold_attach(&mut meter);
     let result = tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "call-provider".into(),
         tool_name: ToolName::new("read_image"),
         tool_type: ToolType::Function,
@@ -325,6 +327,7 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         responses_envelope: Some(envelope.clone()),
     };
     let tool_result = tau_proto::ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_type: ToolType::Function,
         status: tau_proto::ToolResultStatus::Success,

@@ -38,13 +38,20 @@ const WORKER_RESPONSE: &str = "worker boot-a complete";
 const MAIN_START_RESPONSE: &str = "worker start accepted";
 const MAIN_FINAL_RESPONSE: &str = "worker completion observed";
 const HIDDEN_MODEL_SENTINEL: &str = tau_e2e_tests::FAKE_MODEL_ID;
+/// Durable instruction text. Typed provenance, rather than marker-shaped text,
+/// determines which prefix receives an envelope during provider projection.
 const WORKER_INITIAL: &str = concat!(
-    "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You were started by an agent `main`. Your responses will be delivered to it. ",
     "You can use the `message` tool to communicate with agents.\n\n",
     "Complete the deterministic worker instruction."
 );
+const WORKER_PROVIDER_INITIAL: &str = concat!(
+    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
+    "Complete the deterministic worker instruction."
+);
 const RESTORE_NOTICE: &str = concat!(
-    "[tau-internal] Previous session was interrupted and restored. Less than 1 minute has passed ",
+    "Previous session was interrupted and restored. Less than 1 minute has passed ",
     "since the last recorded session event, and the state of the world might have changed. ",
     "Session-scoped tool and extension state may also have changed; inspect current tool state ",
     "and recreate timers or other session-scoped setup if still needed."
@@ -241,7 +248,8 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     let second_worker_projection =
         assert_worker_size_projection(&second_worker_wide, &identities.worker, &identities)?;
     let second_worker_style = second.marker_styles(identities.worker.as_str())?;
-    let narrow_prompt_prefix = "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it.";
+    let narrow_prompt_prefix =
+        "You were started by an agent `main`. Your responses will be delivered to it.";
     if !second_worker_wide
         .lines()
         .any(|line| line.contains(narrow_prompt_prefix))
@@ -596,7 +604,7 @@ fn scenario() -> ScenarioV2 {
                 ctx_id: "s8-worker".to_owned(),
                 actions: vec![
                     ScenarioActionV2::Text {
-                        user_text: WORKER_INITIAL.to_owned(),
+                        user_text: WORKER_PROVIDER_INITIAL.to_owned(),
                         response: "worker boot-a complete".to_owned(),
                     },
                     ScenarioActionV2::Text {

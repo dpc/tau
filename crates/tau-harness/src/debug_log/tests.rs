@@ -472,6 +472,7 @@ fn compact_debug_string_keeps_short_strings() {
 fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
     let sentinel = b"\x89PNG\r\n\x1a\nunique-image-sentinel".to_vec();
     let tool_result = tau_proto::ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_type: tau_proto::ToolType::Function,
         status: tau_proto::ToolResultStatus::Success,
@@ -614,6 +615,7 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
 #[test]
 fn tool_result_report_image_bytes_are_redacted_before_debug_json() {
     let event = Event::ToolResultReported(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "call-image-report".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
         tool_type: tau_proto::ToolType::Function,
@@ -654,6 +656,7 @@ fn intercept_reply_nested_event_redacts_provider_image_bytes() {
     let mut message = HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
         action: tau_proto::InterceptAction::Pass(Some(Box::new(Event::ProviderToolResult(
             tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: "call-image".into(),
                 tool_name: tau_proto::ToolName::new("read_image"),
                 tool_type: tau_proto::ToolType::Function,
@@ -851,6 +854,7 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![tau_proto::ContextItem::ToolResult(
             tau_proto::ToolResultItem {
+                presentation: Default::default(),
                 call_id: "call-image".into(),
                 tool_type: tau_proto::ToolType::Function,
                 status: tau_proto::ToolResultStatus::Success,

@@ -4,6 +4,7 @@ use super::*;
 fn format_session_entry_tree_preview_shows_grouped_tool_results() {
     let result = AgentEntry::ToolResults {
         items: vec![tau_proto::ToolResultItem {
+            presentation: Default::default(),
             call_id: "call_ugly".into(),
             tool_type: tau_proto::ToolType::Function,
             status: tau_proto::ToolResultStatus::Success,
@@ -18,6 +19,7 @@ fn format_session_entry_tree_preview_shows_grouped_tool_results() {
 
     let multibyte_result = AgentEntry::ToolResults {
         items: vec![tau_proto::ToolResultItem {
+            presentation: Default::default(),
             call_id: "call_utf8".into(),
             tool_type: tau_proto::ToolType::Function,
             status: tau_proto::ToolResultStatus::Success,

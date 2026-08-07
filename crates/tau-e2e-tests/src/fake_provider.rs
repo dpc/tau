@@ -832,10 +832,10 @@ impl FakeState {
                         "</response>",
                         "&lt;/response&gt;",
                     );
-                    format!(
-                        "[tau-internal]: Watched agent {child_agent_id} emitted a response\n\n\
+                    tau_internal_envelope(&format!(
+                        "Watched agent {child_agent_id} emitted a response\n\n\
                          <response>\n{body}\n</response>"
-                    )
+                    ))
                 }
                 WatchNotificationV2::Prompt { content } => {
                     let body = tau_proto::escape_exact_sentinel_close(
@@ -843,10 +843,10 @@ impl FakeState {
                         "</prompt>",
                         "&lt;/prompt&gt;",
                     );
-                    format!(
-                        "[tau-internal]: Watched agent {child_agent_id} received a user prompt\n\n\
+                    tau_internal_envelope(&format!(
+                        "Watched agent {child_agent_id} received a user prompt\n\n\
                          <prompt>\n{body}\n</prompt>"
-                    )
+                    ))
                 }
             };
             expected_user_text.push(text);
@@ -2139,6 +2139,14 @@ fn scenario_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
     provider_user_texts(prompt)
 }
 
+/// Frame fixture-expected harness-owned internal prompt text exactly as
+/// production does.
+fn tau_internal_envelope(body: &str) -> String {
+    let body =
+        tau_proto::escape_exact_sentinel_close(body, "</tau_internal>", "&lt;/tau_internal&gt;");
+    format!("<tau_internal>{body}</tau_internal>")
+}
+
 fn latest_provider_user_text(prompt: &tau_proto::AgentPromptCreated) -> Option<String> {
     provider_user_texts(prompt).pop()
 }
@@ -2154,7 +2162,9 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
                     .content
                     .into_iter()
                     .map(|part| match part {
-                        ContentPart::Text { text } => text,
+                        ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
+                            text
+                        }
                     })
                     .collect::<String>(),
             ),

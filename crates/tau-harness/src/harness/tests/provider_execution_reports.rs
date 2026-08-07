@@ -1235,6 +1235,7 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         agent_id: crate::parse_agent_id("spoofed"),
         output_items: vec![tau_proto::ContextItem::ToolResult(
             tau_proto::ToolResultItem {
+                presentation: Default::default(),
                 call_id: "image-call".into(),
                 tool_type: tau_proto::ToolType::Function,
                 status: tau_proto::ToolResultStatus::Success,

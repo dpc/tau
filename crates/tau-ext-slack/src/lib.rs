@@ -5721,6 +5721,7 @@ fn structured_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
 /// Construct one ordinary terminal successful tool result.
 fn successful_tool_result(invoke: &ToolStarted, text: &str) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
@@ -5738,6 +5739,7 @@ fn successful_tool_result(invoke: &ToolStarted, text: &str) -> ToolResult {
 
 fn tool_error(invoke: ToolStarted, message: String) -> Event {
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

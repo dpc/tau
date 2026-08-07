@@ -285,6 +285,7 @@ impl ReleaseWorker {
                 Ok(WorkerInput::Arm) => armed = true,
                 Ok(WorkerInput::Cancel) => {
                     let _ = handle.report_tool_cancelled_detached(tau_proto::ToolCancelled {
+                        presentation: Default::default(),
                         call_id: invoke.call_id.clone(),
                         tool_name: invoke.tool_name.clone(),
                         tool_type: ToolType::Function,
@@ -331,6 +332,7 @@ impl ReleaseWorker {
             }
             if armed && authenticated && claim(&terminal, TerminalOwner::Release) {
                 let _ = handle.report_tool_result_detached(ToolResult {
+                    presentation: Default::default(),
                     call_id: invoke.call_id.clone(),
                     tool_name: invoke.tool_name.clone(),
                     tool_type: ToolType::Function,
@@ -383,6 +385,7 @@ fn claim(terminal: &Mutex<TerminalOwner>, owner: TerminalOwner) -> bool {
 /// Builds one worker-owned terminal error.
 fn worker_error(invoke: &tau_proto::ToolStarted, message: String) -> ToolError {
     ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,

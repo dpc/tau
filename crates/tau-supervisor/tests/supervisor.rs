@@ -439,6 +439,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         result,
         HarnessInputMessage::emit_with_persist(
             Event::ToolResultReported(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: "call-1".into(),
                 tool_name: tau_proto::ToolName::new("echo"),
                 tool_type: tau_proto::ToolType::Function,

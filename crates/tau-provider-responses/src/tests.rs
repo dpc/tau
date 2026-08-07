@@ -801,6 +801,7 @@ fn explicit_prompt_cache_marks_only_earliest_constructed_input() {
                     ),
                 }),
                 ContextItem::ToolResult(tau_proto::ToolResultItem {
+                    presentation: Default::default(),
                     call_id: tau_proto::ToolCallId::new("call-1"),
                     tool_type: ToolType::Function,
                     status: tau_proto::ToolResultStatus::Success,
@@ -1711,6 +1712,7 @@ fn prompt_with_replayed_user_text() -> tau_proto::AgentPromptCreated {
         .push(tau_proto::ContextBlock::ToolResults(
             tau_proto::ToolResultsBlock {
                 items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
                     call_id: tau_proto::ToolCallId::new("call_1"),
                     tool_type: ToolType::Function,
                     status: ToolResultStatus::Success,

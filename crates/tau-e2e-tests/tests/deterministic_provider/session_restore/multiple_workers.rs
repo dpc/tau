@@ -6,14 +6,14 @@ const ALPHA_ROLE: &str = "deterministic-worker-alpha";
 const BETA_ROLE: &str = "deterministic-worker-beta";
 const ALPHA_INSTRUCTION: &str = "Complete alpha instruction.";
 const BETA_INSTRUCTION: &str = "Complete beta instruction.";
-const ALPHA_INITIAL: &str = concat!(
-    "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n",
+const ALPHA_PROVIDER_INITIAL: &str = concat!(
+    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete alpha instruction."
 );
-const BETA_INITIAL: &str = concat!(
-    "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n",
+const BETA_PROVIDER_INITIAL: &str = concat!(
+    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete beta instruction."
 );
 
@@ -29,10 +29,10 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded_bytes = serde_json::to_vec(&scenario)?.len();
-    if action_counts != [6, 2, 2] || encoded_bytes != 1_704 {
+    if action_counts != [6, 2, 2] || encoded_bytes != 1_730 {
         return Err(format!(
             "S4 scenario no longer matches its three-lane [6, 2, 2]-action, \
-             1,704-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
+             1,730-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
         )
         .into());
     }
@@ -222,7 +222,7 @@ fn s4_scenario() -> ScenarioV2 {
                 ctx_id: "s4-worker-alpha".to_owned(),
                 actions: vec![
                     ScenarioActionV2::Text {
-                        user_text: ALPHA_INITIAL.to_owned(),
+                        user_text: ALPHA_PROVIDER_INITIAL.to_owned(),
                         response: "alpha boot-a complete".to_owned(),
                     },
                     ScenarioActionV2::Text {
@@ -235,7 +235,7 @@ fn s4_scenario() -> ScenarioV2 {
                 ctx_id: "s4-worker-beta".to_owned(),
                 actions: vec![
                     ScenarioActionV2::Text {
-                        user_text: BETA_INITIAL.to_owned(),
+                        user_text: BETA_PROVIDER_INITIAL.to_owned(),
                         response: "beta boot-a complete".to_owned(),
                     },
                     ScenarioActionV2::Text {

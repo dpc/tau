@@ -11,13 +11,13 @@ use super::super::daemon_support::{disconnect_ui, spawn_daemon};
 use super::{
     BootIdentities, DeterministicFixture, DurableSessionSnapshot, FAKE_PROVIDER, Observed,
     ProviderTurnCounts, SESSION, ScenarioActionV2, ScenarioLaneV2, ScenarioV2,
-    SessionRestoreObserver, WORKER_INITIAL, WORKER_PROMPT, assert_provider_turn_counts,
+    SessionRestoreObserver, WORKER_PROMPT, WORKER_PROVIDER_INITIAL, assert_provider_turn_counts,
     assert_restored_roster, assert_resume_boundaries, count_prompt, count_response,
     initial_live_watch_subscription_id, interruption_support as interruption, matched_action_count,
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
-const SCENARIO_BYTES: usize = 1_026;
+const SCENARIO_BYTES: usize = 1_039;
 /// Existing bounded hold deadline used only to keep the provider prompt in
 /// flight until the synchronized process-group kill.
 const HOLD_TIMEOUT_MS: u64 = 10_000;
@@ -256,7 +256,7 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
             ScenarioLaneV2 {
                 ctx_id: "s5-worker".to_owned(),
                 actions: vec![ScenarioActionV2::HoldUntilCancel {
-                    user_text: WORKER_INITIAL.to_owned(),
+                    user_text: WORKER_PROVIDER_INITIAL.to_owned(),
                     timeout_ms: HOLD_TIMEOUT_MS,
                 }],
             },

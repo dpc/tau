@@ -37,6 +37,7 @@ fn slow_tool_name() -> ToolName {
 
 fn background_placeholder(call_id: &str) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: slow_tool_name(),
         tool_type: ToolType::Function,

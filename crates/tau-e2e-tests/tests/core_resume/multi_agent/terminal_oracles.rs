@@ -83,7 +83,7 @@ pub(super) fn assert_worker_size_projection(
 ) -> Result<Vec<WorkerSemanticClass>, Box<dyn std::error::Error>> {
     assert_transcript_rows(frame, agent_id, identities)?;
     let semantic = frame.split_whitespace().collect::<Vec<_>>().join(" ");
-    let initial_start = "[tau-internal]: You were started by an agent `main`.";
+    let initial_start = "You were started by an agent `main`.";
     let required = [
         (initial_start, WorkerSemanticClass::InternalPromptStart),
         (

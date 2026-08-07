@@ -774,6 +774,7 @@ fn routed_peer_requests_complete_from_terminal_reports() {
 
         let report = match outcome {
             "result" => Event::ToolResultReported(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: call_id.as_str().into(),
                 tool_name: tau_proto::ToolName::new("forged"),
                 tool_type: tau_proto::ToolType::Function,
@@ -784,6 +785,7 @@ fn routed_peer_requests_complete_from_terminal_reports() {
                 originator: extension_originator(),
             }),
             "error" => Event::ToolErrorReported(tau_proto::ToolError {
+                presentation: Default::default(),
                 call_id: call_id.as_str().into(),
                 tool_name: tau_proto::ToolName::new("forged"),
                 tool_type: tau_proto::ToolType::Function,
@@ -793,6 +795,7 @@ fn routed_peer_requests_complete_from_terminal_reports() {
                 originator: extension_originator(),
             }),
             "cancel" => Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: call_id.as_str().into(),
                 tool_name: tau_proto::ToolName::new("forged"),
                 tool_type: tau_proto::ToolType::Function,
@@ -951,6 +954,7 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
     let transcript_nodes = default_agent_tree(&harness).nodes().len();
 
     harness.finish_prebuilt_internal_tool_result(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "peer-internal".into(),
         tool_name: tau_proto::ToolName::new("skill"),
         tool_type: tau_proto::ToolType::Function,
@@ -1110,6 +1114,7 @@ fn peer_internal_ephemeral_lifecycle_is_suppressed_from_debug_log() {
         )
         .expect("route ephemeral internal request");
     harness.finish_prebuilt_internal_tool_result(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "ephemeral-peer-internal".into(),
         tool_name: tau_proto::ToolName::new("peer_background"),
         tool_type: tau_proto::ToolType::Function,
@@ -1172,6 +1177,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
     assert_eq!(harness.agents[&cid].tools_in_flight, 1);
 
     harness.finish_prebuilt_internal_tool_result(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "peer-internal-background".into(),
         tool_name: tau_proto::ToolName::new("peer_background"),
         tool_type: tau_proto::ToolType::Function,
@@ -1234,6 +1240,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
         )
         .expect("background error fixture");
     harness.finish_prebuilt_internal_tool_error(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: "peer-internal-background-error".into(),
         tool_name: tau_proto::ToolName::new("peer_background"),
         tool_type: tau_proto::ToolType::Function,

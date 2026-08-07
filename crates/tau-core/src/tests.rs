@@ -287,6 +287,7 @@ fn agent_prompt(agent_id: &str, text: &str) -> Event {
         inference_activation: false,
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         text: text.to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,
@@ -340,6 +341,7 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
 
 fn background_placeholder(call_id: &str) -> Event {
     Event::ProviderToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: ToolCallId::from(call_id),
         tool_name: ToolName::new("example_tool"),
         tool_type: ToolType::Function,

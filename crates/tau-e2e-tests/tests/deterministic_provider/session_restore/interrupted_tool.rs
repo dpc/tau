@@ -6,14 +6,14 @@ use super::super::daemon_support::{disconnect_ui, spawn_daemon};
 use super::{
     BootIdentities, DUMMY_TOOL, DeterministicFixture, DurableSessionSnapshot, FAKE_PROVIDER,
     ProviderTurnCounts, SESSION, ScenarioActionV2, ScenarioLaneV2, ScenarioV2,
-    SessionRestoreObserver, WORKER_INITIAL, WORKER_PROMPT, assert_provider_turn_counts,
+    SessionRestoreObserver, WORKER_PROMPT, WORKER_PROVIDER_INITIAL, assert_provider_turn_counts,
     assert_resume_boundaries, interruption_support as interruption, matched_action_count,
 };
 
 /// Exact provider-authored foreground tool identity.
 const TOOL_CALL_ID: &str = "s6-interrupted-tool";
 /// Exact compact JSON size of the reviewed S6 scenario grammar.
-const SCENARIO_BYTES: usize = 1_072;
+const SCENARIO_BYTES: usize = 1_085;
 
 /// Proves a worker's acknowledged but unterminated foreground tool is repaired
 /// once on resume and remains balanced across a second cold resume.
@@ -183,7 +183,7 @@ fn interrupted_tool_scenario(diagnostic: &str) -> ScenarioV2 {
                 ctx_id: "s6-worker".to_owned(),
                 actions: vec![
                     ScenarioActionV2::DummyToolCall {
-                        user_text: WORKER_INITIAL.to_owned(),
+                        user_text: WORKER_PROVIDER_INITIAL.to_owned(),
                         call_id: TOOL_CALL_ID.into(),
                     },
                     ScenarioActionV2::DummyToolRepair {

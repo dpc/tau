@@ -6,6 +6,7 @@ use crate::{event_log as path_crate_event_log, extension as path_crate_extension
 /// Build one start-agent request with observable correlation and instruction.
 fn request(query_id: &str, instruction: &str) -> StartAgentRequest {
     StartAgentRequest {
+        trusted_internal_spans: Vec::new(),
         query_id: query_id.to_owned(),
         instruction: instruction.to_owned(),
         role: Some("engineer".to_owned()),
@@ -239,6 +240,43 @@ fn invalid_role_commits_before_directed_rejection() {
             Event::StartAgentAccepted(accepted) if accepted.query_id == "q-invalid-role"
         )
     }));
+}
+
+/// Configured extensions may request an agent, but only the harness may stamp
+/// instruction spans for internal provider presentation.
+#[test]
+fn configured_extension_cannot_assert_trusted_instruction_spans() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let sink = connect_ready_configured_extension(
+        &mut h,
+        "requester",
+        "requester",
+        tau_proto::ClientKind::Tool,
+    );
+    let mut invalid = request("q-forged-span", "untrusted instruction");
+    invalid.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 0, end: 9 }];
+
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        Event::StartAgentRequest(invalid),
+    )
+    .expect("process rejected request");
+
+    assert!(source_committed(&h, "requester", |event| {
+        matches!(
+            event,
+            Event::StartAgentRequest(request) if request.query_id == "q-forged-span"
+        )
+    }));
+    let result = directed_result(&sink, "q-forged-span").expect("directed rejection");
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot assert trusted internal"))
+    );
+    assert_eq!(query_agent_count(&h, "q-forged-span"), 0);
 }
 
 /// Invalid parent correlation is evaluated only after the raw request commits

@@ -284,6 +284,7 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
 #[test]
 fn provider_image_content_rejects_mismatched_media_bytes() {
     let result = tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
         tool_type: tau_proto::ToolType::Function,
@@ -352,6 +353,7 @@ fn provider_image_content_rejects_per_agent_aggregate_overflow() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     tree.retained_provider_image_bytes = MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT;
     let result = tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: tau_proto::ToolName::new("read_image"),
         tool_type: tau_proto::ToolType::Function,
@@ -390,6 +392,7 @@ fn provider_response_rejects_input_side_tool_result_items() {
             .expect("known-safe AgentPromptId must be valid"),
         agent_id: agent_id(),
         output_items: vec![ContextItem::ToolResult(tau_proto::ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-image".into(),
             tool_type: tau_proto::ToolType::Function,
             status: tau_proto::ToolResultStatus::Success,
@@ -431,6 +434,7 @@ fn prompt_event(agent_id: AgentId) -> Event {
         inference_activation: false,
         agent_id,
         text: "hello".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,
@@ -438,6 +442,49 @@ fn prompt_event(agent_id: AgentId) -> Event {
         display_name: None,
         ctx_id: None,
     })
+}
+
+/// Durable span provenance splits provider content without treating its source
+/// label or delimiter-shaped text as authority, and rejects malformed byte
+/// ranges before folding.
+#[test]
+fn trusted_internal_prompt_spans_are_typed_utf8_ranges() {
+    let text = "bootstrap\n\n雪 user task";
+    let mut event = prompt_event(agent_id());
+    let Event::AgentPromptSubmitted(prompt) = &mut event else {
+        unreachable!()
+    };
+    prompt.text = text.to_owned();
+    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 0, end: 11 }];
+
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    tree.validate_event(&event).expect("valid span");
+    tree.apply_event(&event);
+    assert!(matches!(
+        &tree.nodes()[0].entry,
+        AgentEntry::UserInput { items, .. }
+            if matches!(
+                items.as_slice(),
+                [ContextItem::Message(MessageItem { content, .. })]
+                    if matches!(
+                        content.as_slice(),
+                        [
+                            ContentPart::HarnessInternalText { text: prefix },
+                            ContentPart::Text { text: task },
+                        ] if prefix == "bootstrap\n\n" && task == "雪 user task"
+                    )
+            )
+    ));
+
+    let mut invalid = event;
+    let Event::AgentPromptSubmitted(prompt) = &mut invalid else {
+        unreachable!()
+    };
+    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 12, end: 13 }];
+    assert!(
+        validation_error(&tree, invalid).contains("trusted internal prompt spans"),
+        "ranges must begin and end on UTF-8 boundaries"
+    );
 }
 
 fn validation_error(tree: &AgentTree, event: Event) -> String {
@@ -487,6 +534,7 @@ fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
             inference_activation: false,
             agent_id: agent_id(),
             text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: PromptOriginator::User,
@@ -571,6 +619,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
         );
         for (index, tool_type) in tool_types.iter().enumerate() {
             tree.apply_event(&Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: format!("call-{index}").into(),
                 tool_name: ToolName::new(format!("tool_{index}")),
                 tool_type: *tool_type,
@@ -1704,6 +1753,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         tree.apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: second_call_id.clone(),
                 tool_name: ToolName::new("second_tool"),
                 tool_type: ToolType::Function,
@@ -1722,6 +1772,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderToolError(tau_proto::ToolError {
+                presentation: Default::default(),
                 call_id: first_call_id.clone(),
                 tool_name: ToolName::new("first_tool"),
                 tool_type: ToolType::Function,
@@ -1803,6 +1854,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "root prompt".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: PromptOriginator::User,
@@ -1882,6 +1934,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     let drained = tree.apply_event_at(
         AgentEventParent::InheritHead,
         &Event::ProviderToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id,
             tool_name: ToolName::new("tool"),
             tool_type: ToolType::Function,
@@ -2188,6 +2241,7 @@ fn self_compaction_terminal_delivery_is_correlated_and_exactly_once() {
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: "bounded terminal".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: None,
@@ -2452,6 +2506,7 @@ fn manual_completion_notification_lookup_is_branch_specific() {
             self_compaction_terminal: None,
             agent_id: agent_id(),
             text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             inference_activation: false,

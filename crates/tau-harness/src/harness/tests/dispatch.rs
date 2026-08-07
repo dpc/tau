@@ -82,21 +82,21 @@ fn self_compaction_terminal_envelopes_are_literal_and_bounded() {
         (
             tau_proto::SelfCompactionTerminalOutcome::Compacted,
             Some(transaction_id.clone()),
-            "[tau-internal] Self compact terminal: {\"status\":\"compacted\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":\"ct-envelope\"}",
+            "Self compact terminal: {\"status\":\"compacted\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":\"ct-envelope\"}",
         ),
         (
             tau_proto::SelfCompactionTerminalOutcome::Failed {
                 reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             },
             Some(transaction_id),
-            "[tau-internal] Self compact terminal: {\"status\":\"provider_error\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":\"ct-envelope\"}",
+            "Self compact terminal: {\"status\":\"provider_error\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":\"ct-envelope\"}",
         ),
         (
             tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
                 reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
             },
             None,
-            "[tau-internal] Self compact terminal: {\"status\":\"compaction_cancelled\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":null}",
+            "Self compact terminal: {\"status\":\"compaction_cancelled\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":null}",
         ),
     ];
     for (outcome, transaction_id, expected) in cases {
@@ -605,6 +605,7 @@ fn hidden_delegate_roles_are_omitted_from_catalog_but_remain_explicitly_callable
     assert!(!rendered.contains("* `engineer-junior` -"));
 
     let query = tau_proto::StartAgentRequest {
+        trusted_internal_spans: Vec::new(),
         parent_agent: None,
         query_id: "hidden-role".to_owned(),
         instruction: "side task".to_owned(),
@@ -2474,6 +2475,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     inference_activation: false,
                     agent_id: tau_proto::AgentId::parse("engineer_default").expect("agent id"),
                     text: "default prompt".to_owned(),
+                    trusted_internal_spans: Vec::new(),
                     message_class: tau_proto::PromptMessageClass::User,
                     internal_kind: None,
                     originator: tau_proto::PromptOriginator::User,
@@ -2493,6 +2495,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                     agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
                     text: "side steered".to_owned(),
+                    trusted_internal_spans: Vec::new(),
                     message_class: tau_proto::PromptMessageClass::User,
                     internal_kind: None,
                     ctx_id: None,
@@ -2591,6 +2594,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
                     agent_id: agent_id.clone(),
                     text: "resume outstanding activation".to_owned(),
+                    trusted_internal_spans: Vec::new(),
                     message_class: tau_proto::PromptMessageClass::User,
                     internal_kind: None,
                     originator: tau_proto::PromptOriginator::User,
@@ -2644,6 +2648,7 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
         h.handle_start_agent_request(
             &crate::test_connection_id("conn-delegate"),
             StartAgentRequest {
+                trusted_internal_spans: Vec::new(),
                 parent_agent: None,
                 query_id: "q-role".to_owned(),
                 instruction: "side task".to_owned(),
@@ -2729,7 +2734,7 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
 fn text_part(item: &ContextItem) -> Option<&str> {
     match item {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
-            ContentPart::Text { text } => text.as_str(),
+            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
         }),
         ContextItem::ToolResult(result) => match &result.output.raw {
             CborValue::Text(text) => Some(text.as_str()),
@@ -2844,6 +2849,7 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
                 inference_activation: false,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: text.to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -2892,6 +2898,7 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
             inference_activation: false,
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "usage prompt".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -3027,7 +3034,9 @@ fn restore_notice_context_text(prompt: &AgentPromptCreated) -> Option<String> {
         .flatten()
         .iter()
         .filter_map(text_part)
-        .find(|text| is_restore_notice_prompt_text(text))
+        .find(|text| {
+            crate::internal_envelope::body(text).is_some_and(is_restore_notice_prompt_text)
+        })
         .map(str::to_owned)
 }
 
@@ -3037,7 +3046,9 @@ fn restore_notice_context_count(prompt: &AgentPromptCreated) -> usize {
         .flatten()
         .iter()
         .filter_map(text_part)
-        .filter(|text| is_restore_notice_prompt_text(text))
+        .filter(|text| {
+            crate::internal_envelope::body(text).is_some_and(is_restore_notice_prompt_text)
+        })
         .count()
 }
 
@@ -3110,6 +3121,7 @@ fn seed_background_placeholder_for_agent(
                 inference_activation: false,
                 agent_id: parsed_agent_id.clone(),
                 text: format!("run {tool_name}"),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -3157,6 +3169,7 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::ProviderToolResult(ToolResult {
+                presentation: Default::default(),
                 call_id: call_id.into(),
                 tool_name: ToolName::new(tool_name),
                 tool_type: tau_proto::ToolType::Function,
@@ -3875,6 +3888,7 @@ fn shown_tool_failure_examples_are_session_and_agent_scoped() {
 
 fn loop_guard_tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
@@ -4079,6 +4093,7 @@ fn side_agent_repetition_response_propagates_error_result() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-side"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-repetition".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
@@ -4150,6 +4165,7 @@ fn side_agent_error_response_propagates_error_result() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-side-error"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-error".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
@@ -4236,6 +4252,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-side-invalid"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: Some(parent),
             query_id: "q-invalid-tool".to_owned(),
             instruction: "review the change".to_owned(),
@@ -4845,6 +4862,7 @@ fn loop_guard_resets_on_successful_terminal_tool_result() {
         Some(&cid),
         None,
         tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id: "ok-call".into(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -4886,6 +4904,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
     h.handle_background_tool_result(
         &crate::test_connection_id("conn-bg"),
         tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id: "bg-call".into(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -5491,6 +5510,7 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
 /// tests.
 pub(super) fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
@@ -5579,6 +5599,7 @@ fn provider_tool_response(
 /// Builds a terminal error fixture for dispatch and interception tests.
 pub(super) fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
@@ -5601,6 +5622,7 @@ fn tool_progress(call_id: &str, tool_name: &str, message: &str) -> tau_proto::To
 
 fn ext_query(query_id: &str) -> StartAgentRequest {
     StartAgentRequest {
+        trusted_internal_spans: Vec::new(),
         parent_agent: None,
         query_id: query_id.to_owned(),
         instruction: format!("instruction {query_id}"),
@@ -6083,6 +6105,7 @@ fn background_cancel_clears_actual_running_call() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-cancel-drain"),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "bg-exclusive-cancel-running".into(),
             tool_name: ToolName::new("bg_exclusive_cancel"),
             tool_type: tau_proto::ToolType::Function,
@@ -6634,6 +6657,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-wrong"),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "owner-cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -6764,6 +6788,7 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
         "conn-wrong",
         TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ToolCancelled(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: "emit-cancelled-call".into(),
                 tool_name: ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
@@ -7417,6 +7442,7 @@ impl crate::InternalToolHandler for TestAgentStartBuiltin {
                 };
                 let query_id = format!("test-agent-start-{}", call.id);
                 host.enqueue_start_agent_request_without_draining(tau_proto::StartAgentRequest {
+                    trusted_internal_spans: Vec::new(),
                     parent_agent: None,
                     query_id,
                     instruction: "test builtin agent_start".to_owned(),
@@ -7442,6 +7468,7 @@ impl crate::InternalToolHandler for TestAgentStartBuiltin {
                     return Ok(());
                 };
                 host.finish_prebuilt_tool_error(tau_proto::ToolError {
+                    presentation: Default::default(),
                     call_id: call_id.into(),
                     tool_name: ToolName::new("agent_start"),
                     tool_type: tau_proto::ToolType::Function,
@@ -9017,6 +9044,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "internal prompt should not be listed".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -10619,7 +10647,7 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
             if prewarm
                 .context.flatten()
                 .iter()
-                .any(|item| text_part(item).is_some_and(is_restore_notice_prompt_text))
+                .any(|item| text_part(item).is_some_and(|text| crate::internal_envelope::body(text).is_some_and(is_restore_notice_prompt_text)))
     )));
     assert_eq!(restore_notice_event_count(&h), 0);
 
@@ -10630,7 +10658,11 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
         .context
         .flatten()
         .iter()
-        .position(|item| text_part(item).is_some_and(is_restore_notice_prompt_text))
+        .position(|item| {
+            text_part(item).is_some_and(|text| {
+                crate::internal_envelope::body(text).is_some_and(is_restore_notice_prompt_text)
+            })
+        })
         .expect("restore notice in first prompt");
     let user_pos = prompt
         .context
@@ -10663,6 +10695,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "submitted activation".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -10688,6 +10721,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
                 text: "steered activation".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 ctx_id: Some("ctx-1".to_owned()),
@@ -10727,6 +10761,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             inference_activation: false,
             agent_id: agent_id.clone(),
             text: "passive submitted".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -10746,6 +10781,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id,
             text: "passive steered".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             ctx_id: None,
@@ -10807,6 +10843,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: text.to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -10847,6 +10884,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
             inference_activation: true,
             agent_id,
             text: "activation C".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -10999,7 +11037,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         .context
         .flatten()
         .iter()
-        .position(|item| text_part(item) == Some(notice.as_str()))
+        .position(|item| text_part(item) == Some(crate::internal_envelope::frame(&notice).as_str()))
         .expect("background interruption notice in first prompt");
     let user_pos = first_prompt
         .context
@@ -13130,6 +13168,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
             agent_id: agent_id.clone(),
             inference_activation: true,
             text: "owed activation".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -13271,6 +13310,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             agent_id: agent_id.clone(),
             inference_activation: true,
             text: "owed".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -13529,6 +13569,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             agent_id: agent_id.clone(),
             inference_activation: true,
             text: "owed".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -13967,6 +14008,7 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
             agent_id: crate::parse_agent_id(&agent_id),
             inference_activation: false,
             text: "suffix B".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14006,6 +14048,7 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "stable prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14046,6 +14089,7 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             inference_activation: true,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "mixed activation after coalesced wakes".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14130,6 +14174,7 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "proactive stable prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14169,6 +14214,7 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             inference_activation: true,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "mixed proactive activation".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14708,6 +14754,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "activation B".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -14840,6 +14887,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-image".into(),
             tool_name: ToolName::new("read_image"),
             tool_type: tau_proto::ToolType::Function,
@@ -14972,6 +15020,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -15029,6 +15078,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-success".into(),
             tool_name: ToolName::new("success_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -15042,6 +15092,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolError(tau_proto::ToolError {
+            presentation: Default::default(),
             call_id: "call-error".into(),
             tool_name: ToolName::new("error_tool"),
             tool_type: tau_proto::ToolType::Custom,
@@ -15054,6 +15105,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "call-cancel".into(),
             tool_name: ToolName::new("cancel_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -15215,6 +15267,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "reactive prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -15257,6 +15310,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-reactive".into(),
             tool_name: ToolName::new("reactive_tool"),
             tool_type: tau_proto::ToolType::Custom,
@@ -15350,6 +15404,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "stable readiness prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -16561,6 +16616,7 @@ fn seed_historical_open_prefix_failure(
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: "historical prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -16604,6 +16660,7 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-historical".into(),
             tool_name: ToolName::new("historical_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -16971,6 +17028,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
     )));
 
     h.finish_prebuilt_internal_tool_result(ToolResult {
+        presentation: Default::default(),
         call_id: "call-sibling".into(),
         tool_name: ToolName::new("sibling"),
         tool_type: tau_proto::ToolType::Function,
@@ -17824,6 +17882,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
     )
     .expect("register delivery interceptor");
     h.finish_prebuilt_internal_tool_result(ToolResult {
+        presentation: Default::default(),
         call_id: "call-cancel-sibling".into(),
         tool_name: ToolName::new("sibling"),
         tool_type: tau_proto::ToolType::Function,
@@ -18487,6 +18546,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: originating_text.clone(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -18611,6 +18671,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderToolResult(ToolResult {
+                presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
@@ -19010,7 +19071,10 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .collect::<Vec<_>>();
     assert_eq!(live_inference_prompts.len(), 1);
     assert_eq!(
-        context_text_count(&live_inference_prompts[0], &notification_text),
+        context_text_count(
+            &live_inference_prompts[0],
+            &crate::internal_envelope::frame(&notification_text),
+        ),
         1
     );
     assert!(
@@ -19287,6 +19351,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderToolResult(ToolResult {
+                presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
@@ -20134,6 +20199,7 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
             inference_activation: false,
             agent_id: target_id.clone(),
             text: "content to compact".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -21016,6 +21082,7 @@ fn start_background_tool_and_finish_placeholder_turn(
             inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: format!("run {tool_name}"),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -22011,7 +22078,7 @@ fn successful_wait_preemption_installs_replacement_before_queued_activation() {
         .map(str::to_owned)
         .collect();
     assert!(continuation_text.contains(&"replacement summary".to_owned()));
-    assert!(continuation_text.contains(&"queued after compact".to_owned()));
+    assert!(continuation_text.contains(&crate::internal_envelope::frame("queued after compact"),));
 }
 
 /// A second compact request while cancellation is intercepted must coalesce
@@ -22812,6 +22879,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
         h.record_wait_tool_request(call_id);
         h.record_wait_tool_result(
             ToolResult {
+                presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: ToolName::new("slow"),
                 tool_type: tau_proto::ToolType::Function,
@@ -23157,6 +23225,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
@@ -23894,7 +23963,7 @@ impl crate::InternalToolHandler for ReentrantDelegateCompletionPrompt {
             .expect("target agent configured");
         host.dispatch_test_background_completion(
             &agent_id,
-            "[tau-internal] Tool call `canceled-shell` is complete.".to_owned(),
+            background_completion_prompt(&ToolCallId::from("canceled-shell")),
         )
     }
 }
@@ -24021,6 +24090,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-user".to_owned(),
             instruction: "side task".to_owned(),
@@ -24107,6 +24177,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-message".to_owned(),
             instruction: "side task".to_owned(),
@@ -24417,6 +24488,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
@@ -24471,7 +24543,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
             ContextItem::Message(MessageItem {
                 role: ContextRole::User,
                 ..
-            }) if text_part(item) == Some("side task")
+            }) if text_part(item).is_some_and(|text| text.contains("side task"))
         )
     });
     assert!(
@@ -24569,6 +24641,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-notifications"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
@@ -24615,7 +24688,8 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
             ContextItem::Message(MessageItem {
                 role: ContextRole::User,
                 ..
-            }) if text_part(item) == Some("Summarize in one sentence.")
+            }) if text_part(item)
+                == Some("Summarize in one sentence.")
         )
     });
     assert!(
@@ -24723,6 +24797,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-notifications"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
@@ -24846,6 +24921,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
@@ -24896,6 +24972,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-notifications"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
@@ -25068,6 +25145,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
@@ -25386,6 +25464,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: "slow-call".into(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -25553,6 +25632,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -25840,6 +25920,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: "slow-call-cancel".into(),
             tool_name: ToolName::new("slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -25946,6 +26027,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-fail"),
         Event::ToolErrorReported(tau_proto::ToolError {
+            presentation: Default::default(),
             call_id: "fail-call".into(),
             tool_name: ToolName::new("fail"),
             tool_type: tau_proto::ToolType::Function,
@@ -26554,6 +26636,7 @@ fn wait_resolves_on_synthetic_tool_error() {
         Some(&cid),
         None,
         tau_proto::ToolError {
+            presentation: Default::default(),
             call_id: target_call_id,
             tool_name: ToolName::new("missing"),
             tool_type: tau_proto::ToolType::Function,
@@ -26882,6 +26965,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-A".to_owned(),
             instruction: "side task A".to_owned(),
@@ -26895,6 +26979,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-B".to_owned(),
             instruction: "side task B".to_owned(),
@@ -27121,6 +27206,7 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
         h.handle_start_agent_request(
             &crate::test_connection_id("conn-delegate"),
             StartAgentRequest {
+                trusted_internal_spans: Vec::new(),
                 parent_agent: None,
                 query_id: query_id.to_owned(),
                 instruction: "side task".to_owned(),
@@ -27161,6 +27247,7 @@ fn delegate_missing_default_engineer_errors_when_unavailable() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-default".to_owned(),
             instruction: "side task".to_owned(),
@@ -29219,6 +29306,7 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "creator-cost-child".to_owned(),
             instruction: "charge this child".to_owned(),
@@ -29424,6 +29512,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-explicit".to_owned(),
             instruction: "side task".to_owned(),
@@ -29560,6 +29649,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
@@ -29627,6 +29717,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
@@ -29710,6 +29801,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.handle_extension_event(
         "conn-delegate",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: "nested-call".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
@@ -29857,6 +29949,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
@@ -29920,6 +30013,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
@@ -30045,6 +30139,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
@@ -30119,6 +30214,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.handle_extension_event(
         "conn-delegate",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: "outer-call".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
@@ -30238,6 +30334,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-top".to_owned(),
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
@@ -30301,6 +30398,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-leaf".to_owned(),
             instruction: "LEAF: do one terminal search only".to_owned(),
@@ -32011,6 +32109,7 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let pending_id = h
         .enqueue_internal_start_agent_request_without_draining(StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             query_id: "pending-peer-endpoint".to_owned(),
             instruction: "ordinary pending task".to_owned(),
             role: Some("engineer".to_owned()),
@@ -32486,7 +32585,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
             .filter(|item| {
                 text_part(item).is_some_and(|text| {
                     text.contains(&format!(
-                        "[tau-internal]: You have received a message from {sender_id}"
+                        "<tau_internal>You have received a message from {sender_id}"
                     )) && text.contains(BODY)
                 })
             })
@@ -32728,7 +32827,7 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     assert!(context.iter().any(|item| {
         text_part(item).is_some_and(|text| {
             text.contains(&format!(
-                "[tau-internal]: You have received a message from {recipient_id}"
+                "<tau_internal>You have received a message from {recipient_id}"
             )) && text
                 .contains("<message>\nsecret <message>&&lt;/message&gt; payload >\n</message>")
         })
@@ -33218,7 +33317,7 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
         .find(|text| text.contains("Watched agent"))
         .expect("canonical watch response");
     assert!(text.contains(&format!(
-        "[tau-internal]: Watched agent {recipient_id} emitted a response"
+        "<tau_internal>Watched agent {recipient_id} emitted a response"
     )));
     assert!(text.contains("<response>\ndone <response>&&lt;/response&gt; payload >\n</response>"));
     assert!(!text.contains("You have received a message"));
@@ -33305,7 +33404,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         .find(|text| text.contains("received a user prompt"))
         .expect("canonical prompt notification");
     assert!(text.contains(&format!(
-        "[tau-internal]: Watched agent {watched_id} received a user prompt"
+        "<tau_internal>Watched agent {watched_id} received a user prompt"
     )));
     assert!(text.contains("<prompt>\nplease continue <now>&</now> >\n</prompt>"));
     assert!(!text.contains("finished its turn"));
@@ -33346,7 +33445,7 @@ fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: false,
         session_id: h.current_session_id.clone(),
-        text: "[tau-internal] Tool call `call-1` is complete.".to_owned(),
+        text: background_completion_prompt(&ToolCallId::from("call-1")),
         agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
         message_class: tau_proto::PromptMessageClass::Internal,
         originator: tau_proto::PromptOriginator::User,
@@ -33611,6 +33710,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             inference_activation: true,
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged submitted".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -33630,6 +33730,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: crate::parse_agent_id("forged-agent"),
             text: "forged steered".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             ctx_id: None,
@@ -33675,6 +33776,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "forged submitted".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -33694,6 +33796,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id,
             text: "forged steered".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             ctx_id: None,
@@ -34231,6 +34334,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: Some(parent.clone()),
             query_id: "q-inherit".to_owned(),
             instruction: "side task".to_owned(),
@@ -34590,6 +34694,7 @@ fn embedded_tool_trace_records_call_and_byte_free_result() {
     assert_eq!(calls, vec![call]);
 
     let result = ToolResult {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: ToolName::new("read_image"),
         tool_type: tau_proto::ToolType::Function,

@@ -22,14 +22,14 @@ const REPAIR_ROLE: &str = "deterministic-worker-repair";
 const QUIESCENT_PROMPT: &str = "Complete the quiescent deterministic instruction.";
 const UNCERTAIN_PROMPT: &str = "Complete the dispatch-uncertain deterministic instruction.";
 const REPAIR_PROMPT: &str = "Begin the interrupted-tool deterministic instruction.";
-const QUIESCENT_INITIAL: &str = concat!(
-    "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n",
+const QUIESCENT_PROVIDER_INITIAL: &str = concat!(
+    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete the quiescent deterministic instruction."
 );
-const UNCERTAIN_INITIAL: &str = concat!(
-    "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n",
+const UNCERTAIN_PROVIDER_INITIAL: &str = concat!(
+    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete the dispatch-uncertain deterministic instruction."
 );
 const REPAIR_CONTINUATION: &str = "Continue the mixed-state repaired tool round.";
@@ -38,7 +38,7 @@ const HOLD_TIMEOUT_MS: u64 = 10_000;
 const TOOL_CALL_ID: &str = "s7-interrupted-tool";
 const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
 const COMPLETE_CURSORS: [usize; 4] = [5, 1, 1, 2];
-const SCENARIO_BYTES: usize = 2_152;
+const SCENARIO_BYTES: usize = 2_178;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane
@@ -378,14 +378,14 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
             ScenarioLaneV2 {
                 ctx_id: "s7-quiescent".to_owned(),
                 actions: vec![ScenarioActionV2::Text {
-                    user_text: QUIESCENT_INITIAL.to_owned(),
+                    user_text: QUIESCENT_PROVIDER_INITIAL.to_owned(),
                     response: "quiescent worker complete".to_owned(),
                 }],
             },
             ScenarioLaneV2 {
                 ctx_id: "s7-uncertain".to_owned(),
                 actions: vec![ScenarioActionV2::HoldUntilCancel {
-                    user_text: UNCERTAIN_INITIAL.to_owned(),
+                    user_text: UNCERTAIN_PROVIDER_INITIAL.to_owned(),
                     timeout_ms: HOLD_TIMEOUT_MS,
                 }],
             },

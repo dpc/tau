@@ -716,9 +716,9 @@ pub(crate) fn watch_work_status_text(
         tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
         tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
     };
-    Some(format!(
-        "[tau-internal]: Watched agent {sender_label} status: {state} on {title}"
-    ))
+    Some(crate::internal_envelope::frame(&format!(
+        "Watched agent {sender_label} status: {state} on {title}"
+    )))
 }
 
 /// Render only closed structured provider categories; no provider-authored text
@@ -735,26 +735,34 @@ pub(crate) fn watch_provider_status_text(
         } => {
             let delay =
                 tau_proto::format_approximate_duration_secs(u64::from(next_retry_delay_secs));
-            format!(
-                "[tau-internal]: Watched agent {sender_label} provider status: retrying ({category}, attempt {attempt}, next retry about {delay})",
+            crate::internal_envelope::frame(&format!(
+                "Watched agent {sender_label} provider status: retrying ({category}, attempt {attempt}, next retry about {delay})",
                 category = category.as_str(),
-            )
+            ))
         }
-        tau_proto::AgentWatchProviderState::RecoveringContext { .. } => format!(
-            "[tau-internal]: Watched agent {sender_label} provider status: recovering_context (context_window)"
-        ),
-        tau_proto::AgentWatchProviderState::Blocked { category } => format!(
-            "[tau-internal]: Watched agent {sender_label} provider status: blocked ({})",
-            category.as_str()
-        ),
-        tau_proto::AgentWatchProviderState::DispatchUncertain { category } => format!(
-            "[tau-internal]: Watched agent {sender_label} provider status: dispatch_uncertain ({})",
-            category.as_str()
-        ),
-        tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => format!(
-            "[tau-internal]: Watched agent {sender_label} provider status: terminal error ({})",
-            failure_kind.as_str()
-        ),
+        tau_proto::AgentWatchProviderState::RecoveringContext { .. } => {
+            crate::internal_envelope::frame(&format!(
+                "Watched agent {sender_label} provider status: recovering_context (context_window)"
+            ))
+        }
+        tau_proto::AgentWatchProviderState::Blocked { category } => {
+            crate::internal_envelope::frame(&format!(
+                "Watched agent {sender_label} provider status: blocked ({})",
+                category.as_str()
+            ))
+        }
+        tau_proto::AgentWatchProviderState::DispatchUncertain { category } => {
+            crate::internal_envelope::frame(&format!(
+                "Watched agent {sender_label} provider status: dispatch_uncertain ({})",
+                category.as_str()
+            ))
+        }
+        tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
+            crate::internal_envelope::frame(&format!(
+                "Watched agent {sender_label} provider status: terminal error ({})",
+                failure_kind.as_str()
+            ))
+        }
     }
 }
 
@@ -972,28 +980,29 @@ fn is_exact_sentinel_projection(text: &str) -> bool {
         ("<tau_web_content", "</tau_web_content>"),
     ]
     .into_iter()
-    .any(|(open, close)| {
-        text.ends_with(close)
-            && (text.starts_with(open)
-                || (text.starts_with("[tau-internal]:") && text.contains(open)))
-    })
+    .any(|(open, close)| text.ends_with(close) && text.starts_with(open))
 }
 
 fn context_items_contain_exact_sentinel(items: &[ContextItem]) -> bool {
     items.iter().any(|item| match item {
         ContextItem::Message(message) => message.content.iter().any(|part| {
-            let tau_proto::ContentPart::Text { text } = part;
+            let (tau_proto::ContentPart::Text { text }
+            | tau_proto::ContentPart::HarnessInternalText { text }) = part;
             is_exact_sentinel_projection(text)
         }),
-        ContextItem::ToolResult(result) => is_exact_sentinel_projection(&result.output.body),
+        ContextItem::ToolResult(result) => {
+            result.presentation == tau_proto::ToolResultPresentation::HarnessDedupPointer
+                || is_exact_sentinel_projection(&result.output.body)
+        }
         _ => false,
     })
 }
 
 fn tool_results_contain_exact_sentinel(items: &[tau_proto::ToolResultItem]) -> bool {
-    items
-        .iter()
-        .any(|item| is_exact_sentinel_projection(&item.output.body))
+    items.iter().any(|item| {
+        item.presentation == tau_proto::ToolResultPresentation::HarnessDedupPointer
+            || is_exact_sentinel_projection(&item.output.body)
+    })
 }
 
 /// Assembles provider context from the selected transcript branch.
@@ -1069,8 +1078,18 @@ pub(crate) fn assemble_prompt_context_from(
                 submission_source,
                 ..
             } => {
-                contains_exact_sentinel_envelope |=
-                    submission_source.as_ref() == Some(&tau_proto::PromptSubmissionSource::HumanUi);
+                contains_exact_sentinel_envelope |= submission_source.as_ref()
+                    == Some(&tau_proto::PromptSubmissionSource::HumanUi)
+                    || items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ContextItem::Message(message)
+                                if message.content.iter().any(|part| matches!(
+                                    part,
+                                    tau_proto::ContentPart::HarnessInternalText { .. }
+                                ))
+                        )
+                    });
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: project_user_prompt_items(items, submission_source.as_ref()),
@@ -1093,11 +1112,10 @@ pub(crate) fn assemble_prompt_context_from(
                 ));
             }
             AgentEntry::ToolResults { items } => {
-                contains_exact_sentinel_envelope |= tool_results_contain_exact_sentinel(items);
+                let items = project_tool_result_items(items);
+                contains_exact_sentinel_envelope |= tool_results_contain_exact_sentinel(&items);
                 blocks.push(tau_proto::ContextBlock::ToolResults(
-                    tau_proto::ToolResultsBlock {
-                        items: items.clone(),
-                    },
+                    tau_proto::ToolResultsBlock { items },
                 ));
             }
             AgentEntry::AgentMessage {
@@ -1123,12 +1141,12 @@ pub(crate) fn assemble_prompt_context_from(
                                 PEER_MESSAGE_CLOSE,
                                 PEER_MESSAGE_CLOSE_VISIBLE,
                             );
-                            format!(
-                                "[tau-internal]: Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
+                            crate::internal_envelope::frame(&format!(
+                                "Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
                                 xml_escape(sender_session_id.as_str()),
                                 xml_escape(sender_id.as_str()),
                                 body
-                            )
+                            ))
                         }
                         (tau_core::AgentMessageDirection::Inbound, None) => {
                             let body = tau_proto::escape_exact_sentinel_close(
@@ -1136,9 +1154,9 @@ pub(crate) fn assemble_prompt_context_from(
                                 MESSAGE_CLOSE,
                                 MESSAGE_CLOSE_VISIBLE,
                             );
-                            format!(
-                                "[tau-internal]: You have received a message from {sender_id}\n\n<message>\n{body}\n</message>"
-                            )
+                            crate::internal_envelope::frame(&format!(
+                                "You have received a message from {sender_id}\n\n<message>\n{body}\n</message>"
+                            ))
                         }
                         (tau_core::AgentMessageDirection::Outbound, _) => message.clone(),
                     };
@@ -1179,9 +1197,9 @@ pub(crate) fn assemble_prompt_context_from(
                                                     WATCH_RESPONSE_CLOSE,
                                                     WATCH_RESPONSE_CLOSE_VISIBLE,
                                                 );
-                                            format!(
-                                                "[tau-internal]: Watched agent {sender_label} emitted a response\n\n<response>\n{body}\n</response>"
-                                            )
+                                            crate::internal_envelope::frame(&format!(
+                                                "Watched agent {sender_label} emitted a response\n\n<response>\n{body}\n</response>"
+                                            ))
                                         },
                                     }],
                                     phase: None,
@@ -1210,9 +1228,9 @@ pub(crate) fn assemble_prompt_context_from(
                                                     WATCH_PROMPT_CLOSE,
                                                     WATCH_PROMPT_CLOSE_VISIBLE,
                                                 );
-                                            format!(
-                                                "[tau-internal]: Watched agent {sender_label} received a user prompt\n\n<prompt>\n{body}\n</prompt>"
-                                            )
+                                            crate::internal_envelope::frame(&format!(
+                                                "Watched agent {sender_label} received a user prompt\n\n<prompt>\n{body}\n</prompt>"
+                                            ))
                                         },
                                     }],
                                     phase: None,
@@ -1271,10 +1289,10 @@ pub(crate) fn assemble_prompt_context_from(
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
-                                        text: format!(
-                                            "[tau-internal]: Watched agent {sender_id} has spent over {} minutes waiting.",
+                                        text: crate::internal_envelope::frame(&format!(
+                                            "Watched agent {sender_id} has spent over {} minutes waiting.",
                                             wait.threshold_minutes
-                                        ),
+                                        )),
                                     }],
                                     phase: None,
                                     responses_raw_json: None,
@@ -1311,20 +1329,78 @@ fn project_user_prompt_items(
     submission_source: Option<&tau_proto::PromptSubmissionSource>,
 ) -> Vec<ContextItem> {
     let mut projected = items.to_vec();
-    if submission_source != Some(&tau_proto::PromptSubmissionSource::HumanUi) {
-        return projected;
-    }
+    let human_ui = submission_source == Some(&tau_proto::PromptSubmissionSource::HumanUi);
     for item in &mut projected {
         if let ContextItem::Message(message) = item {
             for part in &mut message.content {
-                let tau_proto::ContentPart::Text { text } = part;
-                let body =
-                    tau_proto::escape_exact_sentinel_close(text, USER_CLOSE, USER_CLOSE_VISIBLE);
-                *text = format!("<user>{body}</user>");
+                match part {
+                    tau_proto::ContentPart::HarnessInternalText { text } => {
+                        *part = tau_proto::ContentPart::Text {
+                            text: crate::internal_envelope::frame(text),
+                        };
+                    }
+                    tau_proto::ContentPart::Text { text } => {
+                        let body = tau_proto::escape_exact_sentinel_close(
+                            text,
+                            crate::internal_envelope::TAU_INTERNAL_CLOSE,
+                            crate::internal_envelope::TAU_INTERNAL_CLOSE_VISIBLE,
+                        );
+                        if human_ui {
+                            let body = tau_proto::escape_exact_sentinel_close(
+                                &body,
+                                USER_CLOSE,
+                                USER_CLOSE_VISIBLE,
+                            );
+                            *text = format!("<user>{body}</user>");
+                        } else {
+                            *text = body.into_owned();
+                        }
+                    }
+                }
             }
         }
     }
     projected
+}
+
+/// Project durable tool terminals without treating producer-controlled text as
+/// presentation authority. Only the harness-stamped dedup discriminator gets
+/// the internal envelope; every ordinary tool payload has an exact close
+/// neutralized before it reaches a provider.
+fn project_tool_result_items(
+    items: &[tau_proto::ToolResultItem],
+) -> Vec<tau_proto::ToolResultItem> {
+    items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            item.output.body = match item.presentation {
+                tau_proto::ToolResultPresentation::ToolPayload => {
+                    crate::internal_envelope::escape_untrusted_close(&item.output.body).into_owned()
+                }
+                tau_proto::ToolResultPresentation::HarnessDedupPointer => {
+                    crate::internal_envelope::frame(&item.output.body)
+                }
+            };
+            match &mut item.status {
+                tau_proto::ToolResultStatus::Error { message } => {
+                    *message = match item.presentation {
+                        tau_proto::ToolResultPresentation::ToolPayload => {
+                            crate::internal_envelope::escape_untrusted_close(message).into_owned()
+                        }
+                        tau_proto::ToolResultPresentation::HarnessDedupPointer => {
+                            crate::internal_envelope::frame(message)
+                        }
+                    };
+                }
+                tau_proto::ToolResultStatus::Cancelled { reason } => {
+                    *reason = crate::internal_envelope::escape_untrusted_close(reason).into_owned();
+                }
+                tau_proto::ToolResultStatus::Success => {}
+            }
+            item
+        })
+        .collect()
 }
 
 /// Converts a CBOR value to human-readable text for tool results.

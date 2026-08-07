@@ -54,8 +54,8 @@ receive hidden typed context projections containing the watched agent's final re
 text or the text of a user prompt accepted by the watched agent. These notifications must be
 clearly labeled as watch notifications, not as explicit `message` tool deliveries:
 
-- `[tau-internal]: Watched agent <agent-id> emitted a response`
-- `[tau-internal]: Watched agent <agent-id> received a user prompt`
+- `<tau_internal>Watched agent <agent-id> emitted a response …</tau_internal>`
+- `<tau_internal>Watched agent <agent-id> received a user prompt …</tau_internal>`
 
 Self-reported work status uses a closed phase (`unreported`, `working`, `done`,
 `blocked`, or `unknown`), a runtime-local epoch, and a canonical model-authored
@@ -64,7 +64,7 @@ and contains no control characters. An `unreported` notification carries no
 title. Initial snapshots do not activate the watcher. Later status transitions
 are durable typed, isolated notifications. Prompt presentation escapes the title
 as untrusted visible metadata and uses the generic shape
-`[tau-internal]: Watched agent <agent-id> status: <state> on <title>` without
+`<tau_internal>Watched agent <agent-id> status: <state> on <title></tau_internal>` without
 inferring start/update sequencing.
 
 The default `status` tool remains subject to each effective prompt's ordinary

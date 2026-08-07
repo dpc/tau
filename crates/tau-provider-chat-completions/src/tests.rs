@@ -928,6 +928,7 @@ fn local_summary_compaction_builds_dedicated_bounded_request() {
         .push(tau_proto::ContextBlock::ToolResults(
             tau_proto::ToolResultsBlock {
                 items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
                     call_id: tau_proto::ToolCallId::new("call-image"),
                     tool_type: tau_proto::ToolType::Function,
                     status: tau_proto::ToolResultStatus::Success,

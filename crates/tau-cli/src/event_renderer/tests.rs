@@ -66,6 +66,7 @@ fn blocker_result(call_id: &str) -> tau_proto::ToolResultDisplay {
 
 fn blocker_error(call_id: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new("blocker"),
         tool_type: tau_proto::ToolType::Function,
@@ -181,6 +182,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
     );
     renderer.handle_socket_delivery(
         &tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "blocker-cancel".into(),
             tool_name: tau_proto::ToolName::new("blocker"),
             tool_type: tau_proto::ToolType::Function,
@@ -465,6 +467,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
             inference_activation: false,
             agent_id: agent_id("agent-a"),
             text: "submitted".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,

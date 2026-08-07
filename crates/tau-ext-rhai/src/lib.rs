@@ -1475,6 +1475,7 @@ fn pending_call_from_started(started: &ToolStarted) -> PendingToolCall {
 
 fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: CborValue) {
     output.report_tool_result(ToolResult {
+        presentation: Default::default(),
         call_id: call.call_id.clone(),
         tool_name: call.tool_name.clone(),
         tool_type: call.tool_type,
@@ -1488,6 +1489,7 @@ fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: Cbo
 
 fn emit_pending_tool_error(output: &Output, call: &PendingToolCall, message: String) {
     output.report_tool_error(ToolError {
+        presentation: Default::default(),
         call_id: call.call_id.clone(),
         tool_name: call.tool_name.clone(),
         tool_type: call.tool_type,

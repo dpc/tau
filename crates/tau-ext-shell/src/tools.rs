@@ -73,6 +73,7 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
             return events;
         }
         return vec![Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
@@ -196,6 +197,7 @@ fn push_output(events: &mut Vec<Event>, invoke: tau_proto::ToolStarted, output: 
         display,
     } = output;
     events.push(Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -214,6 +216,7 @@ fn push_failure(events: &mut Vec<Event>, invoke: tau_proto::ToolStarted, failure
         display,
     } = failure;
     events.push(Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

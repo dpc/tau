@@ -38,6 +38,7 @@ fn tool_started(id: &str) -> Event {
 
 fn tool_result(id: &str) -> Event {
     Event::ProviderToolResult(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: id.into(),
         tool_name: ToolName::new("trace_tool"),
         tool_type: ToolType::Function,

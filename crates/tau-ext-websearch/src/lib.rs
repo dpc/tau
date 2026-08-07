@@ -450,6 +450,7 @@ fn dispatch_tool_invoke(
             display_args,
         ),
         _ => Event::ToolError(ToolError {
+            presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
@@ -568,6 +569,7 @@ fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher, display_args: Stri
                         Err(message) => return tool_error(invoke, message, display_args),
                     };
                 Event::ToolResult(ToolResult {
+                    presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -615,6 +617,7 @@ fn dispatch_parallel(
                     Err(message) => return tool_error(invoke, message, display_args),
                 };
                 Event::ToolResult(ToolResult {
+                    presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -692,6 +695,7 @@ fn project_web_content(
 
 fn tool_error(invoke: ToolStarted, message: String, display_args: String) -> Event {
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

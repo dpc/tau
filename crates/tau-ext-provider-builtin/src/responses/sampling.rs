@@ -150,7 +150,8 @@ impl ResponsesResponseSampler {
                         .content
                         .iter()
                         .map(|part| match part {
-                            tau_proto::ContentPart::Text { text } => text.as_str(),
+                            tau_proto::ContentPart::Text { text }
+                            | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
                         })
                         .collect::<String>(),
                     false,

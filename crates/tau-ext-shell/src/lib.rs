@@ -1725,6 +1725,7 @@ fn dispatch_locked_tool_invoke(
         }
         Err(path_crate_dir_lock::LockAcquireError::Cancelled) => {
             let _ = tx.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+                presentation: Default::default(),
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,
@@ -1800,6 +1801,7 @@ fn send_tool_failure(
         display,
     } = failure;
     let _ = tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -1900,6 +1902,7 @@ fn dispatch_tool_invoke(
                 WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
             });
             let _ = tx.report_tool_terminal(Event::ToolResult(ToolResult {
+                presentation: Default::default(),
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,
@@ -1959,6 +1962,7 @@ fn dispatch_tool_invoke(
             display,
         }) => {
             let event = Event::ToolError(tau_proto::ToolError {
+                presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
@@ -2086,6 +2090,7 @@ fn dispatch_cancellable_non_shell_tool(
         }
         path_crate_tools::CancellableToolOutcome::Cancelled => {
             let event = Event::ToolCancelled(ToolCancelled {
+                presentation: Default::default(),
                 call_id,
                 tool_name,
                 tool_type: tau_proto::ToolType::Function,
@@ -2171,6 +2176,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         Ok(path_crate_tools_shell::CommandOutcome::Finished(output)) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call finished");
             Event::ToolResult(ToolResult {
+                presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
@@ -2184,6 +2190,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         Ok(path_crate_tools_shell::CommandOutcome::Cancelled) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call cancelled");
             Event::ToolCancelled(ToolCancelled {
+                presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
@@ -2201,6 +2208,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 "cancellable shell call failed"
             );
             Event::ToolError(tau_proto::ToolError {
+                presentation: Default::default(),
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,

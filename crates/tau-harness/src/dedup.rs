@@ -11,11 +11,13 @@
 //!
 //! This module replaces the *content* of any tool result whose CBOR
 //! encoding hashes to the same value as a result already on the
-//! conversation's branch with a short pointer
-//! (`[tau-internal] <tool_name> tool output identical to previous tool call:
-//! <call_id>`). The first occurrence is kept verbatim — only the duplicates are
-//! collapsed. The model can cross-reference the pointer to the original
-//! `call_id` which is still present earlier in its own context.
+//! conversation's branch with a short raw pointer
+//! (`<tool_name> tool output identical to previous tool call: <call_id>`).
+//! The first occurrence is kept verbatim — only the duplicates are collapsed.
+//! The durable pointer carries `HarnessDedupPointer` presentation and gains its
+//! `<tau_internal>` envelope only when the harness projects it to a Provider.
+//! The model can cross-reference the pointer to the original `call_id` which is
+//! still present earlier in its own context.
 //!
 //! Three invariants protect correctness:
 //!
@@ -38,8 +40,6 @@ use std::collections::HashMap;
 
 use tau_core::AgentEntry;
 use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultStatus};
-
-use crate::INTERNAL_MARKER;
 
 /// Minimum CBOR-serialized size of a tool result to consider
 /// deduping. Below this, the pointer text is comparable to the
@@ -102,23 +102,14 @@ impl ResultDedupMap {
             for item in items {
                 let (content_hash, content_bytes) = match &item.status {
                     ToolResultStatus::Success => {
-                        if is_dedup_pointer_value(&item.output) {
-                            continue;
-                        }
                         let bytes = encode_tool_response_for_hash(&item.output);
                         (hash_truncated(&bytes), bytes.len())
                     }
                     ToolResultStatus::Error { message } => {
-                        if message.starts_with(INTERNAL_MARKER) {
-                            continue;
-                        }
                         let bytes = encode_error_response_for_hash(message, &item.output);
                         (hash_truncated(&bytes), bytes.len())
                     }
                     ToolResultStatus::Cancelled { reason } => {
-                        if reason.starts_with(INTERNAL_MARKER) {
-                            continue;
-                        }
                         let bytes = encode_error_response_for_hash(reason, &item.output);
                         (hash_truncated(&bytes), bytes.len())
                     }
@@ -242,9 +233,8 @@ pub(crate) fn hash_truncated(bytes: &[u8]) -> ResultHash {
 }
 
 /// Build the CBOR value that replaces a duplicate tool result.
-/// Encodes as `CborValue::Text` so both the wire format and the
-/// downstream [`crate::prompt::cbor_to_text`] path see identical
-/// human-readable content with a stable, recognizable prefix.
+/// Encodes as `CborValue::Text`; the harness stamps the accompanying typed
+/// presentation discriminator before provider projection frames this body.
 ///
 /// Format includes both the tool name and original call id so the model can
 /// find the previous output without mistaking the pointer for a pending or
@@ -254,35 +244,28 @@ pub(crate) fn build_pointer_value(
     tool_name: &tau_proto::ToolName,
 ) -> CborValue {
     CborValue::Text(format!(
-        "{INTERNAL_MARKER} {} tool output identical to previous tool call: {}",
+        "{} tool output identical to previous tool call: {}",
         tool_name.as_str(),
         original_call_id
     ))
 }
 
 /// Build the error-message string that replaces a duplicate tool
-/// error. The full pointer goes into the `message` field with the
-/// same marker prefix; `details` is dropped because it is what made
-/// the original distinct and the pointer's job is to refer back, not
-/// to reproduce it. The wrapping `function_call_output` is rendered with an
-/// "ERROR:" prefix downstream. The pointer still names the original tool and
-/// call id so the model can locate the full error earlier in context.
+/// error. The raw pointer body goes into the `message` field; `details` is
+/// dropped because it is what made the original distinct and the pointer's job
+/// is to refer back, not to reproduce it. The wrapping `function_call_output`
+/// is rendered with an "ERROR:" prefix downstream. The pointer still names the
+/// original tool and call id so the model can locate the full error earlier in
+/// context.
 pub(crate) fn build_pointer_error_message(
     original_call_id: &ToolCallId,
     tool_name: &tau_proto::ToolName,
 ) -> String {
     format!(
-        "{INTERNAL_MARKER} {} tool output identical to previous tool call: {}",
+        "{} tool output identical to previous tool call: {}",
         tool_name.as_str(),
         original_call_id
     )
-}
-
-/// True when `value` is a previously-emitted dedup pointer rather
-/// than a real tool result. Recognized by the [`INTERNAL_MARKER`] marker
-/// on a `CborValue::Text` payload; any other shape is real content.
-pub(crate) fn is_dedup_pointer_value(value: &tau_proto::ToolResponse) -> bool {
-    value.body.starts_with(INTERNAL_MARKER)
 }
 
 #[cfg(test)]

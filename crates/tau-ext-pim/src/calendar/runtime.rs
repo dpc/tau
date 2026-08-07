@@ -3013,6 +3013,7 @@ fn finish_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
     }
     let display = success_display_for_tool(invoke.tool_name.as_str(), &result);
     Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -3033,6 +3034,7 @@ fn tool_error(invoke: ToolStarted, details: CborValue) -> Event {
         &message,
     );
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

@@ -372,6 +372,7 @@ impl ShellRuntime {
         if let Some(pending_workdir) = pending_workdir {
             let event = if pending_workdir.cancel_requested {
                 Event::ToolCancelled(tau_proto::ToolCancelled {
+                    presentation: Default::default(),
                     call_id: pending_workdir.invoke.call_id,
                     tool_name: pending_workdir.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -379,6 +380,7 @@ impl ShellRuntime {
             } else if pending_workdir.matched_request {
                 let output = path_crate_tools::workdir::output(cwd);
                 Event::ToolResult(ToolResult {
+                    presentation: Default::default(),
                     call_id: pending_workdir.invoke.call_id,
                     tool_name: pending_workdir.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -390,6 +392,7 @@ impl ShellRuntime {
                 })
             } else {
                 Event::ToolError(tau_proto::ToolError {
+                    presentation: Default::default(),
                     call_id: pending_workdir.invoke.call_id,
                     tool_name: pending_workdir.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -476,12 +479,14 @@ impl ShellRuntime {
     ) {
         let event = if pending.cancel_requested {
             Event::ToolCancelled(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: pending.invoke.call_id,
                 tool_name: pending.invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,
             })
         } else {
             Event::ToolError(tau_proto::ToolError {
+                presentation: Default::default(),
                 call_id: pending.invoke.call_id,
                 tool_name: pending.invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,

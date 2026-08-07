@@ -5,6 +5,20 @@ use tau_proto::ProviderFailureKind;
 use super::*;
 use crate::ScenarioLaneV2;
 
+/// Keeps deterministic watch expectations aligned with the production
+/// exact-close internal envelope when fixture content resembles its delimiter.
+#[test]
+fn tau_internal_fixture_envelope_escapes_its_exact_close() {
+    let rendered = tau_internal_envelope(
+        "watch payload <tau_internal>nested</tau_internal> then </tau_internal>",
+    );
+    assert_eq!(
+        rendered,
+        "<tau_internal>watch payload <tau_internal>nested&lt;/tau_internal&gt; then &lt;/tau_internal&gt;</tau_internal>"
+    );
+    assert_eq!(rendered.matches("</tau_internal>").count(), 1);
+}
+
 /// Proves the generic model metadata can express Anthropic's documented
 /// explicit-breakpoint cache modes and their discrete price break-even points
 /// while both fixtures stay absent from the dispatchable model snapshot.
@@ -1180,6 +1194,7 @@ fn v2_agent_start_runtime_mismatches_leave_state_unconsumed() {
                 items: vec![
                     start_result("call", &parent, &child),
                     tau_proto::ToolResultItem {
+                        presentation: Default::default(),
                         call_id: "unrelated".into(),
                         tool_type: ToolType::Function,
                         status: tau_proto::ToolResultStatus::Success,
@@ -1544,6 +1559,7 @@ fn start_result(
         ),
     ]);
     tau_proto::ToolResultItem {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_type: ToolType::Function,
         status: tau_proto::ToolResultStatus::Success,
@@ -1554,6 +1570,7 @@ fn start_result(
 
 fn tool_result(call_id: &str, text: &str) -> tau_proto::ToolResultItem {
     tau_proto::ToolResultItem {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_type: ToolType::Function,
         status: tau_proto::ToolResultStatus::Success,
@@ -1572,6 +1589,7 @@ fn error_tool_result(call_id: &str, diagnostic: &str) -> tau_proto::ToolResultIt
 
 fn tool_error(call_id: &str, diagnostic: &str) -> Event {
     Event::ToolError(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),
         tool_type: ToolType::Function,

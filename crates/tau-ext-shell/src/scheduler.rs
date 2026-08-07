@@ -221,6 +221,7 @@ impl WorkScheduler {
                 .inner
                 .tx
                 .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
+                    presentation: Default::default(),
                     call_id,
                     tool_name,
                     tool_type: ToolType::Function,

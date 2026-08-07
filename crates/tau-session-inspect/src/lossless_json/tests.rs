@@ -34,6 +34,7 @@ fn tagged_json_preserves_cbor_edge_types() {
 #[test]
 fn typed_tool_event_uses_lossless_cbor_projection() {
     let event = Event::ProviderToolResult(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "call-lossless".into(),
         tool_name: tau_proto::ToolName::new("lossless_tool"),
         tool_type: tau_proto::ToolType::Function,

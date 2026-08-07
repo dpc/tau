@@ -124,11 +124,20 @@ presentation. The contract is
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 Both prompt facts also carry required harness-stamped
 `PromptSubmissionSource` provenance while retaining raw accepted prompt text.
-Core, harness, and CLI use that typed source for provider and source-aware
-presentation: authenticated extension prompts are attributed while typed
-HarnessInternal prompts use the diagnostic setting. Protocol CBOR, durable
-authority, and UI consumers retain the raw accepted text. See
+They separately carry validated `trusted_internal_spans`; only those durable
+ranges authorize `<tau_internal>` provider projection, while absent spans and
+delimiter-shaped text remain ordinary payload. Core, harness, and CLI use the
+source for routing and source-aware presentation: authenticated extension
+prompts are attributed while typed HarnessInternal prompts use the diagnostic
+setting. Protocol CBOR, durable authority, and UI consumers retain raw accepted
+text. See
 [SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
+
+Durable tool terminals and transcript `ToolResultItem`s carry serde-defaulted
+`ToolResultPresentation`. `tool_payload` is the extension-submitted default;
+the harness alone stamps `harness_dedup_pointer`, including when retaining
+terminal results through replay or compaction. `ToolCancelled` carries the same
+presentation field for one uniform terminal schema.
 
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes

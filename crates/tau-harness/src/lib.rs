@@ -14,8 +14,6 @@
 
 pub mod runtime_dir;
 
-pub(crate) const INTERNAL_MARKER: &str = "[tau-internal]";
-
 mod agent;
 mod agent_cost_ledger;
 mod agent_creator_topology;
@@ -32,6 +30,7 @@ mod extension_launcher;
 mod format;
 mod frozen_agent_discovery;
 mod harness;
+mod internal_envelope;
 pub mod internal_tools;
 mod model;
 mod pending_agent_discovery;

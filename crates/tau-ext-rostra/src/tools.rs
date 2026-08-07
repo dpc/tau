@@ -201,6 +201,7 @@ pub(super) fn decode_args<T: serde::de::DeserializeOwned>(
 /// Build a successful terminal event for one invocation.
 pub(crate) fn tool_result(invoke: &ToolStarted, text: String) -> Event {
     Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,
@@ -215,6 +216,7 @@ pub(crate) fn tool_result(invoke: &ToolStarted, text: String) -> Event {
 /// Build a categorized failed terminal event for one invocation.
 pub(crate) fn tool_error(invoke: &ToolStarted, error: ToolFailure) -> Event {
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: tau_proto::ToolType::Function,

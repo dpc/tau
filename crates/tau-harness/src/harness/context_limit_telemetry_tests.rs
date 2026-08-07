@@ -116,6 +116,7 @@ fn transcript_delta_derivation_handles_raw_cbor_without_sentinel() {
     )]);
     let entry = AgentEntry::ToolResults {
         items: vec![ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_type: ToolType::Function,
             status: ToolResultStatus::Success,
@@ -140,6 +141,7 @@ fn typed_image_projection_uses_canonical_bytes_and_patches() {
     let image_bytes = vec![0x80; 116_573];
     let entry = AgentEntry::ToolResults {
         items: vec![ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-image".into(),
             tool_type: ToolType::Function,
             status: ToolResultStatus::Success,

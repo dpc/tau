@@ -236,6 +236,7 @@ fn tool_error(agent: &str, byte: u8, seq: u64, call_id: &str) -> Fact {
         seq,
         seq + 1,
         Event::ProviderToolError(tau_proto::ToolError {
+            presentation: Default::default(),
             call_id: call_id.into(),
             tool_name: tau_proto::ToolName::new("test"),
             tool_type: tau_proto::ToolType::Function,
@@ -332,6 +333,7 @@ fn projected_payload_transformations_match_json_and_toon() {
                 2,
                 3,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
@@ -445,6 +447,7 @@ fn shell_outcome_preserves_lifecycle_and_encoding_parity() {
                 2,
                 3,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "shell-call".into(),
                     tool_name: tau_proto::ToolName::new("gpt_shell"),
                     tool_type: tau_proto::ToolType::Function,
@@ -542,6 +545,7 @@ fn cancellation_never_projects_a_shell_outcome() {
                 4,
                 5,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("shell"),
                     tool_type: tau_proto::ToolType::Function,
@@ -588,6 +592,7 @@ fn non_shell_calls_omit_shell_outcomes() {
                 2,
                 3,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
@@ -638,6 +643,7 @@ fn completion_wait_references_source_owned_output_in_lite_and_full() {
                 3,
                 4,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
@@ -665,6 +671,7 @@ fn completion_wait_references_source_owned_output_in_lite_and_full() {
                 5,
                 6,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "wait".into(),
                     tool_name: tau_proto::ToolName::new("wait"),
                     tool_type: tau_proto::ToolType::Function,
@@ -753,6 +760,7 @@ fn incomplete_completion_wait_never_duplicates_source_output() {
                 2,
                 3,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
@@ -781,6 +789,7 @@ fn incomplete_completion_wait_never_duplicates_source_output() {
                 5,
                 6,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "wait".into(),
                     tool_name: tau_proto::ToolName::new("wait"),
                     tool_type: tau_proto::ToolType::Function,
@@ -984,6 +993,7 @@ fn exact_wait_transitive_consistency_is_enforced() {
             5,
             6,
             Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: "other".into(),
                 tool_name: tau_proto::ToolName::new("test"),
                 tool_type: tau_proto::ToolType::Function,
@@ -1000,6 +1010,7 @@ fn exact_wait_transitive_consistency_is_enforced() {
             6,
             7,
             Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: "wait".into(),
                 tool_name: tau_proto::ToolName::new("wait"),
                 tool_type: tau_proto::ToolType::Function,
@@ -1267,6 +1278,7 @@ fn foreign_background_completion_uses_unresolved_fallbacks() {
                 3,
                 7,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "wait".into(),
                     tool_name: tau_proto::ToolName::new("wait"),
                     tool_type: tau_proto::ToolType::Function,
@@ -1385,6 +1397,7 @@ fn foreign_terminal_does_not_transfer_call_status_or_output() {
                 3,
                 5,
                 Event::ToolCancelled(tau_proto::ToolCancelled {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
@@ -1526,6 +1539,7 @@ fn foreign_cancellation_request_does_not_classify_local_terminal() {
                 2,
                 3,
                 Event::ToolCancelled(tau_proto::ToolCancelled {
+                    presentation: Default::default(),
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
@@ -1819,6 +1833,7 @@ fn unavailable_endpoint_halves_do_not_resolve_partial_relationships() {
                 3,
                 4,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "wait-source".into(),
                     tool_name: tau_proto::ToolName::new("wait"),
                     tool_type: tau_proto::ToolType::Function,
@@ -1866,6 +1881,7 @@ fn unavailable_endpoint_halves_do_not_resolve_partial_relationships() {
                 8,
                 12,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: "wait-missing-observation".into(),
                     tool_name: tau_proto::ToolName::new("wait"),
                     tool_type: tau_proto::ToolType::Function,
@@ -2172,6 +2188,7 @@ fn integrity_rejects_placeholder_terminals_and_wrong_cancellation_requests() {
             2,
             3,
             Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: "call".into(),
                 tool_name: tau_proto::ToolName::new("test"),
                 tool_type: tau_proto::ToolType::Function,
@@ -2215,6 +2232,7 @@ fn integrity_rejects_placeholder_terminals_and_wrong_cancellation_requests() {
             3,
             4,
             Event::ToolCancelled(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: "call".into(),
                 tool_name: tau_proto::ToolName::new("test"),
                 tool_type: tau_proto::ToolType::Function,

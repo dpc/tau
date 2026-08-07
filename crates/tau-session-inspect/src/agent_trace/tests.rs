@@ -213,6 +213,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         terminal,
         Event::ProviderToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id: "call-shell".into(),
             tool_name: tau_proto::ToolName::new("shell_command"),
             tool_type: tau_proto::ToolType::Function,

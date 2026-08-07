@@ -27,6 +27,32 @@ pub struct AgentEventValidationError {
     message: String,
 }
 
+/// Reject malformed durable authority ranges before they can reach transcript
+/// folding. Empty lists remain the compatibility-safe interpretation for old
+/// event records.
+fn check_trusted_internal_spans(
+    text: &str,
+    spans: &[tau_proto::TrustedInternalSpan],
+) -> Result<(), AgentEventValidationError> {
+    let mut offset = 0_usize;
+    for span in spans {
+        let start = span.start as usize;
+        let end = span.end as usize;
+        if start < offset
+            || end < start
+            || text.len() < end
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            return Err(AgentEventValidationError::new(
+                "trusted internal prompt spans must be ordered UTF-8 byte ranges within prompt text",
+            ));
+        }
+        offset = end;
+    }
+    Ok(())
+}
+
 impl AgentEventValidationError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
@@ -695,6 +721,7 @@ impl AgentTree {
                                 if message.content.iter().any(|part| matches!(
                                     part,
                                     ContentPart::Text { text: item_text }
+                                        | ContentPart::HarnessInternalText { text: item_text }
                                         if item_text == text
                                 ))
                         ))
@@ -1521,18 +1548,21 @@ impl AgentTree {
             Event::AgentPromptSubmitted(prompt) => Some(self.append_user_text_input(
                 parent,
                 prompt.text.clone(),
+                &prompt.trusted_internal_spans,
                 Some(prompt.submission_source.clone()),
                 prompt.inference_activation,
             )),
             Event::AgentUserMessageInjected(injected) => Some(self.append_user_text_input(
                 parent,
                 injected.text.clone(),
+                &[],
                 None,
                 injected.inference_activation,
             )),
             Event::AgentPromptSteered(steered) => Some(self.append_user_text_input(
                 parent,
                 steered.text.clone(),
+                &steered.trusted_internal_spans,
                 Some(steered.submission_source.clone()),
                 steered.inference_activation,
             )),
@@ -1571,6 +1601,7 @@ impl AgentTree {
         &mut self,
         parent: Option<NodeId>,
         text: String,
+        trusted_internal_spans: &[tau_proto::TrustedInternalSpan],
         submission_source: Option<tau_proto::PromptSubmissionSource>,
         inference_activation: bool,
     ) -> NodeId {
@@ -1579,7 +1610,7 @@ impl AgentTree {
             AgentEntry::UserInput {
                 items: vec![ContextItem::Message(MessageItem {
                     role: ContextRole::User,
-                    content: vec![ContentPart::Text { text }],
+                    content: Self::prompt_content_parts(text, trusted_internal_spans),
                     phase: None,
                     responses_raw_json: None,
                 })],
@@ -1587,6 +1618,40 @@ impl AgentTree {
                 inference_activation,
             },
         )
+    }
+
+    /// Split trusted harness spans from ordinary prompt bytes without allowing
+    /// a malformed durable range to manufacture authority.
+    fn prompt_content_parts(
+        text: String,
+        spans: &[tau_proto::TrustedInternalSpan],
+    ) -> Vec<ContentPart> {
+        if check_trusted_internal_spans(&text, spans).is_err() || spans.is_empty() {
+            return vec![ContentPart::Text { text }];
+        }
+        let mut parts = Vec::new();
+        let mut offset = 0_usize;
+        for span in spans {
+            let start = span.start as usize;
+            let end = span.end as usize;
+            if offset < start {
+                parts.push(ContentPart::Text {
+                    text: text[offset..start].to_owned(),
+                });
+            }
+            if start < end {
+                parts.push(ContentPart::HarnessInternalText {
+                    text: text[start..end].to_owned(),
+                });
+            }
+            offset = end;
+        }
+        if offset < text.len() || parts.is_empty() {
+            parts.push(ContentPart::Text {
+                text: text[offset..].to_owned(),
+            });
+        }
+        parts
     }
 
     /// Fold one canonical directional agent-message occurrence without
@@ -1714,6 +1779,7 @@ impl AgentTree {
             tool_type: result.tool_type,
             status: ToolResultStatus::Success,
             output: tau_proto::ToolResponse::from_cbor(&result.result),
+            presentation: result.presentation,
             provider_content: result.provider_content.clone(),
         })
     }
@@ -1731,6 +1797,7 @@ impl AgentTree {
                     .as_ref()
                     .unwrap_or(&tau_proto::CborValue::Null),
             ),
+            presentation: error.presentation,
             provider_content: Vec::new(),
         })
     }
@@ -1746,6 +1813,7 @@ impl AgentTree {
                 reason: "cancelled".to_owned(),
             },
             output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
+            presentation: cancelled.presentation,
             provider_content: Vec::new(),
         })
     }
@@ -2063,7 +2131,9 @@ impl AgentTree {
             Event::AgentInitializationContextSet(context) if context.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
-            Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Some(
+                check_trusted_internal_spans(&prompt.text, &prompt.trusted_internal_spans),
+            ),
             Event::AgentPromptStarted(started) if started.agent_id == self.agent_id => {
                 Some(self.validate_prompt_started(started))
             }
@@ -2075,9 +2145,10 @@ impl AgentTree {
             Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
-            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => {
-                Some(self.validate_self_compaction_delivery(steered))
-            }
+            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => Some(
+                check_trusted_internal_spans(&steered.text, &steered.trusted_internal_spans)
+                    .and_then(|()| self.validate_self_compaction_delivery(steered)),
+            ),
             Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
                 Some(Ok(()))
             }

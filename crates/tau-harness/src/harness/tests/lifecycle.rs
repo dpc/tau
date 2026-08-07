@@ -436,7 +436,7 @@ fn existing_agent_load_reseeds_creator_cost_topology() {
 fn context_text(item: &ContextItem) -> Option<&str> {
     match item {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
-            ContentPart::Text { text } => text.as_str(),
+            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
         }),
         ContextItem::ToolResult(result) => match &result.output.raw {
             CborValue::Text(text) => Some(text.as_str()),
@@ -1903,6 +1903,7 @@ fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> b
 
 fn test_tool_result(call_id: &str, tool_name: &str) -> Event {
     Event::ToolResultReported(ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
@@ -5732,6 +5733,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     h.handle_extension_event(
         second_id,
         TestProtocolItem::Event(Event::StartAgentRequest(StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             parent_agent: None,
             query_id: "q-staged".to_owned(),
             instruction: "STAGED START AGENT REQUEST".to_owned(),
@@ -6591,7 +6593,9 @@ fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
         .context
         .flatten()
         .iter()
-        .position(|item| context_text(item) == Some(notice.as_str()))
+        .position(|item| {
+            context_text(item) == Some(crate::internal_envelope::frame(&notice).as_str())
+        })
         .expect("availability notice in prompt");
     let user_pos = prompt
         .context
@@ -6649,7 +6653,13 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after unregister".to_owned()))
         .expect("dispatch unavailable prompt");
     let first_prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(context_text_count(&first_prompt, &unavailable), 1);
+    assert_eq!(
+        context_text_count(
+            &first_prompt,
+            &crate::internal_envelope::frame(&unavailable)
+        ),
+        1
+    );
     h.handle_provider_response_finished(super::dispatch::provider_text_response(
         &first_prompt.agent_prompt_id,
         first_prompt.agent_id.clone(),
@@ -6666,7 +6676,9 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
         .context
         .flatten()
         .iter()
-        .position(|item| context_text(item) == Some(available.as_str()))
+        .position(|item| {
+            context_text(item) == Some(crate::internal_envelope::frame(&available).as_str())
+        })
         .expect("available-again notice in prompt");
     let user_pos = second_prompt
         .context
@@ -6708,7 +6720,10 @@ fn duplicate_provider_is_rejected_without_ambiguous_fallback() {
     .expect("dispatch user prompt");
 
     let prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(context_text_count(&prompt, &notice), 1);
+    assert_eq!(
+        context_text_count(&prompt, &crate::internal_envelope::frame(&notice)),
+        1
+    );
     assert_eq!(agent_prompt_text_count(&h, &notice), 1);
     assert!(!prompt_has_tool(&prompt, "shell"));
 
@@ -8508,6 +8523,7 @@ fn duplicate_tool_result_is_discarded() {
     let result = h.handle_extension_event(
         "fake-ext",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: "orphan-call".into(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -9107,6 +9123,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     h.handle_extension_event(
         "owner-ext",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,

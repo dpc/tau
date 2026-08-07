@@ -240,7 +240,8 @@ pub fn format_session_entry(entry: &AgentEntry) -> String {
             .content
             .iter()
             .map(|part| match part {
-                tau_proto::ContentPart::Text { text } => text.as_str(),
+                tau_proto::ContentPart::Text { text }
+                | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -304,7 +305,8 @@ fn first_message_text(items: &[ContextItem]) -> Option<String> {
         ContextItem::Message(message) => {
             let mut text = String::new();
             for part in &message.content {
-                let ContentPart::Text { text: part } = part;
+                let (ContentPart::Text { text: part }
+                | ContentPart::HarnessInternalText { text: part }) = part;
                 text.push_str(part);
             }
             (!text.is_empty()).then_some(text)

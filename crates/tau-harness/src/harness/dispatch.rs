@@ -102,6 +102,7 @@ impl Harness {
                 inference_activation,
                 agent_id: target_agent_id,
                 text: prompt.text,
+                trusted_internal_spans: prompt.trusted_internal_spans,
                 message_class: prompt.message_class,
                 internal_kind,
                 originator,

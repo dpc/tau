@@ -433,7 +433,8 @@ fn response_text(items: &[tau_proto::ContextItem]) -> String {
             continue;
         }
         for part in &message.content {
-            let tau_proto::ContentPart::Text { text } = part;
+            let (tau_proto::ContentPart::Text { text }
+            | tau_proto::ContentPart::HarnessInternalText { text }) = part;
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -1539,6 +1540,7 @@ fn process_due_idle_hooks(
                 let instruction =
                     summary_instruction(&pending.user_prompt, &pending.agent_response);
                 handle.emit_transient(Event::StartAgentRequest(StartAgentRequest {
+                    trusted_internal_spans: Vec::new(),
                     parent_agent: None,
                     query_id: query_id.clone(),
                     instruction,

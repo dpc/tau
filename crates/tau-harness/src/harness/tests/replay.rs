@@ -448,6 +448,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
         inference_activation: false,
         agent_id: agent_id.clone(),
         text: "ephemeral history".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -798,6 +799,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -977,7 +979,8 @@ fn agent_message_fact_replay_projects_without_wake() {
     let tau_core::AgentEntry::MessageFact { item, .. } = &replayed_projection else {
         panic!("replayed message fact");
     };
-    let tau_proto::ContentPart::Text { text } = &item.content[0];
+    let (tau_proto::ContentPart::Text { text }
+    | tau_proto::ContentPart::HarnessInternalText { text }) = &item.content[0];
     assert_eq!(
         text,
         "<message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" conversation=\"general\" content_trust=\"external\">persisted message</message>"
@@ -1067,7 +1070,7 @@ fn received_agent_message_replay_restores_context_without_wake() {
                 if matches!(
                     content.first(),
                     Some(tau_proto::ContentPart::Text { text })
-                        if text == "[tau-internal]: You have received a message from manager\n\n<message>\npersisted <message>& body\n</message>"
+                        if text == "<tau_internal>You have received a message from manager\n\n<message>\npersisted <message>& body\n</message></tau_internal>"
                 )
         )
     }));
@@ -1485,6 +1488,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
 #[test]
 fn ui_replay_projects_provider_image_result_without_bytes() {
     let result = ToolResult {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: ToolName::new("read_image"),
         tool_type: tau_proto::ToolType::Function,
@@ -1592,6 +1596,7 @@ fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
 
 fn successful_tool_result(call_id: &str) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -1648,6 +1653,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
                 inference_activation: false,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: "before restart".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -1718,6 +1724,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                         inference_activation: false,
                         agent_id: crate::parse_agent_id("orphan"),
                         text: "orphan prompt".to_owned(),
+                        trusted_internal_spans: Vec::new(),
                         message_class: tau_proto::PromptMessageClass::User,
                         internal_kind: None,
                         originator: tau_proto::PromptOriginator::User,
@@ -1819,6 +1826,7 @@ fn seed_restored_tool_round_for_agent(
                 inference_activation: false,
                 agent_id: crate::parse_agent_id(agent_id),
                 text: format!("before restart for {agent_id}"),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -2373,6 +2381,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
                 inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: "history before load".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -2992,6 +3001,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "background-result-call".into(),
             tool_name: ToolName::new("background_ok"),
             tool_type: tau_proto::ToolType::Function,
@@ -3025,6 +3035,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "background-error-call".into(),
             tool_name: ToolName::new("background_err"),
             tool_type: tau_proto::ToolType::Function,
@@ -3054,6 +3065,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.publish_for_agent(
         &cid,
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "cancelled-call".into(),
             tool_name: ToolName::new("cancel_me"),
             tool_type: tau_proto::ToolType::Function,

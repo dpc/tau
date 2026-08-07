@@ -102,6 +102,7 @@ fn web_content_envelope_is_preserved_in_responses_tool_result() {
         "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: <claim> & &lt;/tau_web_content&gt;</tau_web_content>",
     ] {
         let result = ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-web".into(),
             tool_type: tau_proto::ToolType::Function,
             status: ToolResultStatus::Success,
@@ -171,6 +172,7 @@ fn shell_command_wire_definition_uses_only_call_local_workdir() {
 #[test]
 fn gpt_5_6_lowers_typed_image_inside_function_output() {
     let items = [ContextItem::ToolResult(ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Success,
@@ -234,6 +236,7 @@ fn gpt_5_6_lowers_typed_image_inside_function_output() {
 #[test]
 fn typed_image_lowering_enforces_both_request_budgets() {
     let result = ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Success,
@@ -274,6 +277,7 @@ fn typed_image_lowering_enforces_both_request_budgets() {
 fn unaudited_responses_route_omits_typed_image() {
     let config = chain_test_config();
     let items = [ContextItem::ToolResult(ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Success,
@@ -1585,6 +1589,7 @@ fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
             tau_proto::CborValue::Text("custom input".to_owned()),
         ),
         ContextItem::ToolResult(ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-function".into(),
             tool_type: tau_proto::ToolType::Function,
             status: ToolResultStatus::Success,
@@ -1594,6 +1599,7 @@ fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
             provider_content: Vec::new(),
         }),
         ContextItem::ToolResult(ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-custom".into(),
             tool_type: tau_proto::ToolType::Custom,
             status: ToolResultStatus::Error {
@@ -2637,6 +2643,7 @@ fn assistant_tool_call(
 
 fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
     ContextItem::ToolResult(ToolResultItem {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Error {
@@ -3217,6 +3224,7 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
             tau_proto::CborValue::Text("*** Begin Patch\n*** End Patch".into()),
         ),
         ContextItem::ToolResult(ToolResultItem {
+            presentation: Default::default(),
             call_id: "call-patch".into(),
             tool_type: tau_proto::ToolType::Custom,
             status: ToolResultStatus::Success,
@@ -3313,6 +3321,7 @@ fn build_request_preserves_existing_provider_tool_call_id_prefixes() {
 fn build_request_replays_cancelled_tool_result_with_header() {
     let config = chain_test_config();
     let messages = vec![ContextItem::ToolResult(ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-cancelled".into(),
         tool_type: tau_proto::ToolType::Function,
         status: ToolResultStatus::Cancelled {
@@ -3398,6 +3407,7 @@ fn apply_event_accumulates_custom_tool_input_deltas() {
 fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
     let config = chain_test_config();
     let tool_result = ToolResultItem {
+        presentation: Default::default(),
         call_id: "call-custom".into(),
         tool_type: tau_proto::ToolType::Custom,
         status: ToolResultStatus::Success,

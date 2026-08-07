@@ -522,6 +522,7 @@ fn tool_prefix_composition_is_additive_and_envelope_is_exact() {
 #[test]
 fn typed_image_tool_result_cbor_roundtrip_and_safe_debug() {
     let event = Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-image".into(),
         tool_name: ToolName::new("read_image"),
         tool_type: ToolType::Function,
@@ -954,6 +955,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             tool_type: ToolType::Function,
@@ -964,6 +966,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             tool_type: ToolType::Function,
@@ -982,6 +985,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolErrorReported(ToolError {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
             tool_type: ToolType::Function,
@@ -991,6 +995,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ToolError(ToolError {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
             tool_type: ToolType::Function,
@@ -1044,11 +1049,13 @@ fn representative_events() -> Vec<Event> {
             target_call_id: "call-1".into(),
         }),
         Event::ToolCancelledReported(ToolCancelled {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             tool_type: ToolType::Function,
         }),
         Event::ToolCancelled(ToolCancelled {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             tool_type: ToolType::Function,
@@ -1261,6 +1268,7 @@ fn representative_events() -> Vec<Event> {
             inference_activation: false,
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: PromptMessageClass::User,
             internal_kind: None,
             originator: PromptOriginator::User,
@@ -1283,6 +1291,7 @@ fn representative_events() -> Vec<Event> {
             submission_source: PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id("engineer_abcd1234"),
             text: "steer".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: PromptMessageClass::User,
             internal_kind: None,
             ctx_id: None,
@@ -1594,6 +1603,7 @@ fn representative_events() -> Vec<Event> {
             activation_kind: None,
         }),
         Event::StartAgentRequest(StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             query_id: "query-1".to_owned(),
             instruction: "check this".to_owned(),
             role: Some("reviewer".to_owned()),
@@ -1737,6 +1747,7 @@ fn representative_events() -> Vec<Event> {
             sequence: 3,
         }),
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             tool_type: ToolType::Function,
@@ -1747,6 +1758,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ProviderToolError(ToolError {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
             tool_type: ToolType::Function,
@@ -2998,6 +3010,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
         inference_activation: true,
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "hello".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,
@@ -3067,6 +3080,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         text: "steered".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::User,
         internal_kind: None,
         ctx_id: Some("ctx-1".to_owned()),
@@ -3906,6 +3920,7 @@ fn tool_progress_report_and_canonical_fact_have_distinct_wire_names() {
 #[test]
 fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
     let result = ToolResult {
+        presentation: Default::default(),
         call_id: "result-call".into(),
         tool_name: ToolName::new("owned_tool"),
         tool_type: ToolType::Function,
@@ -3916,6 +3931,7 @@ fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
         originator: PromptOriginator::User,
     };
     let error = ToolError {
+        presentation: Default::default(),
         call_id: "error-call".into(),
         tool_name: ToolName::new("owned_tool"),
         tool_type: ToolType::Function,
@@ -3925,6 +3941,7 @@ fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
         originator: PromptOriginator::User,
     };
     let cancelled = ToolCancelled {
+        presentation: Default::default(),
         call_id: "cancelled-call".into(),
         tool_name: ToolName::new("owned_tool"),
         tool_type: ToolType::Function,
@@ -4676,6 +4693,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             cancelled: false,
         }),
         Event::ToolError(ToolError {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("read"),
             tool_type: ToolType::Function,
@@ -4769,6 +4787,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             inference_activation: false,
             agent_id: agent_id("worker"),
             text: "hi".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: PromptMessageClass::User,
             internal_kind: None,
             originator: PromptOriginator::User,
@@ -4855,7 +4874,8 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
         inference_activation: false,
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),
-        text: "[tau-internal] Tool call `bg` is complete.".into(),
+        text: "<tau_internal>Tool call `bg` is complete.</tau_internal>".into(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: None,
@@ -4884,6 +4904,7 @@ fn steered_prompt_requires_submission_source() {
         submission_source: PromptSubmissionSource::HumanUi,
         agent_id: agent_id("worker"),
         text: "steered".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::User,
         internal_kind: None,
         ctx_id: None,
@@ -4904,6 +4925,7 @@ fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
         inference_activation: true,
         agent_id: agent_id("worker"),
         text: "compact soon".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::Internal,
         internal_kind: Some(InternalPromptKind::ContextSizeAlert),
         originator: PromptOriginator::User,
@@ -4929,6 +4951,7 @@ fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),
         text: "compact after tools".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::Internal,
         internal_kind: Some(InternalPromptKind::ContextSizeAlert),
         ctx_id: None,

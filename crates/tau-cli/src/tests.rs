@@ -2058,6 +2058,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "hello".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2114,6 +2115,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
         submission_source: Default::default(),
         agent_id: agent_id("main"),
         text: "steered submitted prompt".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         ctx_id: None,
@@ -2122,6 +2124,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
         inference_activation: false,
         agent_id: agent_id("main"),
         text: "replayed submitted prompt".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2206,6 +2209,7 @@ fn timer_wakeup_prompt_submitted_renders_visible_marker() {
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2240,6 +2244,7 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: Some("timer:wake:2".to_owned()),
@@ -2264,6 +2269,7 @@ fn extension_prompt_steered_uses_message_marker() {
         },
         agent_id: agent_id("engineer_abc12345"),
         text: "extension-steered prompt".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         ctx_id: None,
@@ -2282,6 +2288,7 @@ fn extension_prompt_steered_uses_message_marker() {
             inference_activation: false,
             agent_id: agent_id("engineer_abc12345"),
             text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2313,6 +2320,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "extension submitted payload".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2326,6 +2334,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         submission_source: extension,
         agent_id: agent_id("engineer_abc12345"),
         text: "extension steered payload".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: Some("swarm-command-2".to_owned()),
@@ -2334,6 +2343,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "harness submitted payload".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2347,6 +2357,7 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
         submission_source: harness,
         agent_id: agent_id("engineer_abc12345"),
         text: "harness steered payload".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: None,
@@ -2390,6 +2401,7 @@ fn internal_prompt_toggle_does_not_reproject_previous_session_history() {
             inference_activation: false,
             agent_id: agent_id("engineer_abc12345"),
             text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2422,6 +2434,7 @@ fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation
         inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `special` fired: exact once".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2435,6 +2448,7 @@ fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
         text: "context alert exact once".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
         ctx_id: None,
@@ -2464,6 +2478,7 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
         inference_activation: false,
         agent_id: agent_id("replayed-agent"),
         text: "replayed submitted internal".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2477,6 +2492,7 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("replayed-agent"),
         text: "replayed steered internal".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: None,
@@ -2503,6 +2519,60 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     assert_eq!(retoggled.matches("replayed steered internal").count(), 1);
 }
 
+/// The provider-only envelope never enters durable prompt text, so the CLI
+/// retains its established diagnostic prefix for both live and cold replay.
+#[test]
+fn internal_prompt_ui_keeps_legacy_prefix_without_model_envelope() {
+    let agent = agent_id("internal-agent");
+    let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent.clone(),
+        text: "live internal body".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
+        ctx_id: None,
+    });
+    let steered = Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        agent_id: agent.clone(),
+        text: "replayed internal body".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        ctx_id: None,
+    });
+
+    let (_live_term, live_handle, live_vt) = setup(100, 24);
+    let mut live = marker_test_renderer(live_handle.clone());
+    live.switch_agent(agent.as_str().to_owned());
+    live.handle(&submitted);
+    live.handle(&steered);
+    live.apply_setting("show-internal-prompts", "on");
+    sync(&live_handle);
+    let live_text = visible_lines(&live_vt, 100).join("\n");
+    assert!(live_text.contains("□ [tau-internal]: live internal body"));
+    assert!(live_text.contains("□ [tau-internal]: replayed internal body"));
+    assert!(!live_text.contains("<tau_internal>"));
+
+    let (_cold_term, cold_handle, cold_vt) = setup(100, 24);
+    let mut cold = marker_test_renderer(cold_handle.clone());
+    cold.switch_agent(agent.as_str().to_owned());
+    cold.handle_recorded_at(&submitted, tau_proto::UnixMicros::new(1));
+    cold.handle_recorded_at(&steered, tau_proto::UnixMicros::new(2));
+    cold.apply_setting("show-internal-prompts", "on");
+    sync(&cold_handle);
+    let cold_text = visible_lines(&cold_vt, 100).join("\n");
+    assert!(cold_text.contains("□ [tau-internal]: live internal body"));
+    assert!(cold_text.contains("□ [tau-internal]: replayed internal body"));
+    assert!(!cold_text.contains("<tau_internal>"));
+}
+
 /// Semantic row markers keep messages and notices visually distinct while
 /// preserving the structured-status marker between them.
 #[test]
@@ -2524,6 +2594,7 @@ fn unqueued_harness_prompt_steered_uses_toggle_controlled_notice() {
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
         text: "harness-steered message".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         ctx_id: None,
@@ -2556,6 +2627,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
             inference_activation: true,
             agent_id: agent_id("engineer_abc12345"),
             text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2569,6 +2641,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
         inference_activation: true,
         agent_id: agent_id("engineer_abc12345"),
         text: "untagged internal prompt".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2580,6 +2653,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
         inference_activation: true,
         agent_id: agent_id("engineer_abc12345"),
         text: "Use the `compact` tool after finishing your current task.".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
         originator: tau_proto::PromptOriginator::User,
@@ -2625,6 +2699,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
             inference_activation: true,
             agent_id: agent_id("engineer_abc12345"),
             text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2640,6 +2715,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
         text: "compact after tools".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
         ctx_id: None,
@@ -3005,6 +3081,7 @@ fn queued_prompt_elides_at_layout_without_changing_authoritative_text() {
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         text: text.into(),
+        trusted_internal_spans: Vec::new(),
         agent_id: agent_id("main"),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
@@ -4866,6 +4943,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         inference_activation: false,
         agent_id: agent_id("worker-1"),
         text: "follow up".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4933,6 +5011,7 @@ fn accepted_prompt_submission_starts_main_turn_before_provider_activity() {
         inference_activation: true,
         agent_id: agent_id("local-agent"),
         text: "warm up locally".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -5151,6 +5230,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         inference_activation: false,
         agent_id: agent_id("worker-1"),
         text: "side task".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -5740,6 +5820,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
             inference_activation: false,
             agent_id: agent_id("worker-1"),
             text: "side task".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: originator.clone(),
@@ -7053,6 +7134,7 @@ fn new_session_clears_session_ui_state() {
         ],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -8032,6 +8114,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     );
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "side-call".into(),
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
@@ -8047,6 +8130,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         display: None,
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -8091,6 +8175,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     assert!(status_row.contains('%'));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
@@ -8730,6 +8815,7 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
     // The Ctrl-D guard must clear it, otherwise a cancelled tool leaves the
     // session looking busy forever after the harness has stopped the tool.
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -8848,6 +8934,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     assert!(status_row.ends_with("%0/1 @1 #12k/200k -/-"));
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
         tool_type: tau_proto::ToolType::Function,
@@ -9622,6 +9709,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         text: "folded queued prompt".into(),
+        trusted_internal_spans: Vec::new(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
@@ -9668,6 +9756,7 @@ fn extension_steering_does_not_promote_matching_queued_user_prompt() {
             name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
         },
         text: "queued extension collision".into(),
+        trusted_internal_spans: Vec::new(),
         agent_id: agent_id("main"),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
@@ -9710,6 +9799,7 @@ fn nonfront_queued_match_remains_a_message_without_consuming_the_front_prompt() 
             inference_activation: false,
             submission_source,
             text: "second queued user prompt".to_owned(),
+            trusted_internal_spans: Vec::new(),
             agent_id: agent_id("main"),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
@@ -9740,6 +9830,7 @@ fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
         inference_activation: true,
         agent_id: agent_id("main"),
         text: text.to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -9798,6 +9889,7 @@ fn internal_prompt_events_are_hidden() {
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: "[tau-internal] Tool call `steered` is complete.".into(),
+        trusted_internal_spans: Vec::new(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
@@ -10937,6 +11029,7 @@ fn immediate_agent_start_completion_shows_agent_stats_and_standard_status() {
         CborValue::Map(Vec::new()),
     ));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
         tool_type: tau_proto::ToolType::Function,
@@ -11005,6 +11098,7 @@ fn provider_tool_error_before_tool_started_is_ignored() {
 
     renderer.handle_recorded_at(
         &Event::ProviderToolError(ToolError {
+            presentation: Default::default(),
             call_id: "bad-args".into(),
             tool_name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
@@ -11035,6 +11129,7 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     );
     renderer.handle_recorded_at(
         &Event::ToolError(ToolError {
+            presentation: Default::default(),
             call_id: "overlap-edit".into(),
             tool_name: tau_proto::ToolName::new("edit"),
             tool_type: tau_proto::ToolType::Function,
@@ -11048,6 +11143,7 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     );
     renderer.handle_recorded_at(
         &Event::ProviderToolError(ToolError {
+            presentation: Default::default(),
             call_id: "overlap-edit".into(),
             tool_name: tau_proto::ToolName::new("edit"),
             tool_type: tau_proto::ToolType::Function,
@@ -11099,6 +11195,7 @@ fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
     assert!(vt.screen_contains(80, "strict_tool 0s pending"));
     renderer.handle_recorded_at(
         &Event::ProviderToolError(ToolError {
+            presentation: Default::default(),
             call_id: "bad-args".into(),
             tool_name: tau_proto::ToolName::new("strict_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -11143,6 +11240,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "wait-timeout".into(),
             tool_name: tau_proto::ToolName::new("wait"),
             tool_type: tau_proto::ToolType::Function,
@@ -11183,6 +11281,7 @@ fn wait_timeout_label_survives_live_to_retained_transition() {
     );
     replay.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "replayed-wait".into(),
             tool_name: tau_proto::ToolName::new("wait"),
             tool_type: tau_proto::ToolType::Function,
@@ -11228,6 +11327,7 @@ fn completed_dummy_tool_replay_is_terminal_idle_and_stays_terminal() {
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "opud-call".into(),
         tool_name: tau_proto::ToolName::new("restart_test_dummy"),
         tool_type: tau_proto::ToolType::Function,
@@ -11282,6 +11382,7 @@ fn incomplete_dummy_tool_replay_is_repaired_honestly_and_not_active() {
         })],
     )));
     renderer.handle(&Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: "opud-incomplete".into(),
         tool_name: tau_proto::ToolName::new("restart_test_dummy"),
         tool_type: tau_proto::ToolType::Function,
@@ -11348,6 +11449,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
     assert!(vt.screen_contains(80, "read src/main.rs"));
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -11448,6 +11550,7 @@ fn status_descriptor_survives_terminal_tool_result() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "status-call".into(),
             tool_name: tau_proto::ToolName::new("status"),
             tool_type: tau_proto::ToolType::Function,
@@ -11512,6 +11615,7 @@ fn provider_terminal_finishes_harness_originated_message_progress() {
         }),
     }));
     renderer.handle(&Event::ProviderToolResult(tau_proto::ToolResult {
+        presentation: Default::default(),
         call_id: "message-call".into(),
         tool_name: tau_proto::ToolName::new("message"),
         tool_type: tau_proto::ToolType::Function,
@@ -11595,6 +11699,7 @@ fn shell_command_duration_shows_effective_timeout() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "shell-default".into(),
             tool_name: tau_proto::ToolName::new("gpt_shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -11632,6 +11737,7 @@ fn shell_command_duration_shows_effective_timeout() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "shell-explicit".into(),
             tool_name: tau_proto::ToolName::new("gpt_shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -11705,6 +11811,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     );
     renderer.handle_recorded_at(
         &Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -11833,6 +11940,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
 
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -11891,6 +11999,7 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
         ],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -12106,6 +12215,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     assert!(vt.screen_contains(80, "read src/main.rs -s"));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -12170,6 +12280,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
     assert!(!vt.screen_contains(80, "read src/main.rs"));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -12190,6 +12301,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         originator: tau_proto::PromptOriginator::User,
     }));
     renderer.handle(&Event::ToolError(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
@@ -12234,6 +12346,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -12276,6 +12389,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     assert!(!vt.screen_contains(80, "grep foo"));
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
         tool_type: tau_proto::ToolType::Function,
@@ -12341,6 +12455,7 @@ fn show_tools_compact_hides_payload_body() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -12414,6 +12529,7 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
     );
     renderer.handle_recorded_at(
         &Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -12488,6 +12604,7 @@ fn show_tools_off_hides_tool_blocks() {
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
@@ -12513,6 +12630,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
     );
 
     renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: "call-web".into(),
         tool_name: tau_proto::ToolName::new("websearch_exa"),
         tool_type: tau_proto::ToolType::Function,

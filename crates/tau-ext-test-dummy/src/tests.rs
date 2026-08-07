@@ -813,6 +813,7 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
         inference_activation: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: text.to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::User,
         internal_kind: None,
         originator: PromptOriginator::User,

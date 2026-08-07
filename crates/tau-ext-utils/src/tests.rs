@@ -215,6 +215,7 @@ fn overdue_timer_waits_for_agent_replay_complete() {
     rt.handle_started_replay(&start);
     rt.handle_result_replay(
         &ToolResult {
+            presentation: Default::default(),
             call_id: start.call_id.clone(),
             tool_name: start.tool_name.clone(),
             tool_type: ToolType::Function,
@@ -293,6 +294,7 @@ fn replayed_timer_prompt_removes_one_shot() {
             inference_activation: false,
             agent_id: agent.clone(),
             text: "Timer `once` fired: wake".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: PromptMessageClass::Internal,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -406,6 +408,7 @@ fn replayed_steered_timer_prompt_removes_one_shot() {
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent.clone(),
         text: "Timer `busy` fired: wake".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: PromptMessageClass::Internal,
         internal_kind: None,
         ctx_id: Some("timer:busy:1".to_owned()),
@@ -414,6 +417,7 @@ fn replayed_steered_timer_prompt_removes_one_shot() {
         inference_activation: false,
         agent_id: steered.agent_id.clone(),
         text: steered.text,
+        trusted_internal_spans: Vec::new(),
         message_class: steered.message_class,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,

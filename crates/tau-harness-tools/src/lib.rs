@@ -1863,7 +1863,7 @@ fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
         .content
         .iter()
         .map(|part| match part {
-            ContentPart::Text { text } => text.as_str(),
+            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1907,12 +1907,17 @@ fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
     Ok(DelegateArgs { prompt, role })
 }
 
-fn delegate_instruction(self_agent_id: &str, prompt: &str) -> String {
+fn delegate_bootstrap_prefix(self_agent_id: &str) -> String {
     format!(
         include_str!("../../tau-harness/src/harness/prompts/delegate_prefix.md"),
         self_agent_id = self_agent_id,
-        prompt = prompt,
+        prompt = "",
     )
+}
+
+#[cfg(test)]
+fn delegate_instruction(self_agent_id: &str, prompt: &str) -> String {
+    format!("{}{}", delegate_bootstrap_prefix(self_agent_id), prompt)
 }
 
 /// Builds the start request for the public `agent_start` tool.
@@ -1927,10 +1932,16 @@ fn delegate_start_request(
     input_stats: ToolUseStats,
     args: DelegateArgs,
 ) -> StartAgentRequest {
+    let prefix = delegate_bootstrap_prefix(self_agent_id);
+    let instruction = format!("{prefix}{}", args.prompt);
     StartAgentRequest {
         parent_agent: None,
         query_id,
-        instruction: delegate_instruction(self_agent_id, &args.prompt),
+        trusted_internal_spans: vec![tau_proto::TrustedInternalSpan {
+            start: 0,
+            end: u32::try_from(prefix.len()).expect("delegate bootstrap prefix fits u32"),
+        }],
+        instruction,
         role: Some(args.role),
         input_stats,
         tool_call_id: Some(call_id),

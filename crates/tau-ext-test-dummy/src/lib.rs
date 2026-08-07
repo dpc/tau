@@ -387,6 +387,7 @@ fn intercepted_prompt_replacement(event: &Event) -> Option<Event> {
             Event::AgentPromptSubmitted(AgentPromptSubmitted {
                 inference_activation: false,
                 text: fixed,
+                trusted_internal_spans: Vec::new(),
                 ..prompt.clone()
             })
         }),
@@ -428,6 +429,7 @@ where
     cx.state.reap_finished_hold()?;
     if cx.state.pending_hold.is_some() {
         return cx.report_error(ToolError {
+            presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
@@ -476,6 +478,7 @@ where
     cx.state.reap_finished_hold()?;
     if cx.state.pending_hold.is_some() {
         return cx.report_error(ToolError {
+            presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
@@ -499,6 +502,7 @@ where
         match signals.recv_timeout(hold_timeout) {
             Ok(HoldSignal::Cancel) => {
                 let _ = handle.report_tool_cancelled_detached(tau_proto::ToolCancelled {
+                    presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -507,6 +511,7 @@ where
             Ok(HoldSignal::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = handle.report_tool_error_detached(ToolError {
+                    presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
@@ -547,6 +552,7 @@ where
 
 fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -560,6 +566,7 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {
 
 fn restart_error(invoke: tau_proto::ToolStarted) -> ToolError {
     ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

@@ -2819,6 +2819,7 @@ fn cbor_reject_unknown_fields(value: &CborValue, allowed: &[&str]) -> Result<(),
 
 fn tool_result(invoke: ToolStarted, text: &str) -> Event {
     Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -2836,6 +2837,7 @@ fn tool_result(invoke: ToolStarted, text: &str) -> Event {
 
 fn tool_error(invoke: ToolStarted, message: String) -> Event {
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

@@ -428,6 +428,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     h.handle_extension_event_inner(&crate::test_connection_id(progress_owner), progress_report)
         .expect("commit ephemeral tool progress report");
     let terminal_report = Event::ToolResultReported(ToolResult {
+        presentation: Default::default(),
         call_id: tool_call_id,
         tool_name: ToolName::new("debug_secret_tool"),
         tool_type: tau_proto::ToolType::Function,
@@ -593,6 +594,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     h.handle_extension_event_inner(&crate::test_connection_id(provider), retry_result)
         .expect("commit duplicate ephemeral retry report");
     let duplicate_terminal_report = Event::ToolResultReported(ToolResult {
+        presentation: Default::default(),
         call_id: ToolCallId::from("ephemeral-debug-tool-call"),
         tool_name: ToolName::new("debug_secret_tool"),
         tool_type: tau_proto::ToolType::Function,
@@ -709,6 +711,7 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
     assert!(
         h.event_targets_ephemeral_agent(
             &Event::StartAgentRequest(StartAgentRequest {
+                trusted_internal_spans: Vec::new(),
                 query_id: "ephemeral-tool-delegate".to_owned(),
                 instruction: "delegate without leaking prompt text".to_owned(),
                 role: Some("engineer".to_owned()),
@@ -774,6 +777,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
 
     for event in [
         Event::ToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: ToolCallId::from("cleared-before-commit-tool"),
             tool_name: ToolName::new("debug_secret_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -784,6 +788,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
             originator: tau_proto::PromptOriginator::User,
         }),
         Event::ProviderToolResult(ToolResult {
+            presentation: Default::default(),
             call_id: ToolCallId::from("cleared-before-commit"),
             tool_name: ToolName::new("debug_secret_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -842,6 +847,7 @@ fn ephemeral_parent_start_agent_request_creates_ephemeral_child() {
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         tau_proto::StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             query_id: "q-ephemeral-child".to_owned(),
             instruction: "delegate without durable transcript".to_owned(),
             role: Some("engineer".to_owned()),
@@ -974,7 +980,9 @@ fn daemon_mode_accepts_later_clients() {
             AgentEntry::UserInput { items, .. } => items.iter().find_map(|item| match item {
                 ContextItem::Message(message) if message.role == ContextRole::User => {
                     message.content.first().map(|part| match part {
-                        ContentPart::Text { text } => text.as_str(),
+                        ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
+                            text.as_str()
+                        }
                     })
                 }
                 _ => None,

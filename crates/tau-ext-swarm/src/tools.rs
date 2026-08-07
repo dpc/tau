@@ -534,6 +534,7 @@ fn report_json(
     let cbor = serde_json::from_value::<CborValue>(value)
         .map_err(|_| ClientError::handler("tool result encoding failed"))?;
     cx.report_result(ToolResult {
+        presentation: Default::default(),
         call_id: cx.invoke().call_id.clone(),
         tool_name: cx.invoke().tool_name.clone(),
         tool_type: ToolType::Function,
@@ -551,6 +552,7 @@ fn report_json(
 
 fn report_error(cx: &ToolContext<'_, SwarmRuntime>, message: String) -> Result<(), ClientError> {
     cx.report_error(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: cx.invoke().call_id.clone(),
         tool_name: cx.invoke().tool_name.clone(),
         tool_type: ToolType::Function,

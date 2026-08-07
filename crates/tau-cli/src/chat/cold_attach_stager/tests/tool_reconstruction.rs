@@ -17,6 +17,7 @@ fn tool_started(call_id: &str) -> Event {
 /// Builds one canonical failed-tool terminal.
 fn tool_error(call_id: &str) -> Event {
     Event::ToolError(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new("fixture"),
         tool_type: tau_proto::ToolType::Function,
@@ -553,6 +554,7 @@ fn canonical_tool_terminal_matrix_excludes_background_placeholder() {
         base_result(tau_proto::ToolResultKind::Final),
         tool_error("call"),
         Event::ToolCancelled(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "call".into(),
             tool_name: tau_proto::ToolName::new("fixture"),
             tool_type: tau_proto::ToolType::Function,

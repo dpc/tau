@@ -910,6 +910,7 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
     );
     let cancellation = |tool_name: &str| {
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
+            presentation: Default::default(),
             call_id: "cancel-replaced".into(),
             tool_name: tau_proto::ToolName::new(tool_name),
             tool_type: tau_proto::ToolType::Function,
@@ -938,6 +939,7 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
         &mut harness,
         InterceptAction::Pass(Some(Box::new(Event::ToolCancelled(
             tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: "cancel-replaced".into(),
                 tool_name: tau_proto::ToolName::new("forged_canonical"),
                 tool_type: tau_proto::ToolType::Function,
@@ -970,6 +972,7 @@ fn dropped_cancellation_report_has_no_downstream_effect() {
         .handle_extension_event(
             "conn-owner",
             TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: "cancel-dropped".into(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
@@ -1167,6 +1170,7 @@ fn backgrounded_terminal_reports_preserve_background_completion_behavior() {
         (
             "cancel",
             Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: "background-cancel".into(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
@@ -1387,6 +1391,7 @@ fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
         .handle_extension_event(
             "conn-owner",
             TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,

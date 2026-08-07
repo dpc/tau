@@ -863,6 +863,7 @@ fn handle_delivery(
                     inference_activation: false,
                     agent_id: prompt.agent_id.clone(),
                     text: prompt.text.clone(),
+                    trusted_internal_spans: Vec::new(),
                     message_class: prompt.message_class,
                     internal_kind: None,
                     originator: tau_proto::PromptOriginator::User,
@@ -909,6 +910,7 @@ fn report_timer_tool(
     let display_args = timer_display_args(&invoke.arguments, invoke.call_id.as_str());
     match result {
         Ok(completion) => handle.report_tool_result(ToolResult {
+            presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
@@ -919,6 +921,7 @@ fn report_timer_tool(
             originator: invoke.originator.clone(),
         }),
         Err(message) => handle.report_tool_error(ToolError {
+            presentation: Default::default(),
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
             tool_type: ToolType::Function,
@@ -936,6 +939,7 @@ fn report_papercut_tool(
     invoke: &ToolStarted,
 ) -> ClientResult<()> {
     handle.report_tool_result(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         tool_type: ToolType::Function,

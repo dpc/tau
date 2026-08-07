@@ -2773,6 +2773,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         .push(tau_proto::ContextBlock::ToolResults(
             tau_proto::ToolResultsBlock {
                 items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
                     call_id: "call-no-side-effect".into(),
                     tool_type: tau_proto::ToolType::Function,
                     status: tau_proto::ToolResultStatus::Success,

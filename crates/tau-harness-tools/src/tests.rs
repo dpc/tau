@@ -319,6 +319,7 @@ fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {
 
 fn tool_result(call_id: &str, kind: ToolResultKind) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("shell"),
         tool_type: ToolType::Function,
@@ -430,6 +431,19 @@ fn agent_start_request_omits_display_name_source() {
     assert_eq!(request.task_name, None);
     assert_eq!(request.role.as_deref(), Some("reviewer"));
     assert_eq!(request.tool_call_id.as_deref(), Some("call-0"));
+    let bootstrap = delegate_bootstrap_prefix("engineer_parent");
+    assert_eq!(
+        request.trusted_internal_spans,
+        vec![tau_proto::TrustedInternalSpan {
+            start: 0,
+            end: u32::try_from(bootstrap.len()).expect("fixture prefix fits u32"),
+        }]
+    );
+    assert_eq!(
+        &request.instruction[..bootstrap.len()],
+        bootstrap,
+        "the durable trusted span covers bootstrap prose but not the delegated task"
+    );
 }
 
 /// Model-visible built-in tool prose stays synchronized with the intentionally
@@ -1387,7 +1401,7 @@ fn delegate_instruction_is_compact_and_exact() {
     assert_eq!(
         instruction,
         concat!(
-            "[tau-internal]: You were started by an agent `engineer-A_9`. ",
+            "You were started by an agent `engineer-A_9`. ",
             "Your responses will be delivered to it. You can use the `message` ",
             "tool to communicate with agents.\n\n",
             "  inspect `this`\n\n<task>café</task>\n",

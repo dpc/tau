@@ -7,11 +7,16 @@ fn cbor_text(s: &str) -> CborValue {
 }
 
 fn result_entry(call_id: &str, content: &str) -> AgentEntry {
+    result_entry_with_status(call_id, ToolResultStatus::Success, content)
+}
+
+fn result_entry_with_status(call_id: &str, status: ToolResultStatus, content: &str) -> AgentEntry {
     AgentEntry::ToolResults {
         items: vec![ToolResultItem {
+            presentation: Default::default(),
             call_id: ToolCallId::from(call_id),
             tool_type: ToolType::Function,
-            status: ToolResultStatus::Success,
+            status,
             output: tau_proto::ToolResponse::from_cbor(&cbor_text(content)),
             provider_content: Vec::new(),
         }],
@@ -37,25 +42,81 @@ fn rebuild_records_only_above_threshold() {
 }
 
 #[test]
-fn rebuild_skips_dedup_pointers() {
+fn rebuild_does_not_record_short_dedup_pointer() {
     let big = "z".repeat(1024);
-    let pointer =
-        format!("{INTERNAL_MARKER} read tool output identical to previous tool call: call_x");
+    let pointer = "read tool output identical to previous tool call: call_x";
     let entries = vec![
         result_entry("call_a", &big),
-        // A previously-recorded dedup pointer that was already
-        // serving as a stand-in for `call_a`'s content. On
-        // rebuild it must NOT enter the map — otherwise a future
-        // result whose CBOR happened to match the pointer text
-        // would dedup against the wrong (pointer's) call_id.
+        // Dedup pointers are below the normal threshold and therefore do not
+        // enter the map. This is a size rule, not marker recognition.
         result_entry("call_b", &pointer),
     ];
     let mut map = ResultDedupMap::new();
     map.rebuild_from_branch(&entries, Some(NodeId::new(2)), DEFAULT_THRESHOLD_BYTES);
-    // call_a entered, call_b's pointer text did not.
+    // call_a entered, while call_b's short pointer did not.
     assert_eq!(map.len(), 1);
     let big_hash = hash_truncated(&encode_for_hash(&cbor_text(&big)));
     assert_eq!(map.lookup(&big_hash).map(|c| c.as_str()), Some("call_a"),);
+}
+
+/// Raw tool payloads that happen to use the internal envelope spelling remain
+/// ordinary dedup candidates. Only typed harness producers may stamp a prompt.
+#[test]
+fn rebuild_records_large_internal_envelope_spelling_for_every_terminal_status() {
+    let success_payload = format!("<tau_internal>success-{}</tau_internal>", "x".repeat(1024));
+    let error_payload = format!("<tau_internal>error-{}</tau_internal>", "x".repeat(1024));
+    let cancelled_payload = format!(
+        "<tau_internal>cancelled-{}</tau_internal>",
+        "x".repeat(1024)
+    );
+    let success =
+        result_entry_with_status("call_success", ToolResultStatus::Success, &success_payload);
+    let error = result_entry_with_status(
+        "call_error",
+        ToolResultStatus::Error {
+            message: error_payload.clone(),
+        },
+        &error_payload,
+    );
+    let cancelled = result_entry_with_status(
+        "call_cancelled",
+        ToolResultStatus::Cancelled {
+            reason: cancelled_payload.clone(),
+        },
+        &cancelled_payload,
+    );
+    let mut map = ResultDedupMap::new();
+    map.rebuild_from_branch(
+        [&success, &error, &cancelled],
+        Some(NodeId::new(3)),
+        DEFAULT_THRESHOLD_BYTES,
+    );
+
+    let success_response = tau_proto::ToolResponse::from_cbor(&cbor_text(&success_payload));
+    let error_response = tau_proto::ToolResponse::from_cbor(&cbor_text(&error_payload));
+    let cancelled_response = tau_proto::ToolResponse::from_cbor(&cbor_text(&cancelled_payload));
+    let success_hash = hash_truncated(&encode_tool_response_for_hash(&success_response));
+    let error_hash = hash_truncated(&encode_error_response_for_hash(
+        &error_payload,
+        &error_response,
+    ));
+    let cancelled_hash = hash_truncated(&encode_error_response_for_hash(
+        &cancelled_payload,
+        &cancelled_response,
+    ));
+    assert_eq!(map.len(), 3);
+    assert_eq!(
+        map.lookup(&success_hash).map(|call_id| call_id.as_str()),
+        Some("call_success")
+    );
+    assert_eq!(
+        map.lookup(&error_hash).map(|call_id| call_id.as_str()),
+        Some("call_error")
+    );
+    assert_eq!(
+        map.lookup(&cancelled_hash).map(|call_id| call_id.as_str()),
+        Some("call_cancelled")
+    );
 }
 
 #[test]
@@ -99,11 +160,8 @@ fn pointer_value_describes_original_tool_call() {
     };
     assert_eq!(
         s,
-        "[tau-internal] read tool output identical to previous tool call: call_xyz"
+        "read tool output identical to previous tool call: call_xyz"
     );
-    assert!(is_dedup_pointer_value(&tau_proto::ToolResponse::from_cbor(
-        &CborValue::Text(s),
-    )));
 }
 
 #[test]
@@ -111,7 +169,7 @@ fn pointer_error_message_describes_original_tool_call() {
     let m = build_pointer_error_message(&ToolCallId::from("call_xyz"), &ToolName::new("shell"));
     assert_eq!(
         m,
-        "[tau-internal] shell tool output identical to previous tool call: call_xyz"
+        "shell tool output identical to previous tool call: call_xyz"
     );
 }
 #[test]

@@ -2176,6 +2176,7 @@ fn field_value<'a>(value: &'a CborValue, field: &str) -> Result<&'a CborValue, S
 
 fn tool_result(invoke: ToolStarted, text: String) -> Event {
     Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -2192,6 +2193,7 @@ fn tool_result(invoke: ToolStarted, text: String) -> Event {
 }
 fn tool_error(invoke: ToolStarted, message: String) -> Event {
     Event::ToolError(ToolError {
+        presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

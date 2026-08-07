@@ -39,6 +39,12 @@ pub enum ContentPart {
         /// Text body for this content part.
         text: String,
     },
+    /// Harness-authenticated internal text. Provider projection alone frames
+    /// this variant; text spelling never establishes this authority.
+    HarnessInternalText {
+        /// Raw harness-authored body.
+        text: String,
+    },
 }
 
 /// Opaque provider-owned payload preserved without semantic authority.
@@ -483,6 +489,10 @@ pub struct ToolResultItem {
     pub status: ToolResultStatus,
     /// Provider-facing rendered tool response plus raw payload.
     pub output: ToolResponse,
+    /// Harness-owned provider-presentation authority retained across
+    /// compaction and resume.
+    #[serde(default)]
+    pub presentation: crate::ToolResultPresentation,
     /// Ordered typed content appended after the normalized text output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_content: Vec<ToolResultContentPart>,

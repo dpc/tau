@@ -65,6 +65,7 @@ fn append_trace_prompt(agents_dir: &std::path::Path, agent_id: &str, text: &str,
                 agent_id: agent_id.clone(),
                 inference_activation: false,
                 text: text.to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -291,6 +292,7 @@ fn append_background_tool_calls(
                 agent_id.as_str(),
                 None,
                 Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
                     call_id: (*call_id).into(),
                     tool_name: tool_name.clone(),
                     tool_type: ToolType::Function,
@@ -375,6 +377,7 @@ fn tool_results_preview_includes_every_result_in_round() {
     let entry = AgentEntry::ToolResults {
         items: vec![
             tau_proto::ToolResultItem {
+                presentation: Default::default(),
                 call_id: "call-1".into(),
                 tool_type: ToolType::Function,
                 status: ToolResultStatus::Success,
@@ -382,6 +385,7 @@ fn tool_results_preview_includes_every_result_in_round() {
                 provider_content: Vec::new(),
             },
             tau_proto::ToolResultItem {
+                presentation: Default::default(),
                 call_id: "call-2".into(),
                 tool_type: ToolType::Function,
                 status: ToolResultStatus::Error {

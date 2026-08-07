@@ -2007,6 +2007,7 @@ impl Harness {
         // before spending. `prepare_start_agent_request` mints identity but does
         // not create an agent or dispatch model work.
         let query = tau_proto::StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
             query_id: format!("{PEER_AUTO_START_QUERY_PREFIX}{message_id}"),
             instruction: String::new(),
             role: Some(role),
@@ -2436,6 +2437,7 @@ impl Harness {
         display: Option<tau_proto::ToolUseState>,
     ) {
         let result = ToolResult {
+            presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name,
             tool_type,
@@ -2475,6 +2477,7 @@ impl Harness {
         display: Option<tau_proto::ToolUseState>,
     ) {
         let error = ToolError {
+            presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name,
             tool_type,
@@ -2596,6 +2599,7 @@ impl Harness {
                     transcript_owner,
                     None,
                     ToolResult {
+                        presentation: Default::default(),
                         call_id: reply.wait_call_id,
                         tool_name: reply.wait_tool_name,
                         tool_type: ToolType::Function,
@@ -2614,6 +2618,7 @@ impl Harness {
                     transcript_owner,
                     None,
                     ToolError {
+                        presentation: Default::default(),
                         call_id: reply.wait_call_id,
                         tool_name: reply.wait_tool_name,
                         tool_type: ToolType::Function,

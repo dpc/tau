@@ -35,9 +35,9 @@ use observer::{Observed, SessionRestoreObserver};
 
 const SESSION: &str = "deterministic-e2e-session";
 const WORKER_PROMPT: &str = "Complete the deterministic worker instruction.";
-const WORKER_INITIAL: &str = concat!(
-    "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it. ",
-    "You can use the `message` tool to communicate with agents.\n\n",
+const WORKER_PROVIDER_INITIAL: &str = concat!(
+    "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",
+    "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete the deterministic worker instruction."
 );
 
@@ -166,7 +166,7 @@ fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {
                 ctx_id: format!("{prefix}-worker"),
                 actions: vec![
                     ScenarioActionV2::Text {
-                        user_text: WORKER_INITIAL.to_owned(),
+                        user_text: WORKER_PROVIDER_INITIAL.to_owned(),
                         response: "worker boot-a complete".to_owned(),
                     },
                     ScenarioActionV2::Text {
@@ -321,7 +321,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
                     ctx_id: "s2-worker".to_owned(),
                     actions: vec![
                         ScenarioActionV2::Text {
-                            user_text: WORKER_INITIAL.to_owned(),
+                            user_text: WORKER_PROVIDER_INITIAL.to_owned(),
                             response: "worker boot-a complete".to_owned(),
                         },
                         ScenarioActionV2::Text {

@@ -206,7 +206,7 @@ context without waking the model or rebuilding extension-local authority.
 Harness-owned agent-message facts use the analogous placement/checkpoint
 mechanics but remain a distinct typed domain. Each directional durable
 occurrence supplies its only payload-bearing provider projection; local inbound
-messages render the escaped stable-sender `[tau-internal]` wrapper from the
+messages render the escaped stable-sender `<tau_internal>` envelope from the
 typed fact, and live activation uses only a sequence-keyed payload-free wake.
 Replay renders context without waking. See
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).

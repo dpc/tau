@@ -606,6 +606,7 @@ fn cancel_call(state: &mut RostraState, call_id: tau_proto::ToolCallId) {
     };
     call.abort.abort();
     let _ = call.handle.report_tool_cancelled_detached(ToolCancelled {
+        presentation: Default::default(),
         call_id,
         tool_name: call.tool_name,
         tool_type: tau_proto::ToolType::Function,

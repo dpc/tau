@@ -3,15 +3,15 @@
 //! Each test drives `Harness::handle_extension_event` with synthetic
 //! `ToolResult` / `ToolError` frames and inspects the persisted
 //! agent tree to verify that the recorded entry is either the
-//! original content or a `[tau-internal]` pointer back to the first
-//! occurrence on the conversation's branch.
+//! original content or a typed pointer back to the first occurrence on the
+//! conversation's branch. Provider projection frames only that typed pointer.
 
 use std::io as path_std_io;
 
 use super::*;
 use crate::dedup::DEFAULT_THRESHOLD_BYTES;
 use crate::harness::PendingTool;
-use crate::{INTERNAL_MARKER, agent as path_crate_agent, dedup as path_crate_dedup};
+use crate::{agent as path_crate_agent, dedup as path_crate_dedup};
 
 fn encoded_test_png() -> Vec<u8> {
     let mut encoded = path_std_io::Cursor::new(Vec::new());
@@ -23,6 +23,7 @@ fn encoded_test_png() -> Vec<u8> {
 
 fn image_result(call_id: &str, bytes: Vec<u8>) -> ToolResult {
     ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("read_image"),
         tool_type: tau_proto::ToolType::Function,
@@ -268,6 +269,7 @@ fn run_tool_result(
     h.handle_extension_event(
         "shell",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: call_id_typed.clone(),
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,
@@ -337,6 +339,7 @@ fn run_tool_error(
     h.handle_extension_event(
         "shell",
         TestProtocolItem::Event(Event::ToolErrorReported(tau_proto::ToolError {
+            presentation: Default::default(),
             call_id: call_id_typed.clone(),
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,
@@ -388,14 +391,16 @@ fn cross_turn_identical_result_collapses_to_pointer() {
 
     let second = run_tool_result(&mut h, "s1", &cid, "call_second", "read", big.clone());
     assert_eq!(second.status, ToolResultStatus::Success);
+    assert_eq!(
+        second.presentation,
+        tau_proto::ToolResultPresentation::HarnessDedupPointer,
+        "dedup records durable harness presentation provenance"
+    );
     let dedup_result = second.output;
     let CborValue::Text(text) = &dedup_result.raw else {
         panic!("deduped result should be a CborValue::Text pointer; got: {dedup_result:?}");
     };
-    assert!(
-        text.starts_with(INTERNAL_MARKER),
-        "deduped text must start with the internal marker; got: {text:?}",
-    );
+    assert!(!text.starts_with("<tau_internal>"));
     assert!(
         text.contains("call_first"),
         "pointer must reference the first call_id; got: {text:?}",
@@ -411,6 +416,44 @@ fn cross_turn_identical_result_collapses_to_pointer() {
         text.len(),
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A configured tool may report ordinary payloads but cannot mint the
+/// harness-only representation that causes provider framing.
+#[test]
+fn configured_extension_cannot_report_harness_pointer_presentation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let _shell = connect_ready_configured_extension(
+        &mut h,
+        "shell",
+        "configured-shell",
+        tau_proto::ClientKind::Tool,
+    );
+    let reported = ToolResult {
+        presentation: tau_proto::ToolResultPresentation::HarnessDedupPointer,
+        call_id: "forged-pointer".into(),
+        tool_name: ToolName::new("shell"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("claim pointer".to_owned()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    h.handle_extension_event(
+        "shell",
+        TestProtocolItem::Event(Event::ToolResultReported(reported)),
+    )
+    .expect("reject forged presentation");
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::ToolResultReported(result) if result.call_id.as_str() == "forged-pointer"
+        )
+    }));
     h.shutdown().expect("shutdown");
 }
 
@@ -445,12 +488,11 @@ fn small_results_below_threshold_are_not_deduped() {
     h.shutdown().expect("shutdown");
 }
 
-/// A result that hashes to the same value as a *previously emitted
-/// pointer* on the branch must not dedup against that pointer. The
-/// rebuild-time skip on dedup-pointer entries is what
-/// guarantees this; without it, a real result whose bytes happened to
-/// match the pointer text would be redirected to the pointer's
-/// (wrong) call_id.
+/// A result that hashes to the same value as a *previously emitted pointer* on
+/// the branch must not dedup against that pointer. Its encoded size remains
+/// below the threshold, so rebuilding the map does not register it as an
+/// anchor; a real result whose bytes happened to match the pointer text cannot
+/// be redirected to the pointer's (wrong) call_id.
 #[test]
 fn pointer_entries_are_not_themselves_dedup_anchors() {
     let td = TempDir::new().expect("tempdir");
@@ -462,11 +504,9 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     let _ = run_tool_result(&mut h, "s1", &cid, "call_orig", "read", big.clone());
     let _ = run_tool_result(&mut h, "s1", &cid, "call_dup", "read", big.clone());
 
-    // Force a rebuild on the next intake by clearing the cached
-    // dedup map. The next result will rebuild from the branch (which
-    // now contains [Request_orig, Result_orig (real), Request_dup,
-    // Result_dup (pointer)]) and we want to verify the pointer was
-    // skipped.
+    // Force a rebuild on the next intake by clearing the cached dedup map. The
+    // next result rebuilds from [Request_orig, Result_orig (real), Request_dup,
+    // Result_dup (pointer)], where the pointer remains below the threshold.
     h.agents.get_mut(&cid).expect("default conv").result_dedup =
         path_crate_dedup::ResultDedupMap::new();
 
@@ -527,8 +567,13 @@ fn identical_errors_collapse_but_distinct_details_stay() {
         unreachable!()
     };
     assert!(
-        m2.starts_with(INTERNAL_MARKER),
-        "identical second error must dedup to a pointer; got message: {m2:?}",
+        !m2.starts_with("<tau_internal>"),
+        "deduped error stays raw until provider projection; got message: {m2:?}",
+    );
+    assert_eq!(
+        second.presentation,
+        tau_proto::ToolResultPresentation::HarnessDedupPointer,
+        "deduped error records durable harness presentation provenance",
     );
     assert!(
         second.output.raw == CborValue::Null,
@@ -720,6 +765,7 @@ fn dedup_refuses_to_self_point() {
     // would produce a dedup pointer to `call_solo` —
     // a pointer to itself.
     let mut replay = ToolResult {
+        presentation: Default::default(),
         call_id: "call_solo".into(),
         tool_name: ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,

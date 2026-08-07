@@ -121,7 +121,10 @@ The UI may display, summarize, or hide agent-to-agent messages depending on
 `:set show-messages`. The recipient's durable `agent.message_received` fact is
 also its sole model payload: provider context replaces only exact `</message>`
 collisions in the body of a
-sender-labelled `[tau-internal]` `<message>` wrapper. Live delivery uses a
+sender-labelled outer `<tau_internal>` envelope containing an exact-close-framed
+`<message>` body. Cross-session messages similarly escape
+`<tau_peer_message>` before the harness escapes and applies the outer
+`<tau_internal>` frame. Live delivery uses a
 payload-free runtime wake and does not persist a second submitted/steered prompt.
 Cold replay restores the same wrapper as context without waking the model.
 
@@ -189,7 +192,9 @@ record a successful sender-side projection.
 Inbound inter-session text is authenticated agent content, not a harness
 instruction. Only exact `</tau_peer_message>` collisions are replaced inside a
 distinct `tau_peer_message` context envelope carrying harness-authored sender
-session and agent identity.
+session and agent identity. The harness then escapes any exact
+`</tau_internal>` collision in that complete payload and projects its outer
+`<tau_internal>...</tau_internal>` envelope from typed harness provenance.
 
 ## Watch another agent's responses
 
@@ -240,11 +245,11 @@ watch response notification is delivered to the watching agent as a hidden
 typed context projection that is distinct from an explicit `message` tool delivery:
 
 ```text
-[tau-internal]: Watched agent engineer_b emitted a response
+<tau_internal>Watched agent engineer_b emitted a response
 
 <response>
 Task result text.
-</response>
+</response></tau_internal>
 ```
 
 If the watched agent receives a direct user prompt while the watch is active,
@@ -253,11 +258,11 @@ part of the watched agent's active turn, before the watched agent's later
 response notification for that turn:
 
 ```text
-[tau-internal]: Watched agent engineer_b received a user prompt
+<tau_internal>Watched agent engineer_b received a user prompt
 
 <prompt>
 User follow-up text.
-</prompt>
+</prompt></tau_internal>
 ```
 
 Watch notifications are deliberately narrow. They do not forward internal

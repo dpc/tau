@@ -116,10 +116,18 @@ routes or capabilities.
 
 Canonical submitted and steered prompt facts retain raw accepted text plus
 harness-stamped `PromptSubmissionSource`. Derived transcript entries preserve that
-typed source. During provider assembly only, `HumanUi` text projects as one
-fieldless `<user>...</user>` user-role item with only exact `</user>` collisions replaced;
-all other text, whitespace, and Unicode remain unchanged. Every other submission
-source and injected input remains raw or uses its separate typed projection.
+typed source and separately preserve validated harness-authenticated
+`trusted_internal_spans`. During provider assembly only, `HumanUi` text projects
+as one fieldless `<user>...</user>` user-role item with only exact `</user>`
+collisions replaced; all other text, whitespace, and Unicode remain unchanged.
+Trusted spans alone project as `<tau_internal>`; every other submission source,
+injected input, and delimiter-shaped payload remains ordinary text.
+
+Provider-visible terminal tool results, errors, and cancellations carry
+serde-defaulted `ToolResultPresentation`. Configured extensions submit only the
+ordinary `tool_payload` form; harness deduplication stamps
+`harness_dedup_pointer`, which durable transcript replay and compaction retain
+for provider projection.
 
 This late presentation boundary makes live and replay deterministic, including
 historical facts already tagged `HumanUi`, without changing canonical text,

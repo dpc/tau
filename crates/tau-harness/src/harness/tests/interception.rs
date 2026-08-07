@@ -2684,7 +2684,9 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
                 ContextItem::Message(MessageItem { content, .. })
                     if content.iter().any(|part| matches!(
                         part,
-                        ContentPart::Text { text } if text == "final steer after compaction"
+                        ContentPart::Text { text }
+                            | ContentPart::HarnessInternalText { text }
+                            if text == "final steer after compaction"
                     ))
             ))
     ));
@@ -2705,7 +2707,9 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
                         ..
                     }) if content.iter().any(|part| matches!(
                         part,
-                        ContentPart::Text { text } if text == expected
+                        ContentPart::Text { text }
+                            if text == expected
+                                || text == &crate::internal_envelope::frame(expected)
                     ))
                 ))
                 .count(),
@@ -2812,6 +2816,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id.clone(),
             text: retry_prompt.text.clone(),
+            trusted_internal_spans: Vec::new(),
             message_class: retry_prompt.message_class,
             internal_kind: retry_prompt.internal_kind(),
             ctx_id: retry_prompt.ctx_id.clone(),
@@ -2940,6 +2945,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id.clone(),
             text: completion_prompt.text.clone(),
+            trusted_internal_spans: Vec::new(),
             message_class: completion_prompt.message_class,
             internal_kind: None,
             ctx_id: None,
@@ -2962,6 +2968,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             inference_activation: true,
             agent_id,
             text: "independent queued activation".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -3066,6 +3073,7 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
                 text: text.to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
                 internal_kind: None,
                 ctx_id: None,
@@ -3452,6 +3460,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                     inference_activation,
                     agent_id: agent_id.clone(),
                     text: "submitted".to_owned(),
+                    trusted_internal_spans: Vec::new(),
                     message_class: tau_proto::PromptMessageClass::User,
                     internal_kind: None,
                     originator: tau_proto::PromptOriginator::User,
@@ -3477,6 +3486,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
                     submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                     agent_id,
                     text: "steered".to_owned(),
+                    trusted_internal_spans: Vec::new(),
                     message_class: tau_proto::PromptMessageClass::User,
                     internal_kind: None,
                     ctx_id: None,
@@ -3551,6 +3561,7 @@ fn interception_rejects_steered_submission_source_forgery() {
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: "steered".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         ctx_id: None,
@@ -3589,6 +3600,7 @@ fn interception_preserves_context_alert_tag_and_text() {
                 inference_activation: true,
                 agent_id: agent_id.clone(),
                 text: "configured submitted alert".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::Internal,
                 internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
                 originator: tau_proto::PromptOriginator::User,
@@ -3605,6 +3617,7 @@ fn interception_preserves_context_alert_tag_and_text() {
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
                 text: "configured steered alert".to_owned(),
+                trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::Internal,
                 internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
                 ctx_id: None,
@@ -4409,6 +4422,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     h.handle_extension_event(
         "tool-provider",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
@@ -4477,6 +4491,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         inference_activation: true,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: "hello".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,
@@ -5284,6 +5299,7 @@ fn interception_replacement_of_agent_message_received_publishes_original() {
 
 fn tool_result_event(call_id: &str, text: &str) -> Event {
     Event::ToolResult(ToolResult {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("test_tool"),
         tool_type: tau_proto::ToolType::Function,
@@ -5297,6 +5313,7 @@ fn tool_result_event(call_id: &str, text: &str) -> Event {
 
 fn tool_cancelled_event(call_id: &str) -> Event {
     Event::ToolCancelled(tau_proto::ToolCancelled {
+        presentation: Default::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new("test_tool"),
         tool_type: tau_proto::ToolType::Function,
@@ -5887,6 +5904,7 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
             inference_activation: true,
             agent_id: agent_id.clone(),
             text: "rejected activation".to_owned(),
+            trusted_internal_spans: Vec::new(),
             message_class: tau_proto::PromptMessageClass::User,
             internal_kind: None,
             originator: tau_proto::PromptOriginator::User,
@@ -5957,6 +5975,7 @@ fn interception_mutating_prompt_reaches_agent() {
         inference_activation: true,
         agent_id: crate::parse_agent_id(&agent_id),
         text: "I love Tau".to_owned(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::User,

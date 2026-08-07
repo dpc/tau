@@ -461,6 +461,7 @@ fn persist_false_non_tool_event_is_not_persisted() {
 #[test]
 fn raw_tool_terminal_events_are_not_persisted() {
     let result = ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -471,6 +472,7 @@ fn raw_tool_terminal_events_are_not_persisted() {
         originator: PromptOriginator::User,
     };
     let error = ToolError {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -480,6 +482,7 @@ fn raw_tool_terminal_events_are_not_persisted() {
         originator: PromptOriginator::User,
     };
     let cancelled = ToolCancelled {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -502,6 +505,7 @@ fn raw_tool_terminal_events_are_not_persisted() {
 #[test]
 fn raw_start_agent_requests_are_not_persisted() {
     let event = Event::StartAgentRequest(tau_proto::StartAgentRequest {
+        trusted_internal_spans: Vec::new(),
         query_id: "query-1".to_owned(),
         instruction: "delegate this".to_owned(),
         role: None,
@@ -520,6 +524,7 @@ fn raw_start_agent_requests_are_not_persisted() {
 #[test]
 fn persist_false_preserves_every_persistence_exception() {
     let result = ToolResult {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -530,6 +535,7 @@ fn persist_false_preserves_every_persistence_exception() {
         originator: PromptOriginator::User,
     };
     let error = ToolError {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -558,6 +564,7 @@ fn persist_false_preserves_every_persistence_exception() {
         Event::ProviderToolResult(result),
         Event::ProviderToolError(error),
         Event::ToolCancelled(ToolCancelled {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("tool"),
             tool_type: ToolType::Function,
@@ -608,6 +615,7 @@ fn persist_false_preserves_every_persistence_exception() {
 #[test]
 fn inverted_wire_metadata_preserves_persistence_exceptions() {
     let exception = Event::ProviderToolError(ToolError {
+        presentation: Default::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,

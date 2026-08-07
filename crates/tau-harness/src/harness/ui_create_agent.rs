@@ -161,7 +161,7 @@ impl Harness {
             self.preempt_blocking_ext_side_agents(&session_id);
         }
         let mut prompt = if message_class.is_internal() {
-            PendingPrompt::internal(text)
+            PendingPrompt::untrusted_internal(text)
         } else if originator.is_user() {
             PendingPrompt::human_ui(text)
         } else {

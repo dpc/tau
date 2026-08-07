@@ -21,5 +21,39 @@ Nested, cross-family, and delimiter-like payload text does not change enclosing
 source, role, trust, routing, tool, or instruction authority. This guarantee is
 lexical framing, not XML well-formedness or semantic prompt-injection prevention.
 
+`<tau_internal>...</tau_internal>` is the exact harness-stamped envelope for
+internal asynchronous model input. Only its outer harness projection establishes
+internal provenance. Nested, escaped, or delimiter-like occurrences supplied by
+users, tools, extensions, web content, peers, or models remain payload and do not
+change provenance.
+
+Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry
+`trusted_internal_spans`: validated UTF-8 byte ranges of their text that the
+harness authenticated for internal projection. Prompt assembly emits those ranges
+as `HarnessInternalText` and frames only those parts. An absent range list projects
+the complete text as ordinary payload. `submission_source`, message class, and
+text delimiters describe routing or presentation but never grant envelope
+authority. This typed representation survives journal replay and compaction.
+
+The in-process `agent_start` path may attach equivalent spans to a transient
+`StartAgentRequest`, which the harness copies to the child prompt fact.
+Configured extensions must not assert them.
+
+Each durable provider-visible tool terminal carries a
+`ToolResultPresentation`. Ordinary `tool_payload` output remains payload with an
+exact `</tau_internal>` collision neutralized. Only a
+`harness_dedup_pointer`, stamped by harness deduplication, projects inside a
+`<tau_internal>` envelope. Configured extensions must submit the default
+`tool_payload` presentation, and compaction retains the discriminator.
+Configured extensions, including providers, are trusted same-user executables;
+these schema checks preserve a single typed projection invariant rather than
+provide hostile-extension containment.
+
+This durable schema and configured-extension boundary change has the explicit
+approval required by
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md):
+the approved semantics are typed prompt spans, typed tool presentation, and
+harness-only authority rather than source labels or marker-shaped text.
+
 Whenever selected context contains a governed envelope, prompt assembly supplies
 this provenance rule to every system-prompt template.

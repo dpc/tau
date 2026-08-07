@@ -1495,6 +1495,21 @@ pub enum ToolResultKind {
     BackgroundPlaceholder,
 }
 
+/// Harness-owned presentation authority for a provider-visible tool terminal.
+///
+/// Tool and extension payloads always use [`Self::ToolPayload`]. The harness
+/// alone stamps [`Self::HarnessDedupPointer`] after it replaces an identical
+/// large terminal with a reference to its earlier result.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultPresentation {
+    /// Ordinary untrusted tool output rendered as a tool response.
+    #[default]
+    ToolPayload,
+    /// Harness-authenticated pointer to an earlier identical tool terminal.
+    HarnessDedupPointer,
+}
+
 /// Successful logical tool completion.
 ///
 /// For ordinary foreground calls this carries the final tool result. For
@@ -1514,6 +1529,10 @@ pub struct ToolResult {
     pub tool_type: ToolType,
     /// Tool-owned successful result payload.
     pub result: CborValue,
+    /// Harness-owned provider-presentation authority. Configured tools must
+    /// leave this as [`ToolResultPresentation::ToolPayload`].
+    #[serde(default)]
+    pub presentation: ToolResultPresentation,
     /// Typed provider-visible content that must not pass through text
     /// rendering.
     ///
@@ -1601,6 +1620,10 @@ pub struct ToolError {
     /// Optional structured error details for UIs or diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
+    /// Harness-owned provider-presentation authority. Configured tools must
+    /// leave this as [`ToolResultPresentation::ToolPayload`].
+    #[serde(default)]
+    pub presentation: ToolResultPresentation,
     /// See [`ToolResult::display`]. On error, the state `status` is typically
     /// [`ToolUseStatus::Error`] and
     /// `status_text` carries an optional error label. Renderers add the
@@ -1987,6 +2010,11 @@ pub struct ToolCancelled {
     pub tool_name: ToolName,
     /// Protocol-level tool kind echoed from the request.
     pub tool_type: ToolType,
+    /// Harness-owned provider-presentation authority. Cancellation currently
+    /// has no pointer rendering, but retaining the discriminator makes every
+    /// durable terminal fact unambiguous on replay.
+    #[serde(default)]
+    pub presentation: ToolResultPresentation,
 }
 
 // ---------------------------------------------------------------------------
@@ -2742,6 +2770,14 @@ pub struct StartAgentRequest {
     /// User-style instruction text. Appended to the current
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
+    /// Byte spans of harness-authenticated bootstrap text in
+    /// [`Self::instruction`].
+    ///
+    /// Configured extensions must leave this empty. The harness accepts
+    /// nonempty spans only from its in-process `agent_start` path and
+    /// copies them into the durable prompt fact for provider projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_internal_spans: Vec<TrustedInternalSpan>,
     /// Requested agent role for this side conversation. Tool-backed
     /// delegate queries default to `engineer`; non-tool queries without
     /// a role keep using the currently selected interactive role.
@@ -4030,6 +4066,16 @@ pub struct TermBell {}
 // Agent transcript/runtime events
 // ---------------------------------------------------------------------------
 
+/// One UTF-8 byte range in a prompt that only the harness may project as an
+/// internal envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrustedInternalSpan {
+    /// Inclusive byte offset in the owning prompt text.
+    pub start: u32,
+    /// Exclusive byte offset in the owning prompt text.
+    pub end: u32,
+}
+
 /// A prompt was accepted into a concrete agent transcript.
 ///
 /// This is the durable agent-owned counterpart to the transient
@@ -4045,6 +4091,10 @@ pub struct AgentPromptSubmitted {
     pub inference_activation: bool,
     /// Prompt text.
     pub text: String,
+    /// Harness-authenticated spans in [`Self::text`] that project as internal
+    /// model input. An absent span list treats every byte as untrusted payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_internal_spans: Vec<TrustedInternalSpan>,
     /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
@@ -4338,6 +4388,10 @@ pub struct AgentPromptSteered {
     pub submission_source: PromptSubmissionSource,
     /// Prompt text appended to the in-flight turn.
     pub text: String,
+    /// Harness-authenticated spans in [`Self::text`] that project as internal
+    /// model input. An absent span list treats every byte as untrusted payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_internal_spans: Vec<TrustedInternalSpan>,
     /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,

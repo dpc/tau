@@ -72,15 +72,17 @@ prompt text:
   sender ID and an exact-close-framed body:
 
   ```text
-  [tau-internal]: You have received a message from <stable-agent-id>
+  <tau_internal>You have received a message from <stable-agent-id>
 
   <message>
   <body with exact </message> collisions replaced>
-  </message>
+  </message></tau_internal>
   ```
 
-- cross-session inbound `Message` retains the authenticated
-  `<tau_peer_message>` envelope and stable typed sender session/agent identity;
+- cross-session inbound `Message` frames the authenticated stable sender
+  session/agent identity and body in `<tau_peer_message>`, escapes that inner
+  exact close, then frames and escapes the complete projection in outer
+  `<tau_internal>`;
 - `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
   wrappers and replace only their own exact closing sentinel in each body;
 - current provider and work-status kinds render wording reconstructed from their
@@ -94,8 +96,9 @@ zero provider blocks.
 
 All body text other than the current envelope's own exact close remains literal,
 including ampersands, quotes, entity-like strings, nested tags, and other
-families' close tokens. Dynamic peer attributes retain separate attribute-safe
-escaping. See
+families' close tokens. The outer `<tau_internal>` frame additionally replaces
+every exact `</tau_internal>` collision after the inner body frame. Dynamic peer
+attributes retain separate attribute-safe escaping. See
 [SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
 
 ## Live activation and waits

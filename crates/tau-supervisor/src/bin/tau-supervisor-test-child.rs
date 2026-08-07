@@ -141,6 +141,7 @@ fn write_echo_result(
 ) -> Result<(), Box<dyn Error>> {
     writer.write_message(&HarnessInputMessage::emit_with_persist(
         Event::ToolResultReported(ToolResult {
+            presentation: Default::default(),
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,

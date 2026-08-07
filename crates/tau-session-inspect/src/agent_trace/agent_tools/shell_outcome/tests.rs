@@ -208,6 +208,7 @@ fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
     )]);
     let tool_result = |kind| {
         Event::ProviderToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id: "call".into(),
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
@@ -228,6 +229,7 @@ fn terminal_event_mapping_preserves_source_and_omits_placeholders() {
     );
 
     let foreground_error = Event::ProviderToolError(tau_proto::ToolError {
+        presentation: Default::default(),
         call_id: "call".into(),
         tool_name: tau_proto::ToolName::new("shell"),
         tool_type: tau_proto::ToolType::Function,

@@ -182,6 +182,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         record(
             4,
             Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
                 call_id: "call-1".into(),
                 tool_name: ToolName::new("shell"),
                 tool_type: ToolType::Function,
@@ -221,6 +222,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     events.push(record(
         8,
         Event::ProviderToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             tool_type: ToolType::Function,

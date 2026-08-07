@@ -165,13 +165,16 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   user/internal message class. Its harness-owned `inference_activation` flag
   distinguishes checkpoint-governed work from passive or legacy history;
   steered and injected facts use the same default-false marker. The optional
-  harness-owned `internal_kind=context_size_alert` marks an alert delivery for
+   harness-owned `internal_kind=context_size_alert` marks an alert delivery for
    exact-position live and replay UI history. Harness-stamped
-   `submission_source` selects provider and source-aware CLI presentation:
+    `submission_source` selects routing and source-aware CLI presentation:
    `Extension { name }` renders once as an attributed message,
    `HarnessInternal` is controlled by the default-off internal-prompt setting,
    and `Legacy` preserves hidden internal behavior. `HumanUi` facts keep raw
-   canonical text but project as fieldless `<user>...</user>` context.
+    canonical text but project as fieldless `<user>...</user>` context.
+    Validated harness-authenticated `trusted_internal_spans` select only the
+    text ranges that provider projection frames as `<tau_internal>`; absent
+    spans leave all bytes as ordinary payload, regardless of source or text.
 - **`agent.prompt_queued`** — A prompt arrived while the agent was busy and was
   queued instead of dispatched. Runtime UI state; not durable transcript truth.
 - **`agent.prompt_steered`** — A previously queued prompt folded into an
@@ -180,7 +183,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
    checkpoint-governed work; missing/default-false values are passive or legacy
    and cannot independently wake replay. It carries the same optional
    `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`
-   and requires the same harness-stamped `submission_source`. The optional typed
+    and requires the same harness-stamped `submission_source` and
+    `trusted_internal_spans`. The optional typed
    `self_compaction_terminal` is immutable one-shot delivery authority for self
    `compact`; it contains closed status plus request, call, and optional
    transaction correlation, and duplicate delivery is invalid. Old steered
@@ -390,9 +394,12 @@ their selected models.
   synthetic background placeholder uses `provider.tool_result` only. A validated
   image result may retain its typed bytes in the durable agent transcript and in
   the point-to-point `agent.prompt_created` sent to the selected provider.
-  Generic live subscribers receive no image bytes, and historical replay may
-  omit provider content entirely; neither generic broadcast nor replay is
-  provider-content authority.
+   Generic live subscribers receive no image bytes, and historical replay may
+   omit provider content entirely; neither generic broadcast nor replay is
+   provider-content authority.
+   Durable terminals default to `tool_payload`; only harness-stamped
+   `harness_dedup_pointer` presentation projects as `<tau_internal>`. Configured
+   extensions cannot publish that presentation, and replay/compaction retain it.
   Peer requests routed to harness-internal tools are the explicit exception:
   their loaded-agent correlation is runtime-only, so resulting
   `provider.tool_result` / `provider.tool_error` events remain ownerless and do
@@ -511,8 +518,9 @@ agent requests, and harness dispatch. The registration lifecycle contract is
 - **`tool.cancelled`** *(harness)* — Protected canonical fact that a
   non-backgrounded call was cancelled and its foreground transcript tool round
   is terminal. Backgrounded calls that already emitted a placeholder instead
-  derive `tool.background_error`. The canonical event uses the harness source
-  and cannot be rewritten or dropped.
+   derive `tool.background_error`. The canonical event uses the harness source
+   and cannot be rewritten or dropped. It carries the same defaulted
+   `ToolResultPresentation` discriminator as result and error terminals.
 
 ## Actions
 
@@ -645,7 +653,8 @@ transient runtime observations and never enter semantic replay. See
    subscribers filter, summarize, or fully display agent-to-agent message
    projections according to `:set show-messages`. The received projection is the
    sole model payload; local senders render in a stable-sender-labelled escaped
-   `[tau-internal]` wrapper and external senders in an authenticated peer envelope.
+   outer `<tau_internal>` envelope and external senders in an authenticated peer
+   envelope.
    Live activation is a payload-free runtime wake; replay restores context without
    waking. If a
    side/delegate agent is about to finish, teardown waits until the message turn

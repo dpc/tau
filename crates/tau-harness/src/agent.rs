@@ -438,6 +438,8 @@ pub(crate) enum PendingPromptSource {
 pub(crate) struct PendingPrompt {
     /// Prompt text to fold into the conversation.
     pub(crate) text: String,
+    /// Harness-authenticated byte spans in [`Self::text`].
+    pub(crate) trusted_internal_spans: Vec<tau_proto::TrustedInternalSpan>,
     /// Whether this queued prompt is user text or internal model context.
     pub(crate) message_class: PromptMessageClass,
     /// Source marker for lifecycle decisions that must not confuse internal
@@ -497,6 +499,7 @@ impl PendingPrompt {
     pub(crate) fn user(text: String) -> Self {
         Self {
             text,
+            trusted_internal_spans: Vec::new(),
             message_class: PromptMessageClass::User,
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -525,8 +528,10 @@ impl PendingPrompt {
 
     /// Create a hidden internal queued prompt.
     pub(crate) fn internal(text: String) -> Self {
+        let end = u32::try_from(text.len()).expect("prompt length fits u32");
         Self {
             text,
+            trusted_internal_spans: vec![tau_proto::TrustedInternalSpan { start: 0, end }],
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
@@ -538,6 +543,15 @@ impl PendingPrompt {
         }
     }
 
+    /// Create an internal-class prompt whose bytes came from an authenticated
+    /// UI or configured extension. Its class affects lifecycle only; it has no
+    /// provider-presentation authority.
+    pub(crate) fn untrusted_internal(text: String) -> Self {
+        let mut prompt = Self::user(text);
+        prompt.message_class = PromptMessageClass::Internal;
+        prompt
+    }
+
     /// Create an internal advisory prompt from a named context-size alert.
     pub(crate) fn context_size_alert(text: String) -> Self {
         let mut prompt = Self::internal(text);
@@ -547,33 +561,17 @@ impl PendingPrompt {
 
     /// Create an internal loop-guard pivot prompt.
     pub(crate) fn loop_guard(text: String) -> Self {
-        Self {
-            text,
-            message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::LoopGuard,
-            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-            ctx_id: None,
-            expand_user_skill_on_dispatch: false,
-            activation_observation: None,
-            initial_prompt_correlation: None,
-            self_compaction_terminal: None,
-        }
+        let mut prompt = Self::internal(text);
+        prompt.source = PendingPromptSource::LoopGuard;
+        prompt
     }
 
     /// Create a hidden background-completion notice that waits for the next
     /// user-driven continuation instead of starting a standalone agent turn.
     pub(crate) fn passive_background_completion(text: String) -> Self {
-        Self {
-            text,
-            message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::PassiveBackgroundCompletion,
-            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-            ctx_id: None,
-            expand_user_skill_on_dispatch: false,
-            activation_observation: None,
-            initial_prompt_correlation: None,
-            self_compaction_terminal: None,
-        }
+        let mut prompt = Self::internal(text);
+        prompt.source = PendingPromptSource::PassiveBackgroundCompletion;
+        prompt
     }
 
     /// Create an inference-activating background-completion notice.
@@ -585,17 +583,9 @@ impl PendingPrompt {
 
     /// Create a hidden restore notice that waits for a separate activation.
     pub(crate) fn passive_restore_notice(text: String) -> Self {
-        Self {
-            text,
-            message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::PassiveRestoreNotice,
-            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-            ctx_id: None,
-            expand_user_skill_on_dispatch: false,
-            activation_observation: None,
-            initial_prompt_correlation: None,
-            self_compaction_terminal: None,
-        }
+        let mut prompt = Self::internal(text);
+        prompt.source = PendingPromptSource::PassiveRestoreNotice;
+        prompt
     }
 
     /// Attach a caller correlation id to this exact queued prompt.
