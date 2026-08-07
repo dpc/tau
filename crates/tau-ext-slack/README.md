@@ -253,13 +253,16 @@ Outside DMs, commands are recognized only when raw trimmed text begins with the 
 authenticated bot mention, regardless of whether Slack wrapped the occurrence
 as `message` or `app_mention`. Later command-looking text is prompt content.
 Slack's duplicate wrappers share one process-local `(conversation, message
-timestamp)` cache key, so recent repeats are dropped. Commands are `start`,
+timestamp)` cache key. Pending report duplicates replay the exact report; repeats
+after canonical confirmation are dropped. Commands are `start`,
 `agents`, `select <agent>`, and `to <agent> <message>` (with optional `/`).
 Selection is per configured receive route: parent-route threads share selection,
 receive-enabled fixed-thread routes are isolated, and dynamic DMs select per D id.
 
-An agent calls `slack_register(enabled: true)` to receive messages. Every submitted create, edit, or owned-post reaction report gets its own source-bound
-reply id. Use `slack_send` with `message` and exactly one of `reply_to` or the
+An agent calls `slack_register(enabled: true)` to receive messages. Every
+submitted create, edit, delete, or owned-post reaction carries a stable opaque
+report ID. Exact canonical create/edit echoes install their source-bound reply
+IDs. Use `slack_send` with `message` and exactly one of `reply_to` or the
 alias-only `destination`; raw Slack ids and thread selectors are never accepted.
 Its fixed schema never enumerates configuration. Call `slack_conversations` for
 bounded pages (default 20, maximum 32) of all static routes, sorted by alias. Each
@@ -284,14 +287,20 @@ therefore influence proactive sends available to that role. Keep destination
 sets and roles minimal; use separate roles or separately prefixed Slack instances
 when receive and proactive authority need isolation.
 
-Edits require a same-process locally submitted original report with matching sender, route, and
+Edits require a same-process canonically confirmed original report with matching sender, route, and
 thread. Inbound human reaction events require a recent post created through `slack_send`, matching
 owner, verified actor, and a covering receive route. The 4,096-entry received-id
 cache is process-local; cached occurrence ids are nonempty, control-free, and at
 most 256 bytes. Reactions use the cache only when Slack supplies an event id.
-An occurrence is recorded before later identity lookup, local effects, capacity
-admission, or local report write, so a transient failure consumes it until eviction
-or restart. Eviction, races, or restart may duplicate delivery. All
+Recording still precedes identity lookup, local effects, and report construction,
+so failure before a pending report exists suppresses retry until cache eviction or
+restart.
+A report-bearing occurrence retains its pre-ACK admission slot and exact report
+until the matching canonical event type, target agent, configured publisher,
+message identity, and report ID return on the live post-commit downpath. Missing
+echoes eventually saturate the 64 slots, stop ACK, and let Slack retry after
+reconnect. Delete revokes all local message authority immediately while retaining
+this pending retirement. Eviction, races, or restart may duplicate delivery. All
 runtime links, selections, reply routes, reaction ownership, registrations, and
 the outbound call ledger clear on restart. The ledger is bounded at 1,024
 non-evicting entries through the live session and rejects new calls before
@@ -329,7 +338,9 @@ Supported events reserve a bounded slot before ACK and then enter one persistent
 64-occurrence serial admission FIFO. Slow identity checks and local replies do not
 block websocket reads, ACKs, Ping/Pong, reconnect, or shutdown. Saturation is
 fail-closed: the bridge does not ACK the occurrence and reconnects so Slack can
-retry. The handoff is memory-only and does not add a post-ACK durability claim.
+retry. Report-bearing work retains its slot through canonical confirmation;
+Socket Mode ACK remains separate and does not claim Tau commit. The handoff is
+memory-only and does not add a post-ACK durability claim.
 
 `TRACE` diagnostics remain local, bounded, and identifier-free. They may cover
 websocket receipt, ACK, admission, identity, post, report submission, and result

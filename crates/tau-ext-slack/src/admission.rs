@@ -94,6 +94,18 @@ impl<T> AdmissionQueue<T> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         depth_bucket(state.outstanding)
     }
+
+    /// Reserve one outstanding permit without queueing work for deterministic
+    /// canonical-confirmation tests.
+    #[cfg(test)]
+    pub(crate) fn retain_test_permit(self: &Arc<Self>) -> OutstandingPermit<T> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(state.outstanding < CAPACITY, "test permit capacity");
+        state.outstanding += 1;
+        OutstandingPermit {
+            queue: Arc::clone(self),
+        }
+    }
 }
 
 /// A slot acquired before ACK and committed only after local ACK write success.

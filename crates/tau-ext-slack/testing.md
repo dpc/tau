@@ -6,13 +6,18 @@ test-only. Event-driven tests cover bounded reservation/FIFO/ACK behavior,
 reconnect, stale-heartbeat expiration, shutdown, framing,
 identity/install/route/config/session retirement, message
 create/edit/reaction/delete report submission, report-before-result ordering, replay
-without repost, retry/cancellation/writer failure, strict reaction and mention
+without repost, ingress report replay before canonical confirmation,
+post-confirmation duplicate suppression, immediate delete revocation, retained
+admission capacity, new/replayed report serialization against disconnect,
+shutdown, unload, and fatal writer retirement, retry/cancellation/writer failure,
+strict reaction and mention
 arguments, ownership/ambiguity/deletion/capacity, and native-ID nonexposure.
 Inject outcomes and use Tokio's paused clock rather than waiting on wall time.
 
 Ingress coverage includes reservation release, the hard 64-occurrence bound,
 FIFO closure/drain, native duplicate suppression, exact target identity,
-responsive and stale peers, off-phase Pong deadlines, non-Pong traffic, and
+exact canonical event/agent/publisher/message/report correlation, responsive and
+stale peers, off-phase Pong deadlines, non-Pong traffic, and
 shutdown/deadline interruption of blocked socket writes.
 Delivery coverage fixes the absolute retry horizon, active-worker/ledger bounds,
 report-before-result ordering, `persist=false` metadata, cancellation, writer failure, and stable replay

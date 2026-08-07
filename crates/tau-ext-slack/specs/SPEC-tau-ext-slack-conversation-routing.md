@@ -12,10 +12,11 @@ overlap reject atomically. Parent receive covers threads; fixed routes normalize
 to their configured root. Static receive DM wins over dynamic linking;
 proactive-only static DM may coexist with a dynamic link.
 
-Reply authority is installed only after successful local transient message-report
-submission and requires its exact fact ID. Submission failure and canonical-fact
-replay install nothing. Interception, append failure, or a crash may prevent the
-later canonical fact without revoking already installed Slack-local authority.
+Reply authority is installed only after the originating configured publisher
+observes the exact canonical message fact on its live post-commit downpath.
+Event type, target agent, configured publisher, message identity, and stable
+Slack report ID must all match. Submission failure, mismatched or missing echoes,
+and canonical-fact replay install nothing.
 Proactive send requires a current configured alias with
 `proactive_send:true`, independently of receive, registration, and dynamic DMs.
 Native IDs, prompt correlation, text, arrival order, thread coordinates, and

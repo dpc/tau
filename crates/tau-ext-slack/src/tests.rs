@@ -118,6 +118,8 @@ struct FakeClient {
     open_count: Mutex<usize>,
     /// Authentication call count.
     auth_count: Mutex<usize>,
+    /// Live-human identity lookup count.
+    identity_count: Mutex<usize>,
     /// Recorded outbound reaction calls.
     reactions: Mutex<Vec<RecordedReaction>>,
     /// Scripted typed reaction outcomes.
@@ -130,6 +132,7 @@ impl FakeClient {
             sent: Mutex::new(Vec::new()),
             open_count: Mutex::new(0),
             auth_count: Mutex::new(0),
+            identity_count: Mutex::new(0),
             reactions: Mutex::new(Vec::new()),
             reaction_results: Mutex::new(VecDeque::new()),
         })
@@ -191,6 +194,7 @@ impl SlackClient for FakeClient {
         _cfg: &RuntimeConfig,
         user_id: &str,
     ) -> Result<Option<VerifiedSlackHuman>, SlackApiError> {
+        *self.identity_count.lock().expect("lock") += 1;
         Ok(test_verified_human(user_id, user_id != "UBOT999"))
     }
 
@@ -727,6 +731,7 @@ fn admission_context(ext: &Extension) -> AdmissionContext {
         queue_wait_us: 0,
         identity_us: Cell::new(0),
         outcome: Cell::new(AdmissionOutcome::RejectedRoute),
+        permit: RefCell::new(None),
     }
 }
 
@@ -1016,6 +1021,163 @@ fn recv_message_report(rx: &mpsc::Receiver<HarnessInputMessage>, expected: &str)
     }
 }
 
+/// Convert one submitted Slack report through the real canonical payload
+/// transformation and deliver it on the extension's production live-event path.
+fn acknowledge_message_report(ext: &Extension, report: &Event) -> Event {
+    let canonical = report
+        .clone()
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("matching Slack report canonicalizes");
+    ext.apply_live_event(&canonical);
+    canonical
+}
+
+/// Build one pending delivered report that owns a real admission permit.
+fn pending_report_fixture() -> (
+    Extension,
+    Event,
+    MessageFactId,
+    Arc<AdmissionQueue<AdmissionWork>>,
+) {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.state.lock().expect("state").session_active = true;
+    let queue = AdmissionQueue::<AdmissionWork>::new();
+    let context = admission_context(&ext);
+    context
+        .permit
+        .borrow_mut()
+        .replace(queue.retain_test_permit());
+    ext.process_slack_message_admitted(
+        slack_message("C123", Some("channel"), "<@UBOT123> hello"),
+        Some(&context),
+    );
+    let report = recv_message_report(&rx, "pending delivered");
+    let Event::MessageDeliveredReported(delivered) = &report else {
+        panic!("expected delivered report");
+    };
+    let message_id = delivered.message_id.clone();
+    let canonical = report
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("canonical delivered fact");
+    (ext, canonical, message_id, queue)
+}
+
+/// Verify one teardown releases pending capacity and rejects a delayed echo.
+fn assert_pending_teardown(name: &str, teardown: impl FnOnce(&Extension)) {
+    let (ext, canonical, message_id, queue) = pending_report_fixture();
+    let held = (1..admission::CAPACITY)
+        .map(|_| queue.reserve().expect("remaining admission slot"))
+        .collect::<Vec<_>>();
+    assert!(matches!(queue.reserve(), Err(ReserveError::Full)));
+    teardown(&ext);
+    assert!(
+        ext.state.lock().expect("state").pending_ingress.is_empty(),
+        "{name} must clear pending ingress"
+    );
+    let released = queue.reserve().expect("teardown releases pending slot");
+    ext.apply_live_event(&canonical);
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .reply_routes
+            .contains_key(&message_id)
+    );
+    drop(released);
+    drop(held);
+}
+
+/// Lifecycle action raced against one gate-held ingress report submission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingTeardownRace {
+    /// Harness transport disconnect.
+    Disconnect,
+    /// Session shutdown event.
+    SessionShutdown,
+    /// Agent unload event.
+    AgentUnload,
+    /// Fatal protocol writer retirement.
+    WriterFailure,
+}
+
+/// Prove one teardown cannot pass the report output/lifecycle barrier.
+fn assert_teardown_waits_for_ingress_output(action: PendingTeardownRace, replay: bool) {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    if replay {
+        ext.process_slack_message(message.clone());
+        let _original = recv_message_report(&rx, "original delivered");
+    }
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let hook = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    if replay {
+        *ext.test_hooks.ingress_replay_boundary.lock().expect("hook") = hook;
+    } else {
+        *ext.test_hooks
+            .ingress_submission_boundary
+            .lock()
+            .expect("hook") = hook;
+    }
+    let ext = Arc::new(ext);
+    let submitting = Arc::clone(&ext);
+    let worker = std::thread::spawn(move || submitting.process_slack_message(message));
+    reached_rx.recv().expect("pending submission boundary");
+    let (done_tx, done_rx) = mpsc::channel();
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    *ext.test_hooks
+        .lifecycle_gate_attempt
+        .lock()
+        .expect("gate hook") = Some(attempt_tx);
+    let retiring = Arc::clone(&ext);
+    let teardown = std::thread::spawn(move || {
+        match action {
+            PendingTeardownRace::Disconnect => retiring.retire_send_authority(),
+            PendingTeardownRace::SessionShutdown => {
+                retiring.apply_live_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
+                    session_id: "s1".parse().expect("session id"),
+                }));
+            }
+            PendingTeardownRace::AgentUnload => {
+                retiring.unload_agent(&agent_id("agent-a"));
+            }
+            PendingTeardownRace::WriterFailure => retiring.retire_after_output_failure(),
+        }
+        done_tx.send(()).expect("teardown completion");
+    });
+    attempt_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("teardown reached gate acquisition");
+    assert!(
+        done_rx.try_recv().is_err(),
+        "a gate acquisition attempt cannot finish while output owns the gate (replay={replay})"
+    );
+    release_tx.send(()).expect("release report submission");
+    worker.join().expect("submission worker");
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("teardown finishes after report submission");
+    teardown.join().expect("teardown worker");
+    if action == PendingTeardownRace::WriterFailure {
+        assert!(rx.try_recv().is_err());
+    } else {
+        let _report = recv_message_report(&rx, "serialized delivered");
+    }
+    assert!(
+        ext.state.lock().expect("state").pending_ingress.is_empty(),
+        "{action:?} must clear pending ingress (replay={replay})"
+    );
+}
+
 /// Assert that no message report is queued.
 fn assert_no_ingress(rx: &mpsc::Receiver<HarnessInputMessage>) {
     while let Ok(message) = rx.try_recv() {
@@ -1066,6 +1228,19 @@ fn message_report_lifecycle_preserves_target_identity() {
             .and_then(|value| value.alias.as_deref()),
         Some("team")
     );
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(!state.reply_routes.contains_key(&delivered.message_id));
+        assert_eq!(state.pending_ingress.len(), 1);
+    }
+    acknowledge_message_report(&ext, &Event::MessageDeliveredReported(delivered.clone()));
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .reply_routes
+            .contains_key(&delivered.message_id)
+    );
 
     ext.process_slack_edit(slack_edit("edit-1", "C123", &native_id, None, "updated"));
     let Event::MessageEditedReported(edited) = recv_message_report(&rx, "edited") else {
@@ -1074,6 +1249,7 @@ fn message_report_lifecycle_preserves_target_identity() {
     assert_eq!(edited.target.message_id, delivered.message_id);
     assert_eq!(edited.text, "updated");
     assert_eq!(edited.publisher_extension_id.as_str(), "std-slack");
+    acknowledge_message_report(&ext, &Event::MessageEditedReported(edited.clone()));
 
     ext.state.lock().expect("state").posted_messages.insert(
         PostedMessageKey::new("C123", "9.0"),
@@ -1098,6 +1274,7 @@ fn message_report_lifecycle_preserves_target_identity() {
     assert_eq!(reaction.target.message_id, delivered.message_id);
     assert_eq!(reaction.reaction, "thumbsup");
     assert_eq!(reaction.publisher_extension_id.as_str(), "std-slack");
+    acknowledge_message_report(&ext, &Event::MessageReactionAddedReported(reaction.clone()));
     ext.process_slack_reaction(slack_reaction(
         "reaction-2",
         "reaction_removed",
@@ -1111,6 +1288,10 @@ fn message_report_lifecycle_preserves_target_identity() {
     };
     assert_eq!(removed.target.message_id, delivered.message_id);
     assert_eq!(removed.publisher_extension_id.as_str(), "std-slack");
+    acknowledge_message_report(
+        &ext,
+        &Event::MessageReactionRemovedReported(removed.clone()),
+    );
 
     let reaction_key = ReactionKey {
         channel_id: "C123".to_owned(),
@@ -1148,11 +1329,134 @@ fn message_report_lifecycle_preserves_target_identity() {
     assert_eq!(deleted.publisher_extension_id.as_str(), "std-slack");
     assert_eq!(deleted.target.message_id, delivered.message_id);
     assert!(deleted.actor.is_none());
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(!state.reply_routes.contains_key(&delivered.message_id));
+        assert!(!state.reactions.targets.contains_key(&delivered.message_id));
+        assert!(state.reactions.owners.is_empty());
+        assert!(state.reactions.in_flight.is_empty());
+        assert_eq!(state.pending_ingress.len(), 1);
+    }
+    acknowledge_message_report(&ext, &Event::MessageDeletedReported(deleted));
+    assert!(ext.state.lock().expect("state").pending_ingress.is_empty());
+}
+
+/// Ingress authority requires exact event type, target agent, configured
+/// publisher, message identity, and extension-generated report identity.
+#[test]
+fn ingress_canonical_correlation_rejects_every_mismatch() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", Some("channel"), "<@UBOT123> hello"));
+    let Event::MessageDeliveredReported(report) = recv_message_report(&rx, "delivered") else {
+        panic!("expected delivered report");
+    };
+    let Event::MessageDelivered(canonical) = Event::MessageDeliveredReported(report.clone())
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("canonical delivered fact")
+    else {
+        panic!("expected canonical delivered fact");
+    };
+
+    let mut wrong_publisher = canonical.clone();
+    wrong_publisher.publisher_extension_id =
+        tau_proto::MessagePublisherId::parse("other-slack").expect("publisher");
+    ext.apply_live_event(&Event::MessageDelivered(wrong_publisher));
+    let mut wrong_agent = canonical.clone();
+    wrong_agent.agent_id = MessageAgentTarget::new("agent-b");
+    ext.apply_live_event(&Event::MessageDelivered(wrong_agent));
+    let mut wrong_message = canonical.clone();
+    wrong_message.message_id = MessageFactId::new("slack-message:wrong");
+    ext.apply_live_event(&Event::MessageDelivered(wrong_message));
+    let mut wrong_report = canonical.clone();
+    wrong_report.extension_data = SlackReportId::from_occurrence("wrong").extension_data();
+    ext.apply_live_event(&Event::MessageDelivered(wrong_report));
+    let mut wrong_type = MessageEdited::new(
+        canonical.publisher_extension_id.clone(),
+        canonical.agent_id.clone(),
+        MessageFactRef {
+            publisher_extension_id: tau_proto::RawMessagePublisherId::new("std-slack"),
+            message_id: canonical.message_id.clone(),
+        },
+        None,
+        canonical.conversation.clone(),
+        "wrong type",
+    );
+    wrong_type.extension_data = canonical.extension_data.clone();
+    ext.apply_live_event(&Event::MessageEdited(wrong_type));
+
+    {
+        let state = ext.state.lock().expect("state");
+        assert_eq!(state.pending_ingress.len(), 1);
+        assert!(!state.reply_routes.contains_key(&canonical.message_id));
+    }
+    ext.apply_live_event(&Event::MessageDelivered(canonical.clone()));
     let state = ext.state.lock().expect("state");
-    assert!(!state.reply_routes.contains_key(&delivered.message_id));
-    assert!(!state.reactions.targets.contains_key(&delivered.message_id));
-    assert!(state.reactions.owners.is_empty());
-    assert!(state.reactions.in_flight.is_empty());
+    assert!(state.pending_ingress.is_empty());
+    assert!(state.reply_routes.contains_key(&canonical.message_id));
+}
+
+/// A report keeps its pre-ACK admission slot until canonical confirmation, so
+/// missing echoes apply Socket Mode backpressure instead of dropping newer
+/// input.
+#[test]
+fn pending_ingress_holds_admission_capacity_until_canonical_echo() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.state.lock().expect("state").session_active = true;
+    let queue = AdmissionQueue::<AdmissionWork>::new();
+    let context = admission_context(&ext);
+    context
+        .permit
+        .borrow_mut()
+        .replace(queue.retain_test_permit());
+    ext.process_slack_message_admitted(
+        slack_message("C123", Some("channel"), "<@UBOT123> hello"),
+        Some(&context),
+    );
+    let report = recv_message_report(&rx, "delivered");
+    let held = (1..admission::CAPACITY)
+        .map(|_| queue.reserve().expect("remaining admission slot"))
+        .collect::<Vec<_>>();
+    assert!(matches!(queue.reserve(), Err(ReserveError::Full)));
+    acknowledge_message_report(&ext, &report);
+    let released = queue.reserve().expect("canonical echo releases slot");
+    drop(released);
+    drop(held);
+}
+
+/// Agent unload, disconnect, session shutdown, and fatal writer retirement all
+/// release pending permits and make delayed canonical echoes inert.
+#[test]
+fn pending_ingress_teardown_releases_capacity_and_rejects_late_echoes() {
+    assert_pending_teardown("agent unload", |ext| {
+        ext.unload_agent(&agent_id("agent-a"));
+    });
+    assert_pending_teardown("disconnect", Extension::retire_send_authority);
+    assert_pending_teardown("session shutdown", |ext| {
+        ext.apply_live_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: "s1".parse().expect("session id"),
+        }));
+    });
+    assert_pending_teardown("writer failure", Extension::retire_after_output_failure);
+}
+
+/// Disconnect, shutdown, unload, and fatal writer retirement cannot overtake a
+/// gate-held new report or pending replay and permit stale post-retirement
+/// output.
+#[test]
+fn ingress_submission_serializes_all_teardown_paths() {
+    for action in [
+        PendingTeardownRace::Disconnect,
+        PendingTeardownRace::SessionShutdown,
+        PendingTeardownRace::AgentUnload,
+        PendingTeardownRace::WriterFailure,
+    ] {
+        assert_teardown_waits_for_ingress_output(action, false);
+        assert_teardown_waits_for_ingress_output(action, true);
+    }
 }
 
 /// Lax static-route ingress reports its existing verified conversation
@@ -1338,9 +1642,18 @@ fn admitted_incoming_delete_fails_closed_after_unregister() {
     let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
     let message_ts = message.ts.clone().expect("native Slack timestamp");
     ext.process_slack_message(message);
-    let Event::MessageDeliveredReported(_) = recv_message_report(&rx, "delivered") else {
+    let delivered = recv_message_report(&rx, "delivered");
+    let Event::MessageDeliveredReported(_) = &delivered else {
         panic!("expected delivered report");
     };
+    acknowledge_message_report(&ext, &delivered);
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .incoming_messages
+            .contains_key(&PostedMessageKey::new("C123", &message_ts))
+    );
     ext.state.lock().expect("state").session_active = true;
     let admission = admission_context(&ext);
     assert!(matches!(
@@ -5200,7 +5513,8 @@ fn padded_leading_mention_retains_command_authority() {
     }
 }
 
-/// Recent Slack redelivery is dropped by the extension-local bounded cache.
+/// Slack redelivery replays a pending report, then canonical confirmation
+/// retires it into ordinary duplicate suppression.
 #[test]
 fn duplicate_slack_event_ids_are_dropped_locally() {
     let (ext, rx, _client) = extension();
@@ -5208,7 +5522,193 @@ fn duplicate_slack_event_ids_are_dropped_locally() {
     let msg = slack_message("C123", None, "<@UBOT123> hello");
     ext.process_slack_message(msg.clone());
     ext.process_slack_message(msg);
-    assert_eq!(recv_prompt(&rx), "hello");
+    let first = recv_message_report(&rx, "first delivered");
+    let second = recv_message_report(&rx, "replayed delivered");
+    assert_eq!(first, second);
+    acknowledge_message_report(&ext, &first);
+    let duplicate = slack_message("C123", None, "<@UBOT123> hello");
+    ext.process_slack_message(duplicate);
+    assert!(rx.try_recv().is_err());
+}
+
+/// Pending duplicate replay preserves the original target even if route
+/// selection changes before Slack redelivery.
+#[test]
+fn pending_duplicate_replays_original_target_after_selection_change() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    register_agent(&ext, "agent-b");
+    ext.state
+        .lock()
+        .expect("state")
+        .selected_agent_by_route
+        .insert(
+            SelectionRouteKey::StaticAlias("team".to_owned()),
+            agent_id("agent-a"),
+        );
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    ext.process_slack_message(message.clone());
+    let original = recv_message_report(&rx, "original delivered");
+    let identity_count = *client.identity_count.lock().expect("identity count");
+    ext.state
+        .lock()
+        .expect("state")
+        .selected_agent_by_route
+        .insert(
+            SelectionRouteKey::StaticAlias("team".to_owned()),
+            agent_id("agent-b"),
+        );
+    ext.process_slack_message(message);
+    let replay = recv_message_report(&rx, "replayed delivered");
+    assert_eq!(replay, original);
+    let Event::MessageDeliveredReported(report) = replay else {
+        panic!("expected delivered replay");
+    };
+    assert_eq!(report.agent_id.as_str(), "agent-a");
+    assert_eq!(
+        *client.identity_count.lock().expect("identity count"),
+        identity_count,
+        "pending replay must not repeat identity lookup"
+    );
+}
+
+/// Pending message replay ignores changed sender/wrapper/route metadata,
+/// performs no second identity lookup, and keeps one original outstanding
+/// permit.
+#[test]
+fn pending_message_duplicate_replays_before_mutable_metadata_policy() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.state.lock().expect("state").session_active = true;
+    let queue = AdmissionQueue::<AdmissionWork>::new();
+    let original_context = admission_context(&ext);
+    original_context
+        .permit
+        .borrow_mut()
+        .replace(queue.retain_test_permit());
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    ext.process_slack_message_admitted(message.clone(), Some(&original_context));
+    let original = recv_message_report(&rx, "original delivered");
+    let identity_count = *client.identity_count.lock().expect("identity count");
+
+    let duplicate_context = admission_context(&ext);
+    duplicate_context
+        .permit
+        .borrow_mut()
+        .replace(queue.retain_test_permit());
+    let mut changed = message;
+    changed.user_id = "invalid changed sender".to_owned();
+    changed.event_type = "unsupported_wrapper".to_owned();
+    changed.channel_type = Some("im".to_owned());
+    changed.thread_ts = Some("invalid changed route".to_owned());
+    ext.process_slack_message_admitted(changed, Some(&duplicate_context));
+    drop(duplicate_context.permit.borrow_mut().take());
+    let replay = recv_message_report(&rx, "replayed delivered");
+    assert_eq!(replay, original);
+    assert_eq!(
+        *client.identity_count.lock().expect("identity count"),
+        identity_count
+    );
+    assert_eq!(ext.state.lock().expect("state").pending_ingress.len(), 1);
+    let held = (1..admission::CAPACITY)
+        .map(|_| queue.reserve().expect("remaining admission slot"))
+        .collect::<Vec<_>>();
+    assert!(matches!(queue.reserve(), Err(ReserveError::Full)));
+    drop(held);
+}
+
+/// Rejected unseen wrappers do not consume the stable key before the former
+/// post-policy occurrence-admission point.
+#[test]
+fn rejected_unseen_wrapper_does_not_suppress_later_valid_occurrence() {
+    for mutation in ["bot", "subtype", "unsupported"] {
+        let (ext, rx, client) = extension();
+        register_agent(&ext, "agent-a");
+        let valid = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+        let mut rejected = valid.clone();
+        match mutation {
+            "bot" => rejected.bot_id = Some("B123".to_owned()),
+            "subtype" => rejected.subtype = Some("channel_join".to_owned()),
+            "unsupported" => rejected.event_type = "unsupported_wrapper".to_owned(),
+            _ => unreachable!("closed mutation cases"),
+        }
+        ext.process_slack_message(rejected);
+        assert!(rx.try_recv().is_err());
+        ext.process_slack_message(valid);
+        let Event::MessageDeliveredReported(_) = recv_message_report(&rx, "valid delivered") else {
+            panic!("valid wrapper must remain admissible after {mutation}");
+        };
+        assert_eq!(*client.identity_count.lock().expect("identity count"), 1);
+    }
+}
+
+/// If canonical confirmation wins after duplicate classification but before
+/// replay acquires the gate, retirement suppresses the now-obsolete replay.
+#[test]
+fn canonical_echo_between_duplicate_classification_and_replay_suppresses_output() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    ext.process_slack_message(message.clone());
+    let report = recv_message_report(&rx, "original delivered");
+    let canonical = report
+        .clone()
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("publisher"),
+        )
+        .expect("canonical delivered fact");
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks
+        .ingress_replay_classified_boundary
+        .lock()
+        .expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let ext = Arc::new(ext);
+    let replaying = Arc::clone(&ext);
+    let replay = std::thread::spawn(move || replaying.process_slack_message(message));
+    reached_rx.recv().expect("pending replay classified");
+    ext.apply_live_event(&canonical);
+    assert!(ext.state.lock().expect("state").pending_ingress.is_empty());
+    release_tx.send(()).expect("release replay");
+    replay.join().expect("replay worker");
+    assert!(rx.try_recv().is_err(), "retired report must not replay");
+}
+
+/// A repeated deletion replays its retained report even though immediate
+/// fail-closed revocation removed the native owner before canonical
+/// confirmation.
+#[test]
+fn pending_delete_replays_after_immediate_authority_revocation() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    let message = slack_message("C123", Some("channel"), "<@UBOT123> hello");
+    let message_ts = message.ts.clone().expect("message timestamp");
+    ext.process_slack_message(message);
+    let delivered = recv_message_report(&rx, "delivered");
+    acknowledge_message_report(&ext, &delivered);
+    let delete = || SlackDelete {
+        event_id: Some("delete-replay".to_owned()),
+        channel_id: "C123".to_owned(),
+        message_ts: message_ts.clone(),
+        thread_ts: None,
+    };
+    ext.process_slack_delete(delete());
+    let first = recv_message_report(&rx, "first delete");
+    assert!(
+        !ext.state
+            .lock()
+            .expect("state")
+            .incoming_messages
+            .contains_key(&PostedMessageKey::new("C123", &message_ts))
+    );
+    ext.process_slack_delete(delete());
+    let replay = recv_message_report(&rx, "replayed delete");
+    assert_eq!(first, replay);
+    acknowledge_message_report(&ext, &first);
+    ext.process_slack_delete(delete());
     assert!(rx.try_recv().is_err());
 }
 
@@ -5400,6 +5900,7 @@ fn latency_markers_are_payload_free() {
             queue_wait_us: 0,
             identity_us: Cell::new(0),
             outcome: Cell::new(AdmissionOutcome::RejectedPolicy),
+            permit: RefCell::new(None),
         };
         assert!(
             ext.verified_human_traced(&cfg(), sentinel_user, Some(&context))

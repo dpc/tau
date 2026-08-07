@@ -11,7 +11,7 @@
 //! Outbound retry and replay follow
 //! `SPEC-tau-ext-slack-send-delivery`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::future::Future;
@@ -26,10 +26,10 @@ use futures_util::{SinkExt, StreamExt};
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDeleted, MessageDelivered, MessageEdited, MessageFactId, MessageFactRef, MessageParty,
-    MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth, MessageSent, NoticeLevel,
-    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStatus,
+    MessageDeleted, MessageDelivered, MessageEdited, MessageExtensionData, MessageFactId,
+    MessageFactRef, MessageParty, MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth,
+    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
 use tokio_tungstenite::tungstenite::Message;
@@ -38,13 +38,18 @@ use ureq::tls as path_ureq_tls;
 
 mod admission;
 mod admission_trace;
+mod pending_ingress;
 mod posted_message_cache;
 mod reactions;
 mod send_delivery;
 mod transport_mentions;
 
-use admission::{AdmissionQueue, QueueDepthBucket, ReserveError};
+use admission::{AdmissionQueue, OutstandingPermit, QueueDepthBucket, ReserveError};
 use admission_trace::{AdmissionOutcome, EventClass, LatencyTrace};
+use pending_ingress::{
+    OccurrenceDisposition, PendingIngress, PendingIngressKind, PendingMessageAuthority,
+    SlackReportId,
+};
 use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
 use reactions::{
     ReactionAuthority, ReactionClient, ReactionState, ReactionTarget, UnavailableReactionClient,
@@ -181,6 +186,8 @@ struct AdmissionContext {
     identity_us: Cell<u64>,
     /// Explicit terminal class selected by the operation that owns the outcome.
     outcome: Cell<AdmissionOutcome>,
+    /// Outstanding pre-ACK slot retained until canonical confirmation.
+    permit: RefCell<Option<OutstandingPermit<AdmissionWork>>>,
 }
 
 /// Exact retained ownership captured while admitting one Slack deletion.
@@ -754,6 +761,8 @@ enum IngressReport {
 
 /// Fully normalized Slack occurrence ready for report submission.
 struct IngressSubmission {
+    /// Slack-native occurrence identity used for stable report correlation.
+    occurrence_key: String,
     /// Exact currently authorized native conversation.
     conversation: SlackConversation,
     /// Live registered agent selected for the occurrence.
@@ -863,6 +872,16 @@ fn slack_message_fact_id(channel_id: &str, native_id: &str) -> MessageFactId {
     MessageFactId::new(format!("slack-message:{}", hasher.finalize().to_hex()))
 }
 
+/// Return the stable native occurrence key shared by duplicate suppression and
+/// canonical report correlation.
+fn received_message_key(message: &SlackMessage) -> Option<String> {
+    message
+        .ts
+        .as_ref()
+        .map(|ts| format!("message:{}:{ts}", message.channel_id))
+        .or_else(|| message.event_id.as_ref().map(|id| format!("event:{id}")))
+}
+
 /// Derive an opaque canonical sender reference without exposing a Slack user
 /// ID.
 fn slack_sender_ref(installation_team_id: &str, user_id: &str) -> String {
@@ -941,7 +960,6 @@ enum ReactionKind {
     Removed,
 }
 
-#[cfg(test)]
 impl ReactionKind {
     /// Return the stable Slack event name.
     fn as_str(self) -> &'static str {
@@ -1185,6 +1203,8 @@ struct State {
     installation_mismatch: bool,
     /// Bounded process-local Slack occurrence ids already admitted.
     received_occurrences: ReceivedOccurrenceCache,
+    /// At most 64 post-ACK reports awaiting canonical confirmation.
+    pending_ingress: HashMap<SlackReportId, PendingIngress>,
     /// Recent bridge-authored Slack posts and their owning agents.
     posted_messages: PostedMessageCache,
     /// Focused source-bound reaction ownership and replay state.
@@ -1203,6 +1223,7 @@ impl State {
         self.linked_dms.clear();
         self.selected_agent_by_route.clear();
         self.received_occurrences = ReceivedOccurrenceCache::default();
+        self.pending_ingress.clear();
     }
 
     /// Install the first authenticated pair or require an exact reconnect
@@ -1311,8 +1332,7 @@ impl State {
         true
     }
 
-    /// Remove all locally submitted incoming report identities owned by one
-    /// agent.
+    /// Remove all canonically confirmed incoming identities owned by one agent.
     fn remove_agent_incoming_messages(&mut self, agent_id: &AgentId) {
         self.incoming_messages
             .retain(|_, owner| &owner.agent_id != agent_id);
@@ -1325,7 +1345,7 @@ impl State {
             .retain(|key| retained.contains(key));
     }
 
-    /// Clear all locally submitted incoming report identities.
+    /// Clear all canonically confirmed incoming identities.
     fn clear_incoming_messages(&mut self) {
         self.incoming_messages.clear();
         self.incoming_message_order.clear();
@@ -1502,6 +1522,15 @@ struct BlockingTestHook {
 #[cfg(test)]
 #[derive(Default)]
 struct ExtensionTestHooks {
+    /// Runs with the output/lifecycle gate held after pending ingress
+    /// insertion.
+    ingress_submission_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Runs with the output/lifecycle gate held before exact pending replay.
+    ingress_replay_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Runs after pending classification and before replay acquires the gate.
+    ingress_replay_classified_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Announces immediately before a lifecycle path attempts the output gate.
+    lifecycle_gate_attempt: Mutex<Option<mpsc::Sender<()>>>,
     /// Runs after the sent report write and before typed-result submission.
     sent_report_boundary: Mutex<Option<BlockingTestHook>>,
     /// Runs after the failure latch is set but before submission-gate release.
@@ -1520,6 +1549,18 @@ fn run_blocking_test_hook(slot: &Mutex<Option<BlockingTestHook>>) {
     {
         hook.reached.send(()).expect("announce test boundary");
         hook.release.recv().expect("release test boundary");
+    }
+}
+
+/// Announce one deterministic lifecycle-gate acquisition attempt.
+#[cfg(test)]
+fn announce_test_gate_attempt(slot: &Mutex<Option<mpsc::Sender<()>>>) {
+    if let Some(sender) = slot
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        sender.send(()).expect("announce gate attempt");
     }
 }
 
@@ -1597,6 +1638,10 @@ impl Extension {
     /// Apply validated configuration before any successful preflight or post
     /// freezes it.
     fn apply_config(&self, cfg: RuntimeConfig) -> Result<(), String> {
+        let _submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.config_frozen {
             return Err(immutable_config_error());
@@ -1616,6 +1661,7 @@ impl Extension {
         state.bot_user_id = None;
         state.installation_team_id = None;
         state.received_occurrences = ReceivedOccurrenceCache::default();
+        state.pending_ingress.clear();
         self.send_wake.notify_lifecycle_change();
         Ok(())
     }
@@ -1623,6 +1669,10 @@ impl Extension {
     /// Clear inactive configuration and runtime routing state after a config
     /// error.
     fn clear_config_after_error(&self) {
+        let _submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.config_frozen {
             return;
@@ -1635,6 +1685,7 @@ impl Extension {
         state.selected_agent_by_route.clear();
         state.clear_reply_routes();
         state.clear_incoming_messages();
+        state.pending_ingress.clear();
         state.clear_send_ledger();
         state.posted_messages.clear();
         state.linked_dms.clear();
@@ -1648,12 +1699,17 @@ impl Extension {
     /// Retire all outbound send authority at the process/session transport
     /// boundary before waking background workers.
     fn retire_send_authority(&self) {
+        #[cfg(test)]
+        announce_test_gate_attempt(&self.test_hooks.lifecycle_gate_attempt);
         retire_send_state(&self.state, &self.output_submission_gate, &self.send_wake);
     }
 
     /// Synchronously retire every route and remote-effect authority after the
     /// confirmed protocol writer becomes unavailable.
     fn retire_after_output_failure(&self) {
+        self.output_failed.store(true, Ordering::Release);
+        #[cfg(test)]
+        announce_test_gate_attempt(&self.test_hooks.lifecycle_gate_attempt);
         retire_after_output_failure(
             &self.state,
             &self.output_submission_gate,
@@ -1665,6 +1721,12 @@ impl Extension {
 
     /// Remove one unloaded agent's private receive/reaction authority.
     fn unload_agent(&self, agent_id: &AgentId) {
+        #[cfg(test)]
+        announce_test_gate_attempt(&self.test_hooks.lifecycle_gate_attempt);
+        let _submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.registered_agents.remove(agent_id);
         state.agent_generation = state.agent_generation.wrapping_add(1);
@@ -1675,6 +1737,7 @@ impl Extension {
             .retain(|_, selected| selected != agent_id);
         state.remove_agent_reply_routes(agent_id);
         state.remove_agent_incoming_messages(agent_id);
+        state.remove_agent_pending_ingress(agent_id);
         state.posted_messages.remove_agent(agent_id);
         state.reactions.remove_agent(agent_id);
         drop(state);
@@ -1871,6 +1934,10 @@ impl Extension {
                 .or_insert_with(|| invoke.agent_id.to_string());
             self.send_wake.notify_lifecycle_change();
         } else {
+            let _submission = self
+                .output_submission_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.registered_agents.remove(&invoke.agent_id) {
                 state.agent_generation = state.agent_generation.wrapping_add(1);
@@ -1882,6 +1949,7 @@ impl Extension {
             state.remove_agent_reply_routes(&invoke.agent_id);
             state.reactions.remove_agent_sources(&invoke.agent_id);
             state.remove_agent_incoming_messages(&invoke.agent_id);
+            state.remove_agent_pending_ingress(&invoke.agent_id);
             self.send_wake.notify_lifecycle_change();
         }
         let mut result = vec![example_field(
@@ -1953,6 +2021,10 @@ impl Extension {
         &self,
         installation: &SlackInstallationIdentity,
     ) -> Result<(), String> {
+        let _submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.bot_user_id.is_none() && state.installation_team_id.is_none() {
             return Ok(());
@@ -1967,6 +2039,10 @@ impl Extension {
 
     /// Poison an established pair after malformed reconnect identity evidence.
     fn latch_invalid_installation_if_established(&self) {
+        let _submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.bot_user_id.is_some() || state.installation_team_id.is_some() {
             state.latch_installation_mismatch();
@@ -2210,6 +2286,28 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
+        let occurrence_key = reaction.event_id.as_ref().map_or_else(
+            || {
+                format!(
+                    "reaction:{}:{}:{}:{}:{}",
+                    reaction.event_type.as_str(),
+                    reaction.channel_id,
+                    reaction.message_ts,
+                    reaction.user_id,
+                    reaction.reaction
+                )
+            },
+            |event_id| format!("reaction:{event_id}"),
+        );
+        if !self.admit_or_replay_occurrence(
+            occurrence_key.clone(),
+            admission,
+            reaction.event_id.is_some(),
+            true,
+            false,
+        ) {
+            return;
+        }
         let (cfg, agent_id, target_message_id, route) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
@@ -2252,9 +2350,13 @@ impl Extension {
             };
             (cfg, owner.agent_id.clone(), owner.message_id.clone(), route)
         };
-        if let Some(event_id) = reaction.event_id.as_ref()
-            && !self.insert_received_occurrence(format!("reaction:{event_id}"), admission)
-        {
+        if !self.admit_or_replay_occurrence(
+            occurrence_key.clone(),
+            admission,
+            reaction.event_id.is_some(),
+            true,
+            true,
+        ) {
             return;
         }
         let Some(identity) = self.verified_human_traced(&cfg, &reaction.user_id, admission) else {
@@ -2263,6 +2365,7 @@ impl Extension {
         self.submit_ingress(
             &cfg,
             IngressSubmission {
+                occurrence_key,
                 conversation: route,
                 agent_id,
                 sender: IngressSender {
@@ -2310,6 +2413,16 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
+        let received_key = edit.event_id.clone().unwrap_or_else(|| {
+            format!(
+                "edit:{}:{}:{}",
+                edit.channel_id, edit.message_ts, edit.revision_ts
+            )
+        });
+        let occurrence_key = format!("edit:{received_key}");
+        if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, true, false) {
+            return;
+        }
         let (cfg, owner, bot_user_id) = {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let Some(cfg) = state.config.clone() else {
@@ -2353,13 +2466,7 @@ impl Extension {
             log_ingress_rejection("malformed_text");
             return;
         }
-        let received_key = edit.event_id.clone().unwrap_or_else(|| {
-            format!(
-                "edit:{}:{}:{}",
-                edit.channel_id, edit.message_ts, edit.revision_ts
-            )
-        });
-        if !self.insert_received_occurrence(format!("edit:{received_key}"), admission) {
+        if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, true, true) {
             return;
         }
         let Some(identity) = self.verified_human_traced(&cfg, &edit.editor_user_id, admission)
@@ -2369,6 +2476,7 @@ impl Extension {
         self.submit_ingress(
             &cfg,
             IngressSubmission {
+                occurrence_key,
                 conversation: owner.conversation,
                 agent_id: owner.agent_id,
                 sender: IngressSender {
@@ -2410,6 +2518,15 @@ impl Extension {
             log_ingress_rejection("malformed_event");
             return;
         }
+        let occurrence = delete.event_id.as_ref().map_or_else(
+            || format!("{}:{}", delete.channel_id, delete.message_ts),
+            Clone::clone,
+        );
+        let occurrence_key = format!("delete:{occurrence}");
+        if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, false, false) {
+            return;
+        }
+        let report_id = SlackReportId::from_occurrence(&occurrence_key);
         let key = PostedMessageKey::new(&delete.channel_id, &delete.message_ts);
         let (publisher, owner) = {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -2461,23 +2578,13 @@ impl Extension {
                 owner,
             )
         };
-        let occurrence = delete
-            .event_id
-            .unwrap_or_else(|| format!("{}:{}", delete.channel_id, delete.message_ts));
-        if !self.admission_authority_is_current(admission)
-            || !self
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .received_occurrences
-                .insert_new(format!("delete:{occurrence}"))
-        {
+        if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, false, true) {
             return;
         }
         let agent_id = owner.agent_id().clone();
         let message_id = owner.message_id().clone();
         let conversation = owner.conversation().clone();
-        let event = Event::MessageDeletedReported(MessageDeleted::new(
+        let mut fact = MessageDeleted::new(
             publisher.clone(),
             MessageAgentTarget::new(agent_id.to_string()),
             MessageFactRef {
@@ -2486,7 +2593,10 @@ impl Extension {
             },
             None,
             Some(message_fact_conversation(&conversation)),
-        ));
+        );
+        fact.extension_data = report_id.extension_data();
+        let event = Event::MessageDeletedReported(fact);
+        let pending_report = event.clone();
         // Revoke before the local write so a concurrently dispatched reply or
         // reaction cannot begin after the deletion report becomes visible. Writer
         // failure keeps authority revoked because the remote deletion is already
@@ -2534,11 +2644,44 @@ impl Extension {
             }
         }
         state.revoke_message_authority(&message_id);
+        let permit = admission.and_then(|context| context.permit.borrow_mut().take());
+        let ingress_epoch = state.ingress_epoch;
+        let config_generation = state.config_generation;
+        let agent_generation = state.agent_generation;
+        state.pending_ingress.insert(
+            report_id.clone(),
+            PendingIngress {
+                kind: PendingIngressKind::Deleted,
+                agent_id,
+                message_id,
+                ingress_epoch,
+                config_generation,
+                agent_generation,
+                message_authority: None,
+                report: pending_report,
+                _permit: permit,
+            },
+        );
         drop(state);
+        #[cfg(test)]
+        run_blocking_test_hook(&self.test_hooks.ingress_submission_boundary);
+        if self.output_failed.load(Ordering::Acquire) || self.shutdown.is_requested() {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending_ingress
+                .remove(&report_id);
+            return;
+        }
         let sent = self
             .output
             .send_confirmed(HarnessInputMessage::emit_with_persist(event, false));
         if !sent {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending_ingress
+                .remove(&report_id);
             self.output_failed.store(true, Ordering::Release);
             #[cfg(test)]
             run_blocking_test_hook(&self.test_hooks.output_failure_boundary);
@@ -2564,6 +2707,20 @@ impl Extension {
         mut message: SlackMessage,
         admission: Option<&AdmissionContext>,
     ) {
+        if validate_conversation_id("event.channel", &message.channel_id).is_err()
+            || message
+                .ts
+                .as_deref()
+                .is_none_or(|ts| validate_slack_ts(ts).is_err())
+        {
+            log_ingress_rejection("malformed_event");
+            return;
+        }
+        let occurrence_key =
+            received_message_key(&message).expect("validated Slack message identity");
+        if !self.admit_or_replay_occurrence(occurrence_key.clone(), admission, true, true, false) {
+            return;
+        }
         if message.bot_id.is_some() || message.subtype.is_some() {
             log_ingress_rejection(if message.bot_id.is_some() {
                 "bot_message"
@@ -2572,12 +2729,7 @@ impl Extension {
             });
             return;
         }
-        if validate_conversation_id("event.channel", &message.channel_id).is_err()
-            || validate_user_id("event.user", &message.user_id).is_err()
-            || message
-                .ts
-                .as_deref()
-                .is_none_or(|ts| validate_slack_ts(ts).is_err())
+        if validate_user_id("event.user", &message.user_id).is_err()
             || message
                 .thread_ts
                 .as_deref()
@@ -2618,10 +2770,7 @@ impl Extension {
         } {
             message.thread_ts = route.thread_ts;
         }
-        if !self.insert_received_message(&message, admission) {
-            if let Some(admission) = admission {
-                admission.mark(AdmissionOutcome::DuplicateIngress);
-            }
+        if !self.admit_or_replay_occurrence(occurrence_key, admission, true, true, true) {
             return;
         }
         let Some(identity) = self.verified_human_traced(&cfg, &message.user_id, admission) else {
@@ -2686,34 +2835,118 @@ impl Extension {
         self.route_plain_text(&cfg, &message, &identity, &text, admission);
     }
 
-    /// Drop recently repeated Slack deliveries before local effects or ingress.
-    fn insert_received_message(
-        &self,
-        message: &SlackMessage,
-        admission: Option<&AdmissionContext>,
-    ) -> bool {
-        let key = message
-            .ts
-            .as_ref()
-            .map(|ts| format!("message:{}:{ts}", message.channel_id))
-            .or_else(|| message.event_id.as_ref().map(|id| format!("event:{id}")));
-        key.is_some_and(|key| self.insert_received_occurrence(key, admission))
-    }
-
-    /// Insert one already-authorized native occurrence into the bounded cache.
-    fn insert_received_occurrence(
+    /// Classify one native occurrence without replacing an exact pending
+    /// report.
+    fn classify_received_occurrence(
         &self,
         key: String,
         admission: Option<&AdmissionContext>,
-    ) -> bool {
-        if !self.local_effect_authority_is_current(admission) {
-            return false;
+        deduplicate_confirmed: bool,
+        require_agent_generation: bool,
+        record_new: bool,
+    ) -> Option<OccurrenceDisposition> {
+        let current = if require_agent_generation {
+            self.local_effect_authority_is_current(admission)
+        } else {
+            self.admission_authority_is_current(admission)
+        };
+        if !current {
+            return None;
         }
-        self.state
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let report_id = SlackReportId::from_occurrence(&key);
+        if state.pending_ingress.contains_key(&report_id) {
+            return Some(OccurrenceDisposition::Pending(report_id));
+        }
+        if deduplicate_confirmed && state.received_occurrences.seen.contains(&key) {
+            return Some(OccurrenceDisposition::ConfirmedDuplicate);
+        }
+        if deduplicate_confirmed && record_new {
+            assert!(state.received_occurrences.insert_new(key));
+        }
+        Some(OccurrenceDisposition::New)
+    }
+
+    /// Continue a new occurrence, replay a pending report, or suppress a
+    /// confirmed duplicate before recomputing identity or routing.
+    fn admit_or_replay_occurrence(
+        &self,
+        key: String,
+        admission: Option<&AdmissionContext>,
+        deduplicate_confirmed: bool,
+        require_agent_generation: bool,
+        record_new: bool,
+    ) -> bool {
+        match self.classify_received_occurrence(
+            key,
+            admission,
+            deduplicate_confirmed,
+            require_agent_generation,
+            record_new,
+        ) {
+            Some(OccurrenceDisposition::New) => true,
+            Some(OccurrenceDisposition::Pending(report_id)) => {
+                #[cfg(test)]
+                run_blocking_test_hook(&self.test_hooks.ingress_replay_classified_boundary);
+                self.replay_pending_ingress(&report_id, admission);
+                false
+            }
+            Some(OccurrenceDisposition::ConfirmedDuplicate) => {
+                if let Some(admission) = admission {
+                    admission.mark(AdmissionOutcome::DuplicateIngress);
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Replay one exact pending report when Slack redelivers an occurrence
+    /// before its canonical confirmation.
+    fn replay_pending_ingress(
+        &self,
+        report_id: &SlackReportId,
+        admission: Option<&AdmissionContext>,
+    ) {
+        let submission = self
+            .output_submission_gate
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .received_occurrences
-            .insert_new(key)
+            .unwrap_or_else(|error| error.into_inner());
+        let report = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if admission.is_some_and(|context| !context.matches_state(&state))
+                || self.output_failed.load(Ordering::Acquire)
+                || self.shutdown.is_requested()
+            {
+                return;
+            }
+            state
+                .pending_ingress
+                .get(report_id)
+                .map(|pending| pending.report.clone())
+        };
+        let Some(report) = report else {
+            return;
+        };
+        #[cfg(test)]
+        run_blocking_test_hook(&self.test_hooks.ingress_replay_boundary);
+        if self.output_failed.load(Ordering::Acquire) || self.shutdown.is_requested() {
+            return;
+        }
+        let sent = self
+            .output
+            .send_confirmed(HarnessInputMessage::emit_with_persist(report, false));
+        if !sent {
+            self.output_failed.store(true, Ordering::Release);
+        }
+        drop(submission);
+        if !sent {
+            self.retire_after_output_failure();
+            return;
+        }
+        if let Some(admission) = admission {
+            admission.mark(AdmissionOutcome::Submitted);
+        }
     }
 
     fn config_for_allowed_message(&self, message: &SlackMessage) -> Option<RuntimeConfig> {
@@ -3251,6 +3484,8 @@ impl Extension {
         self.submit_ingress(
             &cfg,
             IngressSubmission {
+                occurrence_key: received_message_key(message)
+                    .expect("validated Slack message identity"),
                 conversation: route,
                 agent_id,
                 sender: IngressSender {
@@ -3283,6 +3518,7 @@ impl Extension {
         admission: Option<&AdmissionContext>,
     ) {
         let IngressSubmission {
+            occurrence_key,
             conversation,
             agent_id,
             sender,
@@ -3336,6 +3572,8 @@ impl Extension {
                 installation_team_id,
             )
         };
+        let report_id = SlackReportId::from_occurrence(&occurrence_key);
+        let extension_data = report_id.extension_data();
         let target = MessageAgentTarget::new(agent_id.to_string());
         let party = MessageParty {
             stable_id: slack_sender_ref(&installation_team_id, &user_id),
@@ -3348,27 +3586,32 @@ impl Extension {
             }),
         };
         let fact_conversation = Some(message_fact_conversation(&conversation));
-        let (event, reply_message_id, original_key, reaction_message_ts) = match report {
-            IngressReport::Delivered { message_id, text } => (
-                Event::MessageDeliveredReported(MessageDelivered::new(
+        let (event, kind, reply_message_id, original_key, reaction_message_ts) = match report {
+            IngressReport::Delivered { message_id, text } => {
+                let mut fact = MessageDelivered::new(
                     publisher.clone(),
                     target,
                     message_id.clone(),
                     party,
                     fact_conversation,
                     text,
-                )),
-                message_id.clone(),
-                native_message_ts
-                    .as_ref()
-                    .map(|native| PostedMessageKey::new(&conversation.channel_id, native)),
-                native_message_ts,
-            ),
+                );
+                fact.extension_data = extension_data;
+                (
+                    Event::MessageDeliveredReported(fact),
+                    PendingIngressKind::Delivered,
+                    message_id.clone(),
+                    native_message_ts
+                        .as_ref()
+                        .map(|native| PostedMessageKey::new(&conversation.channel_id, native)),
+                    native_message_ts,
+                )
+            }
             IngressReport::Edited {
                 target: message_id,
                 text,
-            } => (
-                Event::MessageEditedReported(MessageEdited::new(
+            } => {
+                let mut fact = MessageEdited::new(
                     publisher.clone(),
                     target,
                     MessageFactRef {
@@ -3378,16 +3621,21 @@ impl Extension {
                     Some(party),
                     fact_conversation,
                     text,
-                )),
-                message_id,
-                None,
-                native_message_ts,
-            ),
+                );
+                fact.extension_data = extension_data;
+                (
+                    Event::MessageEditedReported(fact),
+                    PendingIngressKind::Edited,
+                    message_id,
+                    None,
+                    native_message_ts,
+                )
+            }
             IngressReport::ReactionAdded {
                 target: message_id,
                 reaction,
-            } => (
-                Event::MessageReactionAddedReported(MessageReactionAdded::new(
+            } => {
+                let mut fact = MessageReactionAdded::new(
                     publisher.clone(),
                     target,
                     MessageFactRef {
@@ -3397,16 +3645,21 @@ impl Extension {
                     Some(party),
                     fact_conversation,
                     reaction,
-                )),
-                message_id,
-                None,
-                None,
-            ),
+                );
+                fact.extension_data = extension_data;
+                (
+                    Event::MessageReactionAddedReported(fact),
+                    PendingIngressKind::ReactionAdded,
+                    message_id,
+                    None,
+                    None,
+                )
+            }
             IngressReport::ReactionRemoved {
                 target: message_id,
                 reaction,
-            } => (
-                Event::MessageReactionRemovedReported(MessageReactionRemoved::new(
+            } => {
+                let mut fact = MessageReactionRemoved::new(
                     publisher.clone(),
                     target,
                     MessageFactRef {
@@ -3416,46 +3669,41 @@ impl Extension {
                     Some(party),
                     fact_conversation,
                     reaction,
-                )),
-                message_id,
-                None,
-                None,
-            ),
-        };
-        let sent = self
-            .output
-            .send_confirmed(HarnessInputMessage::emit_with_persist(event, false));
-        if !sent {
-            self.retire_after_output_failure();
-            if let Some(admission) = admission {
-                admission.mark(AdmissionOutcome::RejectedRoute);
+                );
+                fact.extension_data = extension_data;
+                (
+                    Event::MessageReactionRemovedReported(fact),
+                    PendingIngressKind::ReactionRemoved,
+                    message_id,
+                    None,
+                    None,
+                )
             }
-            return;
-        }
+        };
+        let pending_report = event.clone();
+        let submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if admission.is_some_and(|context| !context.matches_state(&state))
+                || self.output_failed.load(Ordering::Acquire)
                 || self.shutdown.is_requested()
                 || !state.registered_agents.contains(&agent_id)
                 || !is_route_authorized(&state, cfg, &conversation, &user_id)
                 || state.installation_team_id.as_deref() != Some(installation_team_id.as_str())
+                || state.pending_ingress.contains_key(&report_id)
             {
                 return;
             }
-            if let Some(original_key) = original_key {
-                state.insert_incoming_message(
-                    original_key,
-                    IncomingMessageOwner {
-                        agent_id: agent_id.clone(),
-                        message_id: reply_message_id.clone(),
-                        conversation: conversation.clone(),
-                        user_id: user_id.clone(),
-                    },
-                );
-            }
-            state.insert_reply_route(
-                reply_message_id.clone(),
-                ReplyRoute {
+            let message_authority = matches!(
+                kind,
+                PendingIngressKind::Delivered | PendingIngressKind::Edited
+            )
+            .then(|| PendingMessageAuthority {
+                original_key,
+                reply_route: ReplyRoute {
                     agent_id: agent_id.clone(),
                     conversation: conversation.clone(),
                     user_id: user_id.clone(),
@@ -3463,23 +3711,58 @@ impl Extension {
                     identity_alias,
                     installation_team_id: installation_team_id.clone(),
                 },
+                reaction_message_ts,
+                conversation,
+                user_id,
+                installation_team_id,
+            });
+            let permit = admission.and_then(|context| context.permit.borrow_mut().take());
+            let ingress_epoch = state.ingress_epoch;
+            let config_generation = state.config_generation;
+            let agent_generation = state.agent_generation;
+            state.pending_ingress.insert(
+                report_id.clone(),
+                PendingIngress {
+                    kind,
+                    agent_id,
+                    message_id: reply_message_id,
+                    ingress_epoch,
+                    config_generation,
+                    agent_generation,
+                    message_authority,
+                    report: pending_report,
+                    _permit: permit,
+                },
             );
-            if let Some(message_ts) = reaction_message_ts {
-                let _ = state.reactions.insert_target(
-                    reply_message_id.clone(),
-                    ReactionTarget {
-                        agent_id,
-                        conversation,
-                        message_ts,
-                        installation_team_id,
-                        authority: ReactionAuthority::Source {
-                            message_id: reply_message_id,
-                            user_id,
-                        },
-                    },
-                );
-            }
         }
+        #[cfg(test)]
+        run_blocking_test_hook(&self.test_hooks.ingress_submission_boundary);
+        if self.output_failed.load(Ordering::Acquire) || self.shutdown.is_requested() {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending_ingress
+                .remove(&report_id);
+            return;
+        }
+        let sent = self
+            .output
+            .send_confirmed(HarnessInputMessage::emit_with_persist(event, false));
+        if !sent {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending_ingress
+                .remove(&report_id);
+            self.output_failed.store(true, Ordering::Release);
+            drop(submission);
+            self.retire_after_output_failure();
+            if let Some(admission) = admission {
+                admission.mark(AdmissionOutcome::RejectedRoute);
+            }
+            return;
+        }
+        drop(submission);
         if let Some(admission) = admission {
             admission.mark(AdmissionOutcome::Submitted);
             let trace = admission.trace;
@@ -3842,7 +4125,7 @@ fn socket_worker_loop(
 
 /// Drain accepted occurrences serially without ever blocking websocket reads.
 fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<AdmissionWork>>) {
-    while let Some((work, _outstanding_permit)) = queue.pop() {
+    while let Some((work, outstanding_permit)) = queue.pop() {
         let trace = LatencyTrace {
             connection_generation: work.connection_generation,
             trace_seq: work.trace_seq,
@@ -3869,6 +4152,7 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
             queue_wait_us: elapsed_us(work.enqueued_at),
             identity_us: Cell::new(0),
             outcome: Cell::new(AdmissionOutcome::RejectedPolicy),
+            permit: RefCell::new(Some(outstanding_permit)),
         };
         let process_result = ext.admission_authority_is_current(Some(&context)).then(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match work.event {
@@ -3983,6 +4267,10 @@ async fn socket_worker_once_with_heartbeat(
     };
     let ws_url = match startup {
         Some(startup) => {
+            let _submission = ext
+                .output_submission_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(error) = state
                 .install_or_match_installation(startup.bot_user_id, startup.installation_team_id)
@@ -4000,6 +4288,10 @@ async fn socket_worker_once_with_heartbeat(
                 .open_socket(cfg)
                 .map_err(|error| error.to_string())?;
             validate_socket_url(&ws_url)?;
+            let _submission = ext
+                .output_submission_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(error) =
                 state.install_or_match_installation(installation.bot_user_id, installation.team_id)
@@ -4737,6 +5029,7 @@ fn retire_send_state(
     {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
+        state.pending_ingress.clear();
         state.clear_send_ledger();
     }
     wake.notify_lifecycle_change();
@@ -4765,6 +5058,7 @@ fn retire_after_output_failure(
         state.selected_agent_by_route.clear();
         state.clear_reply_routes();
         state.clear_incoming_messages();
+        state.pending_ingress.clear();
         state.clear_send_ledger();
         state.posted_messages.clear();
         state.reactions.clear();
@@ -4852,6 +5146,26 @@ impl TauExtension for SlackExtension {
                     })
                 },
                 handle_tool_invocation,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_EDITED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_DELETED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_REACTION_ADDED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_REACTION_REMOVED),
+                handle_live_event,
             )
             .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_SENT),
@@ -4956,6 +5270,25 @@ impl Extension {
     /// Apply one event delivered through the registered production live-event
     /// path.
     fn apply_live_event(&self, event: &Event) {
+        if let Some((kind, publisher, agent_id, message_id, extension_data)) =
+            canonical_ingress_ack_fields(event)
+        {
+            let _submission = self
+                .output_submission_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .acknowledge_canonical_ingress(
+                    kind,
+                    publisher,
+                    agent_id,
+                    message_id,
+                    extension_data,
+                );
+            return;
+        }
         match event {
             Event::MessageSent(fact) => {
                 self.state
@@ -4990,6 +5323,8 @@ impl Extension {
                 self.unload_agent(&unloaded.agent_id);
             }
             Event::SessionShutdown(_) => {
+                #[cfg(test)]
+                announce_test_gate_attempt(&self.test_hooks.lifecycle_gate_attempt);
                 let _submission = self
                     .output_submission_gate
                     .lock()
@@ -5005,6 +5340,7 @@ impl Extension {
                 state.selected_agent_by_route.clear();
                 state.clear_reply_routes();
                 state.clear_incoming_messages();
+                state.pending_ingress.clear();
                 state.clear_send_ledger();
                 state.posted_messages.clear();
                 state.reactions.clear();
@@ -5012,6 +5348,56 @@ impl Extension {
             }
             _ => {}
         }
+    }
+}
+
+/// Extract exact canonical ingress acknowledgement fields from one live event.
+fn canonical_ingress_ack_fields(
+    event: &Event,
+) -> Option<(
+    PendingIngressKind,
+    &tau_proto::MessagePublisherId,
+    &MessageAgentTarget,
+    &MessageFactId,
+    &MessageExtensionData,
+)> {
+    match event {
+        Event::MessageDelivered(fact) => Some((
+            PendingIngressKind::Delivered,
+            &fact.publisher_extension_id,
+            &fact.agent_id,
+            &fact.message_id,
+            &fact.extension_data,
+        )),
+        Event::MessageEdited(fact) => Some((
+            PendingIngressKind::Edited,
+            &fact.publisher_extension_id,
+            &fact.agent_id,
+            &fact.target.message_id,
+            &fact.extension_data,
+        )),
+        Event::MessageDeleted(fact) => Some((
+            PendingIngressKind::Deleted,
+            &fact.publisher_extension_id,
+            &fact.agent_id,
+            &fact.target.message_id,
+            &fact.extension_data,
+        )),
+        Event::MessageReactionAdded(fact) => Some((
+            PendingIngressKind::ReactionAdded,
+            &fact.publisher_extension_id,
+            &fact.agent_id,
+            &fact.target.message_id,
+            &fact.extension_data,
+        )),
+        Event::MessageReactionRemoved(fact) => Some((
+            PendingIngressKind::ReactionRemoved,
+            &fact.publisher_extension_id,
+            &fact.agent_id,
+            &fact.target.message_id,
+            &fact.extension_data,
+        )),
+        _ => None,
     }
 }
 

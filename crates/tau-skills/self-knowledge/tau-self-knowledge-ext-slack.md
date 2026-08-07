@@ -73,9 +73,12 @@ Agents register to receive. Accepted Slack creates, edits, deletes, and reaction
 submit transient `message.*_reported` events; the harness publishes immutable
 canonical `message.*` facts downstream. `slack_send` requires `message` plus
 exactly one Tau-issued `reply_to` or proactive `destination` alias. Successfully
-published creates and edits install source-bound reply authority in Slack-local
-runtime state. Edits require a known
-locally published original; reactions require a recent Tau-authored post and covering
+published creates and edits install source-bound reply authority only after their
+exact canonical facts return to the configured publisher's live downpath. Each
+report carries a stable opaque occurrence ID. Deletes revoke authority immediately
+and remain pending until the same canonical confirmation. Socket Mode ACK is
+separate from Tau commit. Edits require a known canonically confirmed original;
+reactions require a recent Tau-authored post and covering
 receive policy. Proactive sends need no registration but still require live
 extension/session authority and effective tool policy.
 
@@ -108,8 +111,11 @@ roles minimal; use separate roles or prefixed extension instances for isolation.
 
 Configuration freezes after successful Socket Mode preflight or immediately
 before an authorized post or reaction API attempt; restart Tau to change it. Failed preflight and denied
-sends remain reconfigurable. A bounded process-local native-id cache drops recent
-Slack repeats; cache eviction or restart may duplicate delivery. Runtime
+sends remain reconfigurable. A bounded process-local native-id cache replays exact
+pending reports and drops repeats after canonical confirmation; cache eviction or
+restart may duplicate delivery. Recording precedes identity and report
+construction, so an earlier failure remains suppressed until eviction/restart.
+Runtime
 links/routes/selections and edit ownership clear on restart. Logs and notices
 omit payloads, ids, websocket URLs, and tokens.
 
@@ -140,7 +146,9 @@ At most 64 calls own active delivery workers, each response is capped at
 Supported events reserve one of 64 process-local queued/in-flight admission slots
 before ACK. Slow live-human verification and bridge-local replies run on one serial
 worker, so they do not block later websocket ACKs, Ping/Pong, reconnect, or
-shutdown. Saturation reconnects without ACK so Slack can retry. The FIFO survives
+shutdown. Report-bearing work retains its slot through canonical confirmation;
+missing echoes saturate admission and reconnect without ACK so Slack can retry.
+Socket Mode ACK remains separate from Tau commit. The FIFO survives
 reconnect but is memory-only; process death after ACK can still lose an occurrence.
 The worker sends its first WebSocket Ping after 10 seconds and repeats every 10
 seconds. An independent deadline reconnects 40 seconds after the latest Pong;

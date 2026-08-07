@@ -25,16 +25,24 @@ Published stable identity is opaque and installation-scoped; native IDs remain
 private. Reconnect identity mismatch retires installation authority until
 restart. Replay uses stored universal fields only, performs no Slack lookup or
 alias re-resolution, and reconstructs no actionable route. Occurrence FIFO
-capacity is 4,096; recording precedes effects and
-transient failure consumes the occurrence until eviction/restart.
+capacity is 4,096. A repeated occurrence replays its exact retained report while
+canonical confirmation is pending, then ordinary duplicate suppression drops it.
+Recording still precedes identity lookup, local effects, and report construction,
+so a failure before pending report installation suppresses retry until cache
+eviction or process restart.
 Operational logs and categorical failures omit actor IDs, displays, aliases,
 reaction names, message text, and installation identifiers.
 
 Admission uses a 64-item successful-ACK FIFO with generation checks. Shutdown or
 config change invalidates late work; reconnect preserves queued authority.
+Report-bearing occurrences retain their pre-ACK slot until an exact canonical
+event type, target agent, configured publisher, message identity, and stable
+Slack report ID return on the live post-commit downpath. Missing echoes retain
+the slot, so saturation stops ACK and lets Slack retry after reconnect. Socket
+Mode ACK remains a separate transport result and proves no Tau commit.
 Mention-only/all-message triggers remain exact, and non-DM commands require a
-leading authenticated bot mention. Only successful report submission installs a
-source reply selector and never proactive authority.
+leading authenticated bot mention. Only canonical confirmation installs a source
+reply selector and never proactive authority.
 
 One process-lifetime Socket Mode worker owns at most one current WebSocket.
 After connection it sends Ping every 10 seconds, with the first Ping delayed by
