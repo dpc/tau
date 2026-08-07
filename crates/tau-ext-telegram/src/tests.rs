@@ -148,6 +148,8 @@ struct ControlledPollClient {
     response_ready: Condvar,
     called: Mutex<usize>,
     called_ready: Condvar,
+    /// Exact offsets captured before each response gate.
+    offsets: Mutex<Vec<Option<i64>>>,
     /// State machine controlling one deterministic webhook-check pause.
     webhook_check_gate: Mutex<WebhookCheckGate>,
     /// Signals webhook-check gate transitions.
@@ -161,6 +163,7 @@ impl ControlledPollClient {
             response_ready: Condvar::new(),
             called: Mutex::new(0),
             called_ready: Condvar::new(),
+            offsets: Mutex::new(Vec::new()),
             webhook_check_gate: Mutex::new(WebhookCheckGate::Open),
             webhook_check_changed: Condvar::new(),
         })
@@ -194,9 +197,9 @@ impl ControlledPollClient {
 
     fn wait_for_call_count(&self, expected: usize) {
         let called = self.called.lock().expect("lock");
-        let (called, _timeout) = self
+        let called = self
             .called_ready
-            .wait_timeout_while(called, Duration::from_secs(1), |called| *called < expected)
+            .wait_while(called, |called| *called < expected)
             .expect("wait");
         assert!(
             *called >= expected,
@@ -236,8 +239,9 @@ impl TelegramClient for ControlledPollClient {
     fn get_updates(
         &self,
         _cfg: &RuntimeConfig,
-        _offset: Option<i64>,
+        offset: Option<i64>,
     ) -> Result<Vec<TgUpdate>, String> {
+        self.offsets.lock().expect("lock").push(offset);
         {
             let mut called = self.called.lock().expect("lock");
             *called += 1;
@@ -343,6 +347,18 @@ fn process_update(ext: &Extension, update: TgUpdate) {
     ext.process_update_for_generation(update, config_generation);
 }
 
+/// Construct one typed Telegram cursor offset for state assertions.
+fn update_offset(value: i64) -> TelegramUpdateOffset {
+    TelegramUpdateId::new(value - 1)
+        .expect("test offset predecessor")
+        .next_offset()
+}
+
+/// Construct one validated Telegram update ID for test fixtures.
+fn telegram_update_id(value: i64) -> TelegramUpdateId {
+    TelegramUpdateId::new(value).expect("test update id")
+}
+
 fn expect_tool_finished(rx: &mpsc::Receiver<HarnessInputMessage>) {
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -417,6 +433,16 @@ fn expect_delivered(
     };
     assert_eq!(report.publisher_extension_id.as_str(), "std-telegram");
     report
+}
+
+/// Convert a retained report into the exact canonical fact the harness returns
+/// after stamping publisher authority.
+fn canonical_delivered(
+    report: MessageDelivered<tau_proto::RawMessagePublisherId>,
+) -> MessageDelivered {
+    report.with_publisher(
+        tau_proto::MessagePublisherId::parse("std-telegram").expect("canonical publisher"),
+    )
 }
 
 /// Stamp a bridge-produced delivered report payload as the harness would, then
@@ -1499,7 +1525,7 @@ fn incoming_unallowed_user_is_not_routed() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1526,7 +1552,7 @@ fn textless_allowed_message_gets_unsupported_reply() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1556,7 +1582,7 @@ fn one_registered_agent_routes_plain_text() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1597,6 +1623,794 @@ fn one_registered_agent_routes_plain_text() {
     assert_delivered_live_replay_parity(report);
 }
 
+/// A routed update must remain before the Telegram cursor until the exact
+/// canonical delivery fact returns from this configured publisher.
+#[test]
+fn routed_update_advances_only_after_exact_canonical_echo() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    let report = expect_delivered(&rx);
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(42)));
+}
+
+/// Telegram redelivery before canonical confirmation must replay the retained
+/// report exactly rather than recomputing its target from mutable routing.
+#[test]
+fn missing_canonical_echo_replays_exact_routed_report() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let update = TgUpdate {
+        update_id: telegram_update_id(41),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("hello".to_owned()),
+        }),
+    };
+
+    process_update(&ext, update.clone());
+    let first = expect_delivered(&rx);
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.clear();
+        state.registered_agents.insert(agent_id("agent-2"));
+    }
+    process_update(&ext, update);
+    let replay = expect_delivered(&rx);
+
+    assert_eq!(replay, first);
+    assert_eq!(replay.agent_id.as_str(), "agent-1");
+    assert_eq!(ext.state.lock().next_update_offset, None);
+}
+
+/// Publisher, agent, message, and report-ID correlation all prevent unrelated
+/// canonical facts from retiring a routed Telegram update.
+#[test]
+fn unrelated_canonical_deliveries_do_not_ack_routed_update() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    let report = expect_delivered(&rx);
+
+    let mut wrong_publisher = report
+        .clone()
+        .with_publisher(tau_proto::MessagePublisherId::parse("other-telegram").expect("publisher"));
+    ext.acknowledge_live_delivery(&wrong_publisher);
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    wrong_publisher = canonical_delivered(report.clone());
+    wrong_publisher.agent_id = MessageAgentTarget::new("agent-2");
+    ext.acknowledge_live_delivery(&wrong_publisher);
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    let mut wrong_message = canonical_delivered(report.clone());
+    wrong_message.message_id = telegram_message_ref("123", "999");
+    ext.acknowledge_live_delivery(&wrong_message);
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    let mut wrong_report = canonical_delivered(report.clone());
+    wrong_report.extension_data = tau_proto::MessageExtensionData::default();
+    ext.acknowledge_live_delivery(&wrong_report);
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(42)));
+}
+
+/// The live event dispatcher must reject the extension's own transient report;
+/// only the harness-authored canonical event is an acknowledgement.
+#[test]
+fn reported_delivery_event_does_not_ack_routed_update() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    let report = expect_delivered(&rx);
+    let runtime = TelegramRuntime { ext };
+
+    handle_live_event_value(&runtime, Event::MessageDeliveredReported(report.clone()));
+    assert_eq!(runtime.ext.state.lock().next_update_offset, None);
+
+    handle_live_event_value(
+        &runtime,
+        Event::MessageDelivered(canonical_delivered(report)),
+    );
+    assert_eq!(
+        runtime.ext.state.lock().next_update_offset,
+        Some(update_offset(42))
+    );
+}
+
+/// Mixed routed and non-routed updates may acknowledge out of order, but the
+/// Telegram cursor advances only through their acknowledged ordered prefix.
+#[test]
+fn mixed_update_checkpoints_advance_only_contiguous_acknowledged_prefix() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let message = |update_id, text: &str| TgUpdate {
+        update_id: telegram_update_id(update_id),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some(text.to_owned()),
+        }),
+    };
+
+    process_update(&ext, message(10, "first"));
+    let first = expect_delivered(&rx);
+    process_update(&ext, message(12, "/agents"));
+    process_update(&ext, message(15, "third"));
+    let third = expect_delivered(&rx);
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    ext.acknowledge_live_delivery(&canonical_delivered(third));
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    ext.acknowledge_live_delivery(&canonical_delivered(first));
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(16)));
+}
+
+/// A non-routed update acknowledges at processing return and emits no Tau
+/// event, including when Telegram update IDs contain numeric gaps.
+#[test]
+fn non_routed_updates_acknowledge_at_processing_return() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("/agents".to_owned()),
+            }),
+        },
+    );
+
+    assert!(rx.try_recv().is_err());
+    assert_eq!(client.sent.lock().expect("lock").len(), 1);
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(42)));
+}
+
+/// A routed head may force Telegram to replay later commands. Those
+/// non-routed commands may repeat best-effort replies, while `/start` and
+/// `/select` continue replacing the same local state idempotently.
+#[test]
+fn blocked_non_routed_replay_preserves_command_replacement_semantics() {
+    let (ext, rx, client) = extension();
+    let mut dynamic_cfg = cfg();
+    dynamic_cfg.configured_chat_id = None;
+    ext.apply_config(dynamic_cfg, Some(temp_state_dir()))
+        .expect("apply dynamic-chat config");
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id("agent-1"));
+        state.registered_agents.insert(agent_id("agent-2"));
+        state.learned_chat = Some(LinkedChat {
+            chat_id: 123,
+            user_id: 123,
+        });
+        state
+            .selected_agent_by_chat
+            .insert(123, agent_id("agent-1"));
+    }
+    let message = |update_id, text: &str| TgUpdate {
+        update_id: telegram_update_id(update_id),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some(text.to_owned()),
+        }),
+    };
+
+    process_update(&ext, message(10, "block cursor"));
+    let _routed = expect_delivered(&rx);
+    process_update(&ext, message(11, "/start"));
+    process_update(&ext, message(11, "/start"));
+    process_update(&ext, message(12, "/select agent-2"));
+    process_update(&ext, message(12, "/select agent-2"));
+
+    let state = ext.state.lock();
+    assert_eq!(state.next_update_offset, None);
+    assert_eq!(state.learned_chat.expect("linked chat").chat_id, 123);
+    assert_eq!(
+        state
+            .selected_agent_by_chat
+            .get(&123)
+            .expect("selected agent")
+            .as_str(),
+        "agent-2"
+    );
+    drop(state);
+    let sent = client.sent.lock().expect("lock");
+    assert_eq!(sent.len(), 4);
+    assert_eq!(sent[0].1, sent[1].1);
+    assert_eq!(sent[2].1, sent[3].1);
+}
+
+/// Report visibility must happen after pending insertion, so an echo handled as
+/// soon as another thread receives the report cannot race ahead of checkpoint
+/// creation.
+#[test]
+fn immediate_canonical_echo_cannot_beat_checkpoint_insertion() {
+    let (tx, rx) = mpsc::channel();
+    let ext = Arc::new(test_extension(FakeClient::new(), tx));
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let processing_ext = Arc::clone(&ext);
+
+    let processing = std::thread::spawn(move || {
+        process_update(
+            &processing_ext,
+            TgUpdate {
+                update_id: telegram_update_id(41),
+                message: Some(TgMessage {
+                    chat_id: 123,
+                    chat_type: Some("private".to_owned()),
+                    user_id: 123,
+                    from_name: None,
+                    text: Some("hello".to_owned()),
+                }),
+            },
+        );
+    });
+    let report = expect_delivered(&rx);
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+    processing.join().expect("update processing");
+
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(42)));
+}
+
+/// Re-entering backlog drain after local listener loss must replay a retained
+/// routed update, discard unseen stale work, and advance both only after the
+/// routed canonical echo.
+#[test]
+fn reconnect_drain_replays_pending_route_and_discards_unseen_backlog() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let routed = TgUpdate {
+        update_id: telegram_update_id(10),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("retain me".to_owned()),
+        }),
+    };
+    process_update(&ext, routed.clone());
+    let first = expect_delivered(&rx);
+    let generation = ext.state.lock().config_generation;
+
+    ext.process_draining_update_for_generation(routed, generation);
+    let replay = expect_delivered(&rx);
+    assert_eq!(replay, first);
+    ext.process_draining_update_for_generation(
+        TgUpdate {
+            update_id: telegram_update_id(11),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("/agents".to_owned()),
+            }),
+        },
+        generation,
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(client.sent.lock().expect("lock").is_empty());
+    assert_eq!(ext.state.lock().next_update_offset, None);
+
+    ext.acknowledge_live_delivery(&canonical_delivered(first));
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(12)));
+}
+
+/// Local-poll checkpoints are intentionally process-memory state. A fresh
+/// extension after a crash treats an unconfirmed redelivery as startup backlog
+/// rather than claiming durable recovery it does not provide.
+#[test]
+fn crash_forgets_pending_checkpoint_and_startup_drain_discards_redelivery() {
+    let (old_ext, old_rx, _client) = extension();
+    old_ext
+        .state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let update = TgUpdate {
+        update_id: telegram_update_id(41),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("lost across crash".to_owned()),
+        }),
+    };
+    process_update(&old_ext, update.clone());
+    let _pending = expect_delivered(&old_rx);
+
+    let (new_ext, new_rx, client) = extension();
+    let generation = new_ext.state.lock().config_generation;
+    new_ext.process_draining_update_for_generation(update, generation);
+
+    assert!(new_rx.try_recv().is_err());
+    assert!(client.sent.lock().expect("lock").is_empty());
+    assert_eq!(
+        new_ext.state.lock().next_update_offset,
+        Some(update_offset(42))
+    );
+}
+
+/// A same-stream configuration generation must retain an already submitted
+/// checkpoint so its delayed canonical echo can still advance the cursor.
+#[test]
+fn same_stream_reconfiguration_preserves_pending_checkpoint() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    let report = expect_delivered(&rx);
+    let mut same_stream = cfg();
+    same_stream.poll_timeout_seconds = 9;
+
+    ext.apply_config(same_stream, Some(temp_state_dir()))
+        .expect("same-stream reconfiguration");
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+
+    assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(42)));
+}
+
+/// Switching API-base-plus-token stream identity must clear old checkpoints so
+/// a delayed fact from the retired stream cannot move the new cursor.
+#[test]
+fn stream_reconfiguration_rejects_old_checkpoint_echo() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    let report = expect_delivered(&rx);
+    let mut other_stream = cfg();
+    other_stream.bot_token = "other-token".to_owned();
+
+    ext.apply_config(other_stream, Some(temp_state_dir()))
+        .expect("stream reconfiguration");
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+
+    assert_eq!(ext.state.lock().next_update_offset, None);
+}
+
+/// The pending retry schedule grows deterministically and caps permanently
+/// missing echoes instead of polling and re-emitting at a fixed high rate.
+#[test]
+fn missing_echo_retry_backoff_is_exponential_and_bounded() {
+    let mut backoff = PendingRetryBackoff::new();
+    let delays = (0..8).map(|_| backoff.take_delay()).collect::<Vec<_>>();
+
+    assert_eq!(
+        delays,
+        vec![
+            Duration::from_millis(250),
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        ]
+    );
+    backoff.reset();
+    assert_eq!(backoff.take_delay(), Duration::from_millis(250));
+}
+
+/// Shutdown notification must cancel a long pending-retry delay without
+/// waiting for its wall-clock deadline.
+#[test]
+fn shutdown_cancels_pending_retry_wait() {
+    let state = Arc::new(SharedState::new());
+    let generation = state.lock().coordination_generation;
+    let (wait_tx, wait_rx) = mpsc::channel();
+    state.observe_next_wait(wait_tx);
+    let waiter_state = Arc::clone(&state);
+    let waiter = std::thread::spawn(move || {
+        wait_for_coordination_change_or_shutdown(
+            &waiter_state,
+            &AtomicBool::new(false),
+            Duration::from_secs(60),
+            generation,
+        );
+    });
+
+    wait_rx.recv().expect("waiter reached coordination wait");
+    state.lock().shutdown_requested = true;
+    state.notify_all();
+    waiter.join().expect("shutdown wakes retry wait");
+}
+
+/// Unrelated and repeated canonical deliveries must not mutate poller
+/// coordination, so high-rate ambient message traffic cannot bypass retry
+/// backoff for a missing Telegram echo.
+#[test]
+fn unrelated_canonical_delivery_does_not_wake_pending_retry() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: telegram_update_id(41),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    let report = expect_delivered(&rx);
+    let generation = ext.state.lock().coordination_generation;
+    let unrelated = MessageDelivered::new(
+        tau_proto::MessagePublisherId::parse("other-telegram").expect("publisher"),
+        MessageAgentTarget::new("agent-2"),
+        telegram_message_ref("123", "999"),
+        MessageParty {
+            stable_id: "other".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        "unrelated",
+    );
+
+    for _ in 0..100 {
+        ext.acknowledge_live_delivery(&unrelated);
+    }
+    assert_eq!(ext.state.lock().coordination_generation, generation);
+
+    let waiter_state = Arc::clone(&ext.state);
+    let (wait_tx, wait_rx) = mpsc::channel();
+    ext.state.observe_next_wait(wait_tx);
+    let waiter = std::thread::spawn(move || {
+        wait_for_coordination_change_or_shutdown(
+            &waiter_state,
+            &AtomicBool::new(false),
+            Duration::from_secs(60),
+            generation,
+        );
+    });
+    wait_rx.recv().expect("waiter reached coordination wait");
+    ext.acknowledge_live_delivery(&canonical_delivered(report.clone()));
+    waiter.join().expect("matching echo wakes retry wait");
+    let progressed = ext.state.lock().coordination_generation;
+    assert_ne!(progressed, generation);
+    ext.acknowledge_live_delivery(&canonical_delivered(report));
+    assert_eq!(ext.state.lock().coordination_generation, progressed);
+}
+
+/// A local listener reconnect enters the real poll-loop drain path: retained
+/// routed input replays exactly, unseen backlog is discarded, an empty batch
+/// completes drain, and live polling resumes at the echo-gated offset.
+#[test]
+fn poll_loop_reconnect_replays_pending_then_resumes_after_empty_drain() {
+    let (tx, rx) = mpsc::channel();
+    let pending = TgUpdate {
+        update_id: telegram_update_id(10),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("pending".to_owned()),
+        }),
+    };
+    let unseen = TgUpdate {
+        update_id: telegram_update_id(11),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("/agents".to_owned()),
+        }),
+    };
+    let fresh = TgUpdate {
+        update_id: telegram_update_id(12),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("fresh".to_owned()),
+        }),
+    };
+    let client = ControlledPollClient::new();
+    let ext = test_extension(client.clone(), tx.clone());
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id("agent-1"));
+        state
+            .ensure_update_stream_locked(&cfg())
+            .expect("stream lock");
+        state.poller_drained_initial_backlog = true;
+    }
+    process_update(&ext, pending.clone());
+    let first = expect_delivered(&rx);
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.clear();
+        state.poller_drained_initial_backlog = false;
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let state = Arc::clone(&ext.state);
+    let poll_shutdown = Arc::clone(&shutdown);
+    let poll_client: Arc<dyn TelegramClient> = client.clone();
+    let poller =
+        std::thread::spawn(move || poll_loop(state, poll_client, tx.into(), poll_shutdown));
+
+    client.wait_for_call_count(1);
+    assert_eq!(client.offsets.lock().expect("lock")[0], None);
+    client.release_first_response(vec![pending, unseen]);
+    let replay = expect_delivered(&rx);
+    assert_eq!(replay, first);
+    ext.acknowledge_live_delivery(&canonical_delivered(first));
+    client.wait_for_call_count(2);
+    assert_eq!(client.offsets.lock().expect("lock")[1], Some(12));
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(3);
+    assert_eq!(client.offsets.lock().expect("lock")[2], Some(12));
+    client.release_first_response(vec![fresh]);
+    let resumed = expect_delivered(&rx);
+    assert_eq!(resumed.text, "fresh");
+
+    shutdown.store(true, Ordering::Relaxed);
+    {
+        let mut state = ext.state.lock();
+        state.shutdown_requested = true;
+        state.mark_coordination_changed();
+    }
+    ext.state.notify_all();
+    poller.join().expect("poller");
+}
+
+/// A fresh process has no retained checkpoints: the real poll loop discards
+/// redelivered startup backlog, observes the empty drain boundary, then routes
+/// only a later live update.
+#[test]
+fn poll_loop_restart_discards_unconfirmed_backlog_then_resumes_live() {
+    let (tx, rx) = mpsc::channel();
+    let stale = TgUpdate {
+        update_id: telegram_update_id(41),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("stale after crash".to_owned()),
+        }),
+    };
+    let fresh = TgUpdate {
+        update_id: telegram_update_id(42),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("fresh after drain".to_owned()),
+        }),
+    };
+    let client = ControlledPollClient::new();
+    let ext = test_extension(client.clone(), tx.clone());
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id("agent-1"));
+        state
+            .ensure_update_stream_locked(&cfg())
+            .expect("stream lock");
+    }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let state = Arc::clone(&ext.state);
+    let poll_shutdown = Arc::clone(&shutdown);
+    let poll_client: Arc<dyn TelegramClient> = client.clone();
+    let poller =
+        std::thread::spawn(move || poll_loop(state, poll_client, tx.into(), poll_shutdown));
+
+    client.wait_for_call_count(1);
+    assert_eq!(client.offsets.lock().expect("lock")[0], None);
+    client.release_first_response(vec![stale]);
+    client.wait_for_call_count(2);
+    assert_eq!(client.offsets.lock().expect("lock")[1], Some(42));
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(3);
+    assert_eq!(client.offsets.lock().expect("lock")[2], Some(42));
+    client.release_first_response(vec![fresh]);
+    let report = expect_delivered(&rx);
+    assert_eq!(report.text, "fresh after drain");
+
+    shutdown.store(true, Ordering::Relaxed);
+    {
+        let mut state = ext.state.lock();
+        state.shutdown_requested = true;
+        state.mark_coordination_changed();
+    }
+    ext.state.notify_all();
+    poller.join().expect("poller");
+}
+
+/// The maximum signed update ID must fail Bot API response decoding so the poll
+/// loop uses its cancellable error backoff instead of spinning on redelivery.
+#[test]
+fn maximum_update_id_enters_poll_error_path_without_offset_overflow() {
+    let error = decode_updates(&[serde_json::json!({
+        "update_id": i64::MAX,
+        "message": {
+            "chat": {"id": 123, "type": "private"},
+            "from": {"id": 123},
+            "text": "overflow",
+        },
+    })])
+    .expect_err("maximum update ID must not decode");
+
+    assert!(error.contains("outside the supported offset range"));
+}
+
+/// Repeated unrepresentable update IDs use the poller's cancellable error
+/// backoff in both startup-drain and already-drained modes instead of issuing
+/// an immediate second request.
+#[test]
+fn maximum_update_id_poll_error_is_bounded_before_and_after_drain() {
+    for drained in [false, true] {
+        let (tx, _rx) = mpsc::channel();
+        let client = ControlledPollClient::new();
+        let ext = test_extension(client.clone(), tx.clone());
+        ext.apply_config(cfg(), Some(temp_state_dir()))
+            .expect("apply config");
+        {
+            let mut state = ext.state.lock();
+            state.registered_agents.insert(agent_id("agent-1"));
+            state
+                .ensure_update_stream_locked(&cfg())
+                .expect("stream lock");
+            state.poller_drained_initial_backlog = drained;
+        }
+        let (wait_tx, wait_rx) = mpsc::channel();
+        ext.state.observe_next_wait(wait_tx);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let state = Arc::clone(&ext.state);
+        let poll_shutdown = Arc::clone(&shutdown);
+        let poll_client: Arc<dyn TelegramClient> = client.clone();
+        let poller =
+            std::thread::spawn(move || poll_loop(state, poll_client, tx.into(), poll_shutdown));
+
+        client.wait_for_call_count(1);
+        client.release_error(
+            "Telegram getUpdates returned an update id outside the supported offset range",
+        );
+        wait_rx.recv().expect("poller entered error backoff");
+        {
+            let mut state = ext.state.lock();
+            assert_eq!(*client.called.lock().expect("lock"), 1);
+            state.shutdown_requested = true;
+            state.mark_coordination_changed();
+        }
+        shutdown.store(true, Ordering::Relaxed);
+        ext.state.notify_all();
+        poller.join().expect("poller");
+    }
+}
+
 /// Multiple registered agents without selection are ambiguous, so the bridge
 /// replies with guidance instead of guessing a Tau target.
 #[test]
@@ -1610,7 +2424,7 @@ fn multiple_agents_without_selection_do_not_route() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1645,7 +2459,7 @@ fn bot_commands_show_agent_id_before_display_name() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1658,7 +2472,7 @@ fn bot_commands_show_agent_id_before_display_name() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 2,
+            update_id: telegram_update_id(2),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1698,7 +2512,7 @@ fn agents_list_omits_empty_or_duplicate_display_names() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1728,7 +2542,7 @@ fn malformed_slash_commands_are_not_routed_as_prompts() {
         process_update(
             &ext,
             TgUpdate {
-                update_id,
+                update_id: telegram_update_id(update_id),
                 message: Some(TgMessage {
                     chat_id: 123,
                     chat_type: None,
@@ -1759,7 +2573,7 @@ fn select_then_plain_text_routes_to_selected_agent() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1772,7 +2586,7 @@ fn select_then_plain_text_routes_to_selected_agent() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 2,
+            update_id: telegram_update_id(2),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: None,
@@ -1840,7 +2654,7 @@ fn unconfigured_group_chat_is_refused() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: -100,
                 chat_type: Some("supergroup".to_owned()),
@@ -1871,7 +2685,7 @@ fn configured_group_chat_can_route() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: -100,
                 chat_type: Some("supergroup".to_owned()),
@@ -1900,7 +2714,7 @@ fn configured_chat_rejects_other_private_chat() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 456,
                 chat_type: Some("private".to_owned()),
@@ -1931,7 +2745,7 @@ fn unconfigured_private_text_before_start_does_not_route() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -1958,7 +2772,7 @@ fn unconfigured_to_before_start_does_not_route() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -1991,7 +2805,7 @@ fn linked_chat_rejects_other_private_chat() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -2004,7 +2818,7 @@ fn linked_chat_rejects_other_private_chat() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 2,
+            update_id: telegram_update_id(2),
             message: Some(TgMessage {
                 chat_id: 456,
                 chat_type: Some("private".to_owned()),
@@ -2041,7 +2855,7 @@ fn reconfigured_chat_id_requires_reregistration_before_send() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -2088,7 +2902,7 @@ fn unallowed_group_user_cannot_route() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: -100,
                 chat_type: Some("supergroup".to_owned()),
@@ -2108,7 +2922,7 @@ fn unallowed_group_user_cannot_route() {
 fn initial_poller_drops_stale_backlog() {
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::with_updates(vec![vec![TgUpdate {
-        update_id: 10,
+        update_id: telegram_update_id(10),
         message: Some(TgMessage {
             chat_id: 123,
             chat_type: Some("private".to_owned()),
@@ -2135,7 +2949,7 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::with_updates(vec![
         vec![TgUpdate {
-            update_id: 10,
+            update_id: telegram_update_id(10),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -2145,7 +2959,7 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
             }),
         }],
         vec![TgUpdate {
-            update_id: 11,
+            update_id: telegram_update_id(11),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -2156,7 +2970,7 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
         }],
         Vec::new(),
         vec![TgUpdate {
-            update_id: 12,
+            update_id: telegram_update_id(12),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -2187,8 +3001,9 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
 #[test]
 fn decode_update_preserves_non_message_update_id() {
     let update = decode_update(&serde_json::json!({ "update_id": 42 }))
+        .expect("update decoding should succeed")
         .expect("update id should be preserved");
-    assert_eq!(update.update_id, 42);
+    assert_eq!(update.update_id.as_i64(), 42);
     assert_eq!(update.message, None);
 }
 
@@ -2454,8 +3269,15 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     let mut saw_register_tool = false;
     let mut saw_send_tool = false;
     let mut saw_register_result = false;
+    let mut saw_delivery_subscription = false;
     let mut sent_publisher = None;
     while let Some(frame) = reader.read_message().expect("read output") {
+        if let HarnessInputMessage::Subscribe(subscribe) = &frame {
+            saw_delivery_subscription = subscribe.live_selectors.iter().any(|selector| {
+                selector
+                    == &tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED)
+            });
+        }
         if let HarnessInputMessage::Emit(emit) = frame {
             match emit.event.as_ref() {
                 Event::ToolRegistrationDeclared(register)
@@ -2492,6 +3314,10 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     assert!(
         saw_register_result,
         "namespaced register invocation should dispatch"
+    );
+    assert!(
+        saw_delivery_subscription,
+        "canonical message delivery must be subscribed for local cursor acknowledgements"
     );
     assert_eq!(sent_publisher.as_deref(), Some("telegram-work"));
 }
@@ -2740,7 +3566,7 @@ fn initial_empty_drain_then_fresh_message_routes() {
     let client = FakeClient::with_updates(vec![
         Vec::new(),
         vec![TgUpdate {
-            update_id: 11,
+            update_id: telegram_update_id(11),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -2776,7 +3602,7 @@ fn reconfigured_bot_token_resets_update_backlog_drain() {
     {
         let mut state = ext.state.lock();
         state.poller_drained_initial_backlog = true;
-        state.next_update_offset = Some(99);
+        state.next_update_offset = Some(update_offset(99));
     }
 
     let mut new_cfg = cfg();
@@ -2797,7 +3623,7 @@ fn reconfigured_api_base_resets_update_backlog_drain() {
     {
         let mut state = ext.state.lock();
         state.poller_drained_initial_backlog = true;
-        state.next_update_offset = Some(99);
+        state.next_update_offset = Some(update_offset(99));
     }
 
     let mut new_cfg = cfg();
@@ -2819,7 +3645,7 @@ fn reconfigured_poll_timeout_keeps_update_offset() {
     {
         let mut state = ext.state.lock();
         state.poller_drained_initial_backlog = true;
-        state.next_update_offset = Some(99);
+        state.next_update_offset = Some(update_offset(99));
     }
 
     let mut new_cfg = cfg();
@@ -2829,7 +3655,7 @@ fn reconfigured_poll_timeout_keeps_update_offset() {
 
     let state = ext.state.lock();
     assert!(state.poller_drained_initial_backlog);
-    assert_eq!(state.next_update_offset, Some(99));
+    assert_eq!(state.next_update_offset, Some(update_offset(99)));
 }
 
 /// Poll responses captured under an older config generation must be discarded
@@ -2880,7 +3706,7 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
     ext.apply_config(new_cfg, Some(temp_state_dir()))
         .expect("apply config");
     client.release_first_response(vec![TgUpdate {
-        update_id: 55,
+        update_id: telegram_update_id(55),
         message: Some(TgMessage {
             chat_id: 123,
             chat_type: Some("private".to_owned()),
@@ -2925,7 +3751,7 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
     });
     client.wait_for_blocked_webhook_check();
     client.release_first_response(vec![TgUpdate {
-        update_id: 20,
+        update_id: telegram_update_id(20),
         message: Some(TgMessage {
             chat_id: 123,
             chat_type: Some("private".to_owned()),
@@ -2951,7 +3777,7 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
     client.release_first_response(Vec::new());
     client.wait_for_call_count(4);
     client.release_first_response(vec![TgUpdate {
-        update_id: 21,
+        update_id: telegram_update_id(21),
         message: Some(TgMessage {
             chat_id: 123,
             chat_type: Some("private".to_owned()),
@@ -3101,7 +3927,7 @@ fn stale_generation_update_processing_does_not_reread_current_config() {
 
     ext.process_update_for_generation(
         TgUpdate {
-            update_id: 55,
+            update_id: telegram_update_id(55),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),
@@ -3132,7 +3958,7 @@ fn invalid_reconfiguration_clears_active_bridge_state() {
     process_update(
         &ext,
         TgUpdate {
-            update_id: 1,
+            update_id: telegram_update_id(1),
             message: Some(TgMessage {
                 chat_id: 123,
                 chat_type: Some("private".to_owned()),

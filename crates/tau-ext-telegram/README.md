@@ -78,11 +78,17 @@ The removed Telegram-specific `config.tool_namespace` setting is rejected.
 
 The legacy extension MVP is text-only. Attachments are acknowledged as
 unsupported. Registrations, selected agents, learned chat link, and Telegram
-update offsets are in memory only in legacy local-poll mode. On lazy startup the
-extension drains Telegram's existing backlog without routing it; after restart,
-Telegram may still redeliver newer updates that were not acknowledged before
-shutdown. Telegram webhooks and `getUpdates` polling are mutually exclusive. Only
-one local Tau process can poll a given Bot API base plus bot token within the
+update checkpoints are in memory only in legacy local-poll mode. Routed updates
+advance the poll cursor only after the extension receives their matching
+canonical `message.delivered` echo; a missing echo causes Telegram redelivery to
+replay the retained report. Non-routed updates advance at processing return and
+may repeat best-effort Telegram replies while an earlier routed update blocks
+the cursor. `/start` and `/select` repeat as idempotent replacements, but remote
+effects are not exactly once. On lazy startup the extension drains Telegram's
+existing backlog without routing it; restart forgets in-memory checkpoints and
+may therefore drain updates that were not canonically confirmed before
+shutdown. Telegram webhooks and `getUpdates` polling are mutually exclusive.
+Only one local Tau process can poll a given Bot API base plus bot token within the
 same Tau state root at a time; another process using the same stream is rejected
 with an advisory-lock contention error. Out-of-band consumers can still cause
 Telegram HTTP 409 conflicts; Tau surfaces those as warning notices and clears

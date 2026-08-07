@@ -29,6 +29,7 @@ use routing::{
     telegram_source_label,
 };
 
+use crate::live_checkpoint::TelegramUpdateId;
 use crate::stream_owner::{
     UpdateStreamLock, telegram_contention_diagnostic, webhook_active_message,
 };
@@ -382,24 +383,25 @@ impl Gateway {
 
     /// Process one update and durably advance the offset after handling.
     fn process_update(&mut self, update: TgUpdate) -> Result<UpdateOutcome, String> {
-        if self.durable.has_recent_update(update.update_id) {
-            self.advance_offset(update.update_id)?;
+        let update_id = update.update_id;
+        if self.durable.has_recent_update(update_id.as_i64()) {
+            self.advance_offset(update_id)?;
             return Ok(UpdateOutcome::AdvanceOffset);
         }
         if let Some(message) = update.message.as_ref()
-            && self.process_message(message, update.update_id) == UpdateOutcome::NeedsRedelivery
+            && self.process_message(message, update_id) == UpdateOutcome::NeedsRedelivery
         {
             return Ok(UpdateOutcome::NeedsRedelivery);
         }
-        self.durable.remember_update(update.update_id);
+        self.durable.remember_update(update_id.as_i64());
         self.durable.processed_update_count = self.durable.processed_update_count.saturating_add(1);
-        self.advance_offset(update.update_id)?;
+        self.advance_offset(update_id)?;
         Ok(UpdateOutcome::AdvanceOffset)
     }
 
     /// Advance and persist the next update offset.
-    fn advance_offset(&mut self, update_id: i64) -> Result<(), String> {
-        let next = update_id.saturating_add(1);
+    fn advance_offset(&mut self, update_id: TelegramUpdateId) -> Result<(), String> {
+        let next = update_id.next_offset().as_i64();
         if self
             .durable
             .next_update_offset
@@ -420,7 +422,11 @@ impl Gateway {
     }
 
     /// Handle a Telegram message after update decoding.
-    fn process_message(&mut self, message: &TgMessage, update_id: i64) -> UpdateOutcome {
+    fn process_message(
+        &mut self,
+        message: &TgMessage,
+        update_id: TelegramUpdateId,
+    ) -> UpdateOutcome {
         if !self.cfg.allowed_user_ids.contains(&message.user_id) {
             tracing::warn!(
                 target: crate::LOG_TARGET,
@@ -592,7 +598,12 @@ impl Gateway {
     }
 
     /// Handle a command or plain text message once the Telegram chat is active.
-    fn route_or_command(&mut self, message: &TgMessage, update_id: i64, text: &str) -> bool {
+    fn route_or_command(
+        &mut self,
+        message: &TgMessage,
+        update_id: TelegramUpdateId,
+        text: &str,
+    ) -> bool {
         let (command, rest) = parse_command(text);
         match command {
             Some("/help") => self.reply(message.chat_id, gateway_help_text()),
@@ -740,7 +751,7 @@ impl Gateway {
     }
 
     /// Route one explicit `/to` command.
-    fn route_to(&self, message: &TgMessage, update_id: i64, rest: &str) -> bool {
+    fn route_to(&self, message: &TgMessage, update_id: TelegramUpdateId, rest: &str) -> bool {
         let Some((target, text)) = split_target_and_text(rest) else {
             return self.reply(
                 message.chat_id,
@@ -773,7 +784,7 @@ impl Gateway {
     }
 
     /// Route plain text through the selected target or only live registration.
-    fn route_plain(&self, message: &TgMessage, update_id: i64, text: &str) -> bool {
+    fn route_plain(&self, message: &TgMessage, update_id: TelegramUpdateId, text: &str) -> bool {
         let snapshot = self.socket_state.registry_snapshot();
         if let Some(selection) = self.selection_for_message(Some(message))
             && let Some(agent_id) = selection.agent_id.clone()
@@ -858,7 +869,7 @@ impl Gateway {
     fn queue_route_or_reply(
         &self,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         target: GatewayRegistrationKey,
         text: &str,
     ) -> bool {
@@ -1191,7 +1202,7 @@ impl GatewaySocketState {
         &self,
         target: &GatewayRegistrationKey,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         text: &str,
     ) -> Result<(), String> {
         let request_id = self.next_delivery_id.fetch_add(1, Ordering::Relaxed);
@@ -1492,7 +1503,7 @@ impl GatewayRegistry {
         &mut self,
         target: &GatewayRegistrationKey,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         text: &str,
         request_id: u64,
         gateway_generation: &str,

@@ -15,14 +15,30 @@ Structural tool naming follows
 ## State
 
 Runtime state is intentionally in memory: registered agents, labels, selected
-agent per chat, learned private chat link, and update offset are forgotten when
-the extension restarts. Update offsets and backlog-drain state are scoped to the
-Telegram update stream, identified by the Bot API base URL plus bot token. When
-that stream identity changes, the extension resets the offset and drains the new
-stream before routing messages. The first poll after lazy startup uses
-non-long-poll requests to drain Telegram's existing backlog until it receives an
-empty batch, so pre-registration messages are not published as fresh
-`message.delivered_reported` reports.
+agent per chat, learned private chat link, update offset, and ordered update
+checkpoints are forgotten when the extension restarts. Update offsets,
+checkpoints, and backlog-drain state are scoped to the Telegram update stream,
+identified by the Bot API base URL plus bot token. A routed checkpoint retains
+its exact `message.delivered_reported` report until the configured publisher
+receives the matching canonical `message.delivered` echo. A non-routed
+checkpoint emits no Tau event and acknowledges when local processing returns;
+Telegram replies on that path remain best effort. The cursor advances only
+through the contiguous acknowledged prefix across both classes. Telegram
+redelivery before a routed echo replays the retained report without recomputing
+its target. Pending redelivery retries use bounded exponential backoff from 250
+milliseconds to five seconds, and unrelated canonical events do not wake that
+delay. Redelivery of a non-routed update blocked behind an earlier routed
+checkpoint can repeat replies, `/start` link replacement, and `/select`
+selection replacement; the replacements remain idempotent, but remote replies
+are not exactly once.
+
+When the stream identity changes, the extension resets the offset and
+checkpoints and drains the new stream before routing messages. The first poll
+after lazy startup uses non-long-poll requests to drain Telegram's existing
+backlog until it receives an empty batch, so pre-registration messages are not
+published as fresh `message.delivered_reported` reports. If a prior routed
+checkpoint still blocks the cursor when polling resumes, backlog drain replays
+that retained report while classifying unseen stale updates as non-routed.
 Poll responses captured under an older configuration generation are discarded
 instead of advancing offsets, marking the new stream drained, or routing old
 updates.
@@ -56,6 +72,9 @@ not projected into model context. The original body is published without a
 transport prefix. The harness stamps publisher provenance and performs ordinary
 durable fact projection according to
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
+Local polling uses bounded opaque `extension_data` to correlate each routed
+report with its canonical self-echo; the configured publisher, target agent,
+message identity, event type, and private report ID must all match.
 
 Successful `telegram_send` calls emit `message.sent_reported` before returning their
 transient `tool.result_reported`. The sent report uses the original body and a
@@ -95,6 +114,8 @@ The canonical scoped strategy is [testing.md](../testing.md).
 Unit tests use a fake Telegram client and in-memory harness channels. They cover
 config validation, tool specs/examples, allowlist enforcement, active-chat and
 linking privacy invariants, command routing, update offset/backlog behavior,
+ordered mixed checkpoints, exact canonical correlation, lost-echo replay,
+out-of-order echo races, non-routed duplicate replies,
 shutdown lifecycle, advisory update-stream lock acquisition/contention/release,
 active-reconfigure lock contention, webhook-active registration refusal,
 `getUpdates` 409 conflict notices, generic tool-prefix mapping, and

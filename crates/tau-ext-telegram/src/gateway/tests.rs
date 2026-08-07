@@ -796,7 +796,7 @@ fn enqueue_rejects_delivery_that_cannot_fit_one_response() {
                 agent_id: "agent-alpha".to_owned(),
             },
             &message(7, 10, &text),
-            101,
+            TelegramUpdateId::new(101).expect("test update id"),
             &text,
         )
         .expect_err("oversized singleton must be rejected");
@@ -823,7 +823,7 @@ fn enqueue_checks_missing_route_before_singleton_size() {
                 agent_id: "missing-agent".to_owned(),
             },
             &message(7, 10, &text),
-            102,
+            TelegramUpdateId::new(102).expect("test update id"),
             &text,
         )
         .expect_err("missing route must be rejected first");
@@ -854,7 +854,7 @@ fn enqueue_checks_full_queue_before_singleton_size() {
                 agent_id: "agent-alpha".to_owned(),
             },
             &message(7, 10, &text),
-            103,
+            TelegramUpdateId::new(103).expect("test update id"),
             &text,
         )
         .expect_err("full queue must be rejected first");
@@ -1542,7 +1542,7 @@ fn runtime_config<const N: usize>(
 /// Build a Telegram update for tests.
 fn update(update_id: i64, message: TgMessage) -> TgUpdate {
     TgUpdate {
-        update_id,
+        update_id: TelegramUpdateId::new(update_id).expect("test update id"),
         message: Some(message),
     }
 }

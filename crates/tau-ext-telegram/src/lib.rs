@@ -16,6 +16,8 @@ use ureq::tls as path_ureq_tls;
 
 mod gateway;
 mod gateway_client;
+mod live_checkpoint;
+mod pending_retry_backoff;
 mod stream_owner;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -29,6 +31,10 @@ use std::time::Duration;
 use gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayMessageDelivery, GatewaySocketResponse,
 };
+use live_checkpoint::{
+    ExistingUpdate, LiveCheckpoints, RoutedUpdate, TelegramUpdateId, TelegramUpdateOffset,
+};
+use pending_retry_backoff::PendingRetryBackoff;
 use stream_owner::{
     StreamIdentity, TelegramWebhookInfo, UpdateStreamLock, telegram_contention_diagnostic,
     webhook_active_message,
@@ -275,9 +281,17 @@ impl ExtConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TgUpdate {
     /// Telegram update id used for offset advancement.
-    update_id: i64,
+    update_id: TelegramUpdateId,
     /// Text message payload, or `None` for updates kept only to advance offset.
     message: Option<TgMessage>,
+}
+
+/// Result of processing one live local-poll Telegram update.
+enum UpdateDisposition {
+    /// The update emitted one report that must await its canonical echo.
+    Routed(RoutedUpdate),
+    /// The update emitted no Tau event and completed at processing return.
+    NonRouted,
 }
 
 type TgWebhookInfo = TelegramWebhookInfo;
@@ -311,7 +325,7 @@ struct PollRequest {
     /// Runtime configuration captured for this request.
     cfg: RuntimeConfig,
     /// Telegram update offset captured for this request.
-    offset: Option<i64>,
+    offset: Option<TelegramUpdateOffset>,
     /// Configuration generation captured for stale-response checks.
     config_generation: ConfigGeneration,
     /// Coordination generation observed before this request.
@@ -359,7 +373,9 @@ struct State {
     /// Held OS advisory lock for the singleton Telegram update stream.
     update_stream_lock: Option<Arc<UpdateStreamLock>>,
     poller_drained_initial_backlog: bool,
-    next_update_offset: Option<i64>,
+    next_update_offset: Option<TelegramUpdateOffset>,
+    /// Ordered mixed checkpoints controlling local Telegram cursor advancement.
+    live_checkpoints: LiveCheckpoints,
 }
 
 /// Submit reports for all gateway delivery records targeting the current
@@ -454,6 +470,10 @@ struct SharedState {
     state: Mutex<State>,
     /// Wakes local poller waits after configuration, registration, or shutdown.
     changed: Condvar,
+    /// Test-only one-shot signal emitted while holding state immediately before
+    /// a coordination wait atomically releases that lock.
+    #[cfg(test)]
+    wait_observer: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl SharedState {
@@ -462,6 +482,8 @@ impl SharedState {
         Self {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
+            #[cfg(test)]
+            wait_observer: Mutex::new(None),
         }
     }
 
@@ -500,6 +522,27 @@ impl SharedState {
     /// Wake all current state waiters.
     fn notify_all(&self) {
         self.changed.notify_all();
+    }
+
+    /// Install a one-shot deterministic observer for the next coordination
+    /// wait.
+    #[cfg(test)]
+    fn observe_next_wait(&self, observer: mpsc::Sender<()>) {
+        *self.wait_observer.lock().expect("wait observer lock") = Some(observer);
+    }
+
+    /// Signal a test while the caller still holds the state lock immediately
+    /// before entering the condition-variable wait.
+    #[cfg(test)]
+    fn notify_wait_observer(&self) {
+        if let Some(observer) = self
+            .wait_observer
+            .lock()
+            .expect("wait observer lock")
+            .take()
+        {
+            let _ = observer.send(());
+        }
     }
 }
 
@@ -553,6 +596,7 @@ impl State {
         self.learned_chat = None;
         self.poller_drained_initial_backlog = false;
         self.next_update_offset = None;
+        self.live_checkpoints.clear();
     }
 }
 
@@ -694,6 +738,29 @@ impl Extension {
         )
     }
 
+    /// Advance local polling only when this instance receives the exact
+    /// canonical echo for a retained routed report.
+    fn acknowledge_live_delivery(&self, fact: &MessageDelivered) {
+        let mut state = self.state.lock();
+        let publisher_matches = state
+            .publisher_name
+            .as_ref()
+            .is_some_and(|publisher| publisher.as_str() == fact.publisher_extension_id.as_str());
+        let acknowledged = state
+            .live_checkpoints
+            .acknowledge_canonical(publisher_matches, fact);
+        if !acknowledged {
+            return;
+        }
+        let next_update_offset = state.next_update_offset;
+        state.next_update_offset = state
+            .live_checkpoints
+            .advance_acknowledged_prefix(next_update_offset);
+        state.mark_coordination_changed();
+        drop(state);
+        self.state.notify_all();
+    }
+
     fn apply_local_poll_config(
         &self,
         cfg: RuntimeConfig,
@@ -735,6 +802,7 @@ impl Extension {
         if update_stream_changed {
             state.poller_drained_initial_backlog = false;
             state.next_update_offset = None;
+            state.live_checkpoints.clear();
             state.update_stream_lock = None;
         }
         if !state.registered_agents.is_empty()
@@ -1204,11 +1272,104 @@ impl Extension {
 
     fn process_update_for_generation(&self, update: TgUpdate, config_generation: ConfigGeneration) {
         let update_id = update.update_id;
+        let existing = {
+            let state = self.state.lock();
+            if state.config_generation != config_generation || state.config.is_none() {
+                return;
+            }
+            state
+                .live_checkpoints
+                .existing_update(update_id, state.next_update_offset)
+        };
+        match existing {
+            ExistingUpdate::Acknowledged => return,
+            ExistingUpdate::Routed(report) => {
+                self.output.emit_message_report(*report);
+                return;
+            }
+            ExistingUpdate::NonRouted => {
+                let _ = self.classify_update_for_generation(update, config_generation);
+                return;
+            }
+            ExistingUpdate::New => {}
+        }
+
+        let disposition = self.classify_update_for_generation(update, config_generation);
+        let report = {
+            let mut state = self.state.lock();
+            if state.config_generation != config_generation || state.config.is_none() {
+                return;
+            }
+            match disposition {
+                UpdateDisposition::Routed(route) => {
+                    let report = route.report();
+                    state.live_checkpoints.insert_routed(update_id, route);
+                    Some(*report)
+                }
+                UpdateDisposition::NonRouted => {
+                    state.live_checkpoints.insert_non_routed(update_id);
+                    let next_update_offset = state.next_update_offset;
+                    state.next_update_offset = state
+                        .live_checkpoints
+                        .advance_acknowledged_prefix(next_update_offset);
+                    None
+                }
+            }
+        };
+        if let Some(report) = report {
+            self.output.emit_message_report(report);
+        }
+    }
+
+    /// During backlog drain, replay retained work but classify unseen stale
+    /// updates as non-routed without Telegram replies or Tau reports.
+    fn process_draining_update_for_generation(
+        &self,
+        update: TgUpdate,
+        config_generation: ConfigGeneration,
+    ) {
+        let update_id = update.update_id;
+        let existing = {
+            let state = self.state.lock();
+            if state.config_generation != config_generation || state.config.is_none() {
+                return;
+            }
+            state
+                .live_checkpoints
+                .existing_update(update_id, state.next_update_offset)
+        };
+        match existing {
+            ExistingUpdate::Acknowledged => {}
+            ExistingUpdate::Routed(report) => self.output.emit_message_report(*report),
+            ExistingUpdate::NonRouted => {
+                let _ = self.classify_update_for_generation(update, config_generation);
+            }
+            ExistingUpdate::New => {
+                let mut state = self.state.lock();
+                if state.config_generation != config_generation || state.config.is_none() {
+                    return;
+                }
+                state.live_checkpoints.insert_non_routed(update_id);
+                let next_update_offset = state.next_update_offset;
+                state.next_update_offset = state
+                    .live_checkpoints
+                    .advance_acknowledged_prefix(next_update_offset);
+            }
+        }
+    }
+
+    /// Classify and perform local processing for one previously unseen update.
+    fn classify_update_for_generation(
+        &self,
+        update: TgUpdate,
+        config_generation: ConfigGeneration,
+    ) -> UpdateDisposition {
+        let update_id = update.update_id;
         let Some(message) = update.message else {
-            return;
+            return UpdateDisposition::NonRouted;
         };
         let Some(cfg) = self.config_for_allowed_message(&message, config_generation) else {
-            return;
+            return UpdateDisposition::NonRouted;
         };
         let is_private_chat = is_private_message_chat(&message);
         let active_chat = self.active_chat(&cfg);
@@ -1219,20 +1380,22 @@ impl Extension {
             is_private_chat,
             config_generation,
         ) {
-            return;
+            return UpdateDisposition::NonRouted;
         }
         let Some(text) = self.trimmed_message_text(&cfg, &message, config_generation) else {
-            return;
+            return UpdateDisposition::NonRouted;
         };
         let (command, rest) = parse_command(&text);
         if self.rejects_unlinked_command(&cfg, &message, active_chat, command, config_generation) {
-            return;
+            return UpdateDisposition::NonRouted;
         }
-        if self.handle_command(&cfg, &message, update_id, command, rest, config_generation) {
-            return;
+        if let Some(disposition) =
+            self.handle_command(&cfg, &message, update_id, command, rest, config_generation)
+        {
+            return disposition;
         }
 
-        self.route_plain_text(&cfg, &message, update_id, &text, config_generation);
+        self.route_plain_text(&cfg, &message, update_id, &text, config_generation)
     }
 
     fn config_for_allowed_message(
@@ -1347,11 +1510,11 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         command: Option<&str>,
         rest: &str,
         config_generation: ConfigGeneration,
-    ) -> bool {
+    ) -> Option<UpdateDisposition> {
         match command {
             Some("/start") => {
                 self.handle_start_command(
@@ -1360,19 +1523,18 @@ impl Extension {
                     is_private_message_chat(message),
                     config_generation,
                 );
-                true
+                Some(UpdateDisposition::NonRouted)
             }
             Some("/agents") => {
                 self.handle_agents_command(cfg, message.chat_id, config_generation);
-                true
+                Some(UpdateDisposition::NonRouted)
             }
             Some("/select") => {
                 self.handle_select_command(cfg, message.chat_id, rest, config_generation);
-                true
+                Some(UpdateDisposition::NonRouted)
             }
             Some("/to") => {
-                self.handle_to_command(cfg, message, update_id, rest, config_generation);
-                true
+                Some(self.handle_to_command(cfg, message, update_id, rest, config_generation))
             }
             Some(_) => {
                 self.reply(
@@ -1381,9 +1543,9 @@ impl Extension {
                     "Unknown Telegram command. Supported commands: /start, /agents, /select, /to.",
                     config_generation,
                 );
-                true
+                Some(UpdateDisposition::NonRouted)
             }
-            None => false,
+            None => None,
         }
     }
 
@@ -1471,10 +1633,10 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         rest: &str,
         config_generation: ConfigGeneration,
-    ) {
+    ) -> UpdateDisposition {
         let (target, body) = split_first(rest);
         if target.is_empty() || body.trim().is_empty() {
             self.reply(
@@ -1483,15 +1645,21 @@ impl Extension {
                 "Usage: /to <agent-id-or-prefix> <message>",
                 config_generation,
             );
-            return;
+            return UpdateDisposition::NonRouted;
         }
 
         match self.resolve_registered_agent(target) {
-            Ok(agent_id) => {
-                self.route_text(message, update_id, agent_id, body.trim(), config_generation)
-            }
+            Ok(agent_id) => self.route_text(
+                cfg,
+                message,
+                update_id,
+                agent_id,
+                body.trim(),
+                config_generation,
+            ),
             Err(reply) => {
                 self.reply(cfg, message.chat_id, &reply, config_generation);
+                UpdateDisposition::NonRouted
             }
         }
     }
@@ -1500,14 +1668,17 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         text: &str,
         config_generation: ConfigGeneration,
-    ) {
+    ) -> UpdateDisposition {
         match self.plain_text_target(message.chat_id) {
-            Ok(agent_id) => self.route_text(message, update_id, agent_id, text, config_generation),
+            Ok(agent_id) => {
+                self.route_text(cfg, message, update_id, agent_id, text, config_generation)
+            }
             Err(reply) => {
                 self.reply(cfg, message.chat_id, &reply, config_generation);
+                UpdateDisposition::NonRouted
             }
         }
     }
@@ -1558,32 +1729,37 @@ impl Extension {
 
     fn route_text(
         &self,
+        cfg: &RuntimeConfig,
         message: &TgMessage,
-        update_id: i64,
+        update_id: TelegramUpdateId,
         agent_id: AgentId,
         text: &str,
         config_generation: ConfigGeneration,
-    ) {
+    ) -> UpdateDisposition {
         if !self.poll_response_matches_config(config_generation) {
-            return;
+            return UpdateDisposition::NonRouted;
         }
-        self.output
-            .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
-                self.publisher_claim(),
-                MessageAgentTarget::new(agent_id.as_ref()),
-                telegram_message_ref(&message.chat_id.to_string(), &update_id.to_string()),
-                MessageParty {
-                    stable_id: telegram_sender_ref(&message.user_id.to_string()),
-                    display_name: message.from_name.as_deref().and_then(bounded_display_name),
-                    sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
-                },
-                Some(MessageConversation {
-                    stable_id: message.chat_id.to_string(),
-                    display_name: None,
-                    alias: None,
-                }),
-                text,
-            )));
+        let message_id = telegram_message_ref(
+            &message.chat_id.to_string(),
+            &update_id.as_i64().to_string(),
+        );
+        let delivered = MessageDelivered::new(
+            self.publisher_claim(),
+            MessageAgentTarget::new(agent_id.as_ref()),
+            message_id.clone(),
+            MessageParty {
+                stable_id: telegram_sender_ref(&message.user_id.to_string()),
+                display_name: message.from_name.as_deref().and_then(bounded_display_name),
+                sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+            },
+            Some(MessageConversation {
+                stable_id: message.chat_id.to_string(),
+                display_name: None,
+                alias: None,
+            }),
+            text,
+        );
+        UpdateDisposition::Routed(RoutedUpdate::new(cfg, update_id, delivered))
     }
 
     /// Submit a remote Telegram send-success report before returning the
@@ -1738,6 +1914,8 @@ fn wait_for_coordination_change_or_shutdown(
         return;
     }
     let state = state_cell.lock();
+    #[cfg(test)]
+    state_cell.notify_wait_observer();
     let _guard = state_cell.wait_timeout_while(state, delay, |state| {
         !state.shutdown_requested && state.coordination_generation == observed_generation
     });
@@ -1768,6 +1946,8 @@ fn poll_loop_with_tool_names(
         shutdown: Arc::clone(&shutdown),
         tool_names,
     };
+    let mut pending_retry_backoff = PendingRetryBackoff::new();
+    let mut previous_poll_offset = None;
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return;
@@ -1775,6 +1955,10 @@ fn poll_loop_with_tool_names(
         let Some(poll_request) = wait_for_poller_ready_or_shutdown(&ext.state, &shutdown) else {
             return;
         };
+        if previous_poll_offset != Some(poll_request.offset) {
+            pending_retry_backoff.reset();
+            previous_poll_offset = Some(poll_request.offset);
+        }
         if !poll_request
             .update_stream_lock
             .covers(poll_request.cfg.stream_identity())
@@ -1793,7 +1977,10 @@ fn poll_loop_with_tool_names(
         if draining_initial_backlog {
             request_cfg.poll_timeout_seconds = 0;
         }
-        match ext.client.get_updates(&request_cfg, poll_request.offset) {
+        match ext.client.get_updates(
+            &request_cfg,
+            poll_request.offset.map(TelegramUpdateOffset::as_i64),
+        ) {
             Ok(updates) => {
                 if shutdown.load(Ordering::Relaxed) {
                     return;
@@ -1802,29 +1989,46 @@ fn poll_loop_with_tool_names(
                     continue;
                 }
                 let mut stale_generation = false;
-                let draining = {
+                let (draining, replaying_pending_during_drain) = {
                     let mut state = ext.state.lock();
                     if state.config_generation != poll_request.config_generation
                         || state.config.is_none()
                     {
                         stale_generation = true;
-                        false
+                        (false, false)
                     } else if !state.poller_drained_initial_backlog {
-                        if let Some(max_update_id) = updates.iter().map(|u| u.update_id).max() {
-                            state.next_update_offset = Some(max_update_id + 1);
+                        let replaying_pending = !state.live_checkpoints.is_empty();
+                        if !replaying_pending
+                            && let Some(max_update_id) = updates.iter().map(|u| u.update_id).max()
+                        {
+                            state.next_update_offset = Some(max_update_id.next_offset());
                         }
                         if updates.is_empty() {
                             state.poller_drained_initial_backlog = true;
                         }
-                        true
+                        (true, replaying_pending)
                     } else {
-                        false
+                        (false, false)
                     }
                 };
                 if stale_generation {
                     continue;
                 }
                 if draining {
+                    if replaying_pending_during_drain {
+                        for update in updates {
+                            ext.process_draining_update_for_generation(
+                                update,
+                                poll_request.config_generation,
+                            );
+                        }
+                        wait_for_coordination_change_or_shutdown(
+                            &ext.state,
+                            &shutdown,
+                            pending_retry_backoff.take_delay(),
+                            poll_request.coordination_generation,
+                        );
+                    }
                     continue;
                 }
                 if updates.is_empty() {
@@ -1836,16 +2040,17 @@ fn poll_loop_with_tool_names(
                     );
                 }
                 for update in updates {
-                    {
-                        let mut state = ext.state.lock();
-                        if state.config_generation != poll_request.config_generation
-                            || state.config.is_none()
-                        {
-                            break;
-                        }
-                        state.next_update_offset = Some(update.update_id + 1);
-                    }
                     ext.process_update_for_generation(update, poll_request.config_generation);
+                }
+                if !ext.state.lock().live_checkpoints.is_empty() {
+                    wait_for_coordination_change_or_shutdown(
+                        &ext.state,
+                        &shutdown,
+                        pending_retry_backoff.take_delay(),
+                        poll_request.coordination_generation,
+                    );
+                } else {
+                    pending_retry_backoff.reset();
                 }
             }
             Err(message) => {
@@ -1984,6 +2189,7 @@ fn send_startup_declarations(
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
     ])?;
     runtime.startup_local_tool(tau_proto::ToolRegistrationDeclared {
         tool: register_tool_spec_for(tool_names),
@@ -2059,6 +2265,9 @@ fn handle_configure_message(runtime: &mut TelegramRuntime, configure: tau_proto:
 /// Handle a delivered live event without tau-client's static handler registry.
 fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
     match event {
+        Event::MessageDelivered(fact) => {
+            runtime.ext.acknowledge_live_delivery(&fact);
+        }
         Event::AgentDisplayNameSet(name) => {
             let mut state = runtime.ext.state.lock();
             state
@@ -2454,7 +2663,7 @@ impl TelegramClient for HttpTelegramClient {
             .get("result")
             .and_then(|value| value.as_array())
             .ok_or_else(|| "Telegram getUpdates response missing result array".to_owned())?;
-        Ok(result.iter().filter_map(decode_update).collect())
+        decode_updates(result)
     }
 
     fn send_message(&self, cfg: &RuntimeConfig, chat_id: i64, text: &str) -> Result<(), String> {
@@ -2520,10 +2729,27 @@ fn decode_webhook_info(value: &serde_json::Value) -> Result<TgWebhookInfo, Strin
     })
 }
 
-fn decode_update(value: &serde_json::Value) -> Option<TgUpdate> {
-    let update_id = value.get("update_id")?.as_i64()?;
+fn decode_update(value: &serde_json::Value) -> Result<Option<TgUpdate>, String> {
+    let Some(raw_update_id) = value.get("update_id").and_then(serde_json::Value::as_i64) else {
+        return Ok(None);
+    };
+    let update_id = TelegramUpdateId::new(raw_update_id).ok_or_else(|| {
+        "Telegram getUpdates returned an update id outside the supported offset range".to_owned()
+    })?;
     let message = decode_message(value);
-    Some(TgUpdate { update_id, message })
+    Ok(Some(TgUpdate { update_id, message }))
+}
+
+/// Decode one Bot API update array and reject IDs whose exclusive successor
+/// cannot be represented on the next request.
+fn decode_updates(values: &[serde_json::Value]) -> Result<Vec<TgUpdate>, String> {
+    let mut updates = Vec::new();
+    for value in values {
+        if let Some(update) = decode_update(value)? {
+            updates.push(update);
+        }
+    }
+    Ok(updates)
 }
 
 fn decode_message(value: &serde_json::Value) -> Option<TgMessage> {

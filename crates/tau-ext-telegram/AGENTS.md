@@ -6,6 +6,9 @@ This extension bridges untrusted external Telegram text into Tau. Before changin
 
 Follow the hermetic test strategy in [testing.md](testing.md).
 
+- [`SECURITY.md`](SECURITY.md) — required reading for Telegram trust,
+  correlation, retry, replay, recovery, and lifecycle boundaries.
+
 Keep configuration keys snake_case and reject unknown fields. Never log bot
 tokens or Telegram message content unless the surrounding code already treats it
 as user-visible prompt text.

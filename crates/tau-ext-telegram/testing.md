@@ -8,8 +8,11 @@ interleaving rather than depending on scheduler timing or stress frequency.
 
 Extension tests own Telegram admission, routing, offset and lease behavior,
 duplicate suppression, transient `message.*_reported` metadata, and serialized
-report-before-tool-result submission. Cover both direct polling and gateway
-client paths. Gateway response conformance uses the real gateway client to cover
+report-before-tool-result submission. Local-poll tests force ordered mixed
+checkpoint, exact canonical-echo, missing-echo replay, out-of-order echo,
+reconnect/backlog-drain, and non-routed duplicate-reply interleavings without
+wall-clock races. Cover both direct polling and gateway client paths. Gateway
+response conformance uses the real gateway client to cover
 the 32-record maximum queue, both send and heartbeat producers, and repeated
 ordered bounded drain. Focused serialization tests cover the exact
 newline-inclusive 65,536-byte boundary, JSON escaping, and multibyte UTF-8.
