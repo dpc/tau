@@ -37,7 +37,7 @@ agents:
       text: |-
         {{#if (tool_available capabilities.tools "agent_start")~}}
         {{#if agent_context.delegate_roles~}}
-        ## Available sub-task roles
+        ## Available agent roles for `agent_start`
 
         {{#each agent_context.delegate_roles~}}
         {{#each (sort value by="name")~}}

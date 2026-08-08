@@ -4135,7 +4135,11 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
             .text
             .contains("{{#if (tool_available capabilities.tools \"agent_start\")~}}")
     );
-    assert!(delegate_roles.text.contains("## Available sub-task roles"));
+    assert!(
+        delegate_roles
+            .text
+            .contains("## Available agent roles for `agent_start`")
+    );
     let engineer_instructions = engineer
         .prompt_fragments
         .iter()

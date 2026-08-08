@@ -305,7 +305,8 @@ individual-contributor defaults, and `engineer-senior` is the
 maximum-reasoning engineering variant.
 
 For every role whose effective tool surface includes `agent_start`, Tau's
-built-in global prompt fragment lists the currently available sub-task roles.
+built-in global prompt fragment lists the available agent roles for
+`agent_start`.
 Tau omits the fragment from prompt template data when `agent_start` is
 unavailable, including when role or model policy removes the tool.
 

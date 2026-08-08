@@ -530,9 +530,9 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
             false,
         )
         .expect("render prompt with agent_start");
-    assert!(rendered.contains("## Available sub-task roles"));
+    assert!(rendered.contains("## Available agent roles for `agent_start`"));
     let catalog_offset = rendered
-        .find("## Available sub-task roles")
+        .find("## Available agent roles for `agent_start`")
         .expect("delegate role heading");
     assert!(
         rendered.find("# Tau harness").expect("harness heading") < catalog_offset,
@@ -546,7 +546,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
         "the role catalog must precede the agent identity"
     );
     let catalog_rows = rendered
-        .split_once("## Available sub-task roles")
+        .split_once("## Available agent roles for `agent_start`")
         .expect("delegate role heading")
         .1
         .lines()
@@ -578,7 +578,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
             false,
         )
         .expect("render prompt without agent_start");
-    assert!(!rendered.contains("## Available sub-task roles"));
+    assert!(!rendered.contains("## Available agent roles for `agent_start`"));
     assert!(!rendered.contains("* `engineer` - \"Capable individual contributor."));
 
     h.shutdown().expect("shutdown");
@@ -649,13 +649,17 @@ fn first_effective_prompt_with_agent_start_lists_delegate_roles() {
         .expect("submit first user prompt");
 
     let prompt = read_nth_prompt_created(&h, 0);
-    assert!(prompt.system_prompt.contains("## Available sub-task roles"));
+    assert!(
+        prompt
+            .system_prompt
+            .contains("## Available agent roles for `agent_start`")
+    );
     assert!(prompt.system_prompt.contains(
         "* `engineer` - \"Capable individual contributor. Good default for most tasks.\""
     ));
     let catalog_offset = prompt
         .system_prompt
-        .find("## Available sub-task roles")
+        .find("## Available agent roles for `agent_start`")
         .expect("delegate role heading");
     assert!(
         prompt

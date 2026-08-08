@@ -95,10 +95,10 @@ filtered to the connections that own an effective `shell:workdir` tool, so
 hiding one prefixed instance does not expose its path through another instance's
 shared fragment.
 
-The built-in available-sub-task-roles fragment is prompt-visible only when the
-effective snapshot contains `agent_start`. It applies across role groups and
-renders the currently visible, available delegate role catalog from per-agent
-context;
+The built-in available-agent-roles-for-`agent_start` catalog is prompt-visible
+only when the effective snapshot contains `agent_start`. It applies across role
+groups and renders the currently visible, available delegate role catalog from
+per-agent context;
 agents without `agent_start` omit the fragment from template data entirely.
 Role visibility is presentation-only: hidden roles remain available to explicit
 `agent_start` requests and retain their ordinary authorization and diagnostics.

@@ -32,9 +32,9 @@ agents:
 
 `agents.prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
 
-Tau's built-in global fragment lists available sub-task roles whenever the
-effective prompt tool surface includes `agent_start`. Tau omits it from prompt
-template data for roles or models without that tool.
+Tau's built-in global fragment lists available agent roles for `agent_start`
+whenever the effective prompt tool surface includes that tool. Tau omits it
+from prompt template data for roles or models without it.
 Ordinary prompt fragments whose templates render only whitespace are likewise
 omitted from the `prompt_fragments` array exposed to custom system templates.
 

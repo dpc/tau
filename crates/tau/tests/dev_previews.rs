@@ -143,7 +143,7 @@ fn print_system_prompt_places_delegate_roles_late() {
     assert!(output.status.success(), "{:?}", output.stderr);
     let prompt = String::from_utf8(output.stdout).expect("UTF-8 system prompt");
     let catalog_offset = prompt
-        .find("## Available sub-task roles")
+        .find("## Available agent roles for `agent_start`")
         .expect("delegate role catalog");
     assert!(
         prompt.find("# Tau harness").expect("harness heading") < catalog_offset,
