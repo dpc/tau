@@ -9,6 +9,8 @@ use tau_proto::{
     MessagePublisherId, project_message_fact, visible_escape_metadata,
 };
 
+use crate::terminal_text::sanitize_terminal_body;
+
 /// Exhaustive borrowed UI view of one concrete message fact.
 enum UiMessageFact<'a> {
     /// Delivered base message.
@@ -224,7 +226,7 @@ pub(super) fn render(event: &Event, target_context: MessageFactTargetContext) ->
     output.push(':');
     if let Some(text) = view.text() {
         output.push('\n');
-        output.push_str(&escape(text));
+        output.push_str(&sanitize_terminal_body(text));
     } else if let Some(reaction) = view.reaction() {
         output.push('\n');
         output.push_str(&escape(reaction));

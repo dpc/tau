@@ -32,6 +32,7 @@ mod renderer_handle;
 mod send;
 mod settings_registry;
 mod skill_commands;
+mod terminal_text;
 mod theme;
 mod tool_render;
 mod transcript_markers;

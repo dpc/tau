@@ -89,12 +89,13 @@ fn render_delivery(delivery: tau_proto::EventDelivery) -> String {
     render(&event, MessageFactTargetContext::Explicit).expect("message fact render")
 }
 
-/// All six events use compact directional headings and immediate content with
-/// byte-for-byte live/replay parity, while hiding superseded stable metadata.
+/// All six events use compact directional headings and immediate readable
+/// content with byte-for-byte live/replay parity, while hiding superseded
+/// stable metadata.
 #[test]
 fn six_facts_render_distinct_safe_live_and_replay_output() {
     let expected = [
-        "External `bridge-main` message from \"Ali\\u{202E}ce\" in General for Tau target agent-1:\nhello\\u{000A}world",
+        "External `bridge-main` message from \"Ali\\u{202E}ce\" in General for Tau target agent-1:\nhello\nworld",
         "External `bridge-main` message edited by \"Ali\\u{202E}ce\" in General for Tau target agent-1:\nedited body",
         "External `bridge-main` message deleted by \"Ali\\u{202E}ce\" in General for Tau target agent-1:",
         "External `bridge-main` reaction added by \"Ali\\u{202E}ce\" in General for Tau target agent-1:\n👍",
@@ -163,7 +164,7 @@ fn presentation_values_prefer_useful_labels_with_stable_fallbacks() {
         render(&facts[0], MessageFactTargetContext::Implied).expect("delivered render");
     assert_eq!(
         delivered_rendered,
-        "External `bridge-main` message from \"user-1\" in #friendly-route:\nhello\\u{000A}world"
+        "External `bridge-main` message from \"user-1\" in #friendly-route:\nhello\nworld"
     );
     assert!(!delivered_rendered.contains("conversation-1"));
 
@@ -283,8 +284,8 @@ fn target_parser_distinguishes_valid_and_invalid_claims() {
     );
 }
 
-/// Quoted heading metadata, context delimiters, backslashes, and control
-/// characters remain visibly escaped and cannot imitate generated prose.
+/// Heading metadata remains visibly escaped while bodies keep literal prose and
+/// preserve line boundaries rather than using metadata-style escapes.
 #[test]
 fn untrusted_identifiers_and_text_render_safely() {
     let mut delimiter_text = representative_facts()
@@ -327,12 +328,30 @@ fn untrusted_identifiers_and_text_render_safely() {
     let control_rendered = render(&control_character, MessageFactTargetContext::Explicit)
         .expect("control-character fact");
     assert_ne!(literal_rendered, control_rendered);
-    assert!(literal_rendered.contains(r"\\u{000A}"));
-    assert!(control_rendered.contains(r"\u{000A}"));
+    assert!(literal_rendered.contains(r"\u{000A}"));
+    assert!(control_rendered.ends_with("\n\n"));
 }
 
-/// Unicode presentation values and content survive unchanged except for the
-/// centralized visible escaping policy applied to dangerous metadata.
+/// Reaction and heading fields remain metadata, so terminal-looking content
+/// stays visibly escaped instead of receiving the lossy body sanitizer.
+#[test]
+fn reaction_metadata_retains_visible_control_escaping() {
+    let mut reaction = representative_facts()
+        .into_iter()
+        .find(|event| matches!(event, Event::MessageReactionAdded(_)))
+        .expect("reaction fixture");
+    let Event::MessageReactionAdded(fact) = &mut reaction else {
+        unreachable!("fixture filter selects a reaction")
+    };
+    fact.reaction = "\u{001B}[31m".to_owned();
+
+    let rendered =
+        render(&reaction, MessageFactTargetContext::Implied).expect("reaction fact render");
+    assert!(rendered.ends_with(r"\u{001B}\[31m"));
+}
+
+/// Unicode presentation metadata stays visibly escaped while ordinary body
+/// Unicode remains readable and does not inherit metadata-format escaping.
 #[test]
 fn unicode_display_and_body_render_compactly() {
     let mut delivered = representative_facts()
@@ -353,4 +372,30 @@ fn unicode_display_and_body_render_compactly() {
             "External `bridge-main` message from \"Zoë 👩🏽\\u{200D}💻\" in 研发-チーム:\nПривет 🌍"
         )
     );
+}
+
+/// Terminal-body sanitation applies after live and replay delivery select the
+/// same committed fact, so terminal controls cannot diverge by delivery mode.
+#[test]
+fn terminal_sanitized_body_has_live_replay_parity() {
+    let mut delivered = representative_facts()
+        .into_iter()
+        .next()
+        .expect("delivered fixture");
+    let Event::MessageDelivered(fact) = &mut delivered else {
+        unreachable!("first fixture is delivered")
+    };
+    fact.text = "first\tline\nred\u{001B}[31mtext\u{001B}[0m\u{202E}tail".to_owned();
+
+    let recorded_at = tau_proto::UnixMicros::new(1_700_000_000_000_000);
+    let live = render_delivery(tau_proto::EventDelivery::live(
+        recorded_at,
+        delivered.clone(),
+    ));
+    let replay = render_delivery(tau_proto::EventDelivery::replay(recorded_at, delivered));
+
+    assert_eq!(live, replay);
+    assert!(live.ends_with("first\tline\nredtext�tail"));
+    assert!(!live.contains("[31m"));
+    assert!(!live.contains('\u{001B}'));
 }

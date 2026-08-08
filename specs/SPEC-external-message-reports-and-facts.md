@@ -364,10 +364,16 @@ its stable target reference as a fallback.
 
 The UI never infers verification, ownership, reply authority, or routing and
 never normally displays `extension_data`. All underlying typed fields remain in
-the committed event and raw inspection surfaces. Rendering is bounded and
-escaped identically on live delivery and replay. Universally invalid facts use
-the deterministic diagnostic described above; valid unavailable-target facts
-remain ordinary visible facts.
+the committed event and raw inspection surfaces. Heading, routing, identifier,
+reaction, and diagnostic metadata use visible injective escaping. Text bodies
+instead preserve printable Unicode, spaces, tabs, and line feeds; omit complete
+terminal-control sequences; and omit nonrendering controls or format characters
+unless one replacement character is needed to keep visible text runs separate.
+This terminal-safe body rendering intentionally is not injective: raw inspection
+remains the authority for removed styling or invisible text. Rendering remains
+bounded and deterministic on both live delivery and replay. Universally invalid
+facts use the deterministic diagnostic described above; valid unavailable-target
+facts remain ordinary visible facts.
 
 ## Extension responsibilities
 
