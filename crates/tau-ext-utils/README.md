@@ -1,9 +1,10 @@
 # std-utils
 
 `std-utils` provides the normal `timer` tool and an opt-in best-effort
-`papercut` reporter. The reporter lets an agent leave one concise note about an
-incidental Tau harness, tooling, environment, confusing, or suspicious problem
-without redirecting its primary task.
+`papercut` reporter. Its model-visible guidance says: “Use this tool only if you
+encounter an incidental Tau harness, tooling, environment, confusing, or suspicious
+problem. Record one concise, best-effort report, then continue the primary task. Do
+not call it merely to state that no problem occurred, and do not retry.”
 
 
 ## Enable papercuts

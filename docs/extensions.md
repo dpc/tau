@@ -177,6 +177,9 @@ instance config sets `papercut.enable: true`. See the
 record, per-instance User-storage location, limits, privacy, retention, and
 inspection contract. `tau dev papercut list [--markdown]` inspects the normal
 instance's records; `tau dev papercut clear` clears its locked snapshot.
+The model-visible tool is conditional: agents use it only for an incidental
+Tau harness, tooling, environment, confusing, or suspicious problem, never
+merely to state that no problem occurred.
 
 Core-shell protects non-interactive model and user shell commands from pager
 prompts by applying `PAGER=cat`, `GIT_PAGER=cat`, `GH_PAGER=cat`,

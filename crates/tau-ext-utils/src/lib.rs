@@ -29,6 +29,7 @@ pub const EXTENSION_NAME: &str = "tau-ext-utils";
 pub const TIMER_TOOL_NAME: &str = "timer";
 /// Model-visible best-effort diagnostic reporting tool name.
 pub const PAPERCUT_TOOL_NAME: &str = "papercut";
+const PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool only if you encounter an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
 
 /// Canonical JSONL filename owned by the standard papercut reporter.
 pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
@@ -941,7 +942,7 @@ fn papercut_registration() -> tau_proto::ToolRegistrationDeclared {
         prompt_fragment: Some(tau_proto::PromptFragment::new(
             "papercut",
             tau_proto::PromptPriority::new(0),
-            "Use `papercut` once to report an incidental harness, tooling, environment, confusing, or suspicious problem you encounter while working. Do not report secrets. Continue the primary task after calling it; do not investigate solely because of the papercut, do not retry it, and do not file the report elsewhere unless the primary task already requires that work.",
+            PAPERCUT_MODEL_GUIDANCE,
         )),
     }
 }
@@ -1203,10 +1204,7 @@ fn papercut_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(PAPERCUT_TOOL_NAME),
         model_visible_name: None,
-        description: Some(
-            "Record one concise, best-effort report about an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Continue the primary task after calling it; do not retry."
-                .to_owned(),
-        ),
+        description: Some(PAPERCUT_MODEL_GUIDANCE.to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

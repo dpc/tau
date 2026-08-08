@@ -11,6 +11,8 @@ use tau_proto::{
 
 use super::*;
 
+const EXPECTED_PAPERCUT_MODEL_GUIDANCE: &str = "Use this tool only if you encounter an incidental Tau harness, tooling, environment, confusing, or suspicious problem. Record one concise, best-effort report, then continue the primary task. Do not call it merely to state that no problem occurred, and do not retry.";
+
 /// Ensures JSONL decoding constructs only current-schema papercut records and
 /// keeps an unsupported schema distinct from malformed typed attribution.
 #[test]
@@ -688,9 +690,8 @@ fn papercut_started(call_id: &str, agent: &str, report: &str) -> ToolStarted {
     }
 }
 
-/// The extension must never declare papercut or its prompt until the
-/// per-instance opt-in setting enables it; normal enabled-by-default policy
-/// then leaves final role visibility to the ordinary harness policy pipeline.
+/// Ensures the enabled reporter presents one exact conditional instruction in
+/// both model-visible surfaces, preventing an unconditional or no-problem call.
 #[test]
 fn papercut_config_gates_visibility_and_prompt() {
     let disabled: UtilsConfig =
@@ -709,13 +710,18 @@ fn papercut_config_gates_visibility_and_prompt() {
         .find(|registration| registration.tool.name.as_str() == PAPERCUT_TOOL_NAME)
         .expect("enabled papercut registration");
     assert!(papercut.tool.enabled_by_default);
-    assert!(
+    assert_eq!(
         papercut
             .prompt_fragment
             .as_ref()
             .expect("papercut prompt")
             .template
-            .contains("do not retry")
+            .as_str(),
+        EXPECTED_PAPERCUT_MODEL_GUIDANCE
+    );
+    assert_eq!(
+        papercut.tool.description.as_deref(),
+        Some(EXPECTED_PAPERCUT_MODEL_GUIDANCE)
     );
 }
 
@@ -876,8 +882,8 @@ fn papercut_config_rejects_unknown_fields() {
     );
 }
 
-/// The model-visible schema and runtime validation jointly bound Unicode scalar
-/// count and encoded bytes, rejecting empty reports before any storage request.
+/// Ensures the model-visible schema retains its bounded report contract while
+/// the tool description independently prevents no-problem reporting.
 #[test]
 fn papercut_schema_and_validation_bound_report() {
     let schema = papercut_tool_spec()
@@ -894,6 +900,10 @@ fn papercut_schema_and_validation_bound_report() {
             .pointer("/properties/report/maxLength")
             .and_then(serde_json::Value::as_u64),
         Some(MAX_PAPERCUT_REPORT_CHARS as u64)
+    );
+    assert_eq!(
+        papercut_tool_spec().description.as_deref(),
+        Some(EXPECTED_PAPERCUT_MODEL_GUIDANCE)
     );
 
     assert!(
