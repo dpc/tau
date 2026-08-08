@@ -25,7 +25,7 @@ use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented_lines_with_byte_limit,
 };
 
-pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 300;
 pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 const VCR_REPLAY_SPEEDUP: u64 = 100;
 const MAX_CAPTURED_LINE_BYTES: usize = MAX_SAVED_OUTPUT_BYTES - 128;

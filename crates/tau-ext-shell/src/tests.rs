@@ -2842,6 +2842,24 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
                         .contains("top-level workdir(path) tool")
                 );
             }
+            assert_eq!(
+                properties["timeout"]["description"],
+                serde_json::json!(
+                    "Timeout in seconds. The command is killed if it exceeds this. Default: 300"
+                )
+            );
+            assert!(matches!(
+                register.tool.examples.as_slice(),
+                [tau_proto::ToolExample {
+                    arguments: CborValue::Map(arguments),
+                    ..
+                }]
+                    if arguments.iter().any(|(key, value)| matches!(
+                        (key, value),
+                        (CborValue::Text(key), CborValue::Integer(value))
+                            if key == "timeout" && *value == 300.into()
+                    ))
+            ));
             assert_eq!(parameters["required"], serde_json::json!(["command"]));
             found_shell |= register.tool.name == SHELL_TOOL_NAME;
             found_gpt_shell |= register.tool.name == GPT_SHELL_TOOL_NAME;

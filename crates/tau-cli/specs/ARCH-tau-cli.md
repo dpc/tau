@@ -58,7 +58,7 @@ rows below the one-row header and hide with an essential header that cannot
 fit, while compact and summary modes keep their existing visibility semantics.
 The built-in `shell` and `gpt_shell` tools are the narrow presentation exception:
 the CLI reads their start arguments solely to retain the configured `timeout`
-(or the shell provider's 120-second default) and renders their duration chip as
+(or the shell provider's 300-second default) and renders their duration chip as
 `elapsed/timeout`s. It does not interpret any other shell argument or alter
 generic tool-header behavior.
 The bundled Swarm `blocker` tool is the narrow exception to otherwise generic

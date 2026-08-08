@@ -66,6 +66,8 @@ results with output details, not as tool invocation errors. It should reliably
 timeout operations that take longer than timeout argument, but currently 100%
 reliable child process termination is not implemented and will require advanced
 techniques to implement in the future (e.g. cgroups).
+When the model omits `timeout`, both `shell` and `shell_command` use a
+300-second timeout; an explicit non-negative timeout remains call-local.
 
 On Linux, Android, and macOS, ext-shell shell commands use independent PTYs for stdout
 and stderr while stdin remains closed. Verify `[ ! -t 0 ]`, `[ -t 1 ]`, and

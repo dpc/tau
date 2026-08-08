@@ -16,6 +16,19 @@ fn shell_args(command: &str, timeout: i64) -> CborValue {
     ])
 }
 
+/// Keeps the omitted model-shell timeout aligned with its advertised default
+/// without waiting for a real command to time out.
+#[test]
+fn omitted_timeout_uses_default_and_explicit_timeout_overrides_it() {
+    let omitted = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf ok".to_owned()),
+    )]);
+
+    assert_eq!(parse_timeout_secs(&omitted), Ok(300));
+    assert_eq!(parse_timeout_secs(&shell_args("printf ok", 17)), Ok(17));
+}
+
 fn output_text(result: &CborValue) -> &str {
     let CborValue::Map(entries) = result else {
         panic!("expected result map");

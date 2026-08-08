@@ -112,12 +112,12 @@ fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Option<Blocker
 
 /// Returns the effective timeout for a built-in shell invocation.
 ///
-/// Shell providers enforce a 120-second default when the agent omits
+/// Shell providers enforce a 300-second default when the agent omits
 /// `timeout`. This narrow presentation projection retains that declared limit
 /// so the generic duration chip can show elapsed time against the actual
 /// command budget without changing the provider display protocol.
 fn effective_shell_timeout(started: &tau_proto::ToolStarted) -> Option<Duration> {
-    const DEFAULT_TIMEOUT_SECS: u64 = 120;
+    const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
     if !matches!(started.tool_name.as_str(), "shell" | "gpt_shell") {
         return None;

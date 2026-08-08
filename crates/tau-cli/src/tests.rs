@@ -11757,7 +11757,7 @@ fn shell_command_duration_shows_effective_timeout() {
     );
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "gpt_shell rw sleep 300 206/120s ok"));
+    assert!(vt.screen_contains(100, "gpt_shell rw sleep 300 206/300s ok"));
     assert!(vt.screen_contains(100, "gpt_shell rw sleep 400 206/300s ok"));
 }
 
@@ -11864,7 +11864,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     );
     sync(&handle);
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(vt.screen_contains(80, "shell ro sleep 10 3/120s ok"));
+    assert!(vt.screen_contains(80, "shell ro sleep 10 3/300s ok"));
     assert!(vt.screen_contains(80, "1/1"));
 }
 
@@ -11962,7 +11962,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
     );
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "shell rw printf hello 1/120s ok"));
+    assert!(vt.screen_contains(100, "shell rw printf hello 1/300s ok"));
     assert!(
         vt.screen_text(100)
             .iter()
@@ -12557,7 +12557,7 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
         .find(|row| row.contains("shell "))
         .expect("bounded shell header");
     assert!(header.contains('┄'), "{header:?}");
-    assert!(header.contains(" 1/120s ok"), "{header:?}");
+    assert!(header.contains(" 1/300s ok"), "{header:?}");
     assert!(!header.contains(args), "{header:?}");
     assert!(
         vt.screen_text(100).iter().any(|row| row.trim() == payload),
@@ -12572,7 +12572,7 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
         .find(|row| row.contains("shell "))
         .expect("bounded compact shell header");
     assert!(header.contains('┄'), "{header:?}");
-    assert!(header.contains(" 1/120s ok"), "{header:?}");
+    assert!(header.contains(" 1/300s ok"), "{header:?}");
     assert!(
         !vt.screen_text(100).iter().any(|row| row.trim() == payload),
         "compact mode should continue hiding payload bodies"

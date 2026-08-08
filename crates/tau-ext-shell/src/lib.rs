@@ -789,7 +789,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                 "timeout": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                    "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 300"
                 },
                 "cwd": {
                     "type": "string",
@@ -808,7 +808,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             title: Some("Run a command".to_owned()),
             arguments: CborValue::Map(vec![
                 example_field("command", example_text("cargo test -p tau-core")),
-                example_field("timeout", example_int(120)),
+                example_field("timeout", example_int(300)),
             ]),
             note: Some("For file edits, prefer apply_patch when available.".to_owned()),
             subcommand: None,
@@ -834,7 +834,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                    "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 300"
                 },
                 "workdir": {
                     "type": "string",
@@ -853,7 +853,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             title: Some("Run a command".to_owned()),
             arguments: CborValue::Map(vec![
                 example_field("command", example_text("cargo test -p tau-core")),
-                example_field("timeout", example_int(120)),
+                example_field("timeout", example_int(300)),
             ]),
             note: Some("For file edits, prefer apply_patch when available.".to_owned()),
             subcommand: None,
