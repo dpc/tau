@@ -3,8 +3,9 @@
 ## Record justification
 
 Exact-close framing spans typed transcript projection, external and agent
-messages, interactive prompts, hosted-provider results, system-prompt templates,
-and provider assembly, so no one local artifact can own the complete contract.
+messages, interactive prompts, hosted-provider results, and provider assembly,
+while XML-shaped system-prompt catalogs use a distinct lax closing-tag policy;
+no one local artifact can own the complete contract.
 
 Model-facing payload envelopes are exact lexical sentinels, not XML. Before
 framing, the trusted projector normalizes and bounds the complete body, replaces
@@ -15,6 +16,12 @@ or truncation may modify the framed result.
 Replacement is case-sensitive and changes no other text. Opening tags, near
 variants, other envelope families, entity-like text, and Unicode remain literal.
 Dynamic attributes retain their separate validation and escaping rules.
+
+The built-in XML-shaped skill catalog is presentation metadata, not an exact-close
+payload envelope. Its `xml_escape_lax` formatter replaces every literal `</`
+prefix with `&lt;/` and preserves every other byte. It therefore neutralizes
+local, parent, cross-family, and incomplete closing-tag-shaped text without
+escaping ordinary opening tags, ampersands, quotes, entities, or Unicode.
 
 The framed body therefore cannot emit its enclosing exact closing sentinel.
 Nested, cross-family, and delimiter-like payload text does not change enclosing

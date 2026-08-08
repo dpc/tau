@@ -59,8 +59,8 @@ Skills you should always be aware of are listed below, but more skills are likel
 <available_skills>
 {{#each (sort skills by="name")}}
   <skill>
-    <name>{{escape_exact_sentinel_close (escape_exact_sentinel_close (escape_exact_sentinel_close name "</name>" "&lt;/name&gt;") "</skill>" "&lt;/skill&gt;") "</available_skills>" "&lt;/available_skills&gt;"}}</name>
-    <description>{{escape_exact_sentinel_close (escape_exact_sentinel_close (escape_exact_sentinel_close description "</description>" "&lt;/description&gt;") "</skill>" "&lt;/skill&gt;") "</available_skills>" "&lt;/available_skills&gt;"}}</description>
+    <name>{{xml_escape_lax name}}</name>
+    <description>{{xml_escape_lax description}}</description>
   </skill>
 {{/each~}}
 </available_skills>

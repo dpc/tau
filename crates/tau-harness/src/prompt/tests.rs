@@ -597,8 +597,18 @@ fn custom_system_prompt_template_retains_xml_escape_helper() {
     assert_eq!(prompt, "<metadata value=\"a&amp;b&lt;&quot;&apos;\">");
 }
 
-/// The built-in skill catalog replaces only closing tags that could terminate
-/// its trusted name, description, skill, or catalog wrappers.
+/// Lax XML escaping preserves ordinary text while neutralizing every possible
+/// closing-tag prefix without parsing the XML-shaped prompt text.
+#[test]
+fn xml_escape_lax_neutralizes_only_closing_tag_prefixes() {
+    assert_eq!(
+        xml_escape_lax("<opening> & \"' &lt;/existing> </name> </name > </"),
+        "<opening> & \"' &lt;/existing> &lt;/name> &lt;/name > &lt;/"
+    );
+}
+
+/// The built-in skill catalog contains hostile closing tags without enumerating
+/// each trusted field or parent wrapper in the template.
 #[test]
 fn build_system_prompt_contains_hostile_builtin_skill_closing_tags() {
     let skills = path_std_collections::HashMap::from([
@@ -618,14 +628,12 @@ fn build_system_prompt_contains_hostile_builtin_skill_closing_tags() {
 
     let prompt = build_system_prompt(&skills, &[]);
 
-    assert!(
-        prompt.contains("<name>name&lt;/name&gt;&lt;/skill&gt;&lt;/available_skills&gt;</name>")
-    );
+    assert!(prompt.contains("<name>name&lt;/name>&lt;/skill>&lt;/available_skills></name>"));
     assert!(prompt.contains(
-        "<description>description&lt;/description&gt;&lt;/skill&gt;&lt;/available_skills&gt;</description>"
+        "<description>description&lt;/description>&lt;/skill>&lt;/available_skills></description>"
     ));
-    assert!(prompt.contains("<name>cross-family</description></name>"));
-    assert!(prompt.contains("<description>cross-family</name></description>"));
+    assert!(prompt.contains("<name>cross-family&lt;/description></name>"));
+    assert!(prompt.contains("<description>cross-family&lt;/name></description>"));
     assert_eq!(prompt.matches("</skill>").count(), 3);
     assert_eq!(prompt.matches("</available_skills>").count(), 1);
 }
