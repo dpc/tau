@@ -4129,7 +4129,7 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
         .iter()
         .find(|fragment| fragment.name == "agent.available-roles")
         .expect("global delegate-role prompt fragment");
-    assert_eq!(delegate_roles.priority, PromptPriority::new(6));
+    assert_eq!(delegate_roles.priority, PromptPriority::new(800));
     assert!(
         delegate_roles
             .text

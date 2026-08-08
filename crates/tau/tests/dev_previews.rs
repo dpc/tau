@@ -128,6 +128,43 @@ fn previews_are_memory_only_across_success_failure_and_concurrency() {
     assert_no_runtime_pairs(home.path());
 }
 
+/// Ensures `print-system-prompt` exposes the built-in delegate-role catalog
+/// after harness guidance and before the workdir epilogue.
+#[test]
+fn print_system_prompt_places_delegate_roles_late() {
+    let home = TempDir::new().expect("temporary home");
+    std::fs::create_dir_all(home.path().join("work")).expect("work directory");
+
+    let output = preview(
+        &home,
+        None,
+        &["--role", "engineer", "dev", "print-system-prompt"],
+    );
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let prompt = String::from_utf8(output.stdout).expect("UTF-8 system prompt");
+    let catalog_offset = prompt
+        .find("## Available sub-task roles")
+        .expect("delegate role catalog");
+    assert!(
+        prompt.find("# Tau harness").expect("harness heading") < catalog_offset,
+        "prompt diagnostic must retain late role-catalog placement"
+    );
+    assert!(
+        catalog_offset
+            < prompt
+                .find("# Agent identity")
+                .expect("agent identity heading"),
+        "prompt diagnostic must retain the catalog before agent identity"
+    );
+    assert!(
+        catalog_offset
+            < prompt
+                .find("### Shell workdirs")
+                .expect("shell workdir epilogue"),
+        "prompt diagnostic must retain the catalog before the priority-900 workdir epilogue"
+    );
+}
+
 /// Prompt previews omit a conditionally empty shell fragment regardless of how
 /// the extension is enabled, while retaining CLI precedence and the
 /// deterministic fake id.

@@ -1181,17 +1181,18 @@ fn build_system_prompt_ignores_empty_prompt_fragment_sections() {
 
 /// A capability-gated ordinary fragment that renders empty is omitted from
 /// `prompt_fragments`, so custom system templates cannot observe instructions
-/// for tools outside the effective prompt surface.
+/// for tools outside the effective prompt surface and retain the built-in
+/// catalog's late priority metadata when it is visible.
 #[test]
 fn rendered_empty_prompt_fragments_are_omitted_from_custom_templates() {
     let fragments = vec![tau_proto::PromptFragment::new(
         "agent.available-roles",
-        tau_proto::PromptPriority::new(6),
+        tau_proto::PromptPriority::new(800),
         "{{#if (tool_available capabilities.tools \"agent_start\")}}ROLES{{/if}}",
     )];
     let render = |fragments: &[tau_proto::PromptFragment], capabilities| {
         try_build_system_prompt_with_tool_template_context(
-            "{{#each prompt_fragments}}{{name}}={{content}}{{/each}}",
+            "{{#each prompt_fragments}}{{name}}={{content}} priority={{priority}} early={{early}}{{/each}}",
             &path_std_collections::HashMap::new(),
             fragments,
             &[],
@@ -1213,7 +1214,7 @@ fn rendered_empty_prompt_fragments_are_omitted_from_custom_templates() {
                 std::iter::empty::<String>(),
             )
         ),
-        "agent.available-roles=ROLES"
+        "agent.available-roles=ROLES priority=800 early=false"
     );
 }
 

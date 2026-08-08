@@ -502,8 +502,9 @@ fn configured_role_group_reaches_fragment_and_system_template_contexts() {
 }
 
 /// The built-in delegate-role prompt fragment follows the prompt-owned
-/// `agent_start` capability, so every role that can delegate sees the available
-/// role catalog while roles that cannot delegate keep their previous prompt.
+/// `agent_start` capability and its late priority, so every role that can
+/// delegate sees the available role catalog after harness guidance while roles
+/// that cannot delegate keep their previous prompt.
 #[test]
 fn available_delegate_roles_prompt_follows_agent_start_capability() {
     let td = TempDir::new().expect("tempdir");
@@ -530,6 +531,20 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
         )
         .expect("render prompt with agent_start");
     assert!(rendered.contains("## Available sub-task roles"));
+    let catalog_offset = rendered
+        .find("## Available sub-task roles")
+        .expect("delegate role heading");
+    assert!(
+        rendered.find("# Tau harness").expect("harness heading") < catalog_offset,
+        "the role catalog must follow the harness guidance"
+    );
+    assert!(
+        catalog_offset
+            < rendered
+                .find("# Agent identity")
+                .expect("agent identity heading"),
+        "the role catalog must precede the agent identity"
+    );
     let catalog_rows = rendered
         .split_once("## Available sub-task roles")
         .expect("delegate role heading")
@@ -638,6 +653,18 @@ fn first_effective_prompt_with_agent_start_lists_delegate_roles() {
     assert!(prompt.system_prompt.contains(
         "* `engineer` - \"Capable individual contributor. Good default for most tasks.\""
     ));
+    let catalog_offset = prompt
+        .system_prompt
+        .find("## Available sub-task roles")
+        .expect("delegate role heading");
+    assert!(
+        prompt
+            .system_prompt
+            .find("# Tau harness")
+            .expect("harness heading")
+            < catalog_offset,
+        "provider prompt must retain late role-catalog placement"
+    );
 
     h.shutdown().expect("shutdown");
 }

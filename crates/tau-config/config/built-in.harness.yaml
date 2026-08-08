@@ -33,7 +33,7 @@ agents:
   display_name_template: "{{#if task_name_present}}{{task_name}}{{/if}}"
   prompt_fragments:
     - name: agent.available-roles
-      priority: 6
+      priority: 800
       text: |-
         {{#if (tool_available capabilities.tools "agent_start")~}}
         {{#if agent_context.delegate_roles~}}
