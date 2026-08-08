@@ -581,6 +581,45 @@ fn build_system_prompt_xml_escapes_builtin_skill_section() {
     assert!(prompt.contains("<description>use &lt;fast&gt; &quot;mode&quot;</description>"));
 }
 
+/// The built-in skill catalog keeps every entry indented inside its XML-shaped
+/// wrapper without inserting blank lines between sorted entries.
+#[test]
+fn build_system_prompt_indents_builtin_skill_entries_compactly() {
+    let skills = path_std_collections::HashMap::from([
+        (
+            tau_proto::SkillName::from("zeta"),
+            discovered_skill("last skill", true),
+        ),
+        (
+            tau_proto::SkillName::from("alpha"),
+            discovered_skill("first skill", true),
+        ),
+    ]);
+
+    let prompt = build_system_prompt(&skills, &[]);
+    let catalog = prompt
+        .split_once("<available_skills>\n")
+        .expect("built-in skill catalog opens")
+        .1
+        .split_once("</available_skills>")
+        .expect("built-in skill catalog closes")
+        .0;
+
+    assert_eq!(
+        catalog,
+        concat!(
+            "  <skill>\n",
+            "    <name>alpha</name>\n",
+            "    <description>first skill</description>\n",
+            "  </skill>\n",
+            "  <skill>\n",
+            "    <name>zeta</name>\n",
+            "    <description>last skill</description>\n",
+            "  </skill>\n",
+        )
+    );
+}
+
 /// Without a `by` hash, the sort helper sorts the items themselves rather
 /// than assuming object-shaped values with a `name` field.
 #[test]
