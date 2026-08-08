@@ -132,11 +132,15 @@ impl GatewayClient {
     pub(crate) fn acknowledge_delivery(
         &self,
         report_id: &str,
+        session_id: &str,
+        agent_id: &str,
     ) -> Result<GatewaySocketResponse, String> {
         self.request(
             GatewayRequestKind::AcknowledgeDelivery,
             GatewayClientRequest {
                 report_id: Some(report_id.to_owned()),
+                session_id: Some(session_id.to_owned()),
+                agent_id: Some(agent_id.to_owned()),
                 ..GatewayClientRequest::default()
             },
         )
@@ -249,9 +253,9 @@ impl GatewayRequestKind {
 /// High-level gateway request fields.
 #[derive(Default)]
 struct GatewayClientRequest {
-    /// Optional Tau session id.
+    /// Optional Tau session id for route-bound operations.
     session_id: Option<String>,
-    /// Optional Tau agent id.
+    /// Optional Tau agent id for route-bound operations.
     agent_id: Option<String>,
     /// Optional outbound Telegram message body.
     message: Option<String>,
@@ -268,10 +272,10 @@ struct GatewayWireRequest<'a> {
     protocol_version: u32,
     /// Request kind understood by the gateway.
     kind: &'a str,
-    /// Optional Tau session id.
+    /// Optional Tau session id for route-bound operations.
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
-    /// Optional Tau agent id.
+    /// Optional Tau agent id for route-bound operations.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     /// Optional outbound Telegram message body.

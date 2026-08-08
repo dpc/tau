@@ -845,10 +845,10 @@ fn sidecar_heartbeat_replays_pending_delivery_response() {
     );
 }
 
-/// Ensures an expired registration cannot acknowledge a routed delivery even
-/// when no intervening heartbeat or send request pruned its lease.
+/// Ensures a canonical ACK carries its frozen route and remains valid after
+/// that route retires, while a mismatched route cannot mutate durable state.
 #[test]
-fn canonical_ack_prunes_expired_route_before_authorization() {
+fn canonical_ack_after_route_retirement_requires_exact_frozen_route() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
     fixture.register_route(1, "session-alpha", "agent-alpha");
     fixture
@@ -856,32 +856,20 @@ fn canonical_ack_prunes_expired_route_before_authorization() {
         .process_update(update(150, message(7, 10, "routed")))
         .expect("persist routed checkpoint");
     let delivery = fixture.take_deliveries(1).pop().expect("pending delivery");
-    let key = GatewayRegistrationKey {
-        session_id: "session-alpha".to_owned(),
-        agent_id: "agent-alpha".to_owned(),
-    };
-    fixture
-        .gateway
-        .socket_state
-        .registry
-        .lock()
-        .expect("registry lock")
-        .registrations
-        .get_mut(&key)
-        .expect("registered route")
-        .expires_at = Instant::now();
+    fixture.unregister_route(1, "session-alpha", "agent-alpha");
 
-    let error = fixture
-        .gateway
-        .socket_state
-        .acknowledge_delivery(1, delivery.request_id.as_str().to_owned())
-        .expect_err("expired route must not acknowledge delivery");
-
-    assert_eq!(
-        error,
-        "Telegram gateway report does not belong to this sidecar."
+    let mismatched = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "ack_delivery".to_owned(),
+            report_id: Some(delivery.request_id.as_str().to_owned()),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-other".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
     );
-    assert_eq!(fixture.take_deliveries(1).len(), 0);
+    assert_eq!(mismatched["ok"], false);
     assert_eq!(
         fixture
             .gateway
@@ -891,6 +879,28 @@ fn canonical_ack_prunes_expired_route_before_authorization() {
             .expect("durable deliveries lock")
             .len(),
         1
+    );
+
+    let acknowledged = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "ack_delivery".to_owned(),
+            report_id: Some(delivery.request_id.as_str().to_owned()),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert_eq!(acknowledged["ok"], true);
+    assert!(
+        fixture
+            .gateway
+            .socket_state
+            .durable_deliveries
+            .lock()
+            .expect("durable deliveries lock")
+            .is_empty()
     );
 }
 
@@ -915,7 +925,13 @@ fn canonical_ack_advances_durable_mixed_prefix() {
     fixture
         .gateway
         .socket_state
-        .acknowledge_delivery(1, delivery.request_id.as_str().to_owned())
+        .acknowledge_delivery(
+            delivery.request_id.as_str().to_owned(),
+            GatewayRegistrationKey {
+                session_id: "session-alpha".to_owned(),
+                agent_id: "agent-alpha".to_owned(),
+            },
+        )
         .expect("persist acknowledgement");
     fixture.gateway.durable = fixture
         .gateway
@@ -1009,7 +1025,13 @@ fn canonical_ack_save_cuts_have_deterministic_recovery() {
         let error = fixture
             .gateway
             .socket_state
-            .acknowledge_delivery(1, delivery.request_id.as_str().to_owned())
+            .acknowledge_delivery(
+                delivery.request_id.as_str().to_owned(),
+                GatewayRegistrationKey {
+                    session_id: "session-alpha".to_owned(),
+                    agent_id: "agent-alpha".to_owned(),
+                },
+            )
             .expect_err("injected canonical ACK save failure");
         let restored =
             GatewayDurableState::load(&fixture._tempdir.path().join("state.json"), "test-stream")
@@ -1120,8 +1142,8 @@ fn commit_unknown_poison_stops_waiter_after_initial_health_check() {
     assert_eq!(restored.recent_acknowledgements.len(), 1);
 }
 
-/// Ensures a committed ACK remains authorized after its response is dropped,
-/// sidecar reconnection, route reannouncement, and gateway restart.
+/// Ensures a committed exact ACK remains idempotent after its response is
+/// dropped, its route retires, and the gateway restarts.
 #[test]
 fn committed_ack_retry_survives_response_loss_and_restart() {
     let mut fixture = GatewayFixture::new(Some(10), [7]);
@@ -1142,16 +1164,23 @@ fn committed_ack_retry_survives_response_loss_and_restart() {
         GatewaySocketRequest {
             kind: "ack_delivery".to_owned(),
             report_id: Some(report_id.as_str().to_owned()),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
             ..GatewaySocketRequest::default()
         },
     );
     fixture.unregister_route(1, "session-alpha", "agent-alpha");
-    fixture.register_route(2, "session-alpha", "agent-alpha");
     fixture
         .gateway
         .socket_state
-        .acknowledge_delivery(2, report_id.as_str().to_owned())
-        .expect("retry committed ACK after reannouncement");
+        .acknowledge_delivery(
+            report_id.as_str().to_owned(),
+            GatewayRegistrationKey {
+                session_id: "session-alpha".to_owned(),
+                agent_id: "agent-alpha".to_owned(),
+            },
+        )
+        .expect("retry committed ACK after route retirement");
 
     let path = fixture._tempdir.path().join("state.json");
     let restored = GatewayDurableState::load(&path, "test-stream").expect("restart durable state");
@@ -1168,16 +1197,14 @@ fn committed_ack_retry_survives_response_loss_and_restart() {
         Arc::clone(&fixture.gateway.client),
         restarted_store,
     );
-    let now = Instant::now();
-    {
-        let mut registry = restarted_socket.registry.lock().expect("registry lock");
-        registry.hello(3, now);
-        registry
-            .register_agent(3, register_request("session-alpha", "agent-alpha"), now)
-            .expect("reannounce restarted route");
-    }
     restarted_socket
-        .acknowledge_delivery(3, report_id.as_str().to_owned())
+        .acknowledge_delivery(
+            report_id.as_str().to_owned(),
+            GatewayRegistrationKey {
+                session_id: "session-alpha".to_owned(),
+                agent_id: "agent-alpha".to_owned(),
+            },
+        )
         .expect("retry committed ACK after restart");
 }
 

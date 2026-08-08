@@ -108,32 +108,6 @@ impl GatewayDurableStore {
         Ok(state.clone())
     }
 
-    /// Return the exact route authorized to acknowledge a pending or recently
-    /// committed report.
-    pub(super) fn acknowledgement_route(
-        &self,
-        report_id: &TelegramReportId,
-    ) -> Result<Option<GatewayRegistrationKey>, String> {
-        self.ensure_healthy()?;
-        self.pause_after_initial_health_check();
-        let state = self.state.lock().expect("durable state lock");
-        self.ensure_healthy()?;
-        Ok(state
-            .checkpoints
-            .pending_delivery(report_id)
-            .map(|delivery| GatewayRegistrationKey {
-                session_id: delivery.session_id.clone(),
-                agent_id: delivery.agent_id.clone(),
-            })
-            .or_else(|| {
-                state
-                    .recent_acknowledgements
-                    .iter()
-                    .find(|acknowledgement| acknowledgement.report_id == *report_id)
-                    .map(|acknowledgement| acknowledgement.route.clone())
-            }))
-    }
-
     /// Atomically commit one exact canonical ACK and its bounded retry
     /// authorization before returning success.
     pub(super) fn acknowledge_delivery(

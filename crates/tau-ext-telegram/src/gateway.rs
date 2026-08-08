@@ -1489,25 +1489,14 @@ impl GatewaySocketState {
         select_delivery_prefix(&self.generation, &eligible)
     }
 
-    /// Validate route ownership and synchronously persist one canonical ACK.
-    fn acknowledge_delivery(&self, connection_id: u64, report_id: String) -> Result<(), String> {
+    /// Persist one exact canonical ACK without depending on a live route lease.
+    fn acknowledge_delivery(
+        &self,
+        report_id: String,
+        route: GatewayRegistrationKey,
+    ) -> Result<(), String> {
         let report_id = TelegramReportId::from_gateway(report_id)
             .ok_or_else(|| "Telegram gateway report ID is invalid.".to_owned())?;
-        let route = self
-            .durable_store
-            .acknowledgement_route(&report_id)?
-            .ok_or_else(|| "Telegram gateway report is not pending.".to_owned())?;
-        let owns_route = {
-            let mut registry = self.registry.lock().expect("registry lock");
-            registry.prune_expired(Instant::now());
-            registry
-                .registrations
-                .get(&route)
-                .is_some_and(|registration| registration.connection_id == connection_id)
-        };
-        if !owns_route {
-            return Err("Telegram gateway report does not belong to this sidecar.".to_owned());
-        }
         let durable = self
             .durable_store
             .acknowledge_delivery(&report_id, &route)?;
@@ -1857,9 +1846,9 @@ struct GatewaySocketRequest {
     /// `register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, or
     /// `goodbye`.
     kind: String,
-    /// Tau session id for registration requests.
+    /// Tau session id for registration or acknowledgement requests.
     session_id: Option<String>,
-    /// Tau agent id for registration requests.
+    /// Tau agent id for registration or acknowledgement requests.
     agent_id: Option<String>,
     /// Outbound Telegram message body for send requests.
     message: Option<String>,
@@ -2005,8 +1994,16 @@ fn handle_gateway_socket_request(
             let report_id = request
                 .report_id
                 .ok_or_else(|| "telegram gateway request requires `report_id`".to_owned());
+            let session_id = required_request_field(request.session_id, "session_id");
+            let agent_id = required_request_field(request.agent_id, "agent_id");
             socket_result(state, connection_id, || {
-                state.acknowledge_delivery(connection_id, report_id?)
+                state.acknowledge_delivery(
+                    report_id?,
+                    GatewayRegistrationKey {
+                        session_id: session_id?,
+                        agent_id: agent_id?,
+                    },
+                )
             })
         }
         "goodbye" => serde_json::json!({

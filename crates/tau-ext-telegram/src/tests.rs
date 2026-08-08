@@ -924,10 +924,10 @@ fn gateway_delivery_requires_live_local_registration() {
     assert_eq!(delivered.conversation.expect("conversation").stable_id, "1");
 }
 
-/// Ensures gateway mode ignores a partial canonical collision and sends
-/// `ack_delivery` only for the exact configured-publisher echo.
+/// Ensures gateway mode ignores a partial canonical collision and sends an
+/// exact frozen-route ACK after the target agent unloads.
 #[test]
-fn gateway_delivery_ack_requires_exact_canonical_echo() {
+fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("gateway.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
@@ -950,6 +950,24 @@ fn gateway_delivery_ack_requires_exact_canonical_echo() {
         )
         .expect("write hello response");
         stream.flush().expect("flush hello");
+        let mut unregister = String::new();
+        reader
+            .read_line(&mut unregister)
+            .expect("read unregister request");
+        let unregister: serde_json::Value =
+            serde_json::from_str(&unregister).expect("unregister JSON");
+        assert_eq!(unregister["kind"], "unregister_agent");
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "protocol_version": 0,
+                "ok": true,
+                "deliveries": [],
+            })
+        )
+        .expect("write unregister response");
+        stream.flush().expect("flush unregister");
         let mut ack = String::new();
         reader.read_line(&mut ack).expect("read ack");
         *seen_ack_server.lock().expect("seen ack") =
@@ -982,6 +1000,7 @@ fn gateway_delivery_ack_requires_exact_canonical_echo() {
             Some(tau_proto::ExtensionName::parse("std-telegram").expect("publisher"));
         state.registered_agents.insert(agent_id("agent-1"));
     }
+    *ext.gateway.lock().expect("gateway lock") = Some(Arc::clone(&gateway));
     emit_gateway_deliveries(
         &ext.state,
         &ext.output,
@@ -998,15 +1017,29 @@ fn gateway_delivery_ack_requires_exact_canonical_echo() {
         }],
     );
     let report = expect_delivered(&rx);
+    let runtime = TelegramRuntime { ext };
+    handle_live_event_value(
+        &runtime,
+        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            agent_id: agent_id("agent-1"),
+        }),
+    );
     let mut wrong = canonical_delivered(report.clone());
     wrong.message_id = MessageFactId::new("wrong");
-    ext.acknowledge_live_delivery(&wrong);
-    ext.acknowledge_live_delivery(&canonical_delivered(report));
+    runtime.ext.acknowledge_live_delivery(&wrong);
+    runtime
+        .ext
+        .acknowledge_live_delivery(&canonical_delivered(report));
     server.join().expect("fake gateway server");
 
     let ack = seen_ack.lock().expect("seen ack").clone().expect("ack");
     assert_eq!(ack["kind"], "ack_delivery");
     assert_eq!(ack["report_id"], GATEWAY_REPORT_EXACT);
+    assert_eq!(ack["session_id"], "s1");
+    assert_eq!(ack["agent_id"], "agent-1");
 }
 
 /// A heartbeat failure from a stale gateway connection must not clear

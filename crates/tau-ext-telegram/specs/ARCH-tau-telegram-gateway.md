@@ -37,13 +37,14 @@ JSON-line `status` request and persistent sidecar `hello`, `heartbeat`,
 `goodbye` requests up to a small fixed byte limit. It returns bounded status snapshots,
 sidecar lease parameters,
 and pending durable inbound delivery records on sidecar responses;
-`ack_delivery` confirms an exact canonical echo, and `send_message` returns
-bounded operation errors while keeping Telegram destination selection inside the
-gateway. Sidecar registrations are live-only leases: they are removed on explicit
-unregister, goodbye, socket disconnect, heartbeat expiry, or gateway
-restart/reannouncement. Lease loss suppresses delivery but does not delete or
-retarget durable routed checkpoints. The socket is private same-UID local IPC,
-not an authentication boundary;
+`ack_delivery` carries the retained report ID and frozen session/agent route to
+confirm an exact canonical echo, and `send_message` returns bounded operation
+errors while keeping Telegram destination selection inside the gateway. Sidecar
+registrations are live-only leases: they are removed on explicit unregister,
+goodbye, socket disconnect, heartbeat expiry, or gateway restart/reannouncement.
+Lease loss suppresses delivery but does not delete or retarget durable routed
+checkpoints; an exact ACK still retires its frozen checkpoint after lease loss.
+The socket is private same-UID local IPC, not an authentication boundary;
 this MVP bounds request size and closes protocol-error connections but does not attempt
 to defend against all same-user local denial-of-service patterns.
 Successful sidecar operations expose only the oldest delivery prefix whose exact
@@ -60,9 +61,10 @@ and persistent `register_agent`/`unregister_agent`/`heartbeat` requests to the g
 and emits gateway-delivered inbound text as `message.delivered_reported` to its own
 harness. It retains exact correlation before output and sends `ack_delivery`
 only after the configured publisher's matching live canonical
-`message.delivered` echo. The gateway supplies native update/message, numeric sender, and chat
-identity while retaining routing authority. It does not acquire the stream lock,
-check webhooks, or call Telegram
+`message.delivered` echo, including the delivery's frozen route so the ACK can
+succeed after that route retires. The gateway supplies native update/message,
+numeric sender, and chat identity while retaining routing authority. It does not
+acquire the stream lock, check webhooks, or call Telegram
 `getUpdates`; those remain solely in the gateway daemon. Outbound `telegram_send` is
 forwarded over the same socket as `send_message`; the gateway verifies the sidecar-owned
 live registration and sends only to its configured or linked active chat, never to a

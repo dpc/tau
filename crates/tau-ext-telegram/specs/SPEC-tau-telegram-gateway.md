@@ -26,14 +26,17 @@ Socket responses select a bounded, non-destructive prefix for registrations
 owned by that connection. Disconnect, unregister, lease expiry, and process
 restart suppress delivery without deleting or retargeting the checkpoint;
 re-registration replays its exact retained fields. An idempotent `ack_delivery`
-request verifies the current exact route lease, then commits canonical
-acknowledgement and contiguous cursor advancement through the existing
-per-stream state-file transaction before returning success. Poll progress is
-not required. The same transaction retains an oldest-first bounded history of
-128 validated report IDs and exact session/agent routes, without report content,
-so a currently registered exact route can retry after a committed response is
-lost. A lost echo or uncommitted ACK replays the report, while a committed ACK
-whose response is lost remains committed after reconnect or restart.
+request carries the report ID and frozen session/agent route. It accepts only an
+exact matching pending record or recent acknowledgement, without requiring a
+currently live lease, then commits canonical acknowledgement and contiguous cursor
+advancement through the existing per-stream state-file transaction before returning
+success. Poll progress is not required. The same transaction retains an
+oldest-first bounded history of 128 validated report IDs and exact session/agent
+routes, without report content, so the same route can retry after a committed
+response is lost. A lost echo or uncommitted ACK replays the report, while a
+committed ACK whose response is lost remains committed after reconnect or restart.
+An echo that arrives after unregister, disconnect, or lease expiry can still retire
+the frozen checkpoint; a mismatched route cannot mutate it.
 State-save failures before rename restore the prior in-memory transaction.
 Failure after rename but before successful parent-directory sync is
 commit-unknown: the gateway poisons the shared state owner, refuses further

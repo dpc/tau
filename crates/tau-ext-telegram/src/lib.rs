@@ -386,6 +386,8 @@ struct State {
 struct GatewayPendingDelivery {
     /// Gateway connection that supplied the report.
     gateway: Arc<GatewayClient>,
+    /// Session frozen into the durable gateway route.
+    session_id: String,
     /// Exact target agent expected on the canonical fact.
     agent_id: AgentId,
     /// Exact message identity expected on the canonical fact.
@@ -460,6 +462,7 @@ fn emit_gateway_deliveries(
             report_id,
             GatewayPendingDelivery {
                 gateway: Arc::clone(&gateway),
+                session_id: delivery.session_id,
                 agent_id,
                 message_id,
                 publisher_name,
@@ -802,8 +805,13 @@ impl Extension {
                 return;
             }
             let gateway = Arc::clone(&pending.gateway);
+            let session_id = pending.session_id.clone();
+            let agent_id = pending.agent_id.clone();
             drop(state);
-            if gateway.acknowledge_delivery(report_id.as_str()).is_ok() {
+            if gateway
+                .acknowledge_delivery(report_id.as_str(), &session_id, agent_id.as_ref())
+                .is_ok()
+            {
                 self.state
                     .lock()
                     .gateway_pending_deliveries

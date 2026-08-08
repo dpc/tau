@@ -16,7 +16,8 @@ response conformance uses the real gateway client to cover
 the 32-record maximum response prefix, both send and heartbeat producers, and
 repeated exact replay before ACK. Gateway tests force mixed-prefix ordering,
 restart/re-registration replay, ACK progress independent of long polling,
-lease-expiry authorization, dropped ACK responses, bounded retry state,
+late ACK after route retirement, mismatched-route rejection, dropped ACK
+responses, bounded retry state,
 corrupt typed IDs, concurrent update/ACK commit, and deterministic routed/ACK
 state-save cuts at write, file sync, rename, and parent-directory sync. These
 assert rollback before installation and fail-stop restart recovery after

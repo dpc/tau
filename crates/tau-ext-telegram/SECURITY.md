@@ -53,12 +53,16 @@ make message text trustworthy or grant Tau tool authority.
   operator-supervised daemon. It persists routed reports before bounded,
   non-destructive socket exposure. Only an exact live canonical echo from the
   configured sidecar publisher causes `ack_delivery`; lease loss and restart
-  replay the retained route rather than deleting or recomputing it. Non-routed
-  updates commit only after required replies and mutations succeed. The same
-  state-file transaction commits an ACK, advances its contiguous prefix, and
-  retains one of 128 content-free report-ID/route retry authorizations. Replies
-  and reports may duplicate after crashes or lost acknowledgements; no remote
-  effect is exactly once. State-save failures before rename roll back. A
+  replay the retained route rather than deleting or recomputing it. The ACK
+  includes the persisted report ID and frozen route, so the gateway accepts only
+  that exact durable pair even after the live lease disappears; this same-UID
+  local protocol does not treat lease state as an authentication boundary.
+  Non-routed updates commit only after required replies and mutations succeed.
+  The same state-file transaction commits an ACK, advances its contiguous
+  prefix, and retains one of 128 content-free report-ID/route retry
+  authorizations. Replies and reports may duplicate after crashes or lost
+  acknowledgements; no remote effect is exactly once. State-save failures before
+  rename roll back. A
   parent-directory sync failure after rename retains the installed candidate,
   poisons the shared state owner, refuses further state operations, and requires
   gateway restart rather than claiming rollback. Review

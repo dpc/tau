@@ -121,7 +121,10 @@ that cannot fit by itself is rejected without reflecting its content in the
 diagnostic. Canonical ACK and contiguous cursor advancement commit together in
 the same per-stream state file before the socket returns success. That file
 retains the 128 most recent content-free report-ID/route pairs so a reconnecting
-sidecar can safely retry an ACK whose successful response was lost.
+sidecar can safely retry an ACK whose successful response was lost. An ACK
+carries the report ID and its frozen `(session_id, agent_id)` route; it can
+retire that exact record after unregister, disconnect, or lease expiry, but a
+mismatched route fails without changing durable state.
 Failures before state-file installation roll back cleanly. If parent-directory
 sync fails after rename, the gateway marks the outcome commit-unknown, refuses
 further state operations, and requires restart instead of claiming rollback.
@@ -169,7 +172,9 @@ generic `tool_prefix` when configured), tracks the local session and registered 
 live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
 deliveries locally as `message.delivered_reported`. The sidecar sends
 `ack_delivery` only after the configured publisher receives a live canonical
-`message.delivered` with the exact report ID, target, and message identity.
+`message.delivered` with the exact report ID, target, and message identity. It
+includes that delivery's frozen route, so this final ACK remains valid when the
+matching agent has already unloaded.
 Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram
