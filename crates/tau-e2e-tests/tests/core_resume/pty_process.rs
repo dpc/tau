@@ -339,25 +339,7 @@ impl PtyProcess {
         deadline: Instant,
         is_complete: impl Fn(&str) -> bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let (lock, wake) = &*self.capture;
-        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
-        loop {
-            let frame = normalized_screen(&capture.parser);
-            if generation < capture.generation && is_complete(&frame) {
-                return Ok(frame);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() || capture.closed {
-                return Err(format!(
-                    "timed out waiting for complete post-resize frame; last frame:\n{frame}"
-                )
-                .into());
-            }
-            let (next, _) = wake
-                .wait_timeout(capture, remaining)
-                .map_err(|_| "PTY capture poisoned")?;
-            capture = next;
-        }
+        wait_for_complete_frame_after(&self.capture, generation, deadline, is_complete)
     }
 
     /// Returns styles from the unique selected-agent status row.
@@ -583,6 +565,33 @@ impl PtyProcess {
         std::fs::write(&artifacts.raw, &capture.raw)?;
         std::fs::write(&artifacts.normalized, normalized_screen(&capture.parser))?;
         Ok(())
+    }
+}
+
+fn wait_for_complete_frame_after(
+    capture: &Arc<(Mutex<Capture>, Condvar)>,
+    generation: PtyReadGeneration,
+    deadline: Instant,
+    is_complete: impl Fn(&str) -> bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let (lock, wake) = &**capture;
+    let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+    loop {
+        let frame = normalized_screen(&capture.parser);
+        if generation < capture.generation && is_complete(&frame) {
+            return Ok(frame);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || capture.closed {
+            return Err(format!(
+                "timed out waiting for complete newer frame; last frame:\n{frame}"
+            )
+            .into());
+        }
+        let (next, _) = wake
+            .wait_timeout(capture, remaining)
+            .map_err(|_| "PTY capture poisoned")?;
+        capture = next;
     }
 }
 
@@ -869,6 +878,79 @@ fn bytewise_capture_latches_pending_before_backspace_overwrite() {
         |_| false,
     );
     assert!(capture.tool_violation.is_some());
+}
+
+/// Ensures complete-frame waiting rejects an idle-only redraw before accepting
+/// the subsequent redraw with the selected-agent status row.
+#[test]
+fn complete_frame_wait_rejects_idle_only_generation() {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(
+        "read first; \
+         printf 'This active-auto agent is idle'; \
+         read second; \
+         printf '\\r\\n@worker $.00/$.00'; \
+         read third",
+    );
+    let mut process = PtyProcess::spawn(command, false, None).expect("spawn fragmented redraw");
+    let mut writer = process
+        .writer
+        .as_ref()
+        .expect("PTY writer")
+        .try_clone()
+        .expect("clone PTY writer");
+    let before_idle = process.read_generation().expect("read initial generation");
+    let capture = Arc::clone(&process.capture);
+    let (result_tx, result_rx) = mpsc::channel();
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = wait_for_complete_frame_after(
+                &capture,
+                before_idle,
+                Instant::now() + Duration::from_secs(1),
+                |frame| {
+                    frame.contains("This active-auto agent is idle")
+                        && frame.lines().any(|line| line.starts_with("@worker "))
+                },
+            )
+            .map_err(|error| error.to_string());
+            result_tx.send(result).expect("return complete frame");
+        });
+        writer.write_all(b"first\r").expect("release idle redraw");
+        writer.flush().expect("flush idle redraw release");
+        process
+            .wait_for(
+                "This active-auto agent is idle",
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("observe idle-only redraw");
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        writer
+            .write_all(b"second\r")
+            .expect("release selected status redraw");
+        writer
+            .flush()
+            .expect("flush selected status redraw release");
+        let frame = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("complete frame result")
+            .expect("complete selected status frame");
+        assert!(frame.contains("This active-auto agent is idle"));
+        assert!(frame.lines().any(|line| line.starts_with("@worker ")));
+        writer
+            .write_all(b"third\r")
+            .expect("release selected status process");
+        writer
+            .flush()
+            .expect("flush selected status process release");
+    });
+    process
+        .reap(Duration::from_secs(1))
+        .expect("reap redraw process");
 }
 
 /// Ensures an armed near-max chunk honors a cooperative mid-chunk stop while

@@ -243,8 +243,12 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         return Err("peer repaint changed the themed UI's stable-row style".into());
     }
 
+    let before_worker_switch = second.read_generation()?;
     second.send_line(&format!(":agent switch {}", identities.worker))?;
-    let second_worker_wide = second.wait_for("This active-auto agent is idle", deadline)?;
+    let second_worker_wide =
+        second.wait_for_frame_after(before_worker_switch, deadline, |frame| {
+            assert_worker_size_projection(frame, &identities.worker, &identities).is_ok()
+        })?;
     let second_worker_projection =
         assert_worker_size_projection(&second_worker_wide, &identities.worker, &identities)?;
     let second_worker_style = second.marker_styles(identities.worker.as_str())?;
