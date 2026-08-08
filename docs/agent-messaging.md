@@ -139,8 +139,8 @@ message({"recipient_id":"&01JZ...","message":"Please compare this with your sess
 The target session chooses one eligible receiving agent, preferring idle over
 running and least-recently routed then agent id. A busy eligible agent is reused;
 sending to a session is never enumeration or broadcast. Success returns the
-resolved canonical `session/agent` address and whether it was started. If no
-eligible agent exists, the target walks roles with
+resolved canonical `session/agent` address and delivery status. If no eligible
+agent exists, the target walks roles with
 `inter_session_auto_start` in deterministic configured order, skipping disabled
 or unavailable roles/models. Otherwise sending to the session fails. Multiple
 receiving roles may span role groups; concurrent live sends coalesce onto one

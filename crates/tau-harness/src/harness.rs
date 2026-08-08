@@ -4617,7 +4617,7 @@ impl Harness {
                     return Ok(());
                 }
                 match command.result {
-                    Ok((recipient_id, started)) => {
+                    Ok((recipient_id, _started)) => {
                         if command.publish_sent {
                             self.publish_for_agent_from(
                                 &command.conversation_id,
@@ -4650,10 +4650,6 @@ impl Harness {
                                         "{}/{}",
                                         command.recipient_session_id, recipient_id
                                     )),
-                                ),
-                                (
-                                    tau_proto::CborValue::Text("started".to_owned()),
-                                    tau_proto::CborValue::Bool(started),
                                 ),
                             ]),
                             None,

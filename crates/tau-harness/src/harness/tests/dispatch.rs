@@ -31602,45 +31602,95 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     h.shutdown().expect("shutdown");
 }
 
-/// A successful asynchronous external-message completion publishes the deferred
-/// sender projection and completes the original tool call.
+/// Cross-session message successes hide bare-recipient reuse and auto-start
+/// mechanics while retaining the unambiguous delivery status and recipient.
 #[test]
-fn external_message_success_completion_publishes_sent_projection_and_tool_result() {
+fn external_message_success_results_hide_bare_recipient_start_state() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let call_id: tau_proto::ToolCallId = "external-message-success-call".into();
-    h.tool_agents.insert(call_id.clone(), cid.clone());
+    let completions = [
+        (
+            "external-message-reused-call",
+            "delivered-reused-message",
+            "reused_recipient",
+            false,
+        ),
+        (
+            "external-message-auto-started-call",
+            "delivered-auto-started-message",
+            "auto_started_recipient",
+            true,
+        ),
+    ];
 
-    h.handle_harness_command(
-        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
-            crate::event::ExternalMessageToolCompletedCommand {
-                _permit: None,
-                conversation_id: cid,
-                session_generation: h.current_session_generation,
-                call_id: call_id.clone(),
-                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
-                tool_type: tau_proto::ToolType::Function,
-                result: Ok((crate::parse_agent_id("recipient_agent"), false)),
-                details: CborValue::Null,
-                auth_message_id: tau_proto::AgentMessageId::parse("delivered-message")
-                    .expect("test identifier must satisfy its grammar"),
-                publish_sent: true,
-                sender_id: crate::parse_agent_id("sender_agent"),
-                recipient_session_id: test_session_id("other-session"),
-                kind: tau_proto::AgentMessageKind::Message,
-                message: "delivered".to_owned(),
-            },
-        )),
-    )
-    .expect("handle completion");
+    for (call_id, message_id, recipient_id, started) in completions {
+        let call_id: tau_proto::ToolCallId = call_id.into();
+        h.tool_agents.insert(call_id.clone(), cid.clone());
+        h.handle_harness_command(
+            path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+                crate::event::ExternalMessageToolCompletedCommand {
+                    _permit: None,
+                    conversation_id: cid.clone(),
+                    session_generation: h.current_session_generation,
+                    call_id,
+                    tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+                    tool_type: tau_proto::ToolType::Function,
+                    result: Ok((crate::parse_agent_id(recipient_id), started)),
+                    details: CborValue::Null,
+                    auth_message_id: tau_proto::AgentMessageId::parse(message_id)
+                        .expect("test identifier must satisfy its grammar"),
+                    publish_sent: true,
+                    sender_id: crate::parse_agent_id("sender_agent"),
+                    recipient_session_id: test_session_id("other-session"),
+                    kind: tau_proto::AgentMessageKind::Message,
+                    message: "delivered".to_owned(),
+                },
+            )),
+        )
+        .expect("handle completion");
+    }
 
-    assert_eq!(session_agent_message_sent_events(&h).len(), 1);
-    assert!(
-        event_log_events(&h)
-            .into_iter()
-            .any(|event| matches!(event, Event::ToolResult(result) if result.call_id == call_id))
+    let results = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ToolResult(result) => Some((result.call_id, result.result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(session_agent_message_sent_events(&h).len(), 2);
+    assert_eq!(
+        results,
+        vec![
+            (
+                "external-message-reused-call".into(),
+                CborValue::Map(vec![
+                    (
+                        CborValue::Text("status".to_owned()),
+                        CborValue::Text("Message sent".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("recipient".to_owned()),
+                        CborValue::Text("other-session/reused_recipient".to_owned()),
+                    ),
+                ]),
+            ),
+            (
+                "external-message-auto-started-call".into(),
+                CborValue::Map(vec![
+                    (
+                        CborValue::Text("status".to_owned()),
+                        CborValue::Text("Message sent".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("recipient".to_owned()),
+                        CborValue::Text("other-session/auto_started_recipient".to_owned()),
+                    ),
+                ]),
+            ),
+        ],
+        "reused and auto-created bare recipients must produce the same unambiguous success shape"
     );
 
     h.shutdown().expect("shutdown");

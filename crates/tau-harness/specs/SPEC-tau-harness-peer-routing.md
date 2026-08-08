@@ -13,7 +13,9 @@ least-recently-routed then agent id; busy eligible agents are reused. If none
 exists, roles with effective `inter_session_auto_start` are checked in
 deterministic configured role order, skipping unavailable roles and models.
 Absence or unavailability of a grant fails without spawn. The result reports the
-resolved recipient and whether this delivery started it.
+resolved recipient. Successful model tool results report only delivery status and
+that resolved recipient; they do not expose recipient selection or auto-start
+mechanics.
 
 Remote routing uses cooperative same-UID Tau IPC. Callback correlation proves
 that the claimed sender harness owns a matching live pending request and binds
