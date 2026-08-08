@@ -168,3 +168,10 @@ shell syntax, wrapper argv, environment, `PATH`, or resolved executables. Denial
 errors show the typed configured command matcher/workdir pairs, so patterns must
 not contain secrets. The fixed `rg` subprocess behind `grep` and unrelated
 subprocess systems are not covered.
+
+When the allowlist is present, the shell prompt also identifies command
+enforcement and lists typed `command_glob`/`command_regex` plus `workdir`
+selector pairs. Both selectors in one pair must match. This presentation sorts
+and de-duplicates matching entries without changing enforcement; an empty list
+states `none (all shell commands are denied)`. Selector strings use JSON
+escaping, including brace escapes, so glob syntax remains literal prompt text.

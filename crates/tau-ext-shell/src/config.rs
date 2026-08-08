@@ -4,7 +4,8 @@ mod shell_allowlist;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path as path_std_path;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -129,6 +130,33 @@ impl Default for ShellConfig {
 }
 
 impl ShellConfig {
+    /// Returns the model-visible description of the effective allowlist when
+    /// command enforcement is enabled.
+    ///
+    /// The rendered selector set deliberately preserves matcher types while
+    /// sorting and de-duplicating authored rules. Enforcement retains its
+    /// authored rule vector unchanged.
+    pub(crate) fn allowlist_prompt_fragment(&self) -> Option<String> {
+        let rules = self.allowlist.as_ref()?;
+        let selectors = rules
+            .iter()
+            .map(ShellAllowRule::prompt_selector)
+            .collect::<BTreeSet<_>>();
+        let mut fragment = String::from(
+            "\n\n### Shell command allowlist\n\n\
+             Shell command enforcement is enabled. A raw shell command and its \
+             canonical effective workdir must both match one selector pair:",
+        );
+        if selectors.is_empty() {
+            fragment.push_str("\n- none (all shell commands are denied)");
+        } else {
+            for selector in selectors {
+                let _ = write!(fragment, "\n- {selector}");
+            }
+        }
+        Some(fragment)
+    }
+
     /// Authorize one submitted shell string in its effective cwd.
     ///
     /// Returns `None` without touching the filesystem when no allowlist is

@@ -129,6 +129,14 @@ process spawn. It does not inspect the configured shell/wrapper, environment,
 command matcher with its paired workdir so an agent can choose a permitted command.
 Fixed internal subprocesses such as the `rg` used by `grep` do not participate.
 
+When the allowlist is present, the shell-owned prompt fragment also declares
+that enforcement is enabled and lists the effective typed command/workdir
+selector pairs. The list sorts and de-duplicates presentation entries but does
+not alter authored-rule matching. It says `none (all shell commands are denied)`
+for an explicit empty allowlist. Omission leaves the existing workdir fragment
+unchanged. Selector strings use JSON escaping, including brace escapes, so
+authored glob syntax remains literal prompt content.
+
 For harness-routed `!`/`!!` work, the extension echoes the private command route
 and immutable request fields through transient
 `shell.command_progress_reported` / `shell.command_finished_reported` events.

@@ -165,6 +165,7 @@ impl ShellRuntime {
         tool_prefix: Option<tau_proto::ToolNamePrefix>,
         mut cfg: ExtConfig,
     ) -> tau_client::ClientResult<()> {
+        let previous_allowlist_prompt = self.config.shell.allowlist_prompt_fragment();
         if cfg.working_directory.is_none() {
             cfg.working_directory = self.config.working_directory.clone();
         }
@@ -200,6 +201,14 @@ impl ShellRuntime {
                     }),
                     prompt_fragment: None,
                 })?;
+        }
+        if previous_allowlist_prompt != self.config.shell.allowlist_prompt_fragment() {
+            self.send(HarnessInputMessage::emit_with_persist(
+                Event::ExtPromptFragmentPublish(tau_proto::ExtPromptFragmentPublish {
+                    fragment: crate::shell_workdir_prompt_fragment(&self.config.shell),
+                }),
+                false,
+            ))?;
         }
         Ok(())
     }

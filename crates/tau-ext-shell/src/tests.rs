@@ -2937,6 +2937,10 @@ fn startup_registers_shell_workdir_prompt_fragment() {
                 assert!(template.contains("later tool turn"));
                 assert!(template.contains("sibling calls have no workdir-first ordering"));
                 assert!(template.contains("{{value.label}}_workdir"));
+                assert!(
+                    !template.contains("### Shell command allowlist"),
+                    "disabled enforcement must leave the established fragment unchanged"
+                );
                 found_fragment = true;
             }
             _ => {}
@@ -2948,6 +2952,43 @@ fn startup_registers_shell_workdir_prompt_fragment() {
     );
     assert!(found_fragment, "expected shell cwd prompt fragment publish");
     assert!(!saw_tool_fragment, "cwd must not be attached to any tool");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// Ensures configured command enforcement replaces the startup fragment with
+/// the effective selector pairs that the harness projects into agent prompts.
+#[test]
+fn configured_allowlist_publishes_effective_prompt_fragment() {
+    let workdir = TempDir::new().expect("workdir");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_shell_regex_allowlist_config(
+        &mut writer,
+        vec![(
+            workdir.path().to_str().expect("UTF-8 workdir"),
+            r"printf allowed",
+        )],
+    );
+
+    let Event::ExtPromptFragmentPublish(publish) = reader
+        .read_event()
+        .expect("read configured prompt fragment")
+        .expect("configured prompt fragment")
+    else {
+        panic!("expected configured prompt fragment publication");
+    };
+    assert_eq!(publish.fragment.name, "shell.workdir");
+    let template = publish.fragment.template.as_str();
+    assert!(template.contains("### Shell command allowlist"));
+    assert!(template.contains("canonical effective workdir must both match one selector pair"));
+    assert!(template.contains(&format!(
+        r#"command_regex: "printf allowed"; workdir: "{}""#,
+        workdir.path().display()
+    )));
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -5970,6 +6011,13 @@ fn model_shell_surfaces_enforce_allowlist_before_spawn() {
             r"printf allowed",
         )],
     );
+    let Event::ExtPromptFragmentPublish(_) = reader
+        .read_event()
+        .expect("read configured prompt fragment")
+        .expect("configured prompt fragment")
+    else {
+        panic!("expected configured prompt fragment publication");
+    };
 
     for (call_id, tool_name, directory_field) in [
         ("deny-generic", SHELL_TOOL_NAME, "cwd"),

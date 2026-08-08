@@ -247,6 +247,15 @@ environment, `PATH`, or resolved executables; fixed internal subprocesses such
 as `grep`'s `rg` are excluded. This is a best-effort guardrail, not a sandbox or
 security boundary.
 
+When `allowlist` is present, core-shell also adds its effective typed
+`command_glob`/`command_regex` and `workdir` selector pairs to the model's
+system prompt. The prompt sorts and de-duplicates equivalent presentation
+entries, but enforcement still evaluates the authored rules as configured.
+Both selectors in one displayed pair must match. An explicit empty list renders
+`none (all shell commands are denied)`; omission leaves the existing shell
+workdir guidance unchanged. Selector strings use JSON escaping, including
+`\u007b` and `\u007d` for braces, so patterns remain literal prompt content.
+
 Configured extension processes are trusted local executables with the user's OS
 authority. Tau limits their protocol authority and injects only declared
 Tau-managed secrets, but it does not make them an operating-system sandbox. See

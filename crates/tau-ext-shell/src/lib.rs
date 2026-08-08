@@ -978,7 +978,7 @@ impl tau_client::TauExtension for ShellExtension {
         builder
             .register_context_provider()
             .register_session_context_provider()
-            .publish_prompt_fragment(shell_workdir_prompt_fragment())
+            .publish_prompt_fragment(shell_workdir_prompt_fragment(&self.initial_config.shell))
             .publish_actions(shell_action_schema())
             .on_live::<tau_proto::ToolCancelRequest>(|cx| {
                 cx.state
@@ -2567,23 +2567,27 @@ fn publish_agent_discovery_snapshot_for(
     }
 }
 
-fn shell_workdir_prompt_fragment() -> PromptFragment {
+fn shell_workdir_prompt_fragment(shell: &config::ShellConfig) -> PromptFragment {
+    let mut template = String::from(
+        "{{#if agent_context.workdir}}### Shell workdirs\n\nEach shell extension instance \
+         has its own persistent workdir; there is no global shell cwd.\n\
+         {{#each agent_context.workdir}}- {{#if (eq value.label \"default\")}}default shell \
+         tools (`workdir`){{else}}`{{value.label}}_*` shell tools \
+         (`{{value.label}}_workdir`){{/if}}: `{{value.path}}` \
+         [{{value.status}}]\n{{/each}}\nNormally set the matching workdir tool to the project \
+         root before project work. It sets the cwd/base for later shell and filesystem calls \
+         in that same instance. The cwd can select configured directory-scoped wrappers, \
+         notably `direnv exec .`, and affect other cwd-sensitive wrappers/tools. After \
+         changing it, make dependent calls only in a later tool turn after success; sibling \
+         calls have no workdir-first ordering.{{/if}}",
+    );
+    if let Some(allowlist) = shell.allowlist_prompt_fragment() {
+        template.push_str(&allowlist);
+    }
     PromptFragment::new(
         "shell.workdir",
         PromptPriority::new(900),
-        PromptContent::new(
-            "{{#if agent_context.workdir}}### Shell workdirs\n\nEach shell extension instance \
-             has its own persistent workdir; there is no global shell cwd.\n\
-             {{#each agent_context.workdir}}- {{#if (eq value.label \"default\")}}default shell \
-             tools (`workdir`){{else}}`{{value.label}}_*` shell tools \
-             (`{{value.label}}_workdir`){{/if}}: `{{value.path}}` \
-             [{{value.status}}]\n{{/each}}\nNormally set the matching workdir tool to the project \
-             root before project work. It sets the cwd/base for later shell and filesystem calls \
-             in that same instance. The cwd can select configured directory-scoped wrappers, \
-             notably `direnv exec .`, and affect other cwd-sensitive wrappers/tools. After \
-             changing it, make dependent calls only in a later tool turn after success; sibling \
-             calls have no workdir-first ordering.{{/if}}",
-        ),
+        PromptContent::new(template),
     )
 }
 

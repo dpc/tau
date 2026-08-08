@@ -101,6 +101,27 @@ impl ShellAllowRule {
             self.command_matcher.field_name()
         );
     }
+
+    /// Renders the typed command and workdir selectors as one compact,
+    /// deterministic prompt-list entry that remains literal Handlebars template
+    /// content.
+    pub(super) fn prompt_selector(&self) -> String {
+        let command = prompt_json_string(self.command_matcher.pattern());
+        let workdir = prompt_json_string(&self.workdir);
+        format!(
+            "{}: {command}; workdir: {workdir}",
+            self.command_matcher.field_name()
+        )
+    }
+}
+
+/// Serializes one selector as a JSON string while escaping braces so authored
+/// glob syntax cannot become a Handlebars expression in the prompt template.
+fn prompt_json_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .expect("serializing a string to JSON cannot fail")
+        .replace('{', r"\u007b")
+        .replace('}', r"\u007d")
 }
 
 /// Strict authored representation of one allowlist rule.

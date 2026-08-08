@@ -15,6 +15,122 @@ fn absent_allowlist_does_not_touch_or_restrict_the_workdir() {
     );
 }
 
+/// Ensures omitted command enforcement preserves the existing shell prompt
+/// without an allowlist declaration.
+#[test]
+fn absent_allowlist_omits_the_prompt_fragment() {
+    assert_eq!(ShellConfig::default().allowlist_prompt_fragment(), None);
+}
+
+/// Ensures an enabled allowlist renders its typed command selectors and paired
+/// canonical-workdir selectors rather than claiming they are literal commands.
+#[test]
+fn allowlist_prompt_lists_typed_selector_pairs() {
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [
+            {
+                "workdir": "/srv/project/**",
+                "command": "cargo *"
+            },
+            {
+                "workdir": "/srv/project",
+                "command_regex": "jj (?:log|show)"
+            }
+        ]
+    }))
+    .expect("parse allowlist");
+
+    assert_eq!(
+        config.allowlist_prompt_fragment(),
+        Some(
+            "\n\n### Shell command allowlist\n\n\
+             Shell command enforcement is enabled. A raw shell command and its \
+             canonical effective workdir must both match one selector pair:\n\
+             - command_glob: \"cargo *\"; workdir: \"/srv/project/**\"\n\
+             - command_regex: \"jj (?:log|show)\"; workdir: \"/srv/project\""
+                .to_owned()
+        )
+    );
+}
+
+/// Ensures an explicit empty allowlist states the total command denial instead
+/// of making an enabled guardrail appear unrestricted.
+#[test]
+fn empty_allowlist_prompt_states_that_all_commands_are_denied() {
+    let config: ShellConfig =
+        serde_json::from_value(serde_json::json!({ "allowlist": [] })).expect("parse allowlist");
+
+    assert_eq!(
+        config.allowlist_prompt_fragment(),
+        Some(
+            "\n\n### Shell command allowlist\n\n\
+             Shell command enforcement is enabled. A raw shell command and its \
+             canonical effective workdir must both match one selector pair:\n\
+             - none (all shell commands are denied)"
+                .to_owned()
+        )
+    );
+}
+
+/// Ensures prompt presentation has stable set ordering while execution retains
+/// the configured authored-rule order and duplicates.
+#[test]
+fn allowlist_prompt_sorts_and_deduplicates_selector_pairs() {
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [
+            {
+                "workdir": "/srv/z",
+                "command_regex": "z"
+            },
+            {
+                "workdir": "/srv/a",
+                "command": "a"
+            },
+            {
+                "workdir": "/srv/z",
+                "command_regex": "z"
+            }
+        ]
+    }))
+    .expect("parse allowlist");
+
+    let prompt = config
+        .allowlist_prompt_fragment()
+        .expect("enabled allowlist has a prompt fragment");
+    assert_eq!(prompt.matches("command_regex: \"z\"").count(), 1);
+    assert!(
+        prompt.find("command_glob: \"a\"").expect("glob selector")
+            < prompt.find("command_regex: \"z\"").expect("regex selector")
+    );
+}
+
+/// Ensures valid glob braces remain the exact JSON-decoded selector while
+/// escaping Handlebars delimiters before the selector reaches prompt assembly.
+#[test]
+fn allowlist_prompt_escapes_handlebars_delimiters_in_glob_selectors() {
+    let config: ShellConfig = serde_json::from_value(serde_json::json!({
+        "allowlist": [{
+            "workdir": "/srv/project",
+            "command": "{{cargo,jj}} *"
+        }]
+    }))
+    .expect("parse nested-brace glob");
+
+    let prompt = config
+        .allowlist_prompt_fragment()
+        .expect("enabled allowlist has a prompt fragment");
+    let selector = r#""\u007b\u007bcargo,jj\u007d\u007d *""#;
+    assert!(prompt.contains(&format!("command_glob: {selector}")));
+    assert_eq!(
+        serde_json::from_str::<String>(selector).expect("selector JSON"),
+        "{{cargo,jj}} *"
+    );
+    assert!(
+        !prompt.contains("{{"),
+        "selectors must stay literal when appended to a Handlebars template"
+    );
+}
+
 /// Ensures command and workdir matchers bind as one conjunctive rule rather
 /// than combining halves from different entries.
 #[test]
