@@ -5,6 +5,10 @@ use crate::{
     event as path_crate_event, event_log as path_crate_event_log, harness as path_crate_harness,
 };
 
+fn session_id(value: &str) -> tau_proto::SessionId {
+    tau_proto::SessionId::parse(value).expect("test session id")
+}
+
 fn wait_for_socket(sock: &Path) {
     let started = Instant::now();
     while !sock.exists() {
@@ -155,6 +159,7 @@ fn ephemeral_harness_rejects_session_scoped_extension_data() {
         .run_extension_data_request(
             &crate::test_connection_id(&provider_connection),
             tau_proto::ExtensionDataScope::Session,
+            &h.current_session_id,
             tau_proto::ExtensionDataRequestOp::WriteFile {
                 path: tau_proto::ExtensionDataPath::from("notes.txt"),
                 contents: b"secret-ish session data".to_vec(),
@@ -176,6 +181,108 @@ fn ephemeral_harness_rejects_session_scoped_extension_data() {
     );
 }
 
+/// Ensures a stale Session-scope target fails with the typed mismatch before
+/// even a read-like operation can create or chmod the selected extension root.
+#[test]
+fn session_extension_data_mismatch_rejects_before_root_selection() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let h = quiet_provider_harness(&sp).expect("harness");
+    let provider_connection = h
+        .extension_connection_id("provider")
+        .expect("provider connection")
+        .to_owned();
+
+    let error = h
+        .run_extension_data_request(
+            &crate::test_connection_id(&provider_connection),
+            tau_proto::ExtensionDataScope::Session,
+            &session_id("stale-session"),
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::from(""),
+            },
+        )
+        .expect_err("stale session target must fail");
+
+    assert_eq!(
+        error.kind,
+        tau_proto::ExtensionDataErrorKind::SessionMismatch
+    );
+    assert_eq!(
+        error.message,
+        "session target does not match the current session"
+    );
+    assert!(
+        !tau_config::settings::sessions_dir_of(&sp)
+            .join("stale-session")
+            .exists()
+    );
+    assert!(
+        !tau_config::settings::sessions_dir_of(&sp)
+            .join(h.current_session_id.as_str())
+            .join("ext")
+            .exists(),
+        "mismatch must fail before selecting or creating the current root"
+    );
+}
+
+/// Ensures an omitted wire target falls back to the frame-admission session
+/// across rollover, while an explicit target takes precedence over that
+/// fallback.
+#[test]
+fn session_extension_data_uses_explicit_or_frame_admission_target() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let provider_connection = crate::test_connection_id(
+        h.extension_connection_id("provider")
+            .expect("provider connection"),
+    );
+    let old_admission = h.current_extension_frame_admission();
+    h.switch_session(session_id("s2"), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    let request = |request_id: &str, expected_session_id: Option<tau_proto::SessionId>| {
+        tau_proto::HarnessInputMessage::ExtensionDataRequest(tau_proto::ExtensionDataRequest {
+            request_id: request_id.to_owned(),
+            scope: tau_proto::ExtensionDataScope::Session,
+            expected_session_id,
+            op: tau_proto::ExtensionDataRequestOp::AppendFile {
+                path: tau_proto::ExtensionDataPath::from("log"),
+                contents: request_id.as_bytes().to_vec(),
+            },
+        })
+    };
+
+    h.handle_extension_message_with_admission(
+        &provider_connection,
+        request("implicit-stale", None),
+        old_admission.clone(),
+    )
+    .expect("stale request returns an operation result");
+    h.handle_extension_message_with_admission(
+        &provider_connection,
+        request("explicit-current", Some(session_id("s2"))),
+        old_admission,
+    )
+    .expect("explicitly current request succeeds");
+
+    assert!(
+        !tau_config::settings::sessions_dir_of(&sp)
+            .join("s1")
+            .join("ext/data/provider/log")
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read(
+            tau_config::settings::sessions_dir_of(&sp)
+                .join("s2")
+                .join("ext/data/provider/log")
+        )
+        .expect("current session append"),
+        b"explicit-current"
+    );
+}
+
 /// Ensures an ephemeral session can retain extension-owned User data without
 /// recreating a session directory, because this scope is deliberately
 /// per-instance and shared across sessions under one Tau state root rather
@@ -194,6 +301,7 @@ fn ephemeral_harness_appends_user_scoped_extension_data() {
         .run_extension_data_request(
             &crate::test_connection_id(&provider_connection),
             tau_proto::ExtensionDataScope::User,
+            &session_id("ignored-stale-session"),
             tau_proto::ExtensionDataRequestOp::AppendFile {
                 path: tau_proto::ExtensionDataPath::from("papercuts.jsonl"),
                 contents: b"{\"schema\":1}\n".to_vec(),
@@ -240,6 +348,7 @@ fn memory_only_harness_rejects_all_extension_data_without_state_roots() {
             .run_extension_data_request(
                 &crate::test_connection_id(&provider_connection),
                 scope,
+                &h.current_session_id,
                 tau_proto::ExtensionDataRequestOp::WriteFile {
                     path: tau_proto::ExtensionDataPath::from("notes.txt"),
                     contents: b"must remain memory-only".to_vec(),

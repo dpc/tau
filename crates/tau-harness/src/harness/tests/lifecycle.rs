@@ -3970,6 +3970,7 @@ fn pre_ready_extension_data_rpc_bypasses_only_activation_staging() {
         HarnessInputMessage::ExtensionDataRequest(tau_proto::ExtensionDataRequest {
             request_id: request_id.to_owned(),
             scope: tau_proto::ExtensionDataScope::User,
+            expected_session_id: None,
             op,
         })
     };

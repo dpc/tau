@@ -260,6 +260,7 @@ impl ExtensionDataClient {
                 tau_proto::ExtensionDataRequest {
                     request_id: request_id.clone(),
                     scope,
+                    expected_session_id: None,
                     op,
                 },
             ))?;

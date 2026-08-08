@@ -938,6 +938,12 @@ pub struct ExtensionDataRequest {
     pub request_id: String,
     /// Storage scope to access.
     pub scope: ExtensionDataScope,
+    /// Session identity expected by a Session-scope operation.
+    ///
+    /// The harness uses the frame-admission session when this is absent. Other
+    /// scopes ignore this field because their storage is not session-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session_id: Option<SessionId>,
     /// File operation to perform.
     pub op: ExtensionDataRequestOp,
 }
@@ -948,6 +954,7 @@ impl std::fmt::Debug for ExtensionDataRequest {
             .debug_struct("ExtensionDataRequest")
             .field("request_id", &self.request_id)
             .field("scope", &self.scope)
+            .field("expected_session_id", &self.expected_session_id)
             .field("op", &self.op)
             .finish()
     }
@@ -1227,6 +1234,8 @@ pub enum ExtensionDataErrorKind {
     QuotaExceeded,
     /// Compare-and-swap expected generation did not match the current file.
     GenerationMismatch,
+    /// Session-scope request targeted a session other than the current session.
+    SessionMismatch,
     /// Any other I/O or harness-side error.
     Io,
 }

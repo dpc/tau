@@ -100,13 +100,12 @@ use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
 use crate::harness::current_session::CurrentSessionState;
 use crate::harness::extension_data::{
-    ExtensionDataError, MAX_SECRET_DATA_FILE_BYTES, run_extension_data_append_file,
-    run_extension_data_compare_and_swap_file, run_extension_data_create_file,
-    run_extension_data_create_file_with_limit, run_extension_data_delete_file,
-    run_extension_data_list_files, run_extension_data_read_file,
+    ExtensionDataError, MAX_SECRET_DATA_FILE_BYTES, run_extension_data_compare_and_swap_file,
+    run_extension_data_create_file, run_extension_data_create_file_with_limit,
+    run_extension_data_delete_file, run_extension_data_list_files, run_extension_data_read_file,
     run_extension_data_read_file_with_limit, run_extension_data_rename_file,
     run_extension_data_write_file, run_extension_data_write_file_with_limit,
-    run_user_extension_data_append_file, with_extension_data_scope_lock,
+    run_scoped_extension_data_append_file, with_extension_data_scope_lock,
 };
 use crate::harness::extensions::StartupDeadline;
 
@@ -10191,11 +10190,19 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
         request: tau_proto::ExtensionDataRequest,
+        admission: ExtensionFrameAdmission,
     ) {
         let request_id = request.request_id;
         let secret_scope = request.scope == tau_proto::ExtensionDataScope::Secret;
-        let result = match self.run_extension_data_request(connection_id, request.scope, request.op)
-        {
+        let result = match self.run_extension_data_request(
+            connection_id,
+            request.scope,
+            request
+                .expected_session_id
+                .as_ref()
+                .unwrap_or(&admission.session_id),
+            request.op,
+        ) {
             Ok(value) => tau_proto::ExtensionDataResultPayload::Ok { value },
             Err(error) => tau_proto::ExtensionDataResultPayload::Error {
                 kind: error.kind,
@@ -10213,11 +10220,19 @@ impl Harness {
         &self,
         connection_id: &tau_proto::ConnectionId,
         scope: tau_proto::ExtensionDataScope,
+        expected_session_id: &tau_proto::SessionId,
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+        if scope == tau_proto::ExtensionDataScope::Session
+            && expected_session_id != &self.current_session_id
+        {
+            return Err(ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::SessionMismatch,
+                "session target does not match the current session",
+            ));
+        }
         let is_secret = scope == tau_proto::ExtensionDataScope::Secret;
-        let is_user = scope == tau_proto::ExtensionDataScope::User;
-        let root = self.extension_data_scope_root(connection_id, scope)?;
+        let root = self.extension_data_scope_root(connection_id, scope.clone())?;
         match op {
             tau_proto::ExtensionDataRequestOp::ReadFile { path } => {
                 if is_secret {
@@ -10284,10 +10299,13 @@ impl Harness {
                         tau_proto::ExtensionDataErrorKind::Permission,
                         "append is unavailable for secret data",
                     ))
-                } else if is_user {
-                    run_user_extension_data_append_file(&root, path.into_string(), contents)
                 } else {
-                    run_extension_data_append_file(&root, path.into_string(), contents)
+                    run_scoped_extension_data_append_file(
+                        scope,
+                        &root,
+                        path.into_string(),
+                        contents,
+                    )
                 }
             }
             tau_proto::ExtensionDataRequestOp::DeleteFile { path } => {
@@ -12057,7 +12075,7 @@ impl Harness {
                 self.send_agent_prompt_created_result(source_id, request);
             }
             HarnessInputMessage::ExtensionDataRequest(request) => {
-                self.handle_extension_data_request(source_id, request);
+                self.handle_extension_data_request(source_id, request, admission);
             }
             HarnessInputMessage::ProviderDebugCapture(capture) => {
                 self.handle_provider_debug_capture(source_id, capture);

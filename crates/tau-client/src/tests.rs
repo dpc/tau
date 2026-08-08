@@ -2628,6 +2628,10 @@ fn manual_loop_extension_data_request_preserves_unrelated_frames() {
         }
     );
     assert_eq!(request.scope, tau_proto::ExtensionDataScope::User);
+    assert!(
+        request.expected_session_id.is_none(),
+        "generic client requests preserve admission-session fallback"
+    );
     assert!(matches!(
         request.op,
         tau_proto::ExtensionDataRequestOp::ReadFile { ref path }

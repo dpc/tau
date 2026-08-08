@@ -202,6 +202,10 @@ provider XML never interpret hostile metadata.
 Extension data includes the configured-instance `Secret` scope and complete-file
 generation compare-and-swap governed by
 [SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
+`ExtensionDataRequest.expected_session_id` optionally carries the request-level
+Session-scope target; absence preserves older wire producers and lets the harness
+substitute frame-admission identity. The typed `SessionMismatch` result reports a
+target that is no longer current.
 Secret request and result debug projections expose lengths and operation metadata,
 never payload bytes.
 

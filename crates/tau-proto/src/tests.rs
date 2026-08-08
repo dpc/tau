@@ -2099,6 +2099,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
+            expected_session_id: None,
             op: ExtensionDataRequestOp::ReadFile {
                 path: ExtensionDataPath::new("notes/state.cbor"),
             },
@@ -3145,6 +3146,49 @@ fn extension_data_paths_use_string_wire_shape() {
     let decoded: ExtensionDataEntry =
         serde_json::from_value(value).expect("entry should deserialize");
     assert_eq!(decoded, entry);
+}
+
+/// Ensures session targeting extends the request compatibly: old frames decode
+/// without the optional field, while an explicit target retains its string
+/// shape.
+#[test]
+fn extension_data_session_target_has_compatible_wire_shape() {
+    let legacy = serde_json::json!({
+        "request_id": "request-1",
+        "scope": "session",
+        "op": {
+            "op": "read_file",
+            "path": "state"
+        }
+    });
+    let decoded: ExtensionDataRequest =
+        serde_json::from_value(legacy.clone()).expect("decode legacy request");
+    assert!(decoded.expected_session_id.is_none());
+    assert_eq!(
+        serde_json::to_value(decoded).expect("encode legacy request"),
+        legacy
+    );
+
+    let expected_session_id = test_session_id("session-1");
+    let request = ExtensionDataRequest {
+        request_id: "request-2".to_owned(),
+        scope: ExtensionDataScope::Session,
+        expected_session_id: Some(expected_session_id.clone()),
+        op: ExtensionDataRequestOp::ListFiles {
+            path: ExtensionDataPath::new(""),
+        },
+    };
+    let encoded = serde_json::to_value(&request).expect("encode targeted request");
+    assert_eq!(encoded["expected_session_id"], expected_session_id.as_str());
+    assert_eq!(
+        serde_json::from_value::<ExtensionDataRequest>(encoded).expect("decode targeted request"),
+        request
+    );
+    assert_eq!(
+        serde_json::to_value(ExtensionDataErrorKind::SessionMismatch)
+            .expect("encode mismatch kind"),
+        "session_mismatch"
+    );
 }
 
 /// Ensures single-slice decoders reject extra bytes instead of accepting a
@@ -6182,6 +6226,7 @@ fn extension_data_debug_redacts_secret_payload_bytes() {
     let request = crate::ExtensionDataRequest {
         request_id: "request-1".to_owned(),
         scope: crate::ExtensionDataScope::Secret,
+        expected_session_id: None,
         op: crate::ExtensionDataRequestOp::CompareAndSwapFile {
             path: crate::ExtensionDataPath::new("credential.json"),
             expected_generation: "generation".to_owned(),

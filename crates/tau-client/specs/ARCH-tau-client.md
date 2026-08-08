@@ -219,7 +219,9 @@ buffers unrelated harness frames back into the manual runtime so later
 `recv`/`dispatch_one` calls still see them in order. The helper does not add
 storage policy, path validation, or background demux ownership to tau-client; the
 harness still owns storage boundaries and the extension still owns how storage
-errors map to feature behavior.
+errors map to feature behavior. Generic helper requests omit
+`expected_session_id`; for Session scope, the harness therefore binds them to the
+frame-admission session.
 
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
 `Disconnect`. Non-blocking `try_recv` has separate message, input-closed, and

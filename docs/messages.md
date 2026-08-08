@@ -220,9 +220,13 @@ constants currently live in
 
 Requests choose a storage scope and an operation:
 
-- `session` scope stores data under the extension's current-session root. In
-  `tau --ephemeral` sessions this scope is unavailable; requests are rejected
-  with a `permission` error before any session directory is created.
+- `session` scope stores data under the targeted current-session root. Requests
+  may carry `expected_session_id`; when absent, the harness uses the session
+  captured when the frame arrived. A target other than the execution-time current
+  session fails with `session_mismatch` before root selection or filesystem work.
+  This identity check has no generation/epoch guard. In `tau --ephemeral`
+  sessions this scope is unavailable; matching requests are rejected with a
+  `permission` error before any session directory is created.
 - `user` scope stores persistent data under the harness state directory for that
   extension.
 - `cache` scope stores cache data under the user cache directory for that
@@ -243,6 +247,14 @@ file for read/write/create/append operations and 4096 scanned directory entries
 for one list operation. These quotas bound individual harness operations; they do
 not bound aggregate disk use across many files. See
 [SPEC-tau-harness-session-state](../crates/tau-harness/specs/SPEC-tau-harness-session-state.md) for the extension-data trust boundary and hardening assumptions.
+
+Session and User `append_file` requests from cooperating harnesses hold the
+per-extension-root advisory lock across path validation, quota observation, append
+writes, file sync, and new-file parent sync. The lock covers append only: it does
+not make other mutations or direct filesystem writers linearizable. An I/O or sync
+failure can leave none, some, or all requested bytes, and retry after an ambiguous
+result can append the bytes again. The RPC has no receipt, WAL, deduplication, or
+exactly-once guarantee.
 
 ## External agent-message RPC
 

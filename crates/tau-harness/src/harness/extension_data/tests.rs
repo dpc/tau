@@ -64,20 +64,24 @@ fn append_file_rejects_growth_beyond_extension_data_limit() {
     assert_eq!(err.kind, tau_proto::ExtensionDataErrorKind::QuotaExceeded);
 }
 
-/// Ensures a User-scope append waits for the per-instance lock, so its quota
-/// check and synchronous append cannot race another harness process sharing the
-/// same root.
+/// Ensures Session-scope append dispatch waits for its exact scope-root lock,
+/// so requested-path validation, quota checking, and writing stay inside the
+/// cooperative critical section.
 #[test]
-fn user_scope_append_serializes_on_the_extension_root_lock() {
+fn session_scope_append_dispatch_serializes_on_the_scope_root_lock() {
     use std::sync::mpsc;
     use std::time::Duration;
 
     use fs2::FileExt as _;
 
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let root = tempdir.path().join("user");
-    run_user_extension_data_append_file(&root, "papercuts.jsonl".to_owned(), b"first\n".to_vec())
-        .expect("first append");
+    let root = tempdir.path().join("session");
+    path_std_fs::create_dir_all(&root).expect("create scope root");
+    let path = root.join("quota");
+    path_std_fs::File::create(&path)
+        .expect("create quota file")
+        .set_len(EXTENSION_DATA_MAX_FILE_BYTES - 1)
+        .expect("reserve all but one quota byte");
     let lock = path_std_fs::File::open(&root).expect("open extension root");
     lock.lock_exclusive().expect("hold extension root lock");
 
@@ -86,12 +90,17 @@ fn user_scope_append_serializes_on_the_extension_root_lock() {
     let append_root = root.clone();
     let append = std::thread::spawn(move || {
         started_tx.send(()).expect("report append start");
-        let result = run_user_extension_data_append_file(
-            &append_root,
-            "papercuts.jsonl".to_owned(),
-            b"second\n".to_vec(),
-        );
-        finished_tx.send(result).expect("report append result");
+        let append = || {
+            run_scoped_extension_data_append_file(
+                tau_proto::ExtensionDataScope::Session,
+                &append_root,
+                "quota".to_owned(),
+                vec![1],
+            )
+        };
+        finished_tx
+            .send([append(), append()])
+            .expect("report append results");
     });
 
     started_rx
@@ -99,19 +108,87 @@ fn user_scope_append_serializes_on_the_extension_root_lock() {
         .expect("append worker start");
     assert!(
         finished_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-        "User append must wait for the held extension root lock"
+        "Session append dispatch must wait for the held scope root lock"
     );
     fs2::FileExt::unlock(&lock).expect("release extension root lock");
-    assert!(
-        finished_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("append completion")
-            .is_ok()
-    );
+    let results = finished_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("append completion");
     append.join().expect("append thread");
+    assert!(results[0].is_ok());
     assert_eq!(
-        std::fs::read(root.join("papercuts.jsonl")).expect("read appends"),
-        b"first\nsecond\n"
+        results[1].as_ref().expect_err("quota rejection").kind,
+        tau_proto::ExtensionDataErrorKind::QuotaExceeded
+    );
+    assert_eq!(
+        path_std_fs::metadata(path).expect("quota file").len(),
+        EXTENSION_DATA_MAX_FILE_BYTES
+    );
+}
+
+/// Preserves the append RPC's deliberately non-idempotent retry boundary: the
+/// harness does not recognize repeated bytes as a duplicate request.
+#[test]
+fn locked_append_retry_can_duplicate_bytes() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let root = tempdir.path().join("session");
+
+    for _ in 0..2 {
+        run_locked_extension_data_append_file(&root, "retry.log".to_owned(), b"record\n".to_vec())
+            .expect("append attempt");
+    }
+
+    assert_eq!(
+        path_std_fs::read(root.join("retry.log")).expect("retry log"),
+        b"record\nrecord\n"
+    );
+}
+
+/// Preserves the explicitly ambiguous failure boundary: append does not roll
+/// back bytes after a write, file-sync, or new-file parent-sync failure.
+#[test]
+fn append_failure_can_leave_partial_or_complete_bytes() {
+    use std::io::{Error, Write as _};
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let partial = tempdir.path().join("partial");
+    let error = append_extension_data_file_with(
+        &partial,
+        b"complete",
+        |mut file, _| {
+            file.write_all(b"part")?;
+            Err(Error::other("injected write failure"))
+        },
+        |_| unreachable!("write failure skips parent sync"),
+    )
+    .expect_err("injected write failure");
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(path_std_fs::read(partial).expect("partial append"), b"part");
+
+    let file_sync = tempdir.path().join("file-sync");
+    append_extension_data_file_with(
+        &file_sync,
+        b"complete",
+        |mut file, contents| {
+            file.write_all(contents)?;
+            Err(Error::other("injected file sync failure"))
+        },
+        |_| unreachable!("file sync failure skips parent sync"),
+    )
+    .expect_err("injected file sync failure");
+    assert_eq!(
+        path_std_fs::read(file_sync).expect("complete append before file sync failure"),
+        b"complete"
+    );
+
+    let parent_sync = tempdir.path().join("parent-sync");
+    append_extension_data_file_with(&parent_sync, b"complete", write_file_sync, |_| {
+        Err(Error::other("injected parent sync failure"))
+    })
+    .expect_err("injected parent sync failure");
+    assert_eq!(
+        path_std_fs::read(parent_sync).expect("complete append before parent sync failure"),
+        b"complete"
     );
 }
 

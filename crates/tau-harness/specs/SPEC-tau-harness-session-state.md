@@ -182,14 +182,29 @@ In ephemeral session mode, `ExtensionDataScope::Session` is rejected before any
 session data root is created. `User` and `Cache` scopes remain durable because
 they are extension-owned non-session storage.
 
-`ExtensionDataScope::User` `AppendFile` holds the selected per-instance root's
-exclusive lock from validation through quota check, append, and synchronous
-file durability. This serializes append requests from harness processes sharing
-one Tau state root and configured extension instance; it does not provide a
-general extension-data transaction or session-consistency guarantee.
+Every `ExtensionDataScope::Session` operation is bound to an expected session
+identity before root selection or filesystem work. An explicit
+`ExtensionDataRequest.expected_session_id` takes precedence; otherwise the
+harness uses the session captured at frame admission, including across activation
+staging. A target other than the execution-time current session returns
+`SessionMismatch`. User, Cache, and Secret ignore the field. This check has no
+generation guard, so reuse of the same session ID is outside its contract.
 
-In memory-only harness mode, Session, User, and Cache extension-data requests
-all return Permission before resolving or creating any root.
+Session and User `AppendFile` hold the selected per-instance root's exclusive
+advisory lock from path validation through quota check, append writes, file sync,
+and new-file parent sync. This serializes cooperating append requests from harness
+processes sharing one Tau state root and configured extension instance. Only
+append participates: other extension-data mutations and arbitrary direct
+filesystem writers are not linearized by this lock.
+
+Append remains non-transactional and non-idempotent. An I/O or sync failure may
+leave a partial or complete append. If a caller loses the result and retries, the
+bytes may be duplicated; there is no receipt, WAL, or deduplication mechanism.
+
+In memory-only harness mode, matching Session requests and all User and Cache
+extension-data requests return Permission before resolving or creating any root.
+A stale Session target still returns `SessionMismatch` at the earlier identity
+guard.
 
 Per-agent metadata is durable, extension-visible, and interceptable coordination
 state rather than a secret store; key ownership is conventional and writers

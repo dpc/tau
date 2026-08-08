@@ -386,6 +386,15 @@ pub(super) fn append_extension_data_file(
     path: &Path,
     contents: &[u8],
 ) -> Result<(), std::io::Error> {
+    append_extension_data_file_with(path, contents, write_file_sync, sync_parent_dir)
+}
+
+fn append_extension_data_file_with(
+    path: &Path,
+    contents: &[u8],
+    write_and_sync: impl FnOnce(std::fs::File, &[u8]) -> Result<(), std::io::Error>,
+    sync_new_file_parent: impl FnOnce(&Path) -> Result<(), std::io::Error>,
+) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
@@ -404,9 +413,9 @@ pub(super) fn append_extension_data_file(
         .append(true)
         .create(true)
         .open(path)?;
-    write_file_sync(file, contents)?;
+    write_and_sync(file, contents)?;
     if !existed {
-        sync_parent_dir(path)?;
+        sync_new_file_parent(path)?;
     }
     Ok(())
 }
@@ -578,9 +587,9 @@ pub(super) fn run_extension_data_append_file(
     Ok(tau_proto::ExtensionDataValue::AppendFile)
 }
 
-/// Appends one User-scope file while serializing the complete append operation
-/// across harness processes sharing the per-instance extension root.
-pub(super) fn run_user_extension_data_append_file(
+/// Appends one file while serializing the complete append operation across
+/// harness processes sharing the same extension-data scope root.
+pub(super) fn run_locked_extension_data_append_file(
     root: &Path,
     path: String,
     contents: Vec<u8>,
@@ -588,6 +597,23 @@ pub(super) fn run_user_extension_data_append_file(
     with_extension_data_scope_lock(root, || {
         run_extension_data_append_file(root, path, contents)
     })
+}
+
+/// Selects the approved append locking policy for one extension-data scope.
+pub(super) fn run_scoped_extension_data_append_file(
+    scope: tau_proto::ExtensionDataScope,
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    match scope {
+        tau_proto::ExtensionDataScope::Session | tau_proto::ExtensionDataScope::User => {
+            run_locked_extension_data_append_file(root, path, contents)
+        }
+        tau_proto::ExtensionDataScope::Cache | tau_proto::ExtensionDataScope::Secret => {
+            run_extension_data_append_file(root, path, contents)
+        }
+    }
 }
 
 /// Atomically replaces one complete file when its current BLAKE3 generation
