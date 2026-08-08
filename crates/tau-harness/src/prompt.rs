@@ -448,6 +448,10 @@ fn prompt_template_renderer() -> handlebars::Handlebars<'static> {
     handlebars.register_helper("eq", Box::new(EqHelper));
     handlebars.register_helper("starts_with", Box::new(StartsWithHelper));
     handlebars.register_helper("trim", Box::new(TrimHelper));
+    handlebars.register_helper(
+        "escape_exact_sentinel_close",
+        Box::new(ExactSentinelCloseHelper),
+    );
     handlebars.register_helper("xml_escape", Box::new(XmlEscapeHelper));
     handlebars.register_helper(
         "tool_available",
@@ -657,6 +661,53 @@ impl handlebars::HelperDef for TrimHelper {
     }
 }
 
+/// Render template content with Tau's exact-sentinel-close framing.
+///
+/// The helper accepts a body, exact close, and visible close; it replaces only
+/// byte-exact occurrences of that caller-supplied close. Templates explicitly
+/// compose repeated calls when a value sits inside several trusted sentinels.
+struct ExactSentinelCloseHelper;
+
+impl handlebars::HelperDef for ExactSentinelCloseHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &handlebars::Helper<'rc>,
+        _: &'reg handlebars::Handlebars<'reg>,
+        _: &'rc handlebars::Context,
+        _: &mut handlebars::RenderContext<'reg, 'rc>,
+    ) -> Result<handlebars::ScopedJson<'rc>, handlebars::RenderError> {
+        use handlebars::JsonRender;
+
+        let [value, exact_close, visible_close] = h.params().as_slice() else {
+            return Err(handlebars::RenderErrorReason::Other(
+                "exact sentinel close helper requires a value, exact close, and visible close"
+                    .to_owned(),
+            )
+            .into());
+        };
+        let exact_close = exact_close.value().as_str().ok_or_else(|| {
+            handlebars::RenderError::from(handlebars::RenderErrorReason::Other(
+                "exact sentinel close helper requires a string exact close".to_owned(),
+            ))
+        })?;
+        let visible_close = visible_close.value().as_str().ok_or_else(|| {
+            handlebars::RenderError::from(handlebars::RenderErrorReason::Other(
+                "exact sentinel close helper requires a string visible close".to_owned(),
+            ))
+        })?;
+        Ok(handlebars::ScopedJson::Derived(serde_json::Value::String(
+            tau_proto::escape_exact_sentinel_close(
+                &value.value().render(),
+                exact_close,
+                visible_close,
+            )
+            .into_owned(),
+        )))
+    }
+}
+
+/// Render template content with full XML escaping for attribute-safe custom
+/// templates.
 struct XmlEscapeHelper;
 
 impl handlebars::HelperDef for XmlEscapeHelper {
