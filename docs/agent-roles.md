@@ -66,6 +66,13 @@ Apply these instructions outside the excluded project.
 `tau dev print-prompt` and `tau dev print-tools` use the role that normal startup
 would select when `--role` is omitted, including profile and configured-default
 resolution. Pass `--role NAME` to preview that explicit role instead.
+Both commands configure ordinary extensions, load one fresh ephemeral agent,
+wait boundedly for its per-agent context, and resolve one model/tool snapshot.
+They do not call a provider or create a resumable session. Extensions still use
+their ordinary User, Cache, Secret, direct-state, filesystem, and network
+semantics, so running either diagnostic can have the same extension side effects
+as ordinary startup. This is fresh-agent parity, not a view of a restored or
+currently running agent.
 
 Templates also receive sparse, deterministic runtime capabilities:
 

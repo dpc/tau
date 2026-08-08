@@ -35,6 +35,8 @@ pub(crate) enum DaemonHandle {
         child: Option<std::process::Child>,
         harness_path: PathBuf,
         initial_ui: Option<InitialUiStdio>,
+        /// Whether the owning parent removes this child's exact runtime
+        /// discovery pair after reap, including after forced-exit fallback.
         cleanup_runtime_pair_after_reap: bool,
     },
     Attached {
@@ -56,6 +58,37 @@ impl DaemonHandle {
         match self {
             Self::Owned { initial_ui, .. } => initial_ui.take(),
             Self::Attached { .. } => None,
+        }
+    }
+
+    /// Makes this owning CLI remove its exact runtime discovery pair after the
+    /// child has exited, including after the bounded forced-exit fallback.
+    pub(crate) fn ensure_runtime_pair_cleanup_after_reap(&mut self) {
+        if let Self::Owned {
+            cleanup_runtime_pair_after_reap,
+            ..
+        } = self
+        {
+            *cleanup_runtime_pair_after_reap = true;
+        }
+    }
+
+    /// Stops and reaps an owned child, then applies its exact runtime-pair
+    /// cleanup policy.
+    fn cleanup_owned(&mut self, graceful_timeout: Duration) {
+        if let Self::Owned {
+            child,
+            harness_path,
+            initial_ui,
+            cleanup_runtime_pair_after_reap,
+        } = self
+            && let Some(mut child) = child.take()
+        {
+            stop_owned_daemon(&mut child, initial_ui.take(), graceful_timeout);
+            if *cleanup_runtime_pair_after_reap {
+                let _ = std::fs::remove_file(runtime_dir::socket_path(harness_path));
+                let _ = std::fs::remove_file(runtime_dir::metadata_path(harness_path));
+            }
         }
     }
 
@@ -83,26 +116,7 @@ impl DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
-        if let Self::Owned {
-            child,
-            harness_path,
-            initial_ui,
-            cleanup_runtime_pair_after_reap,
-        } = self
-            && let Some(mut child) = child.take()
-        {
-            stop_owned_daemon(
-                &mut child,
-                initial_ui.take(),
-                OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT,
-            );
-            // The child owns normal cleanup. The parent repeats removal only
-            // after reap so every handled forced-exit path closes its exact pair.
-            if *cleanup_runtime_pair_after_reap {
-                let _ = std::fs::remove_file(runtime_dir::socket_path(harness_path));
-                let _ = std::fs::remove_file(runtime_dir::metadata_path(harness_path));
-            }
-        }
+        self.cleanup_owned(OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT);
         // Attached, or Owned-after-leak: do nothing. The daemon keeps
         // running so other UIs can still use it, or this same UI can
         // `tau attach SESSION` back in later.

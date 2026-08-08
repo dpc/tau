@@ -220,6 +220,57 @@ fn owned_daemon_cleanup_has_forced_termination_fallback() {
     );
 }
 
+/// Diagnostic ownership must remove the exact runtime pair after forced child
+/// reap, while an ordinary session-ephemeral handle leaves parent cleanup off.
+#[cfg(unix)]
+#[test]
+fn diagnostic_owned_daemon_removes_runtime_pair_after_forced_reap() {
+    fn non_exiting_handle(
+        harness_path: PathBuf,
+        cleanup_runtime_pair_after_reap: bool,
+    ) -> DaemonHandle {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' HUP TERM; while :; do read _ || :; done")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn non-exiting child");
+        let initial_ui = InitialUiStdio {
+            stdin: child.stdin.take().expect("child stdin"),
+            stdout: child.stdout.take().expect("child stdout"),
+        };
+        DaemonHandle::Owned {
+            child: Some(child),
+            harness_path,
+            initial_ui: Some(initial_ui),
+            cleanup_runtime_pair_after_reap,
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("temporary runtime directory");
+    let diagnostic_path = temp.path().join("diagnostic");
+    let diagnostic_socket = runtime_dir::socket_path(&diagnostic_path);
+    let diagnostic_metadata = runtime_dir::metadata_path(&diagnostic_path);
+    std::fs::write(&diagnostic_socket, b"socket").expect("seed diagnostic socket");
+    std::fs::write(&diagnostic_metadata, b"metadata").expect("seed diagnostic metadata");
+    let mut diagnostic = non_exiting_handle(diagnostic_path, false);
+    diagnostic.ensure_runtime_pair_cleanup_after_reap();
+    diagnostic.cleanup_owned(Duration::ZERO);
+    assert!(!diagnostic_socket.exists());
+    assert!(!diagnostic_metadata.exists());
+
+    let ordinary_path = temp.path().join("ordinary");
+    let ordinary_socket = runtime_dir::socket_path(&ordinary_path);
+    let ordinary_metadata = runtime_dir::metadata_path(&ordinary_path);
+    std::fs::write(&ordinary_socket, b"socket").expect("seed ordinary socket");
+    std::fs::write(&ordinary_metadata, b"metadata").expect("seed ordinary metadata");
+    let mut ordinary = non_exiting_handle(ordinary_path, false);
+    ordinary.cleanup_owned(Duration::ZERO);
+    assert!(ordinary_socket.exists());
+    assert!(ordinary_metadata.exists());
+}
+
 #[test]
 fn daemon_command_sets_and_clears_harness_config_override_env() {
     let override_ = tau_config::settings::HarnessConfigCliOverride {

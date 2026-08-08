@@ -21,44 +21,6 @@ fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
     command.output().expect("run tau preview")
 }
 
-fn persistent_tree_snapshot(home: &Path) -> Vec<(String, Vec<u8>)> {
-    fn visit(base: &Path, path: &Path, entries: &mut Vec<(String, Vec<u8>)>) {
-        let Ok(metadata) = std::fs::symlink_metadata(path) else {
-            return;
-        };
-        let relative = path
-            .strip_prefix(base)
-            .expect("snapshot path below base")
-            .to_string_lossy()
-            .into_owned();
-        if metadata.is_dir() {
-            entries.push((
-                format!("d:{relative}:{:?}", metadata.permissions()),
-                Vec::new(),
-            ));
-            let mut children = std::fs::read_dir(path)
-                .expect("read snapshot directory")
-                .map(|entry| entry.expect("snapshot entry").path())
-                .collect::<Vec<_>>();
-            children.sort();
-            for child in children {
-                visit(base, &child, entries);
-            }
-        } else {
-            entries.push((
-                format!("f:{relative}:{:?}", metadata.permissions()),
-                std::fs::read(path).expect("read snapshot file"),
-            ));
-        }
-    }
-
-    let mut entries = Vec::new();
-    for root in [".config", ".state", ".cache", ".data", "work"] {
-        visit(home, &home.join(root), &mut entries);
-    }
-    entries
-}
-
 fn assert_no_runtime_pairs(home: &Path) {
     let harnesses = home.join(".runtime/tau/harnesses");
     assert_eq!(
@@ -70,10 +32,43 @@ fn assert_no_runtime_pairs(home: &Path) {
     );
 }
 
-/// All render previews preserve the entire seeded persistent tree on success,
-/// handled post-spawn failure, and mixed concurrent execution.
+fn assert_no_durable_preview_artifacts(home: &Path) {
+    assert_eq!(
+        std::fs::read(home.join(".state/tau/agents/seed/events.cbor"))
+            .expect("read agent sentinel"),
+        b"durable sentinel"
+    );
+    assert_eq!(
+        std::fs::read(home.join(".cache/tau/ext/seed/value")).expect("read cache sentinel"),
+        b"cache sentinel"
+    );
+    let mut agent_entries = std::fs::read_dir(home.join(".state/tau/agents"))
+        .expect("read agent root")
+        .map(|entry| entry.expect("read agent entry").file_name())
+        .collect::<Vec<_>>();
+    agent_entries.sort();
+    assert_eq!(
+        agent_entries,
+        [std::ffi::OsString::from("seed")],
+        "preview must not create another durable agent tree"
+    );
+    let sessions = home.join(".state/tau/sessions");
+    assert!(
+        !sessions.exists()
+            || std::fs::read_dir(sessions)
+                .expect("read sessions directory")
+                .next()
+                .is_none(),
+        "preview must not create a resumable session"
+    );
+    assert_no_runtime_pairs(home);
+}
+
+/// Render previews do not create durable session/agent artifacts or leak
+/// runtime discovery pairs while ordinary configured extensions initialize
+/// their roots.
 #[test]
-fn previews_are_memory_only_across_success_failure_and_concurrency() {
+fn previews_omit_durable_session_artifacts_across_success_failure_and_concurrency() {
     let home = TempDir::new().expect("temporary home");
     std::fs::create_dir_all(home.path().join(".state/tau/agents/seed")).expect("seed state");
     std::fs::write(
@@ -90,13 +85,10 @@ fn previews_are_memory_only_across_success_failure_and_concurrency() {
     std::fs::create_dir_all(home.path().join(".config")).expect("config root");
     std::fs::create_dir_all(home.path().join(".data")).expect("data root");
     std::fs::create_dir_all(home.path().join("work")).expect("work root");
-    let before = persistent_tree_snapshot(home.path());
-
     for command in ["print-prompt", "print-tools", "print-system-prompt"] {
         let output = preview(&home, None, &["--role", "engineer", "dev", command]);
         assert!(output.status.success(), "{:?}", output.stderr);
-        assert_eq!(persistent_tree_snapshot(home.path()), before);
-        assert_no_runtime_pairs(home.path());
+        assert_no_durable_preview_artifacts(home.path());
     }
 
     let failure = preview(
@@ -105,8 +97,7 @@ fn previews_are_memory_only_across_success_failure_and_concurrency() {
         &["--role", "missing-role", "dev", "print-tools"],
     );
     assert!(!failure.status.success());
-    assert_eq!(persistent_tree_snapshot(home.path()), before);
-    assert_no_runtime_pairs(home.path());
+    assert_no_durable_preview_artifacts(home.path());
 
     let mut threads = Vec::new();
     for index in 0..8 {
@@ -124,7 +115,38 @@ fn previews_are_memory_only_across_success_failure_and_concurrency() {
         let output = thread.join().expect("preview thread");
         assert!(output.status.success(), "{:?}", output.stderr);
     }
-    assert_eq!(persistent_tree_snapshot(home.path()), before);
+    assert_no_durable_preview_artifacts(home.path());
+}
+
+/// Required std-pim must complete ordinary Configure storage writes during an
+/// ephemeral diagnostic without creating a resumable session directory.
+#[test]
+fn print_tools_allows_std_pim_extension_data_without_durable_session() {
+    let home = TempDir::new().expect("temporary home");
+    std::fs::create_dir_all(home.path().join("work")).expect("work directory");
+
+    let output = preview(
+        &home,
+        Some("std-pim"),
+        &["--role", "engineer", "dev", "print-tools"],
+    );
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(
+        home.path()
+            .join(".state/tau/ext/std-pim/state-v0.json")
+            .is_file(),
+        "std-pim Configure must receive ordinary writable User storage"
+    );
+    let sessions = home.path().join(".state/tau/sessions");
+    assert!(
+        !sessions.exists()
+            || std::fs::read_dir(sessions)
+                .expect("read sessions directory")
+                .next()
+                .is_none(),
+        "ephemeral diagnostics must not create resumable sessions"
+    );
     assert_no_runtime_pairs(home.path());
 }
 

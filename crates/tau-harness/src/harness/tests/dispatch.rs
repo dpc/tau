@@ -11,7 +11,7 @@ use super::*;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
-    BackgroundCompletionPromptMode, PendingRenderedPrompt, PendingTool,
+    BackgroundCompletionPromptMode, PendingRenderedPreview, PendingRenderedPrompt, PendingTool,
     RestoredCheckpointAuthority, STATUS_REMINDER, agent_message_activation_class,
     background_completion_prompt, extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
@@ -34605,12 +34605,15 @@ fn disconnect_cancels_pending_rendered_preview() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.pending_rendered_prompts.insert(
         agent_id.clone(),
-        vec![PendingRenderedPrompt::Prompt {
-            connection_id: requester.clone(),
-            request_id: "preview-disconnect".to_owned(),
-            role: h.selected_role.clone(),
-            enable_agents_md: false,
-        }],
+        PendingRenderedPreview {
+            requests: vec![PendingRenderedPrompt::Prompt {
+                connection_id: requester.clone(),
+                request_id: "preview-disconnect".to_owned(),
+                role: h.selected_role.clone(),
+                enable_agents_md: false,
+            }],
+            deadline: Instant::now(),
+        },
     );
 
     h.handle_disconnect_at(&requester, Instant::now());
@@ -34632,11 +34635,14 @@ fn session_switch_cancels_pending_rendered_preview() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.pending_rendered_prompts.insert(
         agent_id.clone(),
-        vec![PendingRenderedPrompt::System {
-            connection_id: crate::test_connection_id("preview-switch-requester"),
-            request_id: "preview-switch".to_owned(),
-            role: h.selected_role.clone(),
-        }],
+        PendingRenderedPreview {
+            requests: vec![PendingRenderedPrompt::System {
+                connection_id: crate::test_connection_id("preview-switch-requester"),
+                request_id: "preview-switch".to_owned(),
+                role: h.selected_role.clone(),
+            }],
+            deadline: Instant::now(),
+        },
     );
 
     h.switch_session(
@@ -34644,6 +34650,36 @@ fn session_switch_cancels_pending_rendered_preview() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
+
+    assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
+    assert!(
+        h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .is_none()
+    );
+}
+
+/// An extension that never completes per-agent context must hit the bounded
+/// preview deadline and release both request state and the temporary agent.
+#[test]
+fn rendered_preview_context_timeout_cleans_up_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let deadline = Instant::now();
+    h.pending_rendered_prompts.insert(
+        agent_id.clone(),
+        PendingRenderedPreview {
+            requests: vec![PendingRenderedPrompt::Tools {
+                connection_id: crate::test_connection_id("preview-timeout-requester"),
+                request_id: "preview-timeout".to_owned(),
+                role: h.selected_role.clone(),
+            }],
+            deadline,
+        },
+    );
+
+    h.process_rendered_preview_deadlines(deadline);
 
     assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
     assert!(

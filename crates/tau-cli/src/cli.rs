@@ -353,9 +353,10 @@ pub enum DevCommand {
 
     /// Print the effective provider-visible prompt context.
     ///
-    /// Uses a stable fake agent id so role previews render agent-scoped
-    /// template sections such as Agent identity. Omitting `--role` uses the
-    /// configured startup role.
+    /// Configures ordinary extensions, initializes one fresh ephemeral agent,
+    /// and waits boundedly for its context without calling a provider.
+    /// Extensions retain ordinary persistent state access and side effects.
+    /// Omitting `--role` uses the configured startup role.
     PrintPrompt {
         /// Include harness-injected AGENTS.md context.
         #[arg(long = "enable-agents-md", default_value_t = true, action = clap::ArgAction::Set)]
@@ -370,7 +371,10 @@ pub enum DevCommand {
 
     /// Print the effective tool definitions.
     ///
-    /// Omitting `--role` uses the configured startup role.
+    /// Uses the same fresh ephemeral-agent lifecycle and effective model/tool
+    /// snapshot as `print-prompt`, without calling a provider. Extensions
+    /// retain ordinary persistent state access and side effects. Omitting
+    /// `--role` uses the configured startup role.
     PrintTools,
 
     /// Inspect or clear reports recorded by the standard papercut reporter.

@@ -7,6 +7,32 @@ use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session,
 use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
 
+/// Storage and identity policy for one prompt diagnostic.
+enum RenderDiagnosticKind {
+    /// Fresh-agent effective prompt with ordinary configured-extension storage.
+    EffectivePrompt,
+    /// Existing conservative system-prompt inspection using MemoryOnly storage.
+    SystemPrompt,
+}
+
+impl RenderDiagnosticKind {
+    /// Returns the minted session-id prefix for this diagnostic.
+    const fn session_prefix(&self) -> &'static str {
+        match self {
+            Self::EffectivePrompt => "print-prompt",
+            Self::SystemPrompt => "print-system-prompt",
+        }
+    }
+
+    /// Returns the immutable harness storage policy for this diagnostic.
+    const fn storage_mode(&self) -> tau_harness::HarnessStorageMode {
+        match self {
+            Self::EffectivePrompt => tau_harness::HarnessStorageMode::SessionEphemeral,
+            Self::SystemPrompt => tau_harness::HarnessStorageMode::MemoryOnly,
+        }
+    }
+}
+
 pub(crate) fn run_print_prompt(
     role: Option<&str>,
     enable_agents_md: bool,
@@ -17,7 +43,7 @@ pub(crate) fn run_print_prompt(
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let mut daemon = launch_render_daemon(
-        "print-prompt",
+        RenderDiagnosticKind::EffectivePrompt,
         role,
         profile,
         role_cli_overrides,
@@ -39,7 +65,7 @@ pub(crate) fn run_print_system_prompt(
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let mut daemon = launch_render_daemon(
-        "print-system-prompt",
+        RenderDiagnosticKind::SystemPrompt,
         Some(role),
         profile,
         role_cli_overrides,
@@ -53,7 +79,7 @@ pub(crate) fn run_print_system_prompt(
 }
 
 fn launch_render_daemon(
-    session_prefix: &str,
+    kind: RenderDiagnosticKind,
     role: Option<&str>,
     profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
@@ -61,13 +87,14 @@ fn launch_render_daemon(
     extension_environment: &[String],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<DaemonHandle, CliError> {
-    let session_id = mint_short_id(session_prefix);
+    let session_id = mint_short_id(kind.session_prefix());
+    let storage_mode = kind.storage_mode();
     let output = daemon_output_for_session(
         &session_id,
-        tau_harness::HarnessStorageMode::MemoryOnly,
+        storage_mode,
         tau_harness::SessionLaunchStatus::New,
     )?;
-    resolve_daemon(
+    let mut daemon = resolve_daemon(
         false,
         &session_id,
         SessionLaunchStatus::New,
@@ -80,8 +107,10 @@ fn launch_render_daemon(
             extension_environment: Some(extension_environment),
             harness_config: harness_config_overrides,
         },
-        tau_harness::HarnessStorageMode::MemoryOnly,
-    )
+        storage_mode,
+    )?;
+    daemon.ensure_runtime_pair_cleanup_after_reap();
+    Ok(daemon)
 }
 
 fn print_prompt(prompt: &str) -> Result<(), CliError> {

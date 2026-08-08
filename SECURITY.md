@@ -156,14 +156,17 @@ distributed WAL, or cross-journal transaction. See
 
 ## Agent journals and summary checkpoints
 
-The three `tau dev print-*` render previews use an immutable memory-only
-harness policy: they may read render inputs but do not create, inspect, repair,
-or mutate harness-managed session, agent, diagnostic, retention, or delegated
-extension storage. Only their unique runtime socket and discovery metadata may
-exist while the owned daemon runs; handled exits remove that pair after child
-reap. Configured extensions remain trusted same-user executables and
-unsandboxed, so their direct operating-system side effects are outside this
-guarantee.
+`tau dev print-prompt` and `print-tools` keep session and preview-agent semantic
+state, journals, transcripts, debug artifacts, and retention state process-local
+or omit them, so they create no resumable session or agent. They configure
+ordinary extensions and therefore preserve User, Cache, Secret, direct-state,
+filesystem, network, and external-service reads and writes. They load one fresh
+ephemeral agent through bounded context readiness, resolve an effective
+model/tool snapshot, and never call a provider. `print-system-prompt` retains
+the separate immutable MemoryOnly storage policy. Each preview's unique runtime
+socket and discovery metadata may exist only while its owned daemon runs;
+handled diagnostic exits remove that exact pair after child reap, including
+forced-exit fallback.
 
 Per-agent `events.cbor` journals are authoritative durable identity and
 transcript state. Their `meta.json` files are content-minimized, atomically

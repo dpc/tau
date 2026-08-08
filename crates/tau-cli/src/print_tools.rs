@@ -48,7 +48,7 @@ pub(crate) fn run_print_tools(
     let session_id = mint_short_id("print-tools");
     let output = daemon_output_for_session(
         &session_id,
-        tau_harness::HarnessStorageMode::MemoryOnly,
+        tau_harness::HarnessStorageMode::SessionEphemeral,
         tau_harness::SessionLaunchStatus::New,
     )?;
     let mut daemon = resolve_daemon(
@@ -64,8 +64,9 @@ pub(crate) fn run_print_tools(
             extension_environment: Some(extension_environment),
             harness_config: harness_config_overrides,
         },
-        tau_harness::HarnessStorageMode::MemoryOnly,
+        tau_harness::HarnessStorageMode::SessionEphemeral,
     )?;
+    daemon.ensure_runtime_pair_cleanup_after_reap();
 
     let tools = get_rendered_tool_definitions(&mut daemon, role)?
         .into_iter()
