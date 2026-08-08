@@ -5712,6 +5712,7 @@ dependencies = [
  "tau-client",
  "tau-config",
  "tau-ext-provider-builtin",
+ "tau-ext-utils",
  "tau-harness",
  "tau-harness-tools",
  "tau-proto",

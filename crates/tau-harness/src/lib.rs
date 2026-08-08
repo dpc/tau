@@ -14,6 +14,12 @@
 
 pub mod runtime_dir;
 
+/// Maximum bytes accepted for one extension-owned data file.
+///
+/// Extension-data requests and local operators use this shared limit before
+/// allocating file contents.
+pub const EXTENSION_DATA_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 mod agent;
 mod agent_cost_ledger;
 mod agent_creator_topology;

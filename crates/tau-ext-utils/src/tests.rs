@@ -6,10 +6,40 @@ use std::sync::{Arc, Mutex};
 
 use tau_proto::{
     AgentPromptSteered, Configure, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
-    HarnessOutputWriter, PromptMessageClass,
+    HarnessOutputWriter, PromptMessageClass, UnixMicros,
 };
 
 use super::*;
+
+/// Ensures JSONL decoding constructs only current-schema papercut records and
+/// keeps an unsupported schema distinct from malformed typed attribution.
+#[test]
+fn papercut_record_parser_enforces_the_current_schema() {
+    let record = PapercutRecord::parse_json_line(
+        r#"{"schema":1,"agent_id":"agent-a","session_id":"session-a","timestamp_us":1,"report":"report"}"#,
+    )
+    .expect("current record");
+    assert_eq!(record.agent_id().as_str(), "agent-a");
+    assert_eq!(record.session_id().as_str(), "session-a");
+    assert_eq!(record.timestamp_us(), UnixMicros::new(1));
+    assert_eq!(record.report(), "report");
+    assert_eq!(
+        PapercutRecord::parse_json_line(
+            r#"{"schema":2,"agent_id":"agent-a","session_id":"session-a","timestamp_us":1,"report":"report"}"#
+        ),
+        Err(PapercutRecordParseError::UnsupportedSchema)
+    );
+    assert_eq!(
+        PapercutRecordParseError::UnsupportedSchema.to_string(),
+        "papercut record uses an unsupported schema"
+    );
+    assert_eq!(
+        PapercutRecord::parse_json_line(
+            r#"{"schema":1,"agent_id":"agent/a","session_id":"session-a","timestamp_us":1,"report":"report"}"#
+        ),
+        Err(PapercutRecordParseError::Invalid)
+    );
+}
 
 /// Thread-safe byte sink used by the manual extension writer thread.
 #[derive(Clone, Default)]

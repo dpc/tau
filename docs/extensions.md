@@ -175,7 +175,8 @@ should retain the legacy `[agent-id] ` presentation.
 instance config sets `papercut.enable: true`. See the
 [std-utils README](../crates/tau-ext-utils/README.md) for its exact JSONL
 record, per-instance User-storage location, limits, privacy, retention, and
-inspection contract.
+inspection contract. `tau dev papercut list [--markdown]` inspects the normal
+instance's records; `tau dev papercut clear` clears its locked snapshot.
 
 Core-shell protects non-interactive model and user shell commands from pager
 prompts by applying `PAGER=cat`, `GIT_PAGER=cat`, `GH_PAGER=cat`,

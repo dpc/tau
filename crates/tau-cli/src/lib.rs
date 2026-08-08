@@ -21,6 +21,7 @@ mod list_agents;
 mod list_sessions;
 mod markdown_render;
 mod message_fact_render;
+mod papercut;
 mod print_prompt;
 mod print_tools;
 mod prompt_history;
@@ -778,6 +779,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 reject_harness_config_overrides(&harness_config_overrides, "dev send")?;
             }
             DispatchCommand::Other(cli::Command::Dev {
+                command: cli::DevCommand::Papercut { .. },
+            }) => {
+                reject_harness_config_overrides(&harness_config_overrides, "dev papercut")?;
+            }
+            DispatchCommand::Other(cli::Command::Dev {
                 command: cli::DevCommand::Tmux { .. },
             }) => {
                 reject_dev_tmux_startup_overrides(
@@ -1033,6 +1039,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     &environment_extension_names,
                     &harness_config_overrides,
                 ),
+                cli::DevCommand::Papercut { command } => papercut::run(command),
                 cli::DevCommand::Tmux { command } => {
                     let _ = command;
                     unreachable!("dev tmux dispatch returns before harness config validation")

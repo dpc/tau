@@ -8,8 +8,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io, path as path_std_path, time as path_std_time};
 
-/// Maximum bytes accepted for one extension-owned data file.
-const MAX_EXTENSION_DATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
+use crate::EXTENSION_DATA_MAX_FILE_BYTES;
+
 /// Maximum bytes accepted for one secret-scope file.
 pub(super) const MAX_SECRET_DATA_FILE_BYTES: u64 = 1024 * 1024;
 /// Maximum directory entries scanned by one extension data list operation.
@@ -450,7 +450,7 @@ pub(super) fn run_extension_data_read_file(
     root: &Path,
     path: String,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    run_extension_data_read_file_with_limit(root, path, MAX_EXTENSION_DATA_FILE_BYTES)
+    run_extension_data_read_file_with_limit(root, path, EXTENSION_DATA_MAX_FILE_BYTES)
 }
 
 /// Reads one file while enforcing the selected scope's whole-file limit.
@@ -486,7 +486,7 @@ pub(super) fn run_extension_data_write_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    run_extension_data_write_file_with_limit(root, path, contents, MAX_EXTENSION_DATA_FILE_BYTES)
+    run_extension_data_write_file_with_limit(root, path, contents, EXTENSION_DATA_MAX_FILE_BYTES)
 }
 
 /// Replaces one file while enforcing the selected scope's whole-file limit.
@@ -526,7 +526,7 @@ pub(super) fn run_extension_data_create_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    run_extension_data_create_file_with_limit(root, path, contents, MAX_EXTENSION_DATA_FILE_BYTES)
+    run_extension_data_create_file_with_limit(root, path, contents, EXTENSION_DATA_MAX_FILE_BYTES)
 }
 
 /// Creates one file while enforcing the selected scope's whole-file limit.
@@ -556,7 +556,7 @@ pub(super) fn run_extension_data_append_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    ensure_request_contents_within_limit(&contents, MAX_EXTENSION_DATA_FILE_BYTES)?;
+    ensure_request_contents_within_limit(&contents, EXTENSION_DATA_MAX_FILE_BYTES)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -570,7 +570,7 @@ pub(super) fn run_extension_data_append_file(
             ExtensionDataError::io(format!("failed to stat `{}`", rel.display()), error)
         })?;
         let appended_len = metadata.len().saturating_add(contents.len() as u64);
-        ensure_file_len_within_limit(&rel, appended_len, MAX_EXTENSION_DATA_FILE_BYTES)?;
+        ensure_file_len_within_limit(&rel, appended_len, EXTENSION_DATA_MAX_FILE_BYTES)?;
     }
     append_extension_data_file(&path, &contents).map_err(|error| {
         ExtensionDataError::io(format!("failed to append `{}`", rel.display()), error)

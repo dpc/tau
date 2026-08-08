@@ -56,6 +56,27 @@ jq -c . "$XDG_STATE_HOME/tau/ext/std-utils/papercuts.jsonl"
 jq -c 'select(.schema == 1)' "$XDG_STATE_HOME/tau/ext/std-utils/papercuts.jsonl"
 ```
 
+For the normal `std-utils` instance, Tau also provides concise operator-facing
+inspection:
+
+```sh
+tau dev papercut list
+tau dev papercut list --markdown
+tau dev papercut clear
+```
+
+Each command accepts `--state-dir DIR`, which defaults to Tau's normal state
+directory. Plain list output escapes control characters into one line per
+report; Markdown retains report line boundaries inside a literal code block.
+Both sort the same v1 records by timestamp, agent, session, and report.
+
+`clear` takes the reporter's existing per-instance extension-directory lock,
+reads and removes the canonical JSONL file while holding it, then reports the
+number of records removed. An append completed before that lock boundary is
+cleared. An append that waits for or starts after it writes a new file and is
+preserved. The command does not create storage for an absent reporter and
+repeating clear on an empty history succeeds with a zero count.
+
 
 ## Limits and behavior
 

@@ -30,6 +30,13 @@ Developer prompt and tool-preview startup regressions execute the bundled `tau`
 binary with isolated home and working directories. They assert observable rendered
 contributions rather than only parsed overrides or child-command construction.
 
+Papercut tests serialize records through `tau_ext_utils::PapercutRecord`, the
+same contract used by the reporter, then exercise the CLI reader's bounded,
+no-follow storage path. They cover plain and Markdown rendering, empty and
+repeated clear, rejected malformed/unsupported/unsafe storage, and a
+test-only post-delete midpoint that proves a real `clear()` preserves a waiting
+reporter append after its shared-lock boundary.
+
 Renderer transitions are checked at flush-delimited virtual-terminal frames with
 bounded waits. Tests do not request a post-operation `redraw_sync`, which could
 hide an incoherent first frame; race regressions may use a deterministic midpoint

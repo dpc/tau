@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tau_proto::SessionId;
-use tau_session_inspect::{default_agents_dir, default_session_id, default_sessions_dir};
+use tau_session_inspect::{
+    default_agents_dir, default_session_id, default_sessions_dir, default_state_dir,
+};
 
 #[cfg(test)]
 mod tests;
@@ -371,11 +373,41 @@ pub enum DevCommand {
     /// Omitting `--role` uses the configured startup role.
     PrintTools,
 
+    /// Inspect or clear reports recorded by the standard papercut reporter.
+    Papercut {
+        /// Papercut operation to run.
+        #[command(subcommand)]
+        command: PapercutCommand,
+    },
+
     /// Manage a manual Tau end-to-end session in a private tmux server.
     Tmux {
         /// Tmux helper action to run.
         #[command(subcommand)]
         command: DevTmuxCommand,
+    },
+}
+
+/// Commands that inspect or clear the standard papercut reporter's records.
+#[derive(Subcommand)]
+pub enum PapercutCommand {
+    /// List recorded papercut reports.
+    List {
+        /// Render the reports as copyable Markdown.
+        #[arg(long)]
+        markdown: bool,
+
+        /// Tau state directory containing the standard reporter's records.
+        #[arg(long, default_value_os_t = default_state_dir())]
+        state_dir: PathBuf,
+    },
+
+    /// Remove every papercut report present at this command's serialized clear
+    /// boundary.
+    Clear {
+        /// Tau state directory containing the standard reporter's records.
+        #[arg(long, default_value_os_t = default_state_dir())]
+        state_dir: PathBuf,
     },
 }
 

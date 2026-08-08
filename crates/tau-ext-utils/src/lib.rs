@@ -30,8 +30,10 @@ pub const TIMER_TOOL_NAME: &str = "timer";
 /// Model-visible best-effort diagnostic reporting tool name.
 pub const PAPERCUT_TOOL_NAME: &str = "papercut";
 
-const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
-const PAPERCUT_SCHEMA_VERSION: u64 = 1;
+/// Canonical JSONL filename owned by the standard papercut reporter.
+pub const PAPERCUT_FILE_NAME: &str = "papercuts.jsonl";
+/// Schema version emitted by the standard papercut reporter.
+pub const PAPERCUT_SCHEMA_VERSION: u64 = 1;
 const MAX_PAPERCUT_REPORT_CHARS: usize = 4096;
 const MAX_PAPERCUT_REPORT_BYTES: usize = 16 * 1024;
 const MAX_TIMERS_PER_AGENT: usize = 32;
@@ -173,18 +175,123 @@ impl PapercutStorage for RpcPapercutStorage {
 }
 
 /// One stable, compact record persisted by an accepted papercut report.
-#[derive(serde::Serialize)]
-struct PapercutRecord<'a> {
+///
+/// The standard reporter and `tau dev papercut` share this JSONL contract. The
+/// schema field remains explicit so readers fail closed when a later format
+/// changes its semantics.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct PapercutRecord {
     /// Schema version for batch readers.
     schema: u64,
     /// Harness-routed tool caller identity.
-    agent_id: &'a str,
+    agent_id: AgentId,
     /// Current harness-authored session identity.
-    session_id: &'a str,
+    session_id: tau_proto::SessionId,
     /// Tool operation wall-clock time in Unix microseconds.
-    timestamp_us: u64,
+    timestamp_us: UnixMicros,
     /// Model-supplied concise report text.
-    report: &'a str,
+    report: String,
+}
+
+impl PapercutRecord {
+    /// Constructs one current-schema record from harness-authoritative
+    /// attribution.
+    #[must_use]
+    pub fn new(
+        agent_id: AgentId,
+        session_id: tau_proto::SessionId,
+        timestamp_us: UnixMicros,
+        report: String,
+    ) -> Self {
+        Self {
+            schema: PAPERCUT_SCHEMA_VERSION,
+            agent_id,
+            session_id,
+            timestamp_us,
+            report,
+        }
+    }
+
+    /// Returns the harness-routed reporting agent.
+    #[must_use]
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    /// Returns the harness-authored session current at report time.
+    #[must_use]
+    pub fn session_id(&self) -> &tau_proto::SessionId {
+        &self.session_id
+    }
+
+    /// Returns the report operation time.
+    #[must_use]
+    pub fn timestamp_us(&self) -> UnixMicros {
+        self.timestamp_us
+    }
+
+    /// Returns the model-supplied report text.
+    #[must_use]
+    pub fn report(&self) -> &str {
+        &self.report
+    }
+
+    /// Parses one v1 JSONL record and rejects unsupported schema versions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PapercutRecordParseError`] when JSON, typed attribution, or
+    /// timestamp decoding fails, or when the record schema is unsupported.
+    pub fn parse_json_line(line: &str) -> Result<Self, PapercutRecordParseError> {
+        let wire: PapercutRecordWire =
+            serde_json::from_str(line).map_err(|_| PapercutRecordParseError::Invalid)?;
+        if wire.schema != PAPERCUT_SCHEMA_VERSION {
+            return Err(PapercutRecordParseError::UnsupportedSchema);
+        }
+        Ok(Self::new(
+            wire.agent_id,
+            wire.session_id,
+            wire.timestamp_us,
+            wire.report,
+        ))
+    }
+}
+
+/// Failure while decoding one standard papercut JSONL record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PapercutRecordParseError {
+    /// The line was not valid JSON or did not contain valid typed record
+    /// fields.
+    Invalid,
+    /// The line named a schema version other than the current v1 format.
+    UnsupportedSchema,
+}
+
+impl std::fmt::Display for PapercutRecordParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Invalid => "papercut record is invalid",
+            Self::UnsupportedSchema => "papercut record uses an unsupported schema",
+        })
+    }
+}
+
+impl std::error::Error for PapercutRecordParseError {}
+
+/// Private wire shape decoded before constructing an invariant-preserving
+/// record.
+#[derive(serde::Deserialize)]
+struct PapercutRecordWire {
+    /// Schema version supplied by the persisted JSONL line.
+    schema: u64,
+    /// Harness-routed tool caller identity.
+    agent_id: AgentId,
+    /// Harness-authored session identity.
+    session_id: tau_proto::SessionId,
+    /// Report operation wall-clock time.
+    timestamp_us: UnixMicros,
+    /// Model-supplied concise report text.
+    report: String,
 }
 
 /// Stable map key for one active timer.
@@ -556,16 +663,17 @@ impl TimerRuntime {
         let Some(session_id) = self.session_id.as_deref() else {
             return papercut_not_recorded("no active session is available");
         };
+        let session_id = match tau_proto::SessionId::parse(session_id) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                tracing::warn!(%error, "papercut session attribution was invalid");
+                return papercut_not_recorded("active session attribution was invalid");
+            }
+        };
         let Some(storage) = &self.papercut_storage else {
             return papercut_not_recorded("papercut storage is unavailable");
         };
-        let record = PapercutRecord {
-            schema: PAPERCUT_SCHEMA_VERSION,
-            agent_id: invoke.agent_id.as_ref(),
-            session_id,
-            timestamp_us: now.get(),
-            report: &report,
-        };
+        let record = PapercutRecord::new(invoke.agent_id.clone(), session_id, now, report);
         let mut line = match serde_json::to_vec(&record) {
             Ok(line) => line,
             Err(error) => {

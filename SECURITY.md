@@ -414,6 +414,25 @@ record; ephemeral sessions intentionally use the same durable file. These
 limitations do not expand the configured-local extension boundary or imply
 hostile-process hardening.
 
+`tau dev papercut list [--markdown]` and `clear` form a narrow local operator
+exception for the normal `std-utils` instance's canonical `papercuts.jsonl`
+file. They never enumerate arbitrary extension data. List opens the final
+records file without following a symlink, requires one bounded regular UTF-8
+v1 JSONL file with validated harness identifier fields and a renderable
+timestamp, and renders only the recorded report plus its recorded attribution.
+Plain output escapes controls; Markdown uses literal report blocks. Malformed,
+unsupported, oversized, symlinked, non-regular, or unrenderable records fail
+closed without exposing raw data.
+
+Clear takes the same exclusive extension-directory lock as harness User-scope
+appends, validates the same file, and removes it only while holding that lock.
+It reports the number in its locked snapshot. An append that completed before
+the lock boundary is cleared; an appender that waits for or starts after it
+creates a new file and remains visible. A rejected input is never cleared.
+Review this boundary when changing the papercut record schema, extension-data
+file limit, User-scope lock, normal `std-utils` instance naming, or CLI output
+sanitization.
+
 The same configured-peer boundary admits transient `tool.progress_reported`
 observations. The report commits before routed-call authorization; only the
 downstream consumer may validate the captured live source, suppress backgrounded

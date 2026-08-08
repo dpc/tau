@@ -2,6 +2,35 @@ use clap::{CommandFactory, Parser};
 
 use super::Cli;
 
+/// Ensures the hidden developer command exposes the papercut list, Markdown,
+/// clear, and explicit-state-root interface without loading user configuration.
+#[test]
+fn papercut_developer_commands_parse_with_their_documented_options() {
+    assert!(Cli::try_parse_from(["tau", "dev", "papercut", "list"]).is_ok());
+    assert!(Cli::try_parse_from(["tau", "dev", "papercut", "list", "--markdown"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "tau",
+            "dev",
+            "papercut",
+            "clear",
+            "--state-dir",
+            "/tmp/tau-state",
+        ])
+        .is_ok()
+    );
+
+    let mut command = Cli::command();
+    let dev = command
+        .find_subcommand_mut("dev")
+        .expect("developer command");
+    let papercut = dev
+        .find_subcommand_mut("papercut")
+        .expect("papercut command");
+    assert!(papercut.find_subcommand_mut("list").is_some());
+    assert!(papercut.find_subcommand_mut("clear").is_some());
+}
+
 /// The removed inspection command must neither parse nor appear in top-level
 /// help, preventing stale scripts from mistaking legacy state for active
 /// policy.

@@ -9,7 +9,8 @@ effective visibility.
 `papercut` accepts only a bounded report string and uses the existing
 per-instance `ExtensionDataScope::User` `AppendFile` RPC to append one
 newline-terminated v1 JSONL record to its owned `papercuts.jsonl` relative
-filename. The harness resolves it to
+filename. The shared `PapercutRecord` type defines this v1 contract for the
+reporter and the developer CLI. The harness resolves it to
 `<tau-state>/ext/<configured-std-utils-instance>/papercuts.jsonl` and
 serializes User-scope appends across harness processes sharing that state root
 and instance. The record attributes the report from the routed tool caller and
@@ -20,6 +21,21 @@ rollover mismatch return a no-retry outcome without interrupting the primary
 task. Ephemeral sessions append to the same durable file. Papercut calls are
 live-only and never replay-append. Existing per-session papercut files remain
 historical artifacts and are not migrated.
+
+The approved narrow operator exception from task 149f lets `tau dev papercut
+list` and `clear` read only the normal `std-utils` instance's canonical file.
+It never
+selects arbitrary extension data or exposes other extension payloads. Both
+commands use the ordinary Tau state root or their explicit `--state-dir`;
+absent standard-instance storage is an empty history and clear is a successful
+zero-record no-op. They take the same extension-directory lock as `AppendFile`.
+Clear validates then deletes the complete file while holding that lock, so
+records appended before its lock boundary are removed and appenders released
+after the boundary create a new preserved file. Malformed, unsupported,
+oversized, symlinked, non-regular, or unrenderable records fail closed and
+remain intact.
+This exception uses the explicit semantics approval in
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 The extension uses deferred startup so it can validate this closed
 per-instance configuration before dynamically declaring its tools and prompt

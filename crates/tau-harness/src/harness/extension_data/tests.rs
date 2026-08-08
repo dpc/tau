@@ -10,7 +10,7 @@ fn read_file_rejects_files_larger_than_extension_data_limit() {
     let file_path = tempdir.path().join("too-large.bin");
     path_std_fs::File::create(&file_path)
         .expect("create file")
-        .set_len(MAX_EXTENSION_DATA_FILE_BYTES + 1)
+        .set_len(EXTENSION_DATA_MAX_FILE_BYTES + 1)
         .expect("make sparse oversized file");
 
     let err = run_extension_data_read_file(tempdir.path(), "too-large.bin".to_owned())
@@ -24,7 +24,7 @@ fn read_file_rejects_files_larger_than_extension_data_limit() {
 #[test]
 fn write_file_rejects_payloads_larger_than_extension_data_limit() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let contents = vec![0; MAX_EXTENSION_DATA_FILE_BYTES as usize + 1];
+    let contents = vec![0; EXTENSION_DATA_MAX_FILE_BYTES as usize + 1];
 
     let err = run_extension_data_write_file(tempdir.path(), "too-large.bin".to_owned(), contents)
         .expect_err("oversized write must fail");
@@ -38,7 +38,7 @@ fn write_file_rejects_payloads_larger_than_extension_data_limit() {
 #[test]
 fn create_file_rejects_payloads_larger_than_extension_data_limit() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let contents = vec![0; MAX_EXTENSION_DATA_FILE_BYTES as usize + 1];
+    let contents = vec![0; EXTENSION_DATA_MAX_FILE_BYTES as usize + 1];
 
     let err = run_extension_data_create_file(tempdir.path(), "too-large.bin".to_owned(), contents)
         .expect_err("oversized create must fail");
@@ -55,7 +55,7 @@ fn append_file_rejects_growth_beyond_extension_data_limit() {
     let file_path = tempdir.path().join("nearly-full.bin");
     path_std_fs::File::create(&file_path)
         .expect("create file")
-        .set_len(MAX_EXTENSION_DATA_FILE_BYTES)
+        .set_len(EXTENSION_DATA_MAX_FILE_BYTES)
         .expect("make sparse quota-sized file");
 
     let err = run_extension_data_append_file(tempdir.path(), "nearly-full.bin".to_owned(), vec![0])
