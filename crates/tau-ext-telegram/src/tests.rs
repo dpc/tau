@@ -11,6 +11,20 @@ use super::gateway_supervisor::{
 };
 use super::*;
 
+/// Remote diagnostic bounding preserves valid UTF-8, enforces the exact byte
+/// ceiling, and replaces control characters before stderr use.
+#[test]
+fn bot_api_diagnostic_is_bounded_and_sanitized_at_utf8_boundary() {
+    let exact = "x".repeat(1024);
+    assert_eq!(bounded_api_diagnostic(&exact), exact);
+    let over = format!("\n{}ésecret", "x".repeat(1022));
+    let bounded = bounded_api_diagnostic(&over);
+    assert!(bounded.len() <= 1024);
+    assert!(bounded.starts_with(' '));
+    assert!(!bounded.contains('\n'));
+    assert!(!bounded.contains("secret"));
+}
+
 impl Extension {
     /// Wait for a fixture-driven supervisor connection notification.
     fn wait_for_gateway_connection(&self) {
@@ -62,7 +76,7 @@ struct FakeClient {
     sent: Mutex<Vec<(i64, String)>>,
     update_batches: Mutex<Vec<Vec<TgUpdate>>>,
     poll_timeouts: Mutex<Vec<u64>>,
-    webhook_info: Mutex<Result<TgWebhookInfo, String>>,
+    webhook_info: Mutex<Result<TgWebhookInfo, TelegramApiFailure>>,
     send_error: Mutex<Option<String>>,
 }
 
@@ -87,7 +101,7 @@ impl FakeClient {
         })
     }
 
-    fn with_webhook_info(info: Result<TgWebhookInfo, String>) -> Arc<Self> {
+    fn with_webhook_info(info: Result<TgWebhookInfo, TelegramApiFailure>) -> Arc<Self> {
         Arc::new(Self {
             sent: Mutex::new(Vec::new()),
             update_batches: Mutex::new(Vec::new()),
@@ -103,7 +117,7 @@ impl FakeClient {
 }
 
 impl TelegramClient for FakeClient {
-    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         self.webhook_info.lock().expect("lock").clone()
     }
 
@@ -111,7 +125,7 @@ impl TelegramClient for FakeClient {
         &self,
         _cfg: &RuntimeConfig,
         _offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, String> {
+    ) -> Result<Vec<TgUpdate>, TelegramApiFailure> {
         self.poll_timeouts
             .lock()
             .expect("lock")
@@ -124,9 +138,14 @@ impl TelegramClient for FakeClient {
         }
     }
 
-    fn send_message(&self, _cfg: &RuntimeConfig, chat_id: i64, text: &str) -> Result<(), String> {
+    fn send_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        chat_id: i64,
+        text: &str,
+    ) -> Result<(), TelegramApiFailure> {
         if let Some(message) = self.send_error.lock().expect("lock").clone() {
-            return Err(message);
+            return Err(TelegramApiFailure::Protocol(message));
         }
         self.sent
             .lock()
@@ -139,7 +158,7 @@ impl TelegramClient for FakeClient {
 struct SlowPollClient;
 
 impl TelegramClient for SlowPollClient {
-    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         Ok(TgWebhookInfo::default())
     }
 
@@ -147,12 +166,17 @@ impl TelegramClient for SlowPollClient {
         &self,
         _cfg: &RuntimeConfig,
         _offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, String> {
+    ) -> Result<Vec<TgUpdate>, TelegramApiFailure> {
         std::thread::sleep(Duration::from_secs(2));
         Ok(Vec::new())
     }
 
-    fn send_message(&self, _cfg: &RuntimeConfig, _chat_id: i64, _text: &str) -> Result<(), String> {
+    fn send_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _chat_id: i64,
+        _text: &str,
+    ) -> Result<(), TelegramApiFailure> {
         Ok(())
     }
 }
@@ -171,7 +195,7 @@ enum WebhookCheckGate {
 }
 
 struct ControlledPollClient {
-    first_response: Mutex<Option<Result<Vec<TgUpdate>, String>>>,
+    first_response: Mutex<Option<Result<Vec<TgUpdate>, TelegramApiFailure>>>,
     response_ready: Condvar,
     called: Mutex<usize>,
     called_ready: Condvar,
@@ -239,17 +263,17 @@ impl ControlledPollClient {
     }
 
     fn release_error(&self, message: &str) {
-        self.release_response(Err(message.to_owned()));
+        self.release_response(Err(TelegramApiFailure::Protocol(message.to_owned())));
     }
 
-    fn release_response(&self, response: Result<Vec<TgUpdate>, String>) {
+    fn release_response(&self, response: Result<Vec<TgUpdate>, TelegramApiFailure>) {
         *self.first_response.lock().expect("lock") = Some(response);
         self.response_ready.notify_all();
     }
 }
 
 impl TelegramClient for ControlledPollClient {
-    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         let mut gate = self.webhook_check_gate.lock().expect("lock");
         if matches!(*gate, WebhookCheckGate::BlockNext) {
             *gate = WebhookCheckGate::Waiting;
@@ -267,7 +291,7 @@ impl TelegramClient for ControlledPollClient {
         &self,
         _cfg: &RuntimeConfig,
         offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, String> {
+    ) -> Result<Vec<TgUpdate>, TelegramApiFailure> {
         self.offsets.lock().expect("lock").push(offset);
         {
             let mut called = self.called.lock().expect("lock");
@@ -282,7 +306,12 @@ impl TelegramClient for ControlledPollClient {
         response.take().unwrap_or_else(|| Ok(Vec::new()))
     }
 
-    fn send_message(&self, _cfg: &RuntimeConfig, _chat_id: i64, _text: &str) -> Result<(), String> {
+    fn send_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _chat_id: i64,
+        _text: &str,
+    ) -> Result<(), TelegramApiFailure> {
         Ok(())
     }
 }
@@ -1996,7 +2025,7 @@ fn telegram_register_fails_when_webhook_is_active() {
 fn telegram_register_fails_when_webhook_preflight_fails() {
     let (tx, rx) = mpsc::channel();
     let ext = test_extension(
-        FakeClient::with_webhook_info(Err("Telegram transport error".to_owned())),
+        FakeClient::with_webhook_info(Err(TelegramApiFailure::Transport)),
         tx,
     );
     ext.apply_config(cfg(), Some(temp_state_dir()))
@@ -3776,7 +3805,10 @@ fn telegram_transport_errors_do_not_expose_bot_token() {
     let err = client
         .send_message(&cfg, 123, "hello")
         .expect_err("connection should fail");
-    assert!(!err.contains("secret-token-for-test"), "err: {err}");
+    assert!(
+        !err.to_string().contains("secret-token-for-test"),
+        "err: {err}"
+    );
 }
 
 /// Registering starts a poller, and disconnect/EOF-facing shutdown must not

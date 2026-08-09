@@ -12,6 +12,17 @@ chat IDs. The private bounded sanitized same-user socket is local coordination,
 not a sandbox or authentication boundary, and token-bearing data stays
 gateway-only.
 
+The gateway exposes stable service-manager exit classes: clean/help exits zero;
+malformed CLI input and a missing or empty token environment value use
+`EX_USAGE` (64); active webhook, local stream-lock contention, and runtime
+`getUpdates` HTTP 409 use `EX_UNAVAILABLE` (69); unexpected invariant or
+response-shape failures use `EX_SOFTWARE` (70); local state, lock, runtime
+filesystem, and durability failures use `EX_IOERR` (74); webhook-preflight
+transport failures and HTTP 408, 425, 429, or 5xx use `EX_TEMPFAIL` (75); and
+semantic configuration or permanent authentication/configuration failures use
+`EX_CONFIG` (78). Ordinary runtime polling failures retain the bounded internal
+retry instead of delegating retry policy to the supervisor.
+
 Durable per-stream state contains the cursor, links/selections, recent IDs,
 counters, and an ordered mixed checkpoint sequence. Each update is classified
 once as `Routed(report_id)` with its exact sidecar delivery or `NonRouted`.

@@ -1,3 +1,3 @@
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
     tau_ext_telegram::run_gateway_from_env()
 }

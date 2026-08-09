@@ -13,13 +13,13 @@ mod durable_store;
 mod routing;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,10 +35,9 @@ use routing::{
     telegram_source_label,
 };
 
+use crate::gateway_exit::GatewayExitError;
 use crate::live_checkpoint::{TelegramReportId, TelegramUpdateId};
-use crate::stream_owner::{
-    UpdateStreamLock, telegram_contention_diagnostic, webhook_active_message,
-};
+use crate::stream_owner::{UpdateStreamLock, UpdateStreamLockError, webhook_active_message};
 use crate::{
     DEFAULT_API_BASE, DEFAULT_POLL_TIMEOUT_SECONDS, HttpTelegramClient, MAX_GATEWAY_RESPONSE_BYTES,
     RuntimeConfig, TelegramClient, TgMessage, TgUpdate, is_private_message_chat, parse_command,
@@ -117,7 +116,7 @@ impl UpdateOutcome {
 }
 
 /// Run the gateway daemon using process command-line arguments and environment.
-pub(super) fn run_from_env() -> Result<(), Box<dyn Error>> {
+pub(super) fn run_from_env() -> std::process::ExitCode {
     let args = env::args_os().collect::<Vec<_>>();
     if args
         .iter()
@@ -125,11 +124,18 @@ pub(super) fn run_from_env() -> Result<(), Box<dyn Error>> {
         .any(|arg| arg == "--help" || arg == "-h")
     {
         println!("{}", gateway_usage());
-        return Ok(());
+        return ExitCode::SUCCESS;
     }
-    let config = GatewayConfig::from_env_args(args, |name| env::var(name).ok())?;
-    let gateway = Gateway::new(config, Arc::new(HttpTelegramClient::default()))?;
-    gateway.run_forever()
+    let result = GatewayConfig::from_env_args(args, |name| env::var(name).ok())
+        .and_then(|config| Gateway::new(config, Arc::new(HttpTelegramClient::default())))
+        .and_then(Gateway::run_forever);
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("tau-telegram-gateway: {error}");
+            error.exit_code()
+        }
+    }
 }
 
 /// Validated configuration for the standalone gateway daemon.
@@ -154,13 +160,13 @@ struct GatewayConfig {
 
 impl GatewayConfig {
     /// Parse command-line flags and resolve the bot token from the environment.
-    fn from_env_args<I, F>(args: I, get_env: F) -> Result<Self, String>
+    fn from_env_args<I, F>(args: I, get_env: F) -> Result<Self, GatewayExitError>
     where
         I: IntoIterator<Item = OsString>,
         F: Fn(&str) -> Option<String>,
     {
         let mut parser = GatewayArgParser::new(args.into_iter().skip(1));
-        let raw = parser.parse()?;
+        let raw = parser.parse().map_err(GatewayExitError::Usage)?;
         let bot_token_env = raw
             .bot_token_env
             .as_deref()
@@ -169,19 +175,26 @@ impl GatewayConfig {
             .map(|token| token.trim().to_owned())
             .filter(|token| !token.is_empty())
             .ok_or_else(|| {
-                format!(
+                GatewayExitError::Usage(format!(
                     "telegram gateway requires bot token in environment variable `{bot_token_env}`"
-                )
+                ))
             })?;
         if raw.allowed_user_ids.is_empty() {
-            return Err("telegram gateway requires at least one --allowed-user-id".to_owned());
+            return Err(GatewayExitError::Config(
+                "telegram gateway requires at least one --allowed-user-id".to_owned(),
+            ));
         }
         let api_base = raw
             .api_base
             .unwrap_or_else(|| DEFAULT_API_BASE.to_owned())
             .trim_end_matches('/')
             .to_owned();
-        validate_api_base(&api_base)?;
+        validate_api_base(&api_base).map_err(GatewayExitError::Config)?;
+        if raw.poll_timeout_seconds == Some(0) {
+            return Err(GatewayExitError::Config(
+                "telegram gateway poll timeout must be positive".to_owned(),
+            ));
+        }
         let state_dir = raw.state_dir.unwrap_or_else(|| default_state_dir(&get_env));
         let runtime_dir = raw
             .runtime_dir
@@ -323,23 +336,37 @@ enum GatewayResources {
 impl Gateway {
     /// Construct a gateway, acquire stream ownership, and bind its local
     /// socket.
-    fn new(config: GatewayConfig, client: Arc<dyn TelegramClient>) -> Result<Self, String> {
-        create_private_dir(&config.state_dir)?;
-        create_private_dir(&config.runtime_dir)?;
+    fn new(
+        config: GatewayConfig,
+        client: Arc<dyn TelegramClient>,
+    ) -> Result<Self, GatewayExitError> {
+        create_private_dir(&config.state_dir).map_err(GatewayExitError::Io)?;
+        create_private_dir(&config.runtime_dir).map_err(GatewayExitError::Io)?;
         let cfg = config.runtime_config();
         let stream_hash = cfg.stream_identity().fingerprint();
-        let update_stream_lock =
-            UpdateStreamLock::acquire(&config.state_dir, cfg.stream_identity())?;
-        let webhook = client.get_webhook_info(&cfg)?;
+        let update_stream_lock = UpdateStreamLock::acquire(
+            &config.state_dir,
+            cfg.stream_identity(),
+        )
+        .map_err(|error| match error {
+            UpdateStreamLockError::Contention(message) => GatewayExitError::Unavailable(message),
+            UpdateStreamLockError::Io(message) => GatewayExitError::Io(message),
+        })?;
+        let webhook = client
+            .get_webhook_info(&cfg)
+            .map_err(GatewayExitError::webhook_preflight)?;
         if !webhook.url.trim().is_empty() {
-            return Err(webhook_active_message(&webhook));
+            return Err(GatewayExitError::Unavailable(webhook_active_message(
+                &webhook,
+            )));
         }
         let state_path = config.state_dir.join(format!("{stream_hash}.json"));
-        let mut durable = GatewayDurableState::load(&state_path, &stream_hash)?;
+        let mut durable =
+            GatewayDurableState::load(&state_path, &stream_hash).map_err(GatewayExitError::Io)?;
         if durable.reconcile_with_config(&cfg) {
             durable
                 .save(&state_path)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| GatewayExitError::Io(error.to_string()))?;
         }
         let durable_store = Arc::new(GatewayDurableStore::new(
             state_path.clone(),
@@ -354,7 +381,8 @@ impl Gateway {
             Arc::clone(&client),
             Arc::clone(&durable_store),
         ));
-        let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&socket_state))?;
+        let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&socket_state))
+            .map_err(GatewayExitError::Io)?;
         Ok(Self {
             cfg,
             client,
@@ -369,22 +397,35 @@ impl Gateway {
     }
 
     /// Run Telegram long polling forever.
-    fn run_forever(mut self) -> Result<(), Box<dyn Error>> {
+    fn run_forever(self) -> Result<(), GatewayExitError> {
+        self.run_with_retry(thread::sleep)
+    }
+
+    /// Run polling with an injected retry wait for deterministic policy tests.
+    fn run_with_retry(
+        mut self,
+        mut retry_wait: impl FnMut(Duration),
+    ) -> Result<(), GatewayExitError> {
         eprintln!(
             "Telegram gateway started; local socket: {}",
             self.socket_state.socket_path.display()
         );
         loop {
-            self.durable = self.durable_store.snapshot()?;
+            self.durable = self
+                .durable_store
+                .snapshot()
+                .map_err(GatewayExitError::Io)?;
             let next_update_offset = self.durable.next_update_offset;
             match self.client.get_updates(&self.cfg, next_update_offset) {
-                Ok(updates) => self.process_updates(updates)?,
-                Err(message) => {
-                    if let Some(diagnostic) = telegram_contention_diagnostic(&message) {
-                        return Err(diagnostic.into());
+                Ok(updates) => self
+                    .process_updates(updates)
+                    .map_err(GatewayExitError::Io)?,
+                Err(error) => {
+                    if let Some(exit) = GatewayExitError::runtime_poll(&error) {
+                        return Err(exit);
                     }
-                    tracing::warn!(target: crate::LOG_TARGET, error = %message, "telegram gateway polling failed");
-                    thread::sleep(Duration::from_secs(5));
+                    tracing::warn!(target: crate::LOG_TARGET, error = %error, "telegram gateway polling failed");
+                    retry_wait(Duration::from_secs(5));
                 }
             }
         }

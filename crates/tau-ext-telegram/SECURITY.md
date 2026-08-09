@@ -82,6 +82,10 @@ make message text trustworthy or grant Tau tool authority.
 - Hermetic tests force early canonical echoes, missing and unrelated echoes,
   mixed/out-of-order checkpoints, retry bounds, listener reconnect drain,
   process restart drain, stream changes, and maximum update-ID arithmetic.
+- Gateway exit statuses are non-secret supervisor control data. Typed failure
+  mapping never encodes tokens or message content in the status, and bounded
+  stderr diagnostics redact the configured token even if a remote response
+  reflects it.
 
 Recheck these safeguards when changing Bot API decoding or bounds, update
 ordering, retry timing, output submission, canonical message correlation,

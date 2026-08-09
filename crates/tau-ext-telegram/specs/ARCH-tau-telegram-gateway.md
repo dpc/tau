@@ -10,6 +10,14 @@ bot token from an environment variable, validates the Bot API base, creates priv
 state/runtime directories, acquires the shared stream lock, checks `getWebhookInfo`,
 loads durable per-stream JSON state, binds a private Unix status socket, and then owns
 `getUpdates` polling.
+Startup failures retain typed transport, HTTP-status, local-I/O, and
+configuration classes until the process boundary. During polling, local
+state/durability failure and HTTP 409 also reach that boundary, while ordinary
+Bot API failures keep the existing internal retry. The gateway maps terminating
+classes to the stable `sysexits(3)` statuses specified by
+[SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md), so a supervisor can
+distinguish permanent configuration, temporary preflight, local repair, and
+stream ownership without parsing diagnostics.
 
 The durable state is scoped by the same non-secret stream fingerprint used for locking.
 It stores the next update offset, an optional private-chat link, chat/user-scoped

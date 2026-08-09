@@ -22,6 +22,11 @@ corrupt typed IDs, concurrent update/ACK commit, and deterministic routed/ACK
 state-save cuts at write, file sync, rename, and parent-directory sync. These
 assert rollback before installation and fail-stop restart recovery after
 installation.
+Subprocess tests exercise the stable exit contract with loopback HTTP fixtures:
+help/usage/configuration, active webhook and lock contention, the complete
+preflight status classification, refused transport, corrupt filesystem state,
+and post-preflight `getUpdates` HTTP 409. Response bodies deliberately include
+the fixture token so every emitted failure class also checks redaction.
 Focused serialization tests cover the exact
 newline-inclusive 65,536-byte boundary, JSON escaping, and multibyte UTF-8.
 

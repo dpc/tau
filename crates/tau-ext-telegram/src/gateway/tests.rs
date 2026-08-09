@@ -16,7 +16,7 @@ fn gateway_args_require_allowed_user() {
 
     match result {
         Ok(_) => panic!("missing allowlist should fail"),
-        Err(error) => assert!(error.contains("allowed")),
+        Err(error) => assert!(error.to_string().contains("allowed")),
     }
 }
 
@@ -1133,9 +1133,14 @@ fn commit_unknown_poison_stops_waiter_after_initial_health_check() {
     assert!(ack_error.contains("commit-unknown"));
     assert!(waiter_error.contains("commit-unknown"));
 
-    let restored =
-        GatewayDurableState::load(&fixture._tempdir.path().join("state.json"), "test-stream")
-            .expect("restart state");
+    let state_path = fixture._tempdir.path().join("state.json");
+    let exit = fixture
+        .gateway
+        .run_with_retry(|_| panic!("poisoned state must exit before polling"))
+        .expect_err("poisoned runtime state must terminate");
+    assert_eq!(exit.exit_code(), ExitCode::from(74));
+
+    let restored = GatewayDurableState::load(&state_path, "test-stream").expect("restart state");
     assert_eq!(restored.next_update_offset, Some(207));
     assert_eq!(restored.processed_update_count, 1);
     assert!(!restored.has_recent_update(207));
@@ -1904,7 +1909,7 @@ fn routing_source_labels_are_sanitized() {
 #[derive(Default)]
 struct FakeGatewayClient {
     /// Queued update batches returned by polling.
-    updates: Mutex<VecDeque<Vec<TgUpdate>>>,
+    updates: Mutex<VecDeque<Result<Vec<TgUpdate>, crate::TelegramApiFailure>>>,
     /// Telegram replies sent by the gateway.
     sent: Mutex<Vec<(i64, String)>>,
     /// Number of future sends that should fail.
@@ -1919,7 +1924,10 @@ impl FakeGatewayClient {
 }
 
 impl TelegramClient for FakeGatewayClient {
-    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<crate::TgWebhookInfo, String> {
+    fn get_webhook_info(
+        &self,
+        _cfg: &RuntimeConfig,
+    ) -> Result<crate::TgWebhookInfo, crate::TelegramApiFailure> {
         Ok(crate::TgWebhookInfo::default())
     }
 
@@ -1927,20 +1935,26 @@ impl TelegramClient for FakeGatewayClient {
         &self,
         _cfg: &RuntimeConfig,
         _offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, String> {
-        Ok(self
-            .updates
+    ) -> Result<Vec<TgUpdate>, crate::TelegramApiFailure> {
+        self.updates
             .lock()
             .expect("updates lock")
             .pop_front()
-            .unwrap_or_default())
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
-    fn send_message(&self, _cfg: &RuntimeConfig, chat_id: i64, text: &str) -> Result<(), String> {
+    fn send_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        chat_id: i64,
+        text: &str,
+    ) -> Result<(), crate::TelegramApiFailure> {
         let mut failures = self.send_failures.lock().expect("failures lock");
         if *failures > 0 {
             *failures -= 1;
-            return Err("simulated send failure".to_owned());
+            return Err(crate::TelegramApiFailure::Protocol(
+                "simulated send failure".to_owned(),
+            ));
         }
         drop(failures);
         self.sent
@@ -1949,6 +1963,46 @@ impl TelegramClient for FakeGatewayClient {
             .push((chat_id, text.to_owned()));
         Ok(())
     }
+}
+
+/// Ordinary runtime failures wait exactly five seconds and repoll, while the
+/// following HTTP 409 exits immediately as unavailable.
+#[test]
+fn runtime_poll_retry_policy_is_deterministic() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture
+        .client
+        .updates
+        .lock()
+        .expect("updates lock")
+        .extend([
+            Err(crate::TelegramApiFailure::Transport),
+            Err(crate::TelegramApiFailure::Http {
+                status: 500,
+                message: "temporary".to_owned(),
+            }),
+            Err(crate::TelegramApiFailure::Protocol(
+                "unexpected shape".to_owned(),
+            )),
+            Err(crate::TelegramApiFailure::Http {
+                status: 409,
+                message: "conflict".to_owned(),
+            }),
+        ]);
+    let mut waits = Vec::new();
+    let error = fixture
+        .gateway
+        .run_with_retry(|delay| waits.push(delay))
+        .expect_err("HTTP 409 must terminate polling");
+    assert_eq!(error.exit_code(), ExitCode::from(69));
+    assert_eq!(
+        waits,
+        [
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        ]
+    );
 }
 
 /// Test fixture containing a gateway with lock/socket filesystem effects

@@ -19,6 +19,25 @@ use crate::LOG_TARGET;
 /// Maximum user-visible bytes copied from Telegram diagnostics.
 const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 1024;
 
+/// Typed local stream-lock failure for gateway ownership policy.
+#[derive(Debug)]
+pub(crate) enum UpdateStreamLockError {
+    /// Another local process currently holds this stream's advisory lock.
+    Contention(String),
+    /// The lock filesystem or advisory-lock operation failed.
+    Io(String),
+}
+
+impl std::error::Error for UpdateStreamLockError {}
+
+impl std::fmt::Display for UpdateStreamLockError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Contention(message) | Self::Io(message) => message.fmt(formatter),
+        }
+    }
+}
+
 /// Sensitive identity inputs for one Telegram Bot API update stream.
 ///
 /// This type carries the raw bot token so it must not be logged, formatted, or
@@ -96,32 +115,42 @@ impl UpdateStreamLock {
     ///
     /// The raw bot token is included only in the stream fingerprint input and
     /// is never written to the filesystem or returned in diagnostics.
-    pub(crate) fn acquire(state_dir: &Path, identity: StreamIdentity<'_>) -> Result<Self, String> {
-        let locks_dir = lock_root(state_dir)?;
-        fs::create_dir_all(&locks_dir)
-            .map_err(|e| format!("creating Telegram update-stream lock directory: {e}"))?;
+    pub(crate) fn acquire(
+        state_dir: &Path,
+        identity: StreamIdentity<'_>,
+    ) -> Result<Self, UpdateStreamLockError> {
+        let locks_dir = lock_root(state_dir).map_err(UpdateStreamLockError::Io)?;
+        fs::create_dir_all(&locks_dir).map_err(|e| {
+            UpdateStreamLockError::Io(format!(
+                "creating Telegram update-stream lock directory: {e}"
+            ))
+        })?;
         let stream_hash = identity.fingerprint();
         let path = locks_dir.join(format!("{stream_hash}.lock"));
-        let mut file = open_lock_file(&path)
-            .map_err(|e| format!("opening Telegram update-stream lock: {e}"))?;
+        let mut file = open_lock_file(&path).map_err(|e| {
+            UpdateStreamLockError::Io(format!("opening Telegram update-stream lock: {e}"))
+        })?;
         if let Err(error) = FileExt::try_lock_exclusive(&file) {
             if error.kind() == ErrorKind::WouldBlock {
                 let owner = read_owner_metadata(&mut file)
                     .filter(|owner| !owner.trim().is_empty())
                     .unwrap_or_else(|| "owner metadata unavailable".to_owned());
-                return Err(format!(
+                return Err(UpdateStreamLockError::Contention(format!(
                     "Telegram update stream is already locked by another Tau process \
                      (api_base={}, stream_hash={}, lock={}, owner: {})",
                     identity.api_base(),
                     stream_hash,
                     path.display(),
                     owner.trim()
-                ));
+                )));
             }
-            return Err(format!("locking Telegram update stream: {error}"));
+            return Err(UpdateStreamLockError::Io(format!(
+                "locking Telegram update stream: {error}"
+            )));
         }
-        write_owner_metadata(&mut file, &identity, &stream_hash)
-            .map_err(|e| format!("writing Telegram update-stream lock metadata: {e}"))?;
+        write_owner_metadata(&mut file, &identity, &stream_hash).map_err(|e| {
+            UpdateStreamLockError::Io(format!("writing Telegram update-stream lock metadata: {e}"))
+        })?;
         Ok(Self {
             file,
             path,

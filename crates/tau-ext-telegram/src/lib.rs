@@ -16,6 +16,7 @@ use ureq::tls as path_ureq_tls;
 
 mod gateway;
 mod gateway_client;
+mod gateway_exit;
 mod gateway_supervisor;
 mod live_checkpoint;
 mod pending_retry_backoff;
@@ -23,6 +24,7 @@ mod stream_owner;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
+use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,7 +86,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 
 /// Run the standalone Telegram gateway daemon from process command-line
 /// arguments and environment variables.
-pub fn run_gateway_from_env() -> Result<(), Box<dyn Error>> {
+pub fn run_gateway_from_env() -> std::process::ExitCode {
     tau_client::init_logging_for(LOG_TARGET);
     gateway::run_from_env()
 }
@@ -101,18 +103,53 @@ where
 /// Small Bot API surface used by the extension and faked by unit tests.
 trait TelegramClient: Send + Sync + 'static {
     /// Fetch webhook status without consuming the update stream.
-    fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String>;
+    fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure>;
 
     /// Fetch message updates from Telegram using the configured poll timeout.
     fn get_updates(
         &self,
         cfg: &RuntimeConfig,
         offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, String>;
+    ) -> Result<Vec<TgUpdate>, TelegramApiFailure>;
 
     /// Send a plain text message to one configured or linked chat.
-    fn send_message(&self, cfg: &RuntimeConfig, chat_id: i64, text: &str) -> Result<(), String>;
+    fn send_message(
+        &self,
+        cfg: &RuntimeConfig,
+        chat_id: i64,
+        text: &str,
+    ) -> Result<(), TelegramApiFailure>;
 }
+
+/// Bot API failure retaining the stable facts needed by gateway exit policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TelegramApiFailure {
+    /// DNS, connection, TLS, or timeout failure before an HTTP response.
+    Transport,
+    /// Non-success HTTP response with redacted, bounded response text.
+    Http {
+        /// HTTP status code returned by the Bot API endpoint.
+        status: u16,
+        /// Redacted response excerpt for operator diagnosis.
+        message: String,
+    },
+    /// A successful response that violated the expected Bot API shape.
+    Protocol(String),
+}
+
+impl fmt::Display for TelegramApiFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport => formatter.write_str("Telegram transport error"),
+            Self::Http { status, message } => {
+                write!(formatter, "Telegram returned HTTP {status}: {message}")
+            }
+            Self::Protocol(message) => message.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for TelegramApiFailure {}
 
 /// Validated runtime configuration, including resolved secret values.
 #[derive(Clone)]
@@ -710,10 +747,10 @@ impl State {
             "telegram update polling requires an extension state directory for advisory locking"
                 .to_owned()
         })?;
-        self.update_stream_lock = Some(Arc::new(UpdateStreamLock::acquire(
-            state_dir,
-            cfg.stream_identity(),
-        )?));
+        self.update_stream_lock = Some(Arc::new(
+            UpdateStreamLock::acquire(state_dir, cfg.stream_identity())
+                .map_err(|error| error.to_string())?,
+        ));
         Ok(())
     }
 
@@ -1466,7 +1503,7 @@ impl Extension {
                     );
                     tool_result(invoke, "sent Telegram message")
                 }
-                Err(message) => tool_error(invoke, message),
+                Err(message) => tool_error(invoke, message.to_string()),
             }
         }
     }
@@ -2257,7 +2294,7 @@ fn poll_loop_with_tool_names(
                 if !ext.poll_response_matches_config(poll_request.config_generation) {
                     continue;
                 }
-                if let Some(diagnostic) = telegram_contention_diagnostic(&message) {
+                if let Some(diagnostic) = telegram_contention_diagnostic(&message.to_string()) {
                     tracing::warn!(target: LOG_TARGET, error = %message, "telegram update stream contention detected");
                     ext.fail_active_polling_with_notice(&poll_request.cfg, &diagnostic);
                     continue;
@@ -2888,16 +2925,16 @@ impl Default for HttpTelegramClient {
 }
 
 impl TelegramClient for HttpTelegramClient {
-    fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+    fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         let value = self.post(cfg, "getWebhookInfo", serde_json::json!({}))?;
-        decode_webhook_info(&value)
+        decode_webhook_info(&value).map_err(TelegramApiFailure::Protocol)
     }
 
     fn get_updates(
         &self,
         cfg: &RuntimeConfig,
         offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, String> {
+    ) -> Result<Vec<TgUpdate>, TelegramApiFailure> {
         let mut body = serde_json::json!({
             "timeout": cfg.poll_timeout_seconds,
             "allowed_updates": ["message"],
@@ -2909,11 +2946,20 @@ impl TelegramClient for HttpTelegramClient {
         let result = value
             .get("result")
             .and_then(|value| value.as_array())
-            .ok_or_else(|| "Telegram getUpdates response missing result array".to_owned())?;
-        decode_updates(result)
+            .ok_or_else(|| {
+                TelegramApiFailure::Protocol(
+                    "Telegram getUpdates response missing result array".to_owned(),
+                )
+            })?;
+        decode_updates(result).map_err(TelegramApiFailure::Protocol)
     }
 
-    fn send_message(&self, cfg: &RuntimeConfig, chat_id: i64, text: &str) -> Result<(), String> {
+    fn send_message(
+        &self,
+        cfg: &RuntimeConfig,
+        chat_id: i64,
+        text: &str,
+    ) -> Result<(), TelegramApiFailure> {
         self.post(
             cfg,
             "sendMessage",
@@ -2929,28 +2975,56 @@ impl HttpTelegramClient {
         cfg: &RuntimeConfig,
         method: &str,
         body: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, TelegramApiFailure> {
         let url = format!("{}/bot{}/{}", cfg.api_base, cfg.bot_token, method);
         let mut response = self
             .agent
             .post(&url)
             .content_type("application/json")
             .send(body.to_string())
-            .map_err(|_e| "Telegram transport error".to_owned())?;
+            .map_err(|_error| TelegramApiFailure::Transport)?;
         let status = response.status();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| format!("reading Telegram response: {e}"))?;
-        let text = cfg.stream_identity().redact_token(&text);
         if !status.is_success() {
-            return Err(format!(
-                "Telegram returned HTTP {}: {text}",
-                status.as_u16()
-            ));
+            let bytes = response
+                .body_mut()
+                .with_config()
+                .limit(1025)
+                .read_to_vec()
+                .unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
+            let text = cfg.stream_identity().redact_token(&text);
+            return Err(TelegramApiFailure::Http {
+                status: status.as_u16(),
+                message: bounded_api_diagnostic(&text),
+            });
         }
-        serde_json::from_str(&text).map_err(|e| format!("invalid Telegram JSON: {e}"))
+        let text = response.body_mut().read_to_string().map_err(|error| {
+            TelegramApiFailure::Protocol(format!(
+                "reading Telegram HTTP {status} response: {error}"
+            ))
+        })?;
+        serde_json::from_str(&text).map_err(|error| {
+            TelegramApiFailure::Protocol(format!("invalid Telegram JSON: {error}"))
+        })
     }
+}
+
+/// Bound a remote diagnostic at a UTF-8 boundary before displaying it.
+fn bounded_api_diagnostic(text: &str) -> String {
+    const MAX_BYTES: usize = 1024;
+    let mut output = String::new();
+    for character in text.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if MAX_BYTES < output.len() + character.len_utf8() {
+            break;
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn decode_webhook_info(value: &serde_json::Value) -> Result<TgWebhookInfo, String> {
