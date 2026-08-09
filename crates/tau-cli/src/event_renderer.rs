@@ -17,6 +17,8 @@ use tau_proto::{
     ProviderResponseCompactionStatus, ProviderResponseTextDelta, ToolCallItem, UnixMicros,
 };
 
+const MAX_SUBMITTED_PROMPT_CORRELATIONS: usize = 64;
+
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
@@ -428,7 +430,10 @@ pub(crate) struct EventRenderer {
     /// Queued user-message blocks (in above_sticky zone).
     /// When `AgentPromptStarted` fires for a dequeued prompt,
     /// the first entry is popped and moved back to history.
-    queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
+    queued_user_blocks: VecDeque<QueuedUserBlock>,
+    /// Correlated prompts already submitted after leaving the runtime queue.
+    /// Their later pre-materialization failure cannot consume newer queue work.
+    submitted_prompt_ctx_ids: VecDeque<String>,
     /// Provider-neutral pending row shown after the harness accepts a user
     /// submission and before it assigns a prompt id.
     accepted_submission_block: Option<tau_cli_term::BlockId>,
@@ -640,6 +645,17 @@ pub(crate) struct EventRenderer {
     agent_activity: AgentActivity,
 }
 
+/// One queued lifecycle entry and its optional visible user marker.
+#[derive(Clone, Debug)]
+struct QueuedUserBlock {
+    /// Terminal output block for a user prompt; internal prompts own no block.
+    id: Option<tau_cli_term::BlockId>,
+    /// Exact prompt text used when promoting the marker into history.
+    text: String,
+    /// User/internal class needed to match the broadcast lifecycle FIFO.
+    message_class: tau_proto::PromptMessageClass,
+}
+
 /// Shared state needed by renderer-owned selection changes to retarget prompt
 /// drafts without sending protocol events directly from the renderer thread.
 struct DraftRetargeter {
@@ -664,7 +680,8 @@ struct AgentUiState {
     editor_conversation_context: EditorConversationContext,
     prompts: HashMap<String, PromptState>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
-    queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
+    queued_user_blocks: VecDeque<QueuedUserBlock>,
+    submitted_prompt_ctx_ids: VecDeque<String>,
     accepted_submission_block: Option<tau_cli_term::BlockId>,
     tool_calls: HashMap<String, ToolCallState>,
     shell_blocks: HashMap<String, ShellBlockState>,
@@ -1738,6 +1755,7 @@ impl EventRenderer {
             prompts: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
+            submitted_prompt_ctx_ids: VecDeque::new(),
             accepted_submission_block: None,
             tool_calls: HashMap::new(),
             tool_timer: None,
@@ -2459,6 +2477,7 @@ impl EventRenderer {
             prompts: std::mem::take(&mut self.prompts),
             last_user_block: self.last_user_block.take(),
             queued_user_blocks: std::mem::take(&mut self.queued_user_blocks),
+            submitted_prompt_ctx_ids: std::mem::take(&mut self.submitted_prompt_ctx_ids),
             accepted_submission_block: self.accepted_submission_block.take(),
             tool_calls: std::mem::take(&mut self.tool_calls),
             shell_blocks: std::mem::take(&mut self.shell_blocks),
@@ -2510,6 +2529,7 @@ impl EventRenderer {
         self.prompts = state.prompts;
         self.last_user_block = state.last_user_block;
         self.queued_user_blocks = state.queued_user_blocks;
+        self.submitted_prompt_ctx_ids = state.submitted_prompt_ctx_ids;
         self.accepted_submission_block = state.accepted_submission_block;
         self.tool_calls = state.tool_calls;
         self.shell_blocks = state.shell_blocks;
@@ -3333,6 +3353,7 @@ impl EventRenderer {
         self.prompts.clear();
         self.last_user_block = None;
         self.queued_user_blocks.clear();
+        self.submitted_prompt_ctx_ids.clear();
         self.accepted_submission_block = None;
         self.tool_calls.clear();
         if let Some(timer) = &self.tool_timer {
@@ -4891,6 +4912,12 @@ impl EventRenderer {
             Event::AgentPromptRecalled(recalled) => {
                 EventAgentIdResolution::Agent(recalled.agent_id.to_string())
             }
+            Event::AgentPromptRejected(rejected) => {
+                EventAgentIdResolution::Agent(rejected.agent_id.to_string())
+            }
+            Event::AgentPromptFailed(failed) => {
+                EventAgentIdResolution::Agent(failed.agent_id.to_string())
+            }
             Event::AgentPromptSteered(steered) => {
                 EventAgentIdResolution::Agent(steered.agent_id.to_string())
             }
@@ -5572,6 +5599,10 @@ impl EventRenderer {
                 self.handle_agent_prompt_recalled(recalled);
                 true
             }
+            Event::AgentPromptRejected(rejected) => {
+                self.handle_agent_prompt_rejected(rejected);
+                true
+            }
             Event::AgentPromptSteered(steered) => {
                 self.handle_agent_prompt_steered(steered);
                 true
@@ -5597,6 +5628,43 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_submitted(&mut self, prompt: &tau_proto::AgentPromptSubmitted) {
+        if let Some(ctx_id) = prompt.ctx_id.as_ref() {
+            if !self.submitted_prompt_ctx_ids.contains(ctx_id) {
+                self.submitted_prompt_ctx_ids.push_back(ctx_id.clone());
+            }
+            while MAX_SUBMITTED_PROMPT_CORRELATIONS < self.submitted_prompt_ctx_ids.len() {
+                self.submitted_prompt_ctx_ids.pop_front();
+            }
+        }
+        let queued = if self
+            .queued_user_blocks
+            .front()
+            .is_some_and(|queued| queued.message_class == prompt.message_class)
+        {
+            self.queued_user_blocks.pop_front()
+        } else {
+            None
+        };
+        if !prompt.message_class.is_internal()
+            && matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+                    | tau_proto::PromptSubmissionSource::Legacy
+            )
+            && let Some(queued) = queued.as_ref()
+            && let Some(queued_id) = queued.id
+        {
+            use tau_themes::names;
+            self.handle.remove_block(queued_id);
+            self.reset_main_tool_usage();
+            let id = self.handle.print_output(
+                "user-prompt",
+                self.submitted_prompt_block(names::USER_PROMPT, queued.text.clone()),
+            );
+            self.last_user_block = Some((id, queued.text.clone()));
+            self.handle.redraw();
+            return;
+        }
         if self.handle_visible_internal_prompt(
             prompt.message_class,
             prompt.internal_kind,
@@ -5611,16 +5679,8 @@ impl EventRenderer {
         ) {
             return;
         }
-        if !prompt.message_class.is_internal()
-            && matches!(
-                prompt.submission_source,
-                tau_proto::PromptSubmissionSource::HumanUi
-                    | tau_proto::PromptSubmissionSource::Legacy
-            )
-            && self.front_queued_user_prompt_matches(&prompt.text)
-        {
-            self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
-            return;
+        if let Some(queued_id) = queued.and_then(|queued| queued.id) {
+            self.handle.remove_block(queued_id);
         }
         if self.handle_source_aware_prompt_projection(
             &prompt.submission_source,
@@ -5748,16 +5808,17 @@ impl EventRenderer {
         use tau_themes::names;
 
         if self.front_queued_user_prompt_matches(text) {
-            let Some((queued_id, queued_text)) = self.queued_user_blocks.pop_front() else {
+            let Some(queued) = self.queued_user_blocks.pop_front() else {
                 return;
             };
-            self.handle.remove_block(queued_id);
+            self.handle
+                .remove_block(queued.id.expect("matched queued user prompt owns a block"));
             self.reset_main_tool_usage();
             let id = self.handle.print_output(
                 "user-prompt",
-                self.submitted_prompt_block(names::USER_PROMPT, queued_text.clone()),
+                self.submitted_prompt_block(names::USER_PROMPT, queued.text.clone()),
             );
-            self.last_user_block = Some((id, queued_text));
+            self.last_user_block = Some((id, queued.text));
             self.handle.redraw();
             return;
         }
@@ -5769,6 +5830,11 @@ impl EventRenderer {
 
     fn handle_agent_prompt_queued(&mut self, queued: &tau_proto::AgentPromptQueued) {
         if queued.message_class.is_internal() {
+            self.queued_user_blocks.push_back(QueuedUserBlock {
+                id: None,
+                text: queued.text.clone(),
+                message_class: queued.message_class,
+            });
             return;
         }
 
@@ -5799,17 +5865,46 @@ impl EventRenderer {
         let queued_id = self.handle.new_block("user-prompt-queued", block);
         self.handle.push_above_sticky(queued_id);
         self.handle.redraw();
-        self.queued_user_blocks
-            .push_back((queued_id, queued.text.clone()));
+        self.queued_user_blocks.push_back(QueuedUserBlock {
+            id: Some(queued_id),
+            text: queued.text.clone(),
+            message_class: queued.message_class,
+        });
     }
 
     fn handle_agent_prompt_recalled(&mut self, recalled: &tau_proto::AgentPromptRecalled) {
-        if let Some((queued_id, _text)) = self.queued_user_blocks.pop_back() {
+        if let Some(index) = self
+            .queued_user_blocks
+            .iter()
+            .rposition(|queued| queued.id.is_some())
+            && let Some(queued) = self.queued_user_blocks.remove(index)
+            && let Some(queued_id) = queued.id
+        {
             self.handle.remove_above_sticky(queued_id);
             self.handle.remove_block(queued_id);
         }
         self.handle
             .recall_prompt_before_current(recalled.text.clone());
+        self.handle.redraw();
+    }
+
+    fn handle_agent_prompt_rejected(&mut self, rejected: &tau_proto::AgentPromptRejected) {
+        if self
+            .queued_user_blocks
+            .front()
+            .is_some_and(|queued| queued.message_class == rejected.message_class)
+            && let Some(queued) = self.queued_user_blocks.pop_front()
+            && let Some(queued_id) = queued.id
+        {
+            self.handle.remove_above_sticky(queued_id);
+            self.handle.remove_block(queued_id);
+        }
+        self.agent_activity.clear_optimistic_submissions();
+        self.update_agent_in_progress();
+        self.handle.print_output(
+            "prompt-rejected",
+            render_action_output_block(&self.theme, &rejected.message),
+        );
         self.handle.redraw();
     }
 
@@ -5843,13 +5938,14 @@ impl EventRenderer {
             // and harness facts retain their source-aware presentation. Never
             // consume a different queued item merely because a later item has
             // the same text.
-            let Some((queued_id, text)) = self.queued_user_blocks.pop_front() else {
+            let Some(queued) = self.queued_user_blocks.pop_front() else {
                 return;
             };
-            self.handle.remove_block(queued_id);
+            self.handle
+                .remove_block(queued.id.expect("matched queued user prompt owns a block"));
             self.handle.print_output(
                 "user-prompt-steered",
-                self.submitted_prompt_block(names::USER_PROMPT, text),
+                self.submitted_prompt_block(names::USER_PROMPT, queued.text),
             );
             self.handle.redraw();
             return;
@@ -5880,9 +5976,19 @@ impl EventRenderer {
     /// Queue records lack provenance, so only their front entry can establish
     /// that a submitted or steered prompt is the user projection to promote.
     fn front_queued_user_prompt_matches(&self, text: &str) -> bool {
+        self.front_queued_prompt_matches(text, tau_proto::PromptMessageClass::User)
+    }
+
+    /// Return whether the exact broadcast queue front matches one prompt
+    /// lifecycle event.
+    fn front_queued_prompt_matches(
+        &self,
+        text: &str,
+        message_class: tau_proto::PromptMessageClass,
+    ) -> bool {
         self.queued_user_blocks
             .front()
-            .is_some_and(|(_, queued_text)| queued_text == text)
+            .is_some_and(|queued| queued.text == text && queued.message_class == message_class)
     }
 
     fn handle_agent_prompt_created(&mut self, prompt: &tau_proto::AgentPromptCreated) {
@@ -5890,6 +5996,14 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
+        if let Some(ctx_id) = prompt.ctx_id.as_ref()
+            && let Some(index) = self
+                .submitted_prompt_ctx_ids
+                .iter()
+                .position(|submitted| submitted == ctx_id)
+        {
+            self.submitted_prompt_ctx_ids.remove(index);
+        }
         self.clear_accepted_submission_indicator();
         self.finished_provider_prompts
             .remove(prompt.agent_prompt_id.as_str());
@@ -5935,10 +6049,14 @@ impl EventRenderer {
     fn promote_next_queued_prompt(&mut self, label: &'static str) {
         use tau_themes::names;
 
-        if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
+        if let Some(queued) = self.queued_user_blocks.pop_front()
+            && let Some(queued_id) = queued.id
+        {
             self.handle.remove_block(queued_id);
-            self.handle
-                .print_output(label, self.submitted_prompt_block(names::USER_PROMPT, text));
+            self.handle.print_output(
+                label,
+                self.submitted_prompt_block(names::USER_PROMPT, queued.text),
+            );
         }
     }
 
@@ -7579,6 +7697,19 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptFailed(failed) => {
+                let submitted = self
+                    .submitted_prompt_ctx_ids
+                    .iter()
+                    .position(|ctx_id| ctx_id == &failed.ctx_id)
+                    .and_then(|index| self.submitted_prompt_ctx_ids.remove(index))
+                    .is_some();
+                if !submitted
+                    && let Some(queued) = self.queued_user_blocks.pop_front()
+                    && let Some(queued_id) = queued.id
+                {
+                    self.handle.remove_above_sticky(queued_id);
+                    self.handle.remove_block(queued_id);
+                }
                 self.agent_activity.clear_optimistic_submissions();
                 self.update_agent_in_progress();
                 self.handle.print_output(

@@ -201,6 +201,19 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   effective content refreshed during cold restore. The reducer folds the fact
   into replaceable side state without adding a transcript node.
 - **`agent.prompt_recalled`** — A queued prompt was recalled for editing.
+- **`agent.prompt_rejected`** — Harness-authored transient terminal for one
+  ordinary queued prompt that cannot dispatch because provider initialization
+  settled with no available models. It carries the owning `agent_id`, the
+  user/internal `message_class`, and fixed actionable provider-configuration
+  guidance, but no prompt text. It is immutable, must pass interception, and is
+  delivered only live; it never enters session or agent journals, semantic
+  replay, or provider context. Accepted create-agent initial prompts retain the
+  separately correlated `agent.prompt_failed` terminal instead. Because queued
+  events have no prompt id, live consumers correlate terminals per agent in FIFO
+  broadcast order. Submitted facts remove their matching queue front and retain
+  `ctx_id` correlation, so a later `agent.prompt_failed` cannot consume newer
+  queued work; otherwise `agent.prompt_failed` or `agent.prompt_rejected`
+  consumes the matching user/internal queue front.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
   assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
   `system_prompt`, materialized `context`, tools or `tools_ref`, model, model

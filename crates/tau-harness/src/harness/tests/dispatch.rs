@@ -1485,6 +1485,9 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.provider_model_info.clear();
     h.available_models.clear();
     h.selected_model = None;
+    // Model-less queueing is transient only while startup still has an
+    // unapplied extension connection.
+    h.extensions.pending_connects = 1;
 
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("ui-create-test"),

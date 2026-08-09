@@ -297,6 +297,7 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::AGENT_PROMPT_SUBMITTED),
         EventSelector::Exact(E::AGENT_PROMPT_QUEUED),
         EventSelector::Exact(E::AGENT_PROMPT_RECALLED),
+        EventSelector::Exact(E::AGENT_PROMPT_REJECTED),
         EventSelector::Exact(E::AGENT_PROMPT_STEERED),
         EventSelector::Exact(E::AGENT_COMPACTION_TRIGGERED),
         EventSelector::Exact(E::AGENT_MANUAL_COMPACTION_REQUESTED),
@@ -370,6 +371,7 @@ pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
         .iter()
         .filter(|selector| {
             **selector != EventSelector::Exact(EventName::AGENT_PROMPT_FAILED)
+                && **selector != EventSelector::Exact(EventName::AGENT_PROMPT_REJECTED)
                 && **selector != EventSelector::Exact(EventName::TERM_OSC1337_SET_USER_VAR)
                 && **selector != EventSelector::Exact(EventName::TERM_BELL)
         })

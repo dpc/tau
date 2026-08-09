@@ -1303,6 +1303,11 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             text: "queued".to_owned(),
         }),
+        Event::AgentPromptRejected(AgentPromptRejected {
+            agent_id: agent_id("engineer_abcd1234"),
+            message_class: PromptMessageClass::User,
+            message: "no provider models".to_owned(),
+        }),
         Event::AgentPromptSteered(AgentPromptSteered {
             self_compaction_terminal: None,
             inference_activation: false,
@@ -2613,6 +2618,7 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::UiPromptSubmitted(_)
                 | Event::AgentPromptQueued(_)
                 | Event::AgentPromptRecalled(_)
+                | Event::AgentPromptRejected(_)
                 | Event::AgentPromptCreated(_)
                 | Event::AgentPromptStarted(_)
                 | Event::AgentPromptTerminated(_)
@@ -2651,6 +2657,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.prompt_prewarm_requested",
         "agent.prompt_queued",
         "agent.prompt_recalled",
+        "agent.prompt_rejected",
         "agent.prompt_started",
         "agent.prompt_steered",
         "agent.prompt_submitted",
@@ -4848,6 +4855,11 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
         Event::AgentPromptRecalled(AgentPromptRecalled {
             agent_id: agent_id("worker"),
             text: "queued".to_owned(),
+        }),
+        Event::AgentPromptRejected(AgentPromptRejected {
+            agent_id: agent_id("worker"),
+            message_class: PromptMessageClass::User,
+            message: "no provider models".to_owned(),
         }),
         Event::AgentPromptTerminated(AgentPromptTerminated {
             agent_id: agent_id("worker"),

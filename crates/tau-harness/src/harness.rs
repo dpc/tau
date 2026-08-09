@@ -8946,6 +8946,7 @@ impl Harness {
             Event::AgentPromptStarted(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptQueued(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptRecalled(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptRejected(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptFailed(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptPrewarmRequested(prompt) => Some(&prompt.agent_id),
@@ -12751,6 +12752,7 @@ impl Harness {
                 | Event::AgentCacheRefreshRequested(_)
                 | Event::AgentCacheRefreshCancelRequested(_)
                 | Event::AgentPromptFailed(_)
+                | Event::AgentPromptRejected(_)
         ) {
             // Canonical provider execution facts and pre-materialization prompt
             // terminals are harness-authored. Configured providers publish only
@@ -18307,6 +18309,7 @@ impl Harness {
                 | Event::AgentStarted(_)
                 | Event::AgentPromptStarted(_)
                 | Event::AgentPromptFailed(_)
+                | Event::AgentPromptRejected(_)
                 | Event::AgentOuterTurnStarted(_)
                 | Event::AgentOuterTurnFinished(_)
                 | Event::AgentPromptCreated(_)

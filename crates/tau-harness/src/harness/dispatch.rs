@@ -24,6 +24,8 @@ use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
 use crate::harness::{AgentPublishCompletion, Harness};
 
+const NO_PROVIDER_MODELS_MESSAGE: &str = "No provider models are available. Run `tau provider list` to inspect provider status, then configure or enable a provider before submitting another prompt.";
+
 impl Harness {
     pub(crate) fn dispatch_user_prompt(
         &mut self,
@@ -226,11 +228,20 @@ impl Harness {
     /// Session initialization still happens before prompt dispatch, so
     /// a fresh `chat-*` session can discover AGENTS.md and skills before
     /// the agent sees the first user message.
+    ///
+    /// Pending extension connections preserve transient startup queueing. Once
+    /// every connection and extension activation settles with no provider
+    /// models, this drain rejects queued prompts and retires selected-branch
+    /// message wakes without creating provider work.
     pub(crate) fn try_advance_queue(&mut self) {
         if !self.turn_state.is_idle()
             || !self.extensions_all_ready()
-            || (self.selected_model.is_none() && self.provider_model_info.is_empty())
+            || self.extensions.pending_connects != 0
         {
+            return;
+        }
+        if self.selected_model.is_none() && self.provider_model_info.is_empty() {
+            self.reject_runnable_activations_without_provider_models();
             return;
         }
 
@@ -392,6 +403,78 @@ impl Harness {
                     conv.in_flight_prompt = None;
                 }
                 self.set_agent_turn_state(&agent_id, AgentTurnState::Idle);
+            }
+        }
+    }
+
+    /// Terminalize runnable prompt and message activations after provider
+    /// startup has settled with no published models.
+    fn reject_runnable_activations_without_provider_models(&mut self) {
+        let runnable_agents = self
+            .agents
+            .keys()
+            .filter(|agent_id| {
+                self.agents.get(*agent_id).is_some_and(|agent| {
+                    agent
+                        .pending_prompts
+                        .iter()
+                        .any(|prompt| !prompt.is_passive_background_completion())
+                        || agent.pending_replay_activation
+                        || self.has_ready_message_wake_on_selected_branch(agent_id)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for agent_id in runnable_agents {
+            let pending = self
+                .agents
+                .get_mut(&agent_id)
+                .expect("collected runnable agent must remain loaded")
+                .pending_prompts
+                .drain(..)
+                .collect::<Vec<_>>();
+            let (passive, rejected): (Vec<_>, Vec<_>) = pending
+                .into_iter()
+                .partition(PendingPrompt::is_passive_background_completion);
+            self.agents
+                .get_mut(&agent_id)
+                .expect("collected runnable agent must remain loaded")
+                .pending_prompts
+                .extend(passive);
+
+            for prompt in rejected {
+                if let Some(correlation) = prompt.initial_prompt_correlation {
+                    self.publish_initial_prompt_failed(
+                        correlation,
+                        tau_proto::AgentPromptFailureStage::Submission,
+                        NO_PROVIDER_MODELS_MESSAGE,
+                    );
+                } else if let Some(public_agent_id) = self.ensure_agent_id_for_agent(&agent_id) {
+                    self.publish_event(
+                        Some(crate::harness::harness_connection_id()),
+                        Event::AgentPromptRejected(tau_proto::AgentPromptRejected {
+                            agent_id: crate::parse_agent_id(&public_agent_id),
+                            message_class: prompt.message_class,
+                            message: NO_PROVIDER_MODELS_MESSAGE.to_owned(),
+                        }),
+                    );
+                }
+            }
+
+            let rejects_message_activation = self
+                .agents
+                .get(&agent_id)
+                .is_some_and(|agent| agent.pending_replay_activation)
+                || self.has_ready_message_wake_on_selected_branch(&agent_id);
+            if rejects_message_activation {
+                let through = self
+                    .agents
+                    .get(&agent_id)
+                    .and_then(|agent| agent.head)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                self.acknowledge_message_wakes_through(&agent_id, through);
+                self.emit_harness_failure(NO_PROVIDER_MODELS_MESSAGE);
             }
         }
     }

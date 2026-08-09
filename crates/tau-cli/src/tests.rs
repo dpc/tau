@@ -12,14 +12,15 @@ use tau_cli_term_raw::{Color, Term};
 use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     AgentCompactionTriggered, AgentManualCompactionRequested, AgentPromptCreated,
-    AgentPromptQueued, AgentPromptSteered, AgentPromptSubmitted, AgentPromptTerminated,
-    AgentPromptTerminationReason, AgentStandaloneCompactionStarted, CborValue, ContentPart,
-    ContextItem, ContextRole, Effort, Event, ExtensionReady, HarnessContextUsageChanged,
-    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, HarnessSessionDir, MessageItem,
-    OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
-    ServiceTier, SessionDirStatus, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
-    UiRoleUpdateAction, Verbosity,
+    AgentPromptFailed, AgentPromptQueued, AgentPromptRejected, AgentPromptSteered,
+    AgentPromptSubmitted, AgentPromptTerminated, AgentPromptTerminationReason,
+    AgentStandaloneCompactionStarted, CborValue, ContentPart, ContextItem, ContextRole, Effort,
+    Event, ExtensionReady, HarnessContextUsageChanged, HarnessRoleInfo, HarnessRoleSelected,
+    HarnessRolesAvailable, HarnessSessionDir, MessageItem, OpaqueProviderItem,
+    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
+    SessionDirStatus, SessionStartReason, SessionStarted, ThinkingSummary, ToolBackgroundResult,
+    ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction,
+    Verbosity,
 };
 
 use super::agent_navigation::AgentNavigationState;
@@ -3053,6 +3054,268 @@ fn queued_prompt_uses_composing_marker() {
 
     assert!(vt.screen_contains(80, "⬤ queued marker check"));
     assert!(!vt.screen_contains(80, "◯ queued marker check"));
+}
+
+/// A terminal queue rejection must remove the stale queued marker and render
+/// the actionable provider configuration failure.
+#[test]
+fn rejected_prompt_replaces_queued_marker_with_actionable_failure() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "prompt without providers".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptRejected(AgentPromptRejected {
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        message: "No provider models are available. Run `tau provider list`.".into(),
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(100, "prompt without providers (queued)"));
+    assert!(vt.screen_contains(100, "No provider models are available"));
+    assert!(vt.screen_contains(100, "tau provider list"));
+}
+
+/// FIFO prompt terminals remove the corresponding oldest queued marker, so a
+/// create-agent failure followed by an ordinary rejection cannot cross-remove
+/// adjacent prompts.
+#[test]
+fn prompt_failure_and_rejection_remove_queued_markers_in_fifo_order() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: "create-a".into(),
+            session_id: test_session_id("s1"),
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("main"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+    for text in ["initial A", "ordinary B"] {
+        renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+            text: text.into(),
+            agent_id: agent_id("main"),
+            message_class: tau_proto::PromptMessageClass::User,
+        }));
+    }
+
+    renderer.handle(&Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "create-a".into(),
+        agent_id: agent_id("main"),
+        ctx_id: "ctx-a".into(),
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "initial failed".into(),
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "initial A (queued)"));
+    assert!(vt.screen_contains(100, "ordinary B (queued)"));
+
+    renderer.handle(&Event::AgentPromptRejected(AgentPromptRejected {
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        message: "No provider models are available.".into(),
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "ordinary B (queued)"));
+}
+
+/// A failure routed to a hidden agent must not consume the visible agent's
+/// queued marker.
+#[test]
+fn hidden_agent_prompt_failure_preserves_visible_queue() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "visible queued".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: "hidden-create".into(),
+            session_id: test_session_id("s1"),
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("hidden"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "hidden queued".into(),
+        agent_id: agent_id("hidden"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+
+    renderer.handle(&Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "hidden-create".into(),
+        agent_id: agent_id("hidden"),
+        ctx_id: "hidden-ctx".into(),
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "hidden failed".into(),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "visible queued (queued)"));
+    assert!(!vt.screen_contains(100, "hidden queued (queued)"));
+}
+
+/// A non-requesting attached UI receives only the broadcast queued/failure
+/// lifecycle and must still remove the failed initial marker.
+#[test]
+fn broadcast_only_initial_prompt_failure_removes_queue_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "initial from another UI".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "other-ui-create".into(),
+        agent_id: agent_id("main"),
+        ctx_id: "other-ui-ctx".into(),
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "initial failed".into(),
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(100, "initial from another UI (queued)"));
+    assert!(vt.screen_contains(100, "initial failed"));
+}
+
+/// A late failure for an initial prompt already promoted into submitted history
+/// must not consume a newer ordinary queued marker.
+#[test]
+fn submitted_initial_prompt_failure_preserves_newer_queue() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: "create-a".into(),
+            session_id: test_session_id("s1"),
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("main"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "initial A".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("main"),
+        text: "initial A".into(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: Some("ctx-a".into()),
+    }));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "ordinary B".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "create-a".into(),
+        agent_id: agent_id("main"),
+        ctx_id: "ctx-a".into(),
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "initial failed late".into(),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "ordinary B (queued)"));
+}
+
+/// Queue ownership follows broadcast FIFO/class rather than mutable text, so
+/// skill expansion or interception rewrites cannot strand an initial marker.
+#[test]
+fn rewritten_submitted_initial_failure_preserves_newer_queue() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: ":skill expand-me".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("main"),
+        text: "expanded skill body".into(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: Some("ctx-rewritten".into()),
+    }));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "ordinary B".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "create-rewritten".into(),
+        agent_id: agent_id("main"),
+        ctx_id: "ctx-rewritten".into(),
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "rewritten initial failed".into(),
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(100, ":skill expand-me (queued)"));
+    assert!(vt.screen_contains(100, "ordinary B (queued)"));
+}
+
+/// An internal initial prompt owns no visible queue block, so its terminal
+/// cannot consume a later visible user marker.
+#[test]
+fn internal_initial_prompt_failure_preserves_visible_queue() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::UiCreateAgentResult(
+        tau_proto::UiCreateAgentResult {
+            request_id: "create-internal".into(),
+            session_id: test_session_id("s1"),
+            outcome: tau_proto::UiCreateAgentOutcome::Created {
+                agent_id: agent_id("main"),
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            },
+        },
+    ));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "internal A".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::Internal,
+    }));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "ordinary B".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "create-internal".into(),
+        agent_id: agent_id("main"),
+        ctx_id: "ctx-internal".into(),
+        stage: tau_proto::AgentPromptFailureStage::Submission,
+        message: "internal failed".into(),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "ordinary B (queued)"));
 }
 
 /// A multiline queued prompt occupies two rows while steering still promotes

@@ -148,11 +148,19 @@ Dispatch waits for every selected wake to materialize, then commits an
 multiple ready wakes. It acknowledges only message-fact and agent-message wakes
 whose nodes are ancestors of its selected-branch watermark.
 
+If provider and extension initialization instead settles with no available
+models, the harness retires the same materialized selected-branch wakes plus any
+pending replay activation without committing an inference checkpoint or creating
+provider work. One always-show actionable provider-configuration failure covers
+the coalesced activation for that agent. Off-branch wakes remain dormant and
+owned; a later model publication permits new message activations and any
+subsequently selected dormant wake to use ordinary dispatch.
+
 Explicit navigation is allowed while activation is owed. If the selected branch
 does not contain a wake node, that wake remains dormant, retains any live
 admission ownership, and is not scanned into context or acknowledged. Reselecting
-its branch makes it eligible again. Endpoint/session lifecycle cleanup may
-retire the runtime wake.
+its branch makes it eligible again. Endpoint/session lifecycle cleanup, or the
+settled-empty provider failure above, may retire the runtime wake.
 
 The same branch ownership applies to committed activations parked behind
 interception or context-readiness gates. Each obligation retains its captured
@@ -189,13 +197,13 @@ received occurrence nodes, selected-branch checkpoint coverage, and a later
 terminal non-tool response. It does not match generated wrapper text. A later
 uncovered receive remains outstanding.
 
-Checkpoint coverage releases the exact wake and peer byte weight. Endpoint
-termination/unload, pending-start cancellation, session rollover, and shutdown
-clear applicable runtime wakes, waits, watch isolation state, and admission
-weights; committed facts remain. Stale-generation completions cannot install
-wakes in a replacement session. If this cleanup destructively cancels an already
-delivered interception request, the responder follows the one-reply suspension
-contract in
+Checkpoint coverage and settled-empty selected-branch retirement release the
+exact wake and peer byte weight. Endpoint termination/unload, pending-start
+cancellation, session rollover, and shutdown clear applicable runtime wakes,
+waits, watch isolation state, and admission weights; committed facts remain.
+Stale-generation completions cannot install wakes in a replacement session. If
+this cleanup destructively cancels an already delivered interception request, the
+responder follows the one-reply suspension contract in
 [SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md):
 new publications bypass it until one stale reply is consumed, or disconnect
 resets the connection.

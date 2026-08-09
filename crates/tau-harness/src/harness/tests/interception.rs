@@ -4651,6 +4651,33 @@ fn prompt_failed_terminal_is_immutable_and_must_pass() {
     assert!(Harness::is_peer_forbidden_harness_fact(&original));
 }
 
+/// Settled-empty prompt rejection is harness-owned terminal authority that
+/// interceptors and peers cannot drop, rewrite, or forge.
+#[test]
+fn prompt_rejected_terminal_is_immutable_and_must_pass() {
+    let original = Event::AgentPromptRejected(tau_proto::AgentPromptRejected {
+        agent_id: crate::parse_agent_id("agent-1"),
+        message_class: tau_proto::PromptMessageClass::User,
+        message: "no provider models".to_owned(),
+    });
+    let mut replacement = original.clone();
+    let Event::AgentPromptRejected(rejected) = &mut replacement else {
+        unreachable!("prompt-rejected fixture")
+    };
+    rejected.message = "forged terminal".to_owned();
+
+    assert!(crate::harness::interception::event_must_pass_by_default(
+        &original.name()
+    ));
+    assert!(
+        crate::harness::interception::immutable_protected_fact_was_modified(
+            &original,
+            &replacement
+        )
+    );
+    assert!(Harness::is_peer_forbidden_harness_fact(&original));
+}
+
 /// Ensures the initialization replacement and canonical projections
 /// cannot be forged or rewritten before their runtime producers exist.
 #[test]

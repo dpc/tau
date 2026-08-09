@@ -4145,6 +4145,19 @@ pub struct AgentPromptRecalled {
     pub text: String,
 }
 
+/// The harness rejected a previously queued prompt before provider dispatch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptRejected {
+    /// Agent whose queue owned the prompt.
+    pub agent_id: AgentId,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
+    /// Actionable reason why the prompt could not be dispatched.
+    pub message: String,
+}
+
 /// A durable provider-visible manual or automatic compaction request was
 /// inserted into an agent transcript.
 ///
@@ -5890,6 +5903,8 @@ pub enum Event {
     AgentPromptQueued(AgentPromptQueued),
     #[serde(rename = "agent.prompt_recalled")]
     AgentPromptRecalled(AgentPromptRecalled),
+    #[serde(rename = "agent.prompt_rejected")]
+    AgentPromptRejected(AgentPromptRejected),
     #[serde(rename = "agent.prompt_steered")]
     AgentPromptSteered(AgentPromptSteered),
     #[serde(rename = "agent.compaction_triggered")]
@@ -6337,6 +6352,7 @@ impl Event {
             Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
             Self::AgentPromptQueued(_) => EventName::AGENT_PROMPT_QUEUED,
             Self::AgentPromptRecalled(_) => EventName::AGENT_PROMPT_RECALLED,
+            Self::AgentPromptRejected(_) => EventName::AGENT_PROMPT_REJECTED,
             Self::AgentPromptSteered(_) => EventName::AGENT_PROMPT_STEERED,
             Self::AgentCompactionTriggered(_) => EventName::AGENT_COMPACTION_TRIGGERED,
             Self::AgentCompacted(_) => EventName::AGENT_COMPACTED,
@@ -6500,6 +6516,7 @@ impl Event {
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)
                 | Self::AgentPromptRecalled(_)
+                | Self::AgentPromptRejected(_)
                 | Self::AgentPromptCreated(_)
                 | Self::AgentPromptStarted(_)
                 | Self::AgentPromptTerminated(_)

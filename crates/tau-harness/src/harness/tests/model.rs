@@ -673,6 +673,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
+    h.extensions.pending_connects = 1;
     assert!(h.selected_model.is_none());
 
     assert_eq!(
@@ -686,6 +687,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     );
     assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1,);
 
+    h.extensions.pending_connects = 0;
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
@@ -703,6 +705,233 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
         conv.turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
+}
+
+/// A prompt queued during transient extension startup must wait, but the same
+/// prompt must fail visibly once startup settles with no provider models; a
+/// later model publication must still allow an independent prompt to run.
+#[test]
+fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    h.extensions.pending_connects = 1;
+
+    assert_eq!(
+        h.submit_user_prompt(
+            "s1".parse().expect("session id"),
+            "blocked prompt".to_owned(),
+        )
+        .expect("submit prompt"),
+        PromptSubmission::Queued,
+    );
+    let cid = test_user_agent(&h);
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 1);
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptRejected(_)))
+    );
+
+    h.extensions.pending_connects = 0;
+    h.try_advance_queue();
+
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    let rejected = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptRejected(rejected) => Some(rejected),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rejected.len(), 1);
+    assert!(rejected[0].message.contains("tau provider list"));
+    assert!(
+        rejected[0]
+            .message
+            .contains("configure or enable a provider")
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
+    );
+
+    let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![provider_model(model_id, 128_000)],
+        })),
+    )
+    .expect("publish recovery model");
+    h.submit_user_prompt(
+        "s1".parse().expect("session id"),
+        "recovery prompt".to_owned(),
+    )
+    .expect("submit recovery prompt");
+
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptRejected(_)))
+            .count(),
+        1
+    );
+}
+
+/// A create-agent initial prompt keeps its existing request/ctx terminal
+/// correlation when settled-empty startup rejects it, and must not also emit
+/// the ordinary queued-prompt terminal or provider work.
+#[test]
+fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    h.extensions.pending_connects = 1;
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("empty-model-create-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "empty-model-create".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("initial prompt".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("empty-model-ctx".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create agent");
+    let cid = test_user_agent(&h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("created durable agent");
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 1);
+
+    h.extensions.pending_connects = 0;
+    h.try_advance_queue();
+
+    let events = event_log_events(&h);
+    let failures = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptFailed(failed) => Some(failed),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].request_id, "empty-model-create");
+    assert_eq!(failures[0].agent_id, crate::parse_agent_id(&agent_id));
+    assert_eq!(failures[0].ctx_id, "empty-model-ctx");
+    assert_eq!(
+        failures[0].stage,
+        tau_proto::AgentPromptFailureStage::Submission
+    );
+    assert!(failures[0].message.contains("tau provider list"));
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptRejected(_)))
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
+    );
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+}
+
+/// An inter-agent message accepted during startup must not dispatch before
+/// model publication or remain an immortal wake after startup settles empty; a
+/// later message must activate normally once a model appears.
+#[test]
+fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    h.extensions.pending_connects = 1;
+
+    let publish_message = |h: &mut Harness, message_id: &str, message: &str| {
+        h.publish_event(
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: tau_proto::AgentMessageId::parse(message_id).expect("message id"),
+                sender_id: crate::parse_agent_id("sender"),
+                sender_session_id: None,
+                recipient_id: agent_id.clone(),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                message: message.to_owned(),
+            }),
+        );
+    };
+    publish_message(&mut h, "startup-message", "wait for providers");
+
+    assert!(h.has_ready_message_wake_on_selected_branch(&cid));
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
+    );
+
+    h.extensions.pending_connects = 0;
+    h.try_advance_queue();
+
+    assert!(!h.has_ready_message_wake_on_selected_branch(&cid));
+    assert!(
+        h.replayable_harness_notices
+            .iter()
+            .any(|notice| { notice.always_show && notice.message.contains("tau provider list") })
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
+    );
+
+    let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![provider_model(model_id, 128_000)],
+        })),
+    )
+    .expect("publish recovery model");
+    publish_message(&mut h, "recovery-message", "providers recovered");
+
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
 }
 
 /// `:model <provider>/<model>` is an agent-local selection, not a role switch
@@ -823,6 +1052,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     h.provider_model_info.clear();
     h.available_models.clear();
     h.selected_model = None;
+    h.extensions.pending_connects = 1;
     let role = h.selected_role.clone();
     let selected_model: ModelId = "test/cold-selected".parse().expect("model id");
 
@@ -863,6 +1093,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
             .any(|event| matches!(event, Event::AgentPromptCreated(_)))
     );
 
+    h.extensions.pending_connects = 0;
     h.handle_extension_event(
         "provider-ext",
         TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
@@ -1053,6 +1284,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
+    h.extensions.pending_connects = 1;
     assert!(h.provider_model_info.is_empty());
     assert!(h.selected_model.is_none());
 
@@ -1077,6 +1309,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     );
     assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1);
 
+    h.extensions.pending_connects = 0;
     let available_model: ModelId = "openai/available".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",

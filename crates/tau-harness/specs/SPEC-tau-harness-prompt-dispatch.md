@@ -43,6 +43,23 @@ winning both metadata and routing. Duplicate ids produce an ordinary warning
 whose displayed id count and per-id text are bounded; this diagnostic does not
 change winner selection.
 
+Prompt submission may queue while configured extensions are still initializing.
+After every queued extension connection and the global activation barrier settle,
+an empty provider model registry rejects each runnable queued prompt exactly once
+with `agent.prompt_rejected`, or with the correlated `agent.prompt_failed` terminal
+for an accepted create-agent initial prompt. Both carry actionable configuration
+guidance. `agent.prompt_rejected` is a harness-authored immutable must-pass live
+event carrying only agent identity, message class, and the fixed guidance; it
+contains no prompt text and never enters journals, replay, or provider context.
+Queued prompts have no prompt id, so terminals map per agent in FIFO stream
+order using the broadcast lifecycle alone. A submitted fact removes its matching
+queue front while retaining `ctx_id` correlation, so a later correlated
+`agent.prompt_failed` cannot consume newer work. Otherwise
+`agent.prompt_failed` or `agent.prompt_rejected` consumes the matching
+user/internal FIFO front.
+No provider request is materialized for rejected work. A later model declaration
+affects only new submissions, which use the ordinary selection and dispatch path.
+
 ## Tool prompt-surface policy
 
 Extensions and providers publish metadata only: tools declare neutral `ToolTag`s

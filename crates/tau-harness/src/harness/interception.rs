@@ -388,6 +388,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // instead of the full provider prompt payload.
     EventName::AGENT_PROMPT_STARTED,
     EventName::AGENT_PROMPT_FAILED,
+    EventName::AGENT_PROMPT_REJECTED,
     EventName::AGENT_OUTER_TURN_STARTED,
     EventName::AGENT_OUTER_TURN_FINISHED,
     // Agent response: dropping this would wedge `c.head` /
@@ -544,6 +545,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
             | Event::AgentPromptFailed(_)
+            | Event::AgentPromptRejected(_)
             | Event::AgentOuterTurnStarted(_)
             | Event::AgentOuterTurnFinished(_)
             | Event::ProviderResponseFinished(_)

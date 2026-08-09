@@ -463,6 +463,9 @@ impl EventName {
     pub const AGENT_PROMPT_QUEUED: Self = Self::from_static(EventCategory::Agent, "prompt_queued");
     pub const AGENT_PROMPT_RECALLED: Self =
         Self::from_static(EventCategory::Agent, "prompt_recalled");
+    /// A queued prompt was rejected before provider dispatch.
+    pub const AGENT_PROMPT_REJECTED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_rejected");
     pub const AGENT_PROMPT_STEERED: Self =
         Self::from_static(EventCategory::Agent, "prompt_steered");
     pub const AGENT_COMPACTION_TRIGGERED: Self =
