@@ -1216,7 +1216,7 @@ fn dispatch_action_invoke(invoke: ActionInvoke, lock_manager: &DirLockManager) -
     for entry in removed {
         lines.push(format!("{} owner={}", entry.dir.display(), entry.owner));
     }
-    Event::ActionResult(ActionResult {
+    Event::ActionResultReported(ActionResult {
         invocation_id: invoke.invocation_id,
         action_id: invoke.action_id,
         output: ActionOutput::Text {
@@ -1226,7 +1226,7 @@ fn dispatch_action_invoke(invoke: ActionInvoke, lock_manager: &DirLockManager) -
 }
 
 fn action_error(invoke: ActionInvoke, message: String) -> Event {
-    Event::ActionError(ActionError {
+    Event::ActionErrorReported(ActionError {
         invocation_id: invoke.invocation_id,
         action_id: invoke.action_id,
         message,

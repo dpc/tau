@@ -527,14 +527,20 @@ agent requests, and harness dispatch. The registration lifecycle contract is
 Action events carry command/action schema and invocation traffic between
 extensions, the harness, and interested UIs.
 
-- **`action.schema_published`** — An extension publishes its current action
-  schema tree, including command names, descriptions, arguments, and action ids.
+- **`action.schema_declared`** — An Action-capable configured extension declares
+  a complete replacement schema snapshot.
+- **`action.schema_published`** — The harness publishes an accepted current
+  schema stamped with its logical owner.
 - **`action.invoke`** — The harness or UI requests execution of a published
   action by id with CBOR/YAML-compatible arguments and correlation metadata.
-- **`action.result`** — The action provider returns a successful result for a
-  prior invocation.
-- **`action.error`** — The action provider reports an invocation failure with a
-  human-readable message and optional structured detail.
+- **`action.result_reported`** — The provider reports successful output for
+  downstream exact-owner correlation.
+- **`action.result`** — The harness returns validated output only to the
+  requesting UI.
+- **`action.error_reported`** — The provider reports a failure for downstream
+  exact-owner correlation.
+- **`action.error`** — The harness returns a validated or synthesized failure
+  only to the requesting UI.
 
 ## Extensions
 

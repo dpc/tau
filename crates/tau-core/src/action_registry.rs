@@ -228,6 +228,15 @@ impl ActionRegistry {
     pub fn has_schema_for_connection(&self, connection_id: &ConnectionId) -> bool {
         self.schemas_by_connection.contains_key(connection_id)
     }
+
+    /// Return the current schema owned by one exact live connection.
+    #[must_use]
+    pub fn schema_for_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Option<&ActionProviderSchema> {
+        self.schemas_by_connection.get(connection_id)
+    }
 }
 
 fn validate_invoke_against_schema(

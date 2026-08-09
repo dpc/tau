@@ -119,6 +119,7 @@ impl tau_client::TauExtension for EmailExtension {
             email_prompt_fragment(),
         );
         builder
+            .action_provider()
             .ready_message("email extension ready")
             .configure_raw(|cx| {
                 let Some(state_dir) = cx.configure.state_dir.clone() else {
@@ -130,11 +131,8 @@ impl tau_client::TauExtension for EmailExtension {
                 cx.state
                     .configure(cx.configure.clone(), storage)
                     .map_err(tau_client::ClientError::handler)?;
-                cx.handle.emit(Event::ActionSchemaPublished(
-                    tau_proto::ActionSchemaPublished {
-                        extension_name: tau_proto::ExtensionName::parse("email")
-                            .expect("authenticated email extension name must satisfy the identifier grammar"),
-                        instance_id: 0.into(),
+                cx.handle.emit(Event::ActionSchemaDeclared(
+                    tau_proto::ActionSchemaDeclared {
                         schema: email_action_schema_with_accounts(
                             &cx.state.google_auth_account_ids(),
                         ),
@@ -5378,12 +5376,12 @@ impl RuntimeState {
             )),
         };
         match result {
-            Ok(text) => Event::ActionResult(ActionResult {
+            Ok(text) => Event::ActionResultReported(ActionResult {
                 invocation_id: invoke.invocation_id,
                 action_id: invoke.action_id,
                 output: ActionOutput::Text { text },
             }),
-            Err(message) => Event::ActionError(ActionError {
+            Err(message) => Event::ActionErrorReported(ActionError {
                 invocation_id: invoke.invocation_id,
                 action_id: invoke.action_id,
                 message,

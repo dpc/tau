@@ -358,7 +358,7 @@ impl TauExtension for ActionExtension {
             .publish_actions(ActionSchema::default())
             .action("demo.run", |cx| {
                 cx.state.action_matches += 1;
-                cx.emit(Event::ActionResult(tau_proto::ActionResult {
+                cx.emit(Event::ActionResultReported(tau_proto::ActionResult {
                     invocation_id: cx.invoke.invocation_id.clone(),
                     action_id: cx.invoke.action_id.clone(),
                     output: ActionOutput::Text {
@@ -1499,28 +1499,32 @@ fn action_schema_and_live_dispatch_match_action_after_harness_routing() {
 
     assert_eq!(state.action_matches, 1);
     assert!(matches!(
+        &frames[0],
+        HarnessInputMessage::Hello(hello)
+            if hello.capabilities == [tau_proto::PeerCapability::ActionProvider]
+    ));
+    assert!(matches!(
         &frames[1],
         HarnessInputMessage::Subscribe(sub)
             if sub.live_selectors == [EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE)]
     ));
-    let (schema_index, published_schema) = frames
+    let (schema_index, declared_schema) = frames
         .iter()
         .enumerate()
         .find_map(|(index, frame)| {
             let HarnessInputMessage::Emit(emit) = frame else {
                 return None;
             };
-            let Event::ActionSchemaPublished(published) = emit.event.as_ref() else {
+            let Event::ActionSchemaDeclared(published) = emit.event.as_ref() else {
                 return None;
             };
             Some((index, published))
         })
         .expect("action schema published");
-    assert_eq!(
-        published_schema.extension_name,
-        test_extension_name("action-owner")
-    );
-    assert_eq!(published_schema.instance_id, 0.into());
+    declared_schema
+        .schema
+        .validate()
+        .expect("declared Action schema must validate");
     assert!(schema_index < ready_frame_index(&frames));
     let action_results = frames
         .iter()
@@ -1528,7 +1532,7 @@ fn action_schema_and_live_dispatch_match_action_after_harness_routing() {
             matches!(
                 frame,
                 HarnessInputMessage::Emit(emit)
-                    if matches!(emit.event.as_ref(), Event::ActionResult(result)
+                    if matches!(emit.event.as_ref(), Event::ActionResultReported(result)
                         if result.action_id == "demo.run")
             )
         })

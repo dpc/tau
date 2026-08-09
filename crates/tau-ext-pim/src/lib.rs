@@ -211,7 +211,7 @@ impl RuntimeState {
         } else if invoke.action_id.starts_with("calendar.") {
             self.calendar.dispatch_action(invoke)
         } else {
-            Event::ActionError(tau_proto::ActionError {
+            Event::ActionErrorReported(tau_proto::ActionError {
                 invocation_id: invoke.invocation_id,
                 action_id: invoke.action_id,
                 message: "unknown pim action".to_owned(),
@@ -277,6 +277,7 @@ impl tau_client::TauExtension for PimExtension {
             calendar::calendar_prompt_fragment(),
         );
         builder
+            .action_provider()
             .ready_message("pim extension ready")
             .configure_raw(|cx| {
                 let storage = cx
@@ -288,12 +289,8 @@ impl tau_client::TauExtension for PimExtension {
                 cx.state
                     .configure(cx.configure.clone(), storage)
                     .map_err(tau_client::ClientError::handler)?;
-                cx.handle.emit(Event::ActionSchemaPublished(
-                    tau_proto::ActionSchemaPublished {
-                        extension_name: tau_proto::ExtensionName::parse("pim").expect(
-                            "authenticated pim extension name must satisfy the identifier grammar",
-                        ),
-                        instance_id: 0.into(),
+                cx.handle.emit(Event::ActionSchemaDeclared(
+                    tau_proto::ActionSchemaDeclared {
                         schema: cx.state.action_schema(),
                     },
                 ))

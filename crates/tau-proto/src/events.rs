@@ -1202,6 +1202,14 @@ impl BackgroundSupport {
 // Action events
 // ---------------------------------------------------------------------------
 
+/// Extension-authored complete Action schema snapshot awaiting
+/// canonicalization.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ActionSchemaDeclared {
+    /// Full replacement snapshot; an empty schema withdraws every Action.
+    pub schema: tau_actions::ActionSchema,
+}
+
 /// Harness-stamped action schema currently provided by one extension instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActionSchemaPublished {
@@ -5671,12 +5679,24 @@ pub enum Event {
     ToolDelegateProgress(DelegateProgress),
 
     // Extension-provided UI actions
+    /// Peer-authored complete Action schema snapshot.
+    #[serde(rename = "action.schema_declared")]
+    ActionSchemaDeclared(ActionSchemaDeclared),
+    /// Harness-authored canonical current Action schema.
     #[serde(rename = "action.schema_published")]
     ActionSchemaPublished(ActionSchemaPublished),
     #[serde(rename = "action.invoke")]
     ActionInvoke(ActionInvoke),
+    /// Peer-authored successful outcome awaiting exact invocation correlation.
+    #[serde(rename = "action.result_reported")]
+    ActionResultReported(ActionResult),
+    /// Harness-authored canonical successful outcome.
     #[serde(rename = "action.result")]
     ActionResult(ActionResult),
+    /// Peer-authored failed outcome awaiting exact invocation correlation.
+    #[serde(rename = "action.error_reported")]
+    ActionErrorReported(ActionError),
+    /// Harness-authored canonical failed outcome.
     #[serde(rename = "action.error")]
     ActionError(ActionError),
 
@@ -6163,9 +6183,12 @@ impl Event {
 
     fn action_event_name(&self) -> Option<EventName> {
         match self {
+            Self::ActionSchemaDeclared(_) => EventName::ACTION_SCHEMA_DECLARED,
             Self::ActionSchemaPublished(_) => EventName::ACTION_SCHEMA_PUBLISHED,
             Self::ActionInvoke(_) => EventName::ACTION_INVOKE,
+            Self::ActionResultReported(_) => EventName::ACTION_RESULT_REPORTED,
             Self::ActionResult(_) => EventName::ACTION_RESULT,
+            Self::ActionErrorReported(_) => EventName::ACTION_ERROR_REPORTED,
             Self::ActionError(_) => EventName::ACTION_ERROR,
             _ => return None,
         }
@@ -6452,9 +6475,12 @@ impl Event {
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)
                 | Self::ToolError(_)
+                | Self::ActionSchemaDeclared(_)
                 | Self::ActionSchemaPublished(_)
                 | Self::ActionInvoke(_)
+                | Self::ActionResultReported(_)
                 | Self::ActionResult(_)
+                | Self::ActionErrorReported(_)
                 | Self::ActionError(_)
                 | Self::ExtPromptFragmentPublish(_)
                 | Self::ExtensionSessionDiscoverySnapshotDeclared(_)

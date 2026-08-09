@@ -3046,7 +3046,7 @@ fn tool_error(invoke: ToolStarted, details: CborValue) -> Event {
 }
 
 fn action_result(invoke: ActionInvoke, text: String) -> Event {
-    Event::ActionResult(ActionResult {
+    Event::ActionResultReported(ActionResult {
         invocation_id: invoke.invocation_id,
         action_id: invoke.action_id,
         output: ActionOutput::Text { text },
@@ -3054,7 +3054,7 @@ fn action_result(invoke: ActionInvoke, text: String) -> Event {
 }
 
 fn action_error(invoke: ActionInvoke, message: String) -> Event {
-    Event::ActionError(ActionError {
+    Event::ActionErrorReported(ActionError {
         invocation_id: invoke.invocation_id,
         action_id: invoke.action_id,
         message,

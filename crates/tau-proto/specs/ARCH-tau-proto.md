@@ -8,7 +8,8 @@ or sanitization path.
 
 The protocol now separates transient `message.*_reported` inputs from
 harness-authored canonical `message.*` facts, carries declared
-`PeerCapability::MessageBridge` authority in `Hello`, and separates transient
+orthogonal `PeerCapability::MessageBridge` and
+`PeerCapability::ActionProvider` authority in `Hello`, and separates transient
 provider `provider.models_declared` inputs from harness-authored canonical
 `provider.models_updated` current state. The generic authenticated publisher
 delivery envelope and the remaining exact event-family mappings required by

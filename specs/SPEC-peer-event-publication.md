@@ -54,6 +54,9 @@ use dedicated input/output messages instead of overloading `Emit`. Those
 messages remain outside event interception, subscriptions, and replay unless
 their handlers deliberately publish separate events.
 
+The Action specialization is defined by
+[SPEC-action-declarations-and-outcomes](SPEC-action-declarations-and-outcomes.md).
+
 Extension activation may buffer emitted frames until peer and global startup
 barriers allow publication. Buffering, ordering, authentication, and bounded
 admission remain lifecycle concerns and do not authorize event-specific domain

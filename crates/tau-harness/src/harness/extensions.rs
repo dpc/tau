@@ -146,6 +146,8 @@ pub(crate) struct ExtensionRuntimeState {
     /// Pre-`Ready` tool declarations admitted but not yet committed or dropped
     /// by interception.
     pub(super) pending_tool_lifecycle_declarations: HashMap<tau_proto::ConnectionId, usize>,
+    /// Pre-`Ready` Action snapshots admitted but not yet committed or dropped.
+    pub(super) pending_action_schema_declarations: HashMap<tau_proto::ConnectionId, usize>,
     /// Pre-`Ready` prompt-fragment declarations admitted but not yet committed
     /// or dropped by interception.
     pub(super) pending_prompt_fragment_declarations: HashMap<tau_proto::ConnectionId, usize>,

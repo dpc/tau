@@ -1072,6 +1072,9 @@ fn representative_events() -> Vec<Event> {
             tools_total: 1,
             display: None,
         }),
+        Event::ActionSchemaDeclared(ActionSchemaDeclared {
+            schema: action_schema_fixture(),
+        }),
         Event::ActionSchemaPublished(ActionSchemaPublished {
             extension_name: test_extension_name("std-email"),
             instance_id: 7.into(),
@@ -1088,6 +1091,14 @@ fn representative_events() -> Vec<Event> {
             argv: Vec::new(),
             arguments: CborValue::Map(Vec::new()),
         }),
+        Event::ActionResultReported(ActionResult {
+            invocation_id: ActionInvocationId::parse("act-report-1")
+                .expect("test identifier must satisfy its grammar"),
+            action_id: "email.out.list".to_owned(),
+            output: ActionOutput::Text {
+                text: "reported output".to_owned(),
+            },
+        }),
         Event::ActionResult(ActionResult {
             invocation_id: ActionInvocationId::parse("act-1")
                 .expect("test identifier must satisfy its grammar"),
@@ -1095,6 +1106,13 @@ fn representative_events() -> Vec<Event> {
             output: ActionOutput::Text {
                 text: "no queued mail".to_owned(),
             },
+        }),
+        Event::ActionErrorReported(ActionError {
+            invocation_id: ActionInvocationId::parse("act-report-2")
+                .expect("test identifier must satisfy its grammar"),
+            action_id: "email.out.list".to_owned(),
+            message: "reported failure".to_owned(),
+            details: None,
         }),
         Event::ActionError(ActionError {
             invocation_id: ActionInvocationId::parse("act-2")
@@ -2570,9 +2588,12 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ToolProgress(_)
                 | Event::ToolDelegateProgress(_)
                 | Event::ToolError(_)
+                | Event::ActionSchemaDeclared(_)
                 | Event::ActionSchemaPublished(_)
                 | Event::ActionInvoke(_)
+                | Event::ActionResultReported(_)
                 | Event::ActionResult(_)
+                | Event::ActionErrorReported(_)
                 | Event::ActionError(_)
                 | Event::ExtPromptFragmentPublish(_)
                 | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
@@ -2608,8 +2629,11 @@ fn expected_default_persist(event: &Event) -> bool {
 fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
     [
         "action.error",
+        "action.error_reported",
         "action.invoke",
         "action.result",
+        "action.result_reported",
+        "action.schema_declared",
         "action.schema_published",
         "agent.compaction_triggered",
         "agent.compacted",
@@ -4746,6 +4770,9 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             display: None,
             originator: PromptOriginator::User,
         }),
+        Event::ActionSchemaDeclared(ActionSchemaDeclared {
+            schema: action_schema_fixture(),
+        }),
         Event::ActionSchemaPublished(ActionSchemaPublished {
             extension_name: test_extension_name("std-email"),
             instance_id: 7.into(),
@@ -4762,6 +4789,14 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             argv: Vec::new(),
             arguments: CborValue::Map(Vec::new()),
         }),
+        Event::ActionResultReported(ActionResult {
+            invocation_id: ActionInvocationId::parse("act-report-1")
+                .expect("test identifier must satisfy its grammar"),
+            action_id: "email.out.list".to_owned(),
+            output: ActionOutput::Text {
+                text: "reported output".to_owned(),
+            },
+        }),
         Event::ActionResult(ActionResult {
             invocation_id: ActionInvocationId::parse("act-1")
                 .expect("test identifier must satisfy its grammar"),
@@ -4769,6 +4804,13 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             output: ActionOutput::Text {
                 text: "ok".to_owned(),
             },
+        }),
+        Event::ActionErrorReported(ActionError {
+            invocation_id: ActionInvocationId::parse("act-report-2")
+                .expect("test identifier must satisfy its grammar"),
+            action_id: "email.out.list".to_owned(),
+            message: "reported failure".to_owned(),
+            details: None,
         }),
         Event::ActionError(ActionError {
             invocation_id: ActionInvocationId::parse("act-2")

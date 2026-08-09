@@ -183,7 +183,8 @@ and can parse it explicitly after checking runtime state; returned errors still
 emit one `ConfigError` and do not stop the message loop.
 
 Action helpers mirror the startup/dispatch split used by tools. `publish_actions`
-emits an `action.schema_published` startup event before `Ready`, and action
+adds `PeerCapability::ActionProvider`, emits an `action.schema_declared` startup
+event before `Ready`, and action
 handlers subscribe to `action.invoke` while dispatching only live deliveries whose
 action id matches the declaration. Extension/instance-level action routing
 remains a harness responsibility because configured instance names can differ from

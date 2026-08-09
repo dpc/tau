@@ -131,6 +131,8 @@ pub(crate) struct AuthenticatedExtensionPublication {
     pub(crate) source: tau_proto::ConnectionId,
     /// Authenticated configured extension kind captured at admission.
     pub(crate) kind: tau_proto::ClientKind,
+    /// Optional peer authorities captured at admission.
+    pub(crate) capabilities: std::collections::BTreeSet<tau_proto::PeerCapability>,
     /// Stable configured instance identity captured at admission.
     pub(crate) instance_id: tau_proto::ExtensionInstanceId,
     /// Session binding current when the peer frame originally arrived.
@@ -162,6 +164,8 @@ pub(crate) enum ActivationDeclarationFamily {
     ProviderModels,
     /// Tool registration or unregistration declaration.
     ToolLifecycle,
+    /// Complete Action schema snapshot.
+    ActionSchema,
     /// Extension-level prompt-fragment declaration.
     PromptFragment,
     /// Session-provider registration, skill, or AGENTS.md declaration.
@@ -373,6 +377,9 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::TOOL_REGISTER,
     EventName::TOOL_UNREGISTER,
     EventName::TOOL_PROGRESS,
+    EventName::ACTION_SCHEMA_PUBLISHED,
+    EventName::ACTION_RESULT,
+    EventName::ACTION_ERROR,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -521,6 +528,9 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::ToolRegister(_)
             | Event::ToolUnregister(_)
             | Event::ToolProgress(_)
+            | Event::ActionSchemaPublished(_)
+            | Event::ActionResult(_)
+            | Event::ActionError(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)
@@ -1483,6 +1493,7 @@ impl Harness {
                     Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_) => {
                         ActivationDeclarationFamily::ToolLifecycle
                     }
+                    Event::ActionSchemaDeclared(_) => ActivationDeclarationFamily::ActionSchema,
                     Event::ExtPromptFragmentPublish(_) => {
                         ActivationDeclarationFamily::PromptFragment
                     }
@@ -1506,6 +1517,7 @@ impl Harness {
                 publisher: entry.name.clone(),
                 source: entry.connection_id.clone(),
                 kind: entry.kind.clone(),
+                capabilities: entry.peer_capabilities.clone(),
                 instance_id: entry.instance_id,
                 admission: admission.unwrap_or_else(|| ExtensionFrameAdmission {
                     session_id: self.current_session_id.clone(),

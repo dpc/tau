@@ -29,6 +29,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerCapability {
+    /// Declare Action schemas and report Action terminal outcomes.
+    ActionProvider,
     /// Publish external-message reports for downstream canonicalization.
     MessageBridge,
 }

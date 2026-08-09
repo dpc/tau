@@ -110,6 +110,18 @@ impl<State> ExtensionBuilder<State> {
         self
     }
 
+    /// Declares that this extension provides Action schemas and outcomes.
+    pub fn action_provider(&mut self) -> &mut Self {
+        if !self
+            .peer_capabilities
+            .contains(&tau_proto::PeerCapability::ActionProvider)
+        {
+            self.peer_capabilities
+                .push(tau_proto::PeerCapability::ActionProvider);
+        }
+        self
+    }
+
     /// Adds exact event-name subscriptions to the startup `Subscribe` frame.
     pub fn subscribe(
         &mut self,
@@ -155,12 +167,9 @@ impl<State> ExtensionBuilder<State> {
     /// The extension name is authenticated startup identity. The harness stamps
     /// the live instance id before broadcasting the schema.
     pub fn publish_actions(&mut self, schema: tau_proto::ActionSchema) -> &mut Self {
-        self.startup_event(tau_proto::Event::ActionSchemaPublished(
-            tau_proto::ActionSchemaPublished {
-                extension_name: self.name.clone(),
-                instance_id: 0.into(),
-                schema,
-            },
+        self.action_provider();
+        self.startup_event(tau_proto::Event::ActionSchemaDeclared(
+            tau_proto::ActionSchemaDeclared { schema },
         ))
     }
 
@@ -539,13 +548,14 @@ impl<State> ExtensionBuilder<State> {
     /// extension/instance-level routing for action invocations.
     ///
     /// If the handler returns an error, the runner treats it as a fatal
-    /// extension error. Action-domain failures should emit `ActionError` or
-    /// `ActionResult` and return `Ok(())`.
+    /// extension error. Action-domain failures should emit
+    /// `ActionErrorReported` or `ActionResultReported` and return `Ok(())`.
     pub fn action(
         &mut self,
         action_id: impl Into<String>,
         handler: impl for<'a> FnMut(ActionContext<'a, State>) -> ClientResult<()> + 'static,
     ) -> &mut Self {
+        self.action_provider();
         self.subscribe([tau_proto::EventName::ACTION_INVOKE]);
         self.action_handlers
             .push(Box::new(NamedActionHandler::new(action_id.into(), handler)));

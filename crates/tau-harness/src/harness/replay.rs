@@ -792,7 +792,11 @@ impl Harness {
                 schema: published.schema,
             });
             if selector_matches_event(selectors, &action_event) {
-                self.send_catch_up_event(client_id, Some(&published.connection_id), action_event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    action_event,
+                );
             }
         }
 

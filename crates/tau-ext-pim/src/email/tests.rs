@@ -402,7 +402,7 @@ fn drain_action_schema(reader: &mut HarnessInputReader<BufReader<UnixStream>>) -
     loop {
         match reader.read_message().expect("read").expect("frame") {
             HarnessInputMessage::Emit(emit) => {
-                if let Event::ActionSchemaPublished(published) = *emit.event {
+                if let Event::ActionSchemaDeclared(published) = *emit.event {
                     return published.schema;
                 }
             }
@@ -675,6 +675,7 @@ fn email_run_startup_order_and_subscriptions_are_stable() {
         HarnessInputMessage::Hello(hello)
             if hello.client_name.as_str() == "tau-ext-pim"
                 && hello.client_kind == tau_proto::ClientKind::Tool
+                && hello.capabilities == [tau_proto::PeerCapability::ActionProvider]
     ));
     assert!(matches!(
         &frames[1],
@@ -696,7 +697,7 @@ fn email_run_startup_order_and_subscriptions_are_stable() {
     assert!(matches!(
         &frames[12],
         HarnessInputMessage::Emit(emit)
-            if matches!(emit.event.as_ref(), Event::ActionSchemaPublished(_))
+            if matches!(emit.event.as_ref(), Event::ActionSchemaDeclared(_))
     ));
     assert!(matches!(frames[13], HarnessInputMessage::Ready(_)));
 }
@@ -942,10 +943,10 @@ fn email_run_skips_replayed_actions_and_dispatches_live_action() {
     let (invocation_id, action_id) = loop {
         match pair.reader.read_message().expect("read").expect("frame") {
             HarnessInputMessage::Emit(emit) => match *emit.event {
-                Event::ActionError(error) => {
+                Event::ActionErrorReported(error) => {
                     break (error.invocation_id, error.action_id);
                 }
-                Event::ActionResult(result) => {
+                Event::ActionResultReported(result) => {
                     break (result.invocation_id, result.action_id);
                 }
                 _ => {}
@@ -3999,7 +4000,7 @@ fn runtime_action_invoke_returns_action_error_for_bad_id() {
         argv: Vec::new(),
         arguments: CborValue::Map(Vec::new()),
     });
-    let Event::ActionError(error) = event else {
+    let Event::ActionErrorReported(error) = event else {
         panic!("expected action error")
     };
     assert_eq!(error.action_id, "email.in.list");

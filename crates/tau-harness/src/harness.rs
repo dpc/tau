@@ -1865,8 +1865,11 @@ struct PendingStartAgentRequest {
 
 #[derive(Clone, Debug)]
 struct PendingActionInvocation {
+    owner_name: tau_proto::ExtensionName,
+    owner_instance_id: tau_proto::ExtensionInstanceId,
     provider_connection_id: tau_proto::ConnectionId,
     requester_client_id: tau_proto::ConnectionId,
+    session_id: tau_proto::SessionId,
     action_id: String,
 }
 
@@ -2308,6 +2311,8 @@ pub struct Harness {
     /// `invocation_id` → action provider/requester pair for UI-directed
     /// action result routing and source validation.
     pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
+    /// Process-lifetime terminal invocation ids that can never be routed again.
+    completed_action_invocations: HashSet<ActionInvocationId>,
     /// Correlated manual retry requests awaiting their exact provider owner.
     pending_retry_prompts: HashMap<tau_proto::RetryPromptRequestId, PendingRetryPrompt>,
     /// Process-lifetime replay guard for UI-chosen retry correlation ids.
@@ -3260,6 +3265,7 @@ impl Harness {
             active_ui_shell_command_ids: HashSet::new(),
             pending_ui_shell_output_injections: HashSet::new(),
             pending_action_invocations: HashMap::new(),
+            completed_action_invocations: HashSet::new(),
             pending_retry_prompts: HashMap::new(),
             seen_retry_prompt_requests: HashSet::new(),
             seen_retry_prompt_request_order: VecDeque::new(),
@@ -11249,9 +11255,21 @@ impl Harness {
     fn publish_action_schema(
         &mut self,
         source_id: &tau_proto::ConnectionId,
+        extension_name: ExtensionName,
+        instance_id: tau_proto::ExtensionInstanceId,
         schema: tau_actions::ActionSchema,
     ) {
-        let (extension_name, instance_id) = self.extension_action_owner(source_id);
+        if self
+            .action_registry
+            .schema_for_connection(source_id)
+            .is_some_and(|current| {
+                current.extension_name == extension_name
+                    && current.instance_id == instance_id
+                    && current.schema == schema
+            })
+        {
+            return;
+        }
         if let Err(error) = self.action_registry.register_schema(
             source_id,
             extension_name.clone(),
@@ -11264,7 +11282,7 @@ impl Harness {
             return;
         }
         self.publish_event(
-            Some(source_id),
+            Some(crate::harness::harness_connection_id()),
             Event::ActionSchemaPublished(ActionSchemaPublished {
                 extension_name,
                 instance_id,
@@ -11388,7 +11406,8 @@ impl Harness {
             );
         }
         if let Some(schema) = stage.action_schema {
-            self.publish_action_schema(source_id, schema);
+            let (extension_name, instance_id) = self.extension_action_owner(source_id);
+            self.publish_action_schema(source_id, extension_name, instance_id, schema);
         }
         if let Some(staged) = stage.session_discovery_snapshot
             && self.extension_frame_admission_is_current(&staged.admission)
@@ -11459,6 +11478,10 @@ impl Harness {
             && self
                 .extensions
                 .pending_tool_lifecycle_declarations
+                .is_empty()
+            && self
+                .extensions
+                .pending_action_schema_declarations
                 .is_empty()
             && self
                 .extensions
@@ -11683,6 +11706,10 @@ impl Harness {
             || self
                 .extensions
                 .pending_tool_lifecycle_declarations
+                .contains_key(source_id)
+            || self
+                .extensions
+                .pending_action_schema_declarations
                 .contains_key(source_id)
             || self
                 .extensions
@@ -12023,7 +12050,7 @@ impl Harness {
             HarnessInputMessage::Emit(emit)
                 if matches!(
                     emit.event.as_ref(),
-                    Event::ActionSchemaPublished(_)
+                    Event::ActionSchemaDeclared(_)
                         | Event::ToolRegistrationDeclared(_)
                         | Event::ToolUnregistrationDeclared(_)
                          | Event::ProviderModelsDeclared(_)
@@ -12325,6 +12352,58 @@ impl Harness {
         if matches!(event, Event::ToolProgress(_)) {
             // Canonical tool progress is harness-authored. Tool/Core extensions
             // publish `tool.progress_reported` observations instead.
+            return Ok(());
+        }
+        if matches!(
+            event,
+            Event::ActionSchemaPublished(_) | Event::ActionResult(_) | Event::ActionError(_)
+        ) {
+            // Peers submit declarations and reports. Canonical Action facts are
+            // harness-authored.
+            return Ok(());
+        }
+        if matches!(
+            event,
+            Event::ActionSchemaDeclared(_)
+                | Event::ActionResultReported(_)
+                | Event::ActionErrorReported(_)
+        ) {
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                matches!(
+                    entry.kind,
+                    ClientKind::Provider | ClientKind::Tool | ClientKind::Action | ClientKind::Core
+                ) && entry.state != ExtensionState::Disconnected
+                    && entry
+                        .peer_capabilities
+                        .contains(&tau_proto::PeerCapability::ActionProvider)
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = %source_id,
+                    event = %event_name,
+                    "extension lacks Action provider authority"
+                );
+                return Ok(());
+            }
+            if matches!(event, Event::ActionSchemaDeclared(_))
+                && self.should_stage_extension_capabilities(source_id)
+            {
+                *self
+                    .extensions
+                    .pending_action_schema_declarations
+                    .entry(source_id.clone())
+                    .or_default() += 1;
+            }
+            let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
+            self.enqueue_publish_with_admission(
+                Some(source_id),
+                event,
+                persist,
+                false,
+                None,
+                admission,
+            );
             return Ok(());
         }
         if source_id != harness_connection_id()
@@ -12959,9 +13038,6 @@ impl Harness {
             return Ok(());
         }
 
-        let Some(event) = self.handle_extension_action_event(source_id, event) else {
-            return Ok(());
-        };
         let Some(event) = self.handle_extension_tool_terminal_event(source_id, event) else {
             return Ok(());
         };
@@ -12987,6 +13063,7 @@ impl Harness {
                 | Event::ProviderQuotaReplaceReported(_)
                 | Event::ProviderQuotaPatchReported(_)
                 | Event::ProviderQuotaClearReported(_)
+                | Event::ActionSchemaDeclared(_)
         )
     }
 
@@ -13035,6 +13112,15 @@ impl Harness {
             Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
         ) {
             self.process_committed_tool_declaration(peer_context, event);
+            return;
+        }
+        if matches!(
+            event,
+            Event::ActionSchemaDeclared(_)
+                | Event::ActionResultReported(_)
+                | Event::ActionErrorReported(_)
+        ) {
+            self.process_committed_action_event(peer_context, event);
             return;
         }
         if let Event::ToolRequest(request) = event {
@@ -14113,6 +14199,9 @@ impl Harness {
             interception::ActivationDeclarationFamily::ToolLifecycle => {
                 self.finish_pending_tool_lifecycle_declaration(&extension.source);
             }
+            interception::ActivationDeclarationFamily::ActionSchema => {
+                self.finish_pending_action_schema_declaration(&extension.source);
+            }
             interception::ActivationDeclarationFamily::PromptFragment => {
                 self.finish_pending_prompt_fragment_declaration(&extension.source);
             }
@@ -14138,6 +14227,14 @@ impl Harness {
         self.finish_pending_activation_declaration(
             source_id,
             interception::ActivationDeclarationFamily::ToolLifecycle,
+        );
+    }
+
+    /// Release one pre-activation Action snapshot reservation.
+    fn finish_pending_action_schema_declaration(&mut self, source_id: &tau_proto::ConnectionId) {
+        self.finish_pending_activation_declaration(
+            source_id,
+            interception::ActivationDeclarationFamily::ActionSchema,
         );
     }
 
@@ -14186,6 +14283,9 @@ impl Harness {
             interception::ActivationDeclarationFamily::ToolLifecycle => {
                 &mut self.extensions.pending_tool_lifecycle_declarations
             }
+            interception::ActivationDeclarationFamily::ActionSchema => {
+                &mut self.extensions.pending_action_schema_declarations
+            }
             interception::ActivationDeclarationFamily::PromptFragment => {
                 &mut self.extensions.pending_prompt_fragment_declarations
             }
@@ -14220,30 +14320,67 @@ impl Harness {
         }
     }
 
-    fn handle_extension_action_event(
+    /// Apply one committed Action declaration or terminal report.
+    fn process_committed_action_event(
         &mut self,
-        source_id: &tau_proto::ConnectionId,
-        event: Event,
-    ) -> Option<Event> {
+        peer_context: &interception::PeerPublicationContext,
+        event: &Event,
+    ) {
+        let Some(extension) = peer_context.extension.as_ref().filter(|extension| {
+            matches!(
+                extension.kind,
+                ClientKind::Provider | ClientKind::Tool | ClientKind::Action | ClientKind::Core
+            ) && extension
+                .capabilities
+                .contains(&tau_proto::PeerCapability::ActionProvider)
+        }) else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher
+                && entry.kind == extension.kind
+                && entry
+                    .peer_capabilities
+                    .contains(&tau_proto::PeerCapability::ActionProvider)
+                && entry.state != ExtensionState::Disconnected
+        });
+        if !source_is_current {
+            return;
+        }
         match event {
-            Event::ActionSchemaPublished(published) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_action_schema(source_id, published.schema);
-                } else {
-                    self.publish_action_schema(source_id, published.schema);
+            Event::ActionSchemaDeclared(declaration) => {
+                if let Some(reservation) = extension.activation_reservation
+                    && !self.reaccount_activation_reservation(source_id, reservation, event)
+                {
+                    self.finish_pending_action_schema_declaration(source_id);
+                    return;
                 }
-                None
+                if self.should_stage_extension_capabilities(source_id)
+                    && extension.activation_reservation.is_some()
+                {
+                    self.stage_action_schema(source_id, declaration.schema.clone());
+                } else {
+                    self.publish_action_schema(
+                        source_id,
+                        extension.publisher.clone(),
+                        extension.instance_id,
+                        declaration.schema.clone(),
+                    );
+                }
+                if extension.activation_reservation.is_some() {
+                    self.finish_pending_action_schema_declaration(source_id);
+                }
             }
-            Event::ActionResult(result) => {
-                self.handle_action_result(source_id, result);
-                None
+            Event::ActionResultReported(result) => {
+                self.handle_action_result(extension, result.clone());
             }
-            Event::ActionError(error) => {
-                self.handle_action_error(source_id, error);
-                None
+            Event::ActionErrorReported(error) => {
+                self.handle_action_error(extension, error.clone());
             }
-            Event::ActionInvoke(_) => None,
-            other => Some(other),
+            _ => unreachable!("caller filters committed Action peer events"),
         }
     }
 
@@ -15142,9 +15279,12 @@ impl Harness {
                 self.handle_ui_shell_command(client_id, command);
                 Ok((true, None))
             }
-            Event::ActionSchemaPublished(_) | Event::ActionResult(_) | Event::ActionError(_) => {
-                Ok((true, None))
-            }
+            Event::ActionSchemaDeclared(_)
+            | Event::ActionSchemaPublished(_)
+            | Event::ActionResultReported(_)
+            | Event::ActionResult(_)
+            | Event::ActionErrorReported(_)
+            | Event::ActionError(_) => Ok((true, None)),
             Event::UiSwitchSession(req) => self
                 .handle_ui_switch_session(client_id, req)
                 .map(|keep_going| (keep_going, None)),
@@ -17042,6 +17182,9 @@ impl Harness {
             .pending_tool_lifecycle_declarations
             .remove(connection_id);
         self.extensions
+            .pending_action_schema_declarations
+            .remove(connection_id);
+        self.extensions
             .pending_prompt_fragment_declarations
             .remove(connection_id);
         self.extensions
@@ -17558,6 +17701,9 @@ impl Harness {
         if self
             .pending_action_invocations
             .contains_key(&invoke.invocation_id)
+            || self
+                .completed_action_invocations
+                .contains(&invoke.invocation_id)
         {
             self.send_action_error_to_client(
                 client_id,
@@ -17580,6 +17726,10 @@ impl Harness {
                 return Ok(true);
             }
         };
+        let provider = self
+            .action_registry
+            .schema_for_connection(&provider_connection_id)
+            .expect("routed Action provider must retain its schema");
 
         match self.bus.send_to(
             &provider_connection_id,
@@ -17590,8 +17740,11 @@ impl Harness {
                 self.pending_action_invocations.insert(
                     invoke.invocation_id.clone(),
                     PendingActionInvocation {
+                        owner_name: provider.extension_name.clone(),
+                        owner_instance_id: provider.instance_id,
                         provider_connection_id,
                         requester_client_id: client_id.clone(),
+                        session_id: invoke.session_id,
                         action_id: invoke.action_id,
                     },
                 );
@@ -17628,7 +17781,12 @@ impl Harness {
         Ok(true)
     }
 
-    fn handle_action_result(&mut self, source_id: &tau_proto::ConnectionId, result: ActionResult) {
+    fn handle_action_result(
+        &mut self,
+        publisher: &interception::AuthenticatedExtensionPublication,
+        result: ActionResult,
+    ) {
+        let source_id = &publisher.source;
         let Some(pending) = self
             .pending_action_invocations
             .get(&result.invocation_id)
@@ -17636,7 +17794,12 @@ impl Harness {
         else {
             return;
         };
-        if pending.provider_connection_id != *source_id || pending.action_id != result.action_id {
+        if pending.provider_connection_id != *source_id
+            || pending.owner_name != publisher.publisher
+            || pending.owner_instance_id != publisher.instance_id
+            || pending.session_id != self.current_session_id
+            || pending.action_id != result.action_id
+        {
             tracing::warn!(
                 target: "tau_harness",
                 invocation_id = %result.invocation_id,
@@ -17650,14 +17813,21 @@ impl Harness {
         }
         self.pending_action_invocations
             .remove(&result.invocation_id);
+        self.completed_action_invocations
+            .insert(result.invocation_id.clone());
         let _ = self.bus.send_to(
             &pending.requester_client_id,
-            Some(source_id),
+            Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::ActionResult(result)),
         );
     }
 
-    fn handle_action_error(&mut self, source_id: &tau_proto::ConnectionId, error: ActionError) {
+    fn handle_action_error(
+        &mut self,
+        publisher: &interception::AuthenticatedExtensionPublication,
+        error: ActionError,
+    ) {
+        let source_id = &publisher.source;
         let Some(pending) = self
             .pending_action_invocations
             .get(&error.invocation_id)
@@ -17665,7 +17835,12 @@ impl Harness {
         else {
             return;
         };
-        if pending.provider_connection_id != *source_id || pending.action_id != error.action_id {
+        if pending.provider_connection_id != *source_id
+            || pending.owner_name != publisher.publisher
+            || pending.owner_instance_id != publisher.instance_id
+            || pending.session_id != self.current_session_id
+            || pending.action_id != error.action_id
+        {
             tracing::warn!(
                 target: "tau_harness",
                 invocation_id = %error.invocation_id,
@@ -17678,9 +17853,11 @@ impl Harness {
             return;
         }
         self.pending_action_invocations.remove(&error.invocation_id);
+        self.completed_action_invocations
+            .insert(error.invocation_id.clone());
         let _ = self.bus.send_to(
             &pending.requester_client_id,
-            Some(source_id),
+            Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::ActionError(error)),
         );
     }
@@ -17700,6 +17877,8 @@ impl Harness {
         failed.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
         for (invocation_id, pending) in failed {
             self.pending_action_invocations.remove(&invocation_id);
+            self.completed_action_invocations
+                .insert(invocation_id.clone());
             if &pending.requester_client_id == connection_id {
                 continue;
             }
@@ -17713,8 +17892,17 @@ impl Harness {
                 ),
             );
         }
-        self.pending_action_invocations
-            .retain(|_, pending| &pending.requester_client_id != connection_id);
+        let requester_disconnected = self
+            .pending_action_invocations
+            .iter()
+            .filter_map(|(invocation_id, pending)| {
+                (&pending.requester_client_id == connection_id).then_some(invocation_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for invocation_id in requester_disconnected {
+            self.pending_action_invocations.remove(&invocation_id);
+            self.completed_action_invocations.insert(invocation_id);
+        }
     }
 
     fn try_respawn_supervised_extension(
@@ -17994,6 +18182,9 @@ impl Harness {
                 | Event::ToolResultDisplay(_)
                 | Event::ToolError(_)
                 | Event::ToolCancelled(_)
+                | Event::ActionSchemaPublished(_)
+                | Event::ActionResult(_)
+                | Event::ActionError(_)
                 | Event::HarnessProviderQuotaChanged(_)
         )
     }
@@ -21380,6 +21571,8 @@ impl Harness {
         self.completed_ephemeral_tool_calls.clear();
         self.completed_tool_agents.clear();
         self.pending_tool_providers.clear();
+        self.completed_action_invocations
+            .extend(self.pending_action_invocations.keys().cloned());
         self.pending_action_invocations.clear();
         self.prompt_agents.clear();
         self.ephemeral_provider_prompts.clear();

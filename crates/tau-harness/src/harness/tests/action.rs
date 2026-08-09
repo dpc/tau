@@ -1,4 +1,5 @@
 use super::*;
+use crate::extension::ExtensionState;
 
 fn action_schema(action_id: &str) -> tau_actions::ActionSchema {
     tau_actions::ActionSchema {
@@ -22,15 +23,29 @@ fn action_schema(action_id: &str) -> tau_actions::ActionSchema {
 fn publish_action_schema(h: &mut Harness, source_id: &str, action_id: &str) {
     h.handle_extension_event(
         source_id,
-        TestProtocolItem::Event(Event::ActionSchemaPublished(
-            tau_proto::ActionSchemaPublished {
-                extension_name: crate::test_extension_name("spoofed"),
-                instance_id: 99.into(),
+        TestProtocolItem::Event(Event::ActionSchemaDeclared(
+            tau_proto::ActionSchemaDeclared {
                 schema: action_schema(action_id),
             },
         )),
     )
     .expect("schema publish should be handled");
+}
+
+/// Connect a configured Tool peer with explicit Action-provider authority.
+fn connect_action_provider(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let sink = connect_test_client(h, name, tau_proto::ClientKind::Tool);
+    mark_connected_test_extension_configured(h, name, name, tau_proto::ClientKind::Tool);
+    let entry = h
+        .extensions
+        .entries
+        .get_mut(name)
+        .expect("configured Action provider");
+    entry.instance_id = 0.into();
+    entry.peer_capabilities = [tau_proto::PeerCapability::ActionProvider]
+        .into_iter()
+        .collect();
+    sink
 }
 
 fn action_invoke(invocation_id: &str, extension_name: &str) -> tau_proto::ActionInvoke {
@@ -76,7 +91,7 @@ fn drain_sink(sink: &Arc<Mutex<Vec<RoutedFrame>>>) {
 fn action_schema_publish_is_owner_stamped_and_broadcast() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    let _extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
+    let _extension = connect_action_provider(&mut h, "email-ext");
     let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     subscribe_to_actions(&mut h, "ui");
 
@@ -92,7 +107,10 @@ fn action_schema_publish_is_owner_stamped_and_broadcast() {
             )
         })
         .expect("schema event should be delivered");
-    assert_eq!(routed.source_id.as_deref(), Some("email-ext"));
+    assert_eq!(
+        routed.source_id.as_deref(),
+        Some(crate::harness::harness_connection_id().as_str())
+    );
     match peel_inner_event(&routed.frame) {
         Some(Event::ActionSchemaPublished(published)) => {
             assert_eq!(
@@ -118,13 +136,211 @@ fn action_schema_publish_is_owner_stamped_and_broadcast() {
         h.action_registry
             .has_schema_for_connection(&crate::test_connection_id("email-ext"))
     );
+    let declaration_index = events
+        .iter()
+        .position(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::ActionSchemaDeclared(_))
+            )
+        })
+        .expect("peer declaration must commit and broadcast");
+    let canonical_index = events
+        .iter()
+        .position(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::ActionSchemaPublished(_))
+            )
+        })
+        .expect("canonical schema must publish");
+    assert!(declaration_index < canonical_index);
+}
+
+/// Ensures kind alone cannot grant Action authority without the explicit
+/// capability.
+#[test]
+fn action_schema_declaration_requires_action_provider_capability() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut h = quiet_provider_harness(temp.path()).expect("harness");
+    let _extension = connect_ready_configured_extension(
+        &mut h,
+        "plain-tool",
+        "plain-tool",
+        tau_proto::ClientKind::Tool,
+    );
+    let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
+    subscribe_to_actions(&mut h, "ui");
+
+    publish_action_schema(&mut h, "plain-tool", "email.list");
+
+    assert!(
+        !h.action_registry
+            .has_schema_for_connection(&crate::test_connection_id("plain-tool"))
+    );
+    assert!(ui.lock().expect("ui sink").is_empty());
+}
+
+/// Ensures complete snapshots replace atomically, empty snapshots withdraw, and
+/// identical declarations do not republish canonical state.
+#[test]
+fn action_schema_snapshots_replace_withdraw_and_deduplicate() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut h = quiet_provider_harness(temp.path()).expect("harness");
+    let _extension = connect_action_provider(&mut h, "email-ext");
+    let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
+    subscribe_to_actions(&mut h, "ui");
+
+    publish_action_schema(&mut h, "email-ext", "email.list");
+    publish_action_schema(&mut h, "email-ext", "email.list");
+    let canonical_count = ui
+        .lock()
+        .expect("ui sink")
+        .iter()
+        .filter(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::ActionSchemaPublished(_))
+            )
+        })
+        .count();
+    assert_eq!(canonical_count, 1);
+
+    h.handle_extension_event(
+        "email-ext",
+        TestProtocolItem::Event(Event::ActionSchemaDeclared(
+            tau_proto::ActionSchemaDeclared {
+                schema: tau_actions::ActionSchema {
+                    version: tau_actions::ACTION_SCHEMA_VERSION,
+                    roots: Vec::new(),
+                },
+            },
+        )),
+    )
+    .expect("empty snapshot should withdraw Actions");
+
+    assert!(
+        h.action_registry
+            .schema_for_connection(&crate::test_connection_id("email-ext"))
+            .is_some_and(|snapshot| snapshot.schema.roots.is_empty())
+    );
+    assert!(
+        h.action_registry
+            .route_action_invoke(&action_invoke("withdrawn", "email-ext"))
+            .is_err()
+    );
+}
+
+/// Ensures dropping a parked startup Action snapshot releases its activation
+/// reservation and lets the extension become ready without publishing state.
+#[test]
+fn dropped_startup_action_schema_releases_activation_reservation() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut h = quiet_provider_harness(temp.path()).expect("harness");
+    let _extension = connect_action_provider(&mut h, "email-ext");
+    h.extensions
+        .entries
+        .get_mut("email-ext")
+        .expect("Action provider")
+        .state = ExtensionState::Handshaking;
+    let _interceptor = connect_test_client(&mut h, "interceptor", tau_proto::ClientKind::Tool);
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::ACTION_SCHEMA_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    publish_action_schema(&mut h, "email-ext", "email.list");
+    h.handle_extension_message(
+        &crate::test_connection_id("email-ext"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("Ready waits for parked declaration");
+
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop startup declaration");
+
+    assert_eq!(
+        h.extensions.entries["email-ext"].state,
+        ExtensionState::Ready
+    );
+    assert!(
+        !h.extensions
+            .pending_action_schema_declarations
+            .contains_key("email-ext")
+    );
+    assert!(
+        !h.action_registry
+            .has_schema_for_connection(&crate::test_connection_id("email-ext"))
+    );
+}
+
+/// Ensures interception replacement bytes are recharged and an oversized
+/// startup Action snapshot fails closed without wedging its reservation.
+#[test]
+fn oversized_startup_action_schema_replacement_releases_reservation() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut h = quiet_provider_harness(temp.path()).expect("harness");
+    h.initial_extension_tool_preflight_complete = false;
+    let _extension = connect_action_provider(&mut h, "email-ext");
+    h.extensions
+        .entries
+        .get_mut("email-ext")
+        .expect("Action provider")
+        .state = ExtensionState::Handshaking;
+    let _interceptor = connect_test_client(&mut h, "interceptor", tau_proto::ClientKind::Tool);
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::ACTION_SCHEMA_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    publish_action_schema(&mut h, "email-ext", "email.list");
+    let mut replacement = action_schema("email.list");
+    replacement.roots[0].description = "x".repeat(crate::harness::MAX_EXTENSION_ACTIVATION_BYTES);
+
+    let error = h
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(Event::ActionSchemaDeclared(
+                    tau_proto::ActionSchemaDeclared {
+                        schema: replacement,
+                    },
+                )))),
+            })),
+        )
+        .expect_err("oversized replacement must fail required startup");
+
+    assert!(error.to_string().contains("activation staging exceeds"));
+    assert!(
+        !h.extensions
+            .pending_action_schema_declarations
+            .contains_key("email-ext")
+    );
+    let stage = &h.extensions.activation_staging["email-ext"];
+    assert_eq!(stage.retained_message_count, 0);
+    assert_eq!(stage.retained_message_bytes, 0);
 }
 
 #[test]
 fn action_schema_replays_to_late_action_subscriber() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    let _extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
+    let _extension = connect_action_provider(&mut h, "email-ext");
     publish_action_schema(&mut h, "email-ext", "email.list");
     let late_ui = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
 
@@ -134,21 +350,31 @@ fn action_schema_replays_to_late_action_subscriber() {
     );
 
     let events = late_ui.lock().expect("late ui sink");
-    assert!(events.iter().any(|routed| matches!(
-        peel_inner_event(&routed.frame),
-        Some(Event::ActionSchemaPublished(published))
-            if published.extension_name.as_str() == "email-ext"
-    )));
+    let replayed = events
+        .iter()
+        .find(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::ActionSchemaPublished(published))
+                    if published.extension_name.as_str() == "email-ext"
+            )
+        })
+        .expect("late subscriber must receive current Action schema");
+    assert_eq!(
+        replayed.source_id.as_deref(),
+        Some(crate::harness::harness_connection_id().as_str())
+    );
 }
 
 #[test]
 fn action_invoke_routes_to_owner_and_result_returns_only_to_requester() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    let extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
+    let extension = connect_action_provider(&mut h, "email-ext");
     let _spoof = connect_test_client(&mut h, "spoof-ext", tau_proto::ClientKind::Tool);
     let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     let other_ui = connect_test_client(&mut h, "other-ui", tau_proto::ClientKind::Ui);
+    subscribe_to_actions(&mut h, "other-ui");
     publish_action_schema(&mut h, "email-ext", "email.list");
     drain_sink(&extension);
     drain_sink(&ui);
@@ -175,31 +401,52 @@ fn action_invoke_routes_to_owner_and_result_returns_only_to_requester() {
 
     h.handle_extension_event(
         "spoof-ext",
-        TestProtocolItem::Event(Event::ActionResult(action_result("action-1", "spoofed"))),
+        TestProtocolItem::Event(Event::ActionResultReported(action_result(
+            "action-1", "spoofed",
+        ))),
     )
     .expect("spoofed result should be handled and discarded");
     assert!(ui.lock().expect("ui sink").is_empty());
 
     h.handle_extension_event(
         "email-ext",
-        TestProtocolItem::Event(Event::ActionResult(action_result("action-1", "ok"))),
+        TestProtocolItem::Event(Event::ActionResultReported(action_result("action-1", "ok"))),
     )
     .expect("result should be handled");
 
     let ui_events = ui.lock().expect("ui sink");
-    assert!(ui_events.iter().any(|routed| matches!(
+    let canonical_result = ui_events
+        .iter()
+        .find(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::ActionResult(result))
+                    if result.invocation_id.as_str() == "action-1"
+            )
+        })
+        .expect("requester must receive canonical result");
+    assert_eq!(
+        canonical_result.source_id.as_deref(),
+        Some(crate::harness::harness_connection_id().as_str())
+    );
+    let observer_events = other_ui.lock().expect("other ui sink");
+    assert!(observer_events.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::ActionResultReported(result))
+            if result.invocation_id.as_str() == "action-1"
+    )));
+    assert!(!observer_events.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
         Some(Event::ActionResult(result))
             if result.invocation_id.as_str() == "action-1"
     )));
-    assert!(other_ui.lock().expect("other ui sink").is_empty());
 }
 
 #[test]
 fn duplicate_action_invocation_id_cannot_steal_result_routing() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    let extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
+    let extension = connect_action_provider(&mut h, "email-ext");
     let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     let other_ui = connect_test_client(&mut h, "other-ui", tau_proto::ClientKind::Ui);
     publish_action_schema(&mut h, "email-ext", "email.list");
@@ -244,7 +491,10 @@ fn duplicate_action_invocation_id_cannot_steal_result_routing() {
 
     h.handle_extension_event(
         "email-ext",
-        TestProtocolItem::Event(Event::ActionResult(action_result("shared-action", "ok"))),
+        TestProtocolItem::Event(Event::ActionResultReported(action_result(
+            "shared-action",
+            "ok",
+        ))),
     )
     .expect("original result should be handled");
 
@@ -253,14 +503,30 @@ fn duplicate_action_invocation_id_cannot_steal_result_routing() {
         peel_inner_event(&routed.frame),
         Some(Event::ActionResult(result)) if result.invocation_id.as_str() == "shared-action"
     )));
+    drop(ui_events);
     assert!(other_ui.lock().expect("other ui sink").is_empty());
+
+    drain_sink(&extension);
+    drain_sink(&ui);
+    h.handle_client_event_inner(
+        &crate::test_connection_id("ui"),
+        Event::ActionInvoke(action_invoke("shared-action", "email-ext")),
+    )
+    .expect("completed invocation id reuse should be rejected");
+    assert!(extension.lock().expect("extension sink").is_empty());
+    assert!(ui.lock().expect("ui sink").iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::ActionError(error))
+            if error.invocation_id.as_str() == "shared-action"
+                && error.message.contains("duplicate")
+    )));
 }
 
 #[test]
 fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    let extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
+    let extension = connect_action_provider(&mut h, "email-ext");
     let tool_client = connect_test_client(&mut h, "tool-client", tau_proto::ClientKind::Tool);
     let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     publish_action_schema(&mut h, "email-ext", "email.list");
@@ -319,7 +585,7 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
 fn action_provider_disconnect_unregisters_and_fails_pending_invocations() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    let extension = connect_test_client(&mut h, "email-ext", tau_proto::ClientKind::Tool);
+    let extension = connect_action_provider(&mut h, "email-ext");
     let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
     publish_action_schema(&mut h, "email-ext", "email.list");
     drain_sink(&extension);

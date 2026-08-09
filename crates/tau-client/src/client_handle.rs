@@ -323,7 +323,7 @@ impl ClientHandle {
             tau_proto::HarnessInputMessage::Emit(emit)
                 if matches!(
                     emit.event.as_ref(),
-                    tau_proto::Event::ActionSchemaPublished(_)
+                    tau_proto::Event::ActionSchemaDeclared(_)
                         | tau_proto::Event::ToolRegistrationDeclared(_)
                         | tau_proto::Event::ToolUnregistrationDeclared(_)
                         | tau_proto::Event::ExtensionSessionDiscoverySnapshotDeclared(_)

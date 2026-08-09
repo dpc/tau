@@ -292,7 +292,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                     assert!(register_report.errors.is_empty());
                     registered_tool_names.push(declaration.tool.name);
                 }
-                Event::ActionSchemaPublished(_)
+                Event::ActionSchemaDeclared(_)
                 | Event::ExtensionStarting(_)
                 | Event::ExtensionReady(_)
                 | Event::ProviderModelsDeclared(_)

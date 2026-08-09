@@ -251,10 +251,20 @@ impl EventName {
     pub const TOOL_DELEGATE_PROGRESS: Self =
         Self::from_static(EventCategory::Tool, "delegate_progress");
 
+    /// Peer-authored complete Action schema snapshot.
+    pub const ACTION_SCHEMA_DECLARED: Self =
+        Self::from_static(EventCategory::Action, "schema_declared");
+    /// Harness-authored canonical current Action schema.
     pub const ACTION_SCHEMA_PUBLISHED: Self =
         Self::from_static(EventCategory::Action, "schema_published");
     pub const ACTION_INVOKE: Self = Self::from_static(EventCategory::Action, "invoke");
+    /// Peer-authored successful Action outcome report.
+    pub const ACTION_RESULT_REPORTED: Self =
+        Self::from_static(EventCategory::Action, "result_reported");
     pub const ACTION_RESULT: Self = Self::from_static(EventCategory::Action, "result");
+    /// Peer-authored failed Action outcome report.
+    pub const ACTION_ERROR_REPORTED: Self =
+        Self::from_static(EventCategory::Action, "error_reported");
     pub const ACTION_ERROR: Self = Self::from_static(EventCategory::Action, "error");
 
     /// Canonical external message delivery published by the harness.

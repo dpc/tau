@@ -789,7 +789,7 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER,         // shell cwd context
         EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER, // session skills/AGENTS.md
         EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,           // shell.cwd
-        EventName::ACTION_SCHEMA_PUBLISHED,                     // shell-dir-force-unlock
+        EventName::ACTION_SCHEMA_DECLARED,                      // shell-dir-force-unlock
     ] {
         let event = reader
             .read_event()
@@ -921,7 +921,7 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
         EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER,
         EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER,
         EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
-        EventName::ACTION_SCHEMA_PUBLISHED,
+        EventName::ACTION_SCHEMA_DECLARED,
     ] {
         let message = reader
             .read_raw_message()
@@ -1313,7 +1313,7 @@ fn startup_publishes_shell_dir_force_unlock_action() {
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        let Event::ActionSchemaPublished(published) = event else {
+        let Event::ActionSchemaDeclared(published) = event else {
             continue;
         };
         published.schema.validate().expect("schema validates");
@@ -1384,7 +1384,7 @@ fn shell_dir_force_unlock_releases_overlapping_manual_lock() {
     writer.flush().expect("flush force unlock");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ActionResult(result))
+            Some(Event::ActionResultReported(result))
                 if result.invocation_id.as_str() == "force-unlock-1" =>
             {
                 let tau_proto::ActionOutput::Text { text } = result.output else {
@@ -1395,7 +1395,9 @@ fn shell_dir_force_unlock_releases_overlapping_manual_lock() {
                 assert!(text.contains(&lock_dir.display().to_string()));
                 break;
             }
-            Some(Event::ActionError(error)) if error.invocation_id.as_str() == "force-unlock-1" => {
+            Some(Event::ActionErrorReported(error))
+                if error.invocation_id.as_str() == "force-unlock-1" =>
+            {
                 panic!("force unlock failed: {}", error.message);
             }
             Some(_) => continue,

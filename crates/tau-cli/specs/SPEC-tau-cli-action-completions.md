@@ -1,5 +1,8 @@
 # SPEC-tau-cli-action-completions: Action completion rendering
 
+Action schema ownership, publication, and lifecycle follow
+[SPEC-action-declarations-and-outcomes](../../../specs/SPEC-action-declarations-and-outcomes.md).
+
 Before sending a dynamic `action.invoke`, the CLI records its invocation id and
 the currently viewed agent or no-agent transcript. The first matching
 `action.result` or `action.error` consumes that owner and renders in that

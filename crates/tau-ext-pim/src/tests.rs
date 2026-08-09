@@ -689,10 +689,16 @@ fn startup_registers_email_and_calendar_tools() {
     let mut prompt_tools = Vec::new();
     let mut per_tool_prompt_tools = Vec::new();
     let mut saw_subscription = false;
+    let mut saw_action_provider = false;
     let mut saw_ready = false;
     let mut action_schemas = Vec::new();
     while let Some(frame) = reader.read_message().expect("frame decodes") {
         match frame {
+            HarnessInputMessage::Hello(hello) => {
+                saw_action_provider = hello
+                    .capabilities
+                    .contains(&tau_proto::PeerCapability::ActionProvider);
+            }
             HarnessInputMessage::Subscribe(subscribe) => {
                 assert!(!saw_ready, "Subscribe should be emitted before Ready");
                 saw_subscription = subscribe.live_selectors
@@ -729,9 +735,9 @@ fn startup_registers_email_and_calendar_tools() {
                 tools.push(register.tool.name);
             }
             HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::ActionSchemaPublished(_)) =>
+                if matches!(emit.event.as_ref(), Event::ActionSchemaDeclared(_)) =>
             {
-                let Event::ActionSchemaPublished(published) = *emit.event else {
+                let Event::ActionSchemaDeclared(published) = *emit.event else {
                     unreachable!();
                 };
                 action_schemas.push((saw_ready, published.schema));
@@ -744,6 +750,7 @@ fn startup_registers_email_and_calendar_tools() {
     }
 
     assert!(saw_subscription);
+    assert!(saw_action_provider);
     assert!(saw_ready);
     assert_eq!(action_schemas.len(), 2);
     assert!(!action_schemas[0].0, "initial schema precedes Ready");
@@ -970,7 +977,7 @@ fn public_run_installs_storage_and_skips_replayed_actions() {
         match frame {
             HarnessInputMessage::ConfigError(error) => config_errors.push(error.message),
             HarnessInputMessage::Emit(emit) => {
-                if let Event::ActionError(error) = *emit.event {
+                if let Event::ActionErrorReported(error) = *emit.event {
                     action_errors.push(error.invocation_id);
                 }
             }
