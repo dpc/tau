@@ -10,13 +10,21 @@ fallible setup. `capture`, `send`, and `stop` retain the deterministic historica
 fallback root when no root is supplied; generated-root workflows use the commands
 printed by `start`.
 
-Provider access reads only `testing.yaml` from the real Tau config directory.
+Provider access reads `testing.yaml` and explicitly allowlisted credential-free
+provider profiles from the real Tau config directory.
 Missing or empty configuration warns and keeps the child local-only. Non-empty
 `testing_providers` values are exact extension/provider allowlist pairs; there is
 no all-providers mode. Only matching regular credential-free settings files and
 typed credential subtrees may be copied. General config, sessions, logs, and
-unrelated profiles are never copied. Path traversal, symlinks, non-regular files,
-and unsafe source or destination entries fail closed.
+unrelated profiles are never copied. Config profile leaf symlinks may resolve to
+regular read-only deployment files outside the canonical config instance root.
+Broken links and non-regular targets fail closed. Mutable state, Secret, and
+destination path traversal, symlinks, non-regular files, and unsafe entries fail
+closed. A config/state duplicate fails rather than choosing a source.
+The helper applies the runtime profile bounds independently to each allowlisted
+provider extension instance before copying: at most 4,096 profiles per instance,
+at most 1 MiB per profile, and the shared merged snapshot byte limit per
+instance.
 The scratch Tau enables every extension instance named by the allowlist. The
 canonical `provider-builtin` instance inherits its built-in component identity;
 renamed instances receive exact scratch-only built-in component suffix and

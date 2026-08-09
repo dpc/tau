@@ -31,7 +31,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-ext-rostra` — `std-rostra` configuration, Rostra tool authority, durable local state, synchronization, and following notifications.
 - `tau-self-knowledge-ext-slack` — Slack Socket Mode setup, scopes, event subscriptions, routing, security modes, and troubleshooting.
 - `tau-self-knowledge-ext-swarm` — Tau Swarm endpoint pinning, credentials, blockers, updates, reconnects, and process-memory lifetime.
-- `tau-self-knowledge-ext-provider-builtin` — extension details for built-in provider profiles, model publication, ChatGPT/Codex, Chat Completions, and OpenRouter.
+- `tau-self-knowledge-ext-provider-builtin` — extension details for built-in providers, model publication, ChatGPT/Codex, Chat Completions, and OpenRouter.
 - `tau-self-knowledge-ext-rhai` — extension details for the disabled `std-rhai` trusted local scripting extension and Rhai event hooks.
 - `tau-self-knowledge-ext-shell` — extension details for `core-shell` filesystem, shell, editing, directory-lock, and AGENTS.md discovery tools.
 - `tau-self-knowledge-ext-std-notifications` — extension details for prompt/response sounds, idle notifications, OSC 1337, bells, and notification commands.

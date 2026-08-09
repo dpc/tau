@@ -163,7 +163,7 @@ impl ChatGptProfile {
     }
 }
 
-/// Registered built-in provider profiles keyed by filename-derived namespace.
+/// Registered built-in providers keyed by filename-derived namespace.
 #[derive(Clone, Debug, Default)]
 pub struct BuiltinProviderProfiles {
     providers: BTreeMap<ProviderName, BuiltinProviderProfile>,
@@ -766,14 +766,15 @@ const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
 /// Environment override for prompt execution concurrency.
 const PROMPT_CONCURRENCY_ENV: &str = "TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY";
 
-/// Runs setup commands for registered built-in provider profiles.
+/// Runs setup commands for registered built-in providers.
 pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
     let (extension_instance, args) = provider_cli_target(args)?;
     let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
     match args.first().map(String::as_str).unwrap_or("help") {
         "add" => cmd_add(&args[1..], &network, &extension_instance)?,
-        "remove" | "delete" => cmd_remove(args.get(1).map(String::as_str), &extension_instance)?,
-        "list" | "status" => cmd_list(&extension_instance)?,
+        "remove" | "delete" => cmd_remove(&args[1..], &extension_instance)?,
+        "list" | "status" => cmd_list(&args[1..], &extension_instance)?,
+        "show" => cmd_show(&args[1..], &extension_instance)?,
         "help" | "--help" | "-h" => println!("{PROVIDER_CLI_HELP}"),
         other => return Err(format!("unknown provider subcommand: {other}").into()),
     }
@@ -852,9 +853,12 @@ const PROVIDER_CLI_HELP: &str = "\
 Usage: tau provider [--extension INSTANCE] <subcommand>
 
 Subcommands:
-  add [KIND]                     Add or replace a provider profile
-  remove <name>                  Remove a provider profile
-  list                           List provider profiles
+  add [--state|--config [--output -]] [KIND]
+                                 Add or replace a provider profile (default: state)
+  remove [--state|--config] <name>
+                                 Remove a provider profile
+  list [--state|--config|--all]  List provider profiles with their source
+  show <name>                    Show a credential-free profile and source path
 
 Provider kinds:
   chatgpt           ChatGPT / Codex
@@ -898,7 +902,52 @@ fn cmd_add(
     network: &tau_provider::OutboundNetworkPolicy,
     extension_instance: &tau_proto::ExtensionName,
 ) -> Result<(), Box<dyn Error>> {
-    let kind = match args {
+    let mut requested_target = None;
+    let mut stdout = false;
+    let mut kind_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--state" => {
+                if requested_target
+                    .replace(setup_store::ProfileTarget::State)
+                    .is_some()
+                {
+                    return Err("provider add accepts exactly one source flag".into());
+                }
+            }
+            "--config" => {
+                if requested_target
+                    .replace(setup_store::ProfileTarget::Config)
+                    .is_some()
+                {
+                    return Err("provider add accepts exactly one source flag".into());
+                }
+            }
+            "--output" if args.get(index + 1).map(String::as_str) == Some("-") => {
+                if stdout {
+                    return Err("provider add accepts --output - only once".into());
+                }
+                stdout = true;
+                index += 1;
+            }
+            argument if argument.starts_with('-') => {
+                return Err(format!("unknown provider add option '{argument}'").into());
+            }
+            _ => kind_args.push(args[index].clone()),
+        }
+        index += 1;
+    }
+    let target = match (requested_target, stdout) {
+        (Some(setup_store::ProfileTarget::Config), true) => setup_store::ProfileTarget::Stdout,
+        (None, false) | (Some(setup_store::ProfileTarget::State), false) => {
+            setup_store::ProfileTarget::State
+        }
+        (Some(setup_store::ProfileTarget::Config), false) => setup_store::ProfileTarget::Config,
+        (_, true) => return Err("--output - requires --config".into()),
+        (Some(setup_store::ProfileTarget::Stdout), _) => unreachable!(),
+    };
+    let kind = match kind_args.as_slice() {
         [] => {
             let labels = PROVIDER_KINDS
                 .iter()
@@ -922,16 +971,19 @@ fn cmd_add(
         _ => return Err("tau provider add accepts at most one KIND".into()),
     };
     match kind {
-        "chatgpt" => cmd_add_chatgpt(network, extension_instance)?,
-        "chat-completions" => cmd_add_chat_completions(extension_instance)?,
-        "responses" => cmd_add_responses(extension_instance)?,
-        "openrouter" => cmd_add_openrouter(network, extension_instance)?,
+        "chatgpt" => cmd_add_chatgpt(network, extension_instance, target)?,
+        "chat-completions" => cmd_add_chat_completions(extension_instance, target)?,
+        "responses" => cmd_add_responses(extension_instance, target)?,
+        "openrouter" => cmd_add_openrouter(network, extension_instance, target)?,
         _ => unreachable!("provider kind came from the closed descriptor table"),
     }
     Ok(())
 }
 
-fn cmd_add_responses(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn Error>> {
+fn cmd_add_responses(
+    extension_instance: &tau_proto::ExtensionName,
+    target: setup_store::ProfileTarget,
+) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("responses")?;
     let base_url: String = Input::new()
         .with_prompt("Base URL")
@@ -969,6 +1021,7 @@ fn cmd_add_responses(extension_instance: &tau_proto::ExtensionName) -> Result<()
             compat: responses::ResponsesCompat::default(),
         }),
         api_key_source,
+        target,
     )?;
     Ok(())
 }
@@ -984,6 +1037,7 @@ fn recommended_responses_transport(base_url: &str) -> ResponsesTransport {
 fn cmd_add_chatgpt(
     network: &tau_provider::OutboundNetworkPolicy,
     extension_instance: &tau_proto::ExtensionName,
+    target: setup_store::ProfileTarget,
 ) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("chatgpt")?;
     let auth = run_openai_codex_login(network)?;
@@ -999,12 +1053,14 @@ fn cmd_add_chatgpt(
             responses_lite_compatibility,
         }),
         ApiKeySource::Keyless,
+        target,
     )?;
     Ok(())
 }
 
 fn cmd_add_chat_completions(
     extension_instance: &tau_proto::ExtensionName,
+    target: setup_store::ProfileTarget,
 ) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("local")?;
     let base_url: String = Input::new()
@@ -1032,6 +1088,7 @@ fn cmd_add_chat_completions(
         &name,
         &BuiltinProviderProfile::ChatCompletions(profile),
         api_key_source,
+        target,
     )?;
     Ok(())
 }
@@ -1046,6 +1103,7 @@ fn chat_completions_add_compat() -> ChatCompletionsCompat {
 fn cmd_add_openrouter(
     network: &tau_provider::OutboundNetworkPolicy,
     extension_instance: &tau_proto::ExtensionName,
+    target: setup_store::ProfileTarget,
 ) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("openrouter")?;
     let api_key_source = prompt_api_key(extension_instance, false)?;
@@ -1066,20 +1124,42 @@ fn cmd_add_openrouter(
         &name,
         &BuiltinProviderProfile::OpenRouter(profile),
         api_key_source,
+        target,
     )?;
     Ok(())
 }
 
 fn cmd_remove(
-    name_arg: Option<&str>,
+    args: &[String],
     extension_instance: &tau_proto::ExtensionName,
 ) -> Result<(), Box<dyn Error>> {
+    let mut source = None;
+    let mut name_arg = None;
+    for argument in args {
+        match argument.as_str() {
+            "--config" => {
+                if source.replace(setup_store::ProfileSource::Config).is_some() {
+                    return Err("provider remove accepts exactly one source flag".into());
+                }
+            }
+            "--state" => {
+                if source.replace(setup_store::ProfileSource::State).is_some() {
+                    return Err("provider remove accepts exactly one source flag".into());
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown provider remove option '{value}'").into());
+            }
+            value if name_arg.is_none() => name_arg = Some(value),
+            _ => return Err("tau provider remove accepts one NAME".into()),
+        }
+    }
     let name = match name_arg {
         Some(name) => ProviderName::try_new(name.trim().to_owned())
             .map_err(|error| format!("invalid provider namespace '{name}': {error}"))?,
         None => prompt_provider_name(CHATGPT_PROVIDER_NAME)?,
     };
-    if setup_store::SetupStore::open_default()?.remove(extension_instance, &name)? {
+    if setup_store::SetupStore::open_default()?.remove_from(extension_instance, &name, source)? {
         eprintln!("Removed provider profile '{name}'.");
     } else {
         eprintln!("Provider profile '{name}' was not configured.");
@@ -1087,20 +1167,51 @@ fn cmd_remove(
     Ok(())
 }
 
-fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn Error>> {
+fn cmd_list(
+    args: &[String],
+    extension_instance: &tau_proto::ExtensionName,
+) -> Result<(), Box<dyn Error>> {
     let store = setup_store::SetupStore::open_default()?;
+    let stdout = std::io::stdout();
+    cmd_list_from_store(args, extension_instance, &store, &mut stdout.lock())
+}
+
+fn cmd_list_from_store(
+    args: &[String],
+    extension_instance: &tau_proto::ExtensionName,
+    store: &setup_store::SetupStore,
+    output: &mut impl Write,
+) -> Result<(), Box<dyn Error>> {
+    let source_filter = match args {
+        [] => None,
+        [flag] if flag == "--all" => None,
+        [flag] if flag == "--config" => Some(setup_store::ProfileSource::Config),
+        [flag] if flag == "--state" => Some(setup_store::ProfileSource::State),
+        _ => return Err("tau provider list accepts one of --all, --config, or --state".into()),
+    };
     let setup_store::SetupSnapshot {
-        settings,
+        profiles,
         credentials,
     } = store.snapshot(extension_instance)?;
-    let profiles = load_settings_profiles_lossy(settings);
-    if profiles.providers.is_empty() {
-        println!("No provider profiles configured.");
-        return Ok(());
-    }
-    for (name, profile) in profiles.providers {
-        match profile {
-            BuiltinProviderProfile::Chatgpt(profile) => {
+    let mut displayed = 0_usize;
+    for profile in profiles
+        .into_iter()
+        .filter(|profile| source_filter.is_none_or(|wanted| wanted == profile.source))
+    {
+        let (parsed, _, _) =
+            parse_settings_profile(&profile.provider, &profile.contents).map_err(|reason| {
+                format!(
+                    "provider profile '{}' is invalid: {reason} (source={}, path={})",
+                    profile.provider,
+                    profile.source.label(),
+                    profile.path.display()
+                )
+            })?;
+        displayed += 1;
+        let name = &profile.provider;
+        let source = profile.source.label();
+        match parsed {
+            BuiltinProviderProfile::Chatgpt(parsed) => {
                 let status = match credentials
                     .get(&(name.clone(), ProviderCredentialSlot::OAuth))
                     .and_then(|bytes| {
@@ -1111,53 +1222,101 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
                     Some(_) => "expired",
                     _ => "not-configured",
                 };
-                let mode = if profile.responses_lite_compatibility {
+                let mode = if parsed.responses_lite_compatibility {
                     "responses-lite-compatibility"
                 } else {
                     "responses-standard"
                 };
-                println!("{name}\tchatgpt\t{status}\t{mode}");
+                writeln!(
+                    output,
+                    "{extension_instance}\t{name}\tchatgpt\t{status}\t{mode}\t{source}"
+                )?;
             }
-            BuiltinProviderProfile::ChatCompletions(provider) => {
-                let auth_status = setup_api_key_status(&credentials, &name);
-                let models = provider
+            BuiltinProviderProfile::ChatCompletions(parsed) => {
+                let auth_status = setup_api_key_status(&credentials, name);
+                let models = parsed
                     .models
                     .iter()
                     .map(|model| model.id.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                println!(
-                    "{name}\tchat_completions\t{}\t{models}\t{auth_status}",
-                    provider.base_url
-                );
+                writeln!(
+                    output,
+                    "{extension_instance}\t{name}\tchat_completions\t{}\t{models}\t{auth_status}\t{source}",
+                    parsed.base_url
+                )?;
             }
-            BuiltinProviderProfile::OpenRouter(profile) => {
-                let auth_status = setup_api_key_status(&credentials, &name);
-                let models = profile
+            BuiltinProviderProfile::OpenRouter(parsed) => {
+                let auth_status = setup_api_key_status(&credentials, name);
+                let models = parsed
                     .models
                     .iter()
                     .map(|model| model.id.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                println!(
-                    "{name}\topenrouter\thttps://openrouter.ai/api/v1\t{models}\t{auth_status}"
-                );
+                writeln!(
+                    output,
+                    "{extension_instance}\t{name}\topenrouter\thttps://openrouter.ai/api/v1\t{models}\t{auth_status}\t{source}"
+                )?;
             }
-            BuiltinProviderProfile::Responses(provider) => {
-                let auth_status = setup_api_key_status(&credentials, &name);
-                let models = provider
+            BuiltinProviderProfile::Responses(parsed) => {
+                let auth_status = setup_api_key_status(&credentials, name);
+                let models = parsed
                     .models
                     .iter()
                     .map(|model| model.id.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                println!(
-                    "{name}\tresponses\t{}\t{models}\t{auth_status}",
-                    provider.base_url
-                );
+                writeln!(
+                    output,
+                    "{extension_instance}\t{name}\tresponses\t{}\t{models}\t{auth_status}\t{source}",
+                    parsed.base_url
+                )?;
             }
         }
     }
+    if displayed == 0 {
+        writeln!(output, "No providers configured.")?;
+    }
+    Ok(())
+}
+
+fn cmd_show(
+    args: &[String],
+    extension_instance: &tau_proto::ExtensionName,
+) -> Result<(), Box<dyn Error>> {
+    let store = setup_store::SetupStore::open_default()?;
+    let stdout = std::io::stdout();
+    cmd_show_from_store(args, extension_instance, &store, &mut stdout.lock())
+}
+
+fn cmd_show_from_store(
+    args: &[String],
+    extension_instance: &tau_proto::ExtensionName,
+    store: &setup_store::SetupStore,
+    output: &mut impl Write,
+) -> Result<(), Box<dyn Error>> {
+    let [name] = args else {
+        return Err("tau provider show requires exactly one NAME".into());
+    };
+    let name = ProviderName::try_new(name.clone())
+        .map_err(|error| format!("invalid provider namespace '{name}': {error}"))?;
+    let snapshot = store.snapshot(extension_instance)?;
+    let Some(profile) = snapshot
+        .profiles
+        .into_iter()
+        .find(|profile| profile.provider == name)
+    else {
+        return Err(format!("provider profile '{name}' is not configured").into());
+    };
+    let value: serde_json::Value = serde_json::from_slice(&profile.contents)?;
+    writeln!(
+        output,
+        "source: {}\npath: {}\n{}",
+        profile.source.label(),
+        profile.path.display(),
+        serde_json::to_string_pretty(&value)?
+    )?;
     Ok(())
 }
 
@@ -1331,6 +1490,7 @@ fn save_profile(
     name: &ProviderName,
     profile: &BuiltinProviderProfile,
     api_key_source: ApiKeySource,
+    target: setup_store::ProfileTarget,
 ) -> Result<(), Box<dyn Error>> {
     let ProviderSetupPayload {
         settings,
@@ -1338,8 +1498,9 @@ fn save_profile(
         secret,
         named_source,
     } = provider_setup_payload(name, profile, api_key_source)?;
-    let settings_path =
-        setup_store::SetupStore::open_default()?.apply(&setup_store::ProviderSetupPlan {
+    let settings_output = settings.clone();
+    let settings_path = setup_store::SetupStore::open_default()?.apply_to(
+        &setup_store::ProviderSetupPlan {
             extension_instance: extension_instance.clone(),
             provider: name.clone(),
             settings,
@@ -1348,12 +1509,41 @@ fn save_profile(
                 contents: setup_store::SecretBytes::new(secret),
             },
             named_source,
-        })?;
-    eprintln!(
-        "Provider '{name}' registered for extension '{extension_instance}'. Settings: {}",
-        settings_path.display()
-    );
+        },
+        target,
+    )?;
+    if target == setup_store::ProfileTarget::Stdout {
+        write_dotfiles_profile(
+            &settings_output,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )?;
+    } else if let Some(settings_path) = settings_path {
+        eprintln!(
+            "Provider '{name}' registered for extension '{extension_instance}' in {}. Settings: {}",
+            match target {
+                setup_store::ProfileTarget::State => "state",
+                setup_store::ProfileTarget::Config => "config",
+                setup_store::ProfileTarget::Stdout => unreachable!(),
+            },
+            settings_path.display()
+        );
+    }
     eprintln!("Restart Tau for settings changes to take effect.");
+    Ok(())
+}
+
+fn write_dotfiles_profile(
+    settings: &[u8],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> path_std_io::Result<()> {
+    stdout.write_all(settings)?;
+    stdout.write_all(b"\n")?;
+    writeln!(
+        stderr,
+        "Published the host-local credential; deploy this config profile before restart."
+    )?;
     Ok(())
 }
 
@@ -1498,24 +1688,6 @@ fn try_load_settings_profiles(
         insert_settings_profile(&mut profiles, name, &contents)?;
     }
     Ok(profiles)
-}
-
-fn load_settings_profiles_lossy(files: Vec<(ProviderName, Vec<u8>)>) -> BuiltinProviderProfiles {
-    let mut profiles = BuiltinProviderProfiles::default();
-    for (name, contents) in files {
-        match insert_settings_profile(&mut profiles, name, &contents) {
-            Ok(()) => {}
-            Err(error) => {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    provider = %error.provider,
-                    reason = %error.reason,
-                    "skipping invalid provider settings while listing profiles"
-                );
-            }
-        }
-    }
-    profiles
 }
 
 fn insert_settings_profile(
@@ -2206,7 +2378,7 @@ where
 
 /// Live provider event loop state after the Tau extension handshake completes.
 struct ProviderRuntime<F> {
-    /// Reloads provider profiles for prompt-time auth/model resolution.
+    /// Reloads providers for prompt-time auth/model resolution.
     load_prompt_profiles: F,
     /// Per-profile Responses mode captured at process startup.
     startup_responses_modes: BTreeMap<ProviderName, CodexMode>,

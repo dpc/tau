@@ -36,7 +36,7 @@ overrides.
 
 `testing.yaml` is intentionally not part of the normal layered CLI/harness load
 order. It is an optional standalone testing-only file used by development
-helpers such as `tau dev tmux start` to decide whether provider profiles may be
+helpers such as `tau dev tmux start` to decide whether providers may be
 copied into scratch state. Absence is distinct from an empty
 `testing_providers: []` list so callers can warn differently, but both states
 mean no provider access. Unknown fields fail closed, and each entry validates an
@@ -44,6 +44,20 @@ exact `ExtensionName`/`ProviderName` pair so path-like values never become
 filenames.
 Unreadable, unstatable, or non-regular `testing.yaml` paths are explicit config
 errors rather than missing files.
+
+Provider profile path helpers keep portable read-only config and mutable state
+under the same instance-qualified `providers/<instance>/<provider>.json` shape.
+Callers disjoint-union the two sources and reject duplicate profile names. Config
+leaf symlinks may resolve to bounded regular files outside the canonical config
+instance root, including read-only Nix-store targets; unusable targets fail
+closed. State lifecycle locks and writes never follow symlinks. Cooperative
+startup/setup serialization locks only Tau-private mutable state; persistent
+config-only startup may create an empty private lifecycle directory, while
+memory-only diagnostics never create host state.
+The shared descriptor reader enforces 1 MiB per profile and validates regular
+file type after opening. Unix opens are nonblocking and mutable-state reads add
+`O_NOFOLLOW`. Callers enforce the shared 4,096-profile and merged snapshot byte
+limits across their complete selected source set.
 
 ## CLI runtime-state overlay
 
@@ -210,7 +224,7 @@ over the destination, and syncs the parent directory where supported.
 
 `tau-config` owns the dependency-neutral closed provider credential-reference
 schema, canonical slot paths, named-secret source resolution, and nofollow
-per-instance provider-settings lifecycle lock. Provider setup, harness startup,
+per-instance providers lifecycle lock. Provider setup, harness startup,
 and provider runtime share that parser and resolver rather than interpreting
 credential authority independently. Harness source capture removes one-shot
 environment variables before child spawn; setup retains them. Both modes share

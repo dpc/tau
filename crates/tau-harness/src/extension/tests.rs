@@ -7,6 +7,41 @@ use tau_config::settings::TauStateAccess;
 
 use super::*;
 
+/// Proves the persistent Provider mount source contains the exact retained
+/// Configure bytes and is read-only before namespace setup.
+#[test]
+fn provider_settings_mount_materializes_exact_read_only_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("snapshot");
+    let files = BTreeMap::from([
+        ("a.json".to_owned(), b"{\"a\":1}".to_vec()),
+        ("b.json".to_owned(), b"{\"b\":2}".to_vec()),
+    ]);
+
+    materialize_provider_settings_snapshot(&root, &files).expect("materialize snapshot");
+
+    for (name, contents) in files {
+        let path = root.join(name);
+        assert_eq!(std::fs::read(&path).expect("profile"), contents);
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(root)
+            .expect("root metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o500
+    );
+}
+
 fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
     ExtensionConfig {
         tool_prefix: None,
@@ -60,6 +95,7 @@ fn supervised_command_uses_configured_cwd() {
         None,
         Path::new("/tmp/tau-state"),
         false,
+        &Default::default(),
     )
     .expect("build supervised command");
 
@@ -68,7 +104,7 @@ fn supervised_command_uses_configured_cwd() {
 
 /// Proves persistent launch preparation creates a mount root only for
 /// providers, preventing ordinary tool extensions from populating the
-/// provider-settings tree.
+/// providers tree.
 #[test]
 fn persistent_launch_prepares_settings_mount_only_for_provider() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -80,13 +116,13 @@ fn persistent_launch_prepares_settings_mount_only_for_provider() {
             .expect("prepare tool launch"),
         None
     );
-    assert!(!state.join("provider-settings").exists());
+    assert!(!state.join("providers").exists());
 
     let provider_root =
         prepare_provider_settings_mount(&state, "provider-work", &ClientKind::Provider, false)
             .expect("prepare provider launch")
             .expect("provider settings root");
-    assert_eq!(provider_root, state.join("provider-settings/provider-work"));
+    assert_eq!(provider_root, state.join("providers/provider-work"));
     assert!(provider_root.is_dir());
     assert_eq!(
         std::fs::symlink_metadata(&provider_root)
@@ -109,7 +145,7 @@ fn persistent_launch_prepares_settings_mount_only_for_provider() {
         .expect("prepare memory-only provider launch"),
         None
     );
-    assert!(!memory_state.join("provider-settings").exists());
+    assert!(!memory_state.join("providers").exists());
 }
 
 /// Ensures a built-in instance's failed executable is actionable without
@@ -130,6 +166,7 @@ fn builtin_spawn_failure_is_contextual_and_secret_safe() {
         &tx,
         Path::new("/tmp/tau-state"),
         false,
+        &Default::default(),
     ) {
         Ok(_) => panic!("missing built-in executable must fail"),
         Err(error) => error,
@@ -180,6 +217,7 @@ fn custom_spawn_failure_includes_only_relevant_bounded_context() {
         &tx,
         Path::new("/tmp/tau-state"),
         false,
+        &Default::default(),
     ) {
         Ok(_) => panic!("missing custom cwd must fail"),
         Err(error) => error,

@@ -7,8 +7,8 @@ services, and reports provider execution through Tau protocol events.
 
 ## Ownership boundaries
 
-Tau state stores credential-free profiles at
-`provider-settings/<extension>/<namespace>.json`; each profile's serialized kind
+Tau loads credential-free profiles as a disjoint union from XDG config and state
+at `providers/<extension>/<namespace>.json`; each profile's serialized kind
 selects its backend family. Typed credentials live separately in the selected
 extension instance's Secret scope. ChatGPT profiles use the
 model matrix and finite inference facade owned by `tau-provider-codex`; Chat
@@ -17,7 +17,7 @@ public `responses` profiles use the separate API-key Responses backend with
 per-profile HTTP/SSE or WebSocket transport and always fully replay their typed
 transcript. This public WebSocket route remains separate from private Codex and
 OpenAI Realtime. The
-extension owns mutable-profile resolution, model publication, event ordering,
+extension owns immutable startup-profile resolution, model publication, event ordering,
 public response sampling, logical retries, cancellation, and supervised prewarm
 work. Backends return typed outcomes and never serialize harness frames.
 

@@ -447,14 +447,16 @@ delivery. Exact wire behavior is specified by
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 The harness owns configured-instance Secret storage, payload-opaque RPC routing,
 and the mandatory outer Linux namespace launcher. It masks the whole secret root,
-mounts CLI-owned provider settings read-only only for configured Provider
-instances, and fails supervised startup closed. Every configured Provider gets
-an immutable credential-free `Configure.settings_files` snapshot; a memory-only
-preview gets that snapshot without the provider-settings mount, while Tool
+mounts an ephemeral read-only materialization of the merged config/state provider
+snapshot only for configured Provider instances, and fails supervised startup
+closed. Every configured Provider gets the same immutable credential-free
+`Configure.settings_files` snapshot; a memory-only
+preview gets that snapshot without the providers mount, while Tool
 instances receive neither surface, as specified by
 [SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
-For built-in Providers, startup locks each instance settings directory, captures
-one bounded generation, resolves its valid named API-key bindings without
+For built-in Providers, startup locks each mutable instance directory, captures
+one bounded disjoint-union generation from XDG config and state, rejects every
+cross-layer duplicate, and resolves valid named API-key bindings without
 forwarding those declaration values in Configure, publishes typed records under
 the second-level Secret lock, and retains the same generation for
 `Configure.settings_files`. A typed component identity survives argv wrapping

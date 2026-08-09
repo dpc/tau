@@ -8,7 +8,7 @@ use std::{fmt, fs, io};
 /// Holding this lock serializes setup/removal against the startup snapshot and
 /// named-credential publication transaction.
 pub struct ProviderSettingsInstanceLock {
-    /// Canonical provider-settings directory used as both data root and lock.
+    /// Canonical providers directory used as both data root and lock.
     root: PathBuf,
     /// Open directory handle retaining the process-scoped exclusive lock.
     _directory: fs::File,
@@ -34,7 +34,39 @@ impl fmt::Debug for ProviderSettingsInstanceLock {
 }
 
 impl ProviderSettingsInstanceLock {
-    /// Lock an existing provider-settings directory without following its leaf
+    /// Ensures and locks the Tau-private mutable lifecycle directory for a
+    /// persistent provider instance.
+    pub fn acquire_or_create(state_dir: &Path, extension_instance: &str) -> io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        crate::settings::validate_extension_name(extension_instance).map_err(io::Error::other)?;
+        for directory in [
+            state_dir.join("providers"),
+            state_dir.join("providers").join(extension_instance),
+        ] {
+            match fs::create_dir(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            let metadata = fs::symlink_metadata(&directory)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "provider lifecycle lock path is not a real directory",
+                ));
+            }
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        }
+        Self::acquire_existing(state_dir, extension_instance)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "provider lifecycle directory disappeared before locking",
+            )
+        })
+    }
+
+    /// Lock an existing providers directory without following its leaf
     /// if it is a symlink. A missing directory means the instance has no
     /// registrations and returns `None`.
     pub fn acquire_existing(
@@ -75,7 +107,7 @@ impl ProviderSettingsInstanceLock {
         }
     }
 
-    /// Return the locked provider-settings directory.
+    /// Return the locked providers directory.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -88,7 +120,7 @@ fn open_existing(
 ) -> io::Result<Option<(PathBuf, fs::File)>> {
     let root = crate::settings::extension_provider_settings_dir_of(state_dir, extension_instance)
         .map_err(io::Error::other)?;
-    let provider_settings_root = state_dir.join("provider-settings");
+    let provider_settings_root = state_dir.join("providers");
     for directory in [&provider_settings_root, &root] {
         match fs::symlink_metadata(directory) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {

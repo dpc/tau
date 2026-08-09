@@ -99,7 +99,7 @@ snapshot mutation is introduced.
 
 Named API-key sources are setup/startup authorities, not runtime credential
 inputs. Setup resolves the exact configured declaration only while holding the
-provider-settings instance lock, then takes the Secret lock, publishes the typed
+providers instance lock, then takes the Secret lock, publishes the typed
 record, and activates settings last. Harness startup uses the same lock order
 and one shared closed reference parser, publishes empty typed records for
 unavailable bindings, and retains that locked settings generation for

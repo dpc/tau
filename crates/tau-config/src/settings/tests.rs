@@ -6,6 +6,23 @@ use tempfile::TempDir;
 use super::*;
 use crate::settings as path_crate_settings;
 
+/// Proves portable and mutable provider helpers use the same instance-qualified
+/// shape beneath their distinct TauDirs roots.
+#[test]
+fn provider_profile_roots_are_disjoint_and_instance_qualified() {
+    let config = path_std_path::Path::new("/config/tau");
+    let state = path_std_path::Path::new("/state/tau");
+
+    assert_eq!(
+        extension_provider_config_dir_of(config, "provider-work").expect("config path"),
+        config.join("providers/provider-work")
+    );
+    assert_eq!(
+        extension_provider_settings_dir_of(state, "provider-work").expect("state path"),
+        state.join("providers/provider-work")
+    );
+}
+
 /// Ensures the emergency state-access override accepts only its exact
 /// process-wide recovery tokens rather than silently weakening isolation.
 #[test]

@@ -968,20 +968,30 @@ across hosts and do not establish delivery order, latency, or happens-before.
 Tau keeps extension credentials in harness-mediated configured-instance Secret
 scope. Supervised extensions run in mandatory fail-closed Linux user and mount
 namespaces that hide the whole Tau secret root. Only configured Provider
-instances receive credential-free provider settings: persistent instances get a
-read-only mount and `Configure.settings_files`, while memory-only previews get
-only an immutable `Configure.settings_files` snapshot. Tool instances receive
+instances receive credential-free provider settings from a bounded disjoint union
+of XDG config and state. Config leaf symlinks may target bounded regular
+Nix/dotfiles deployment files outside the canonical config instance root; broken,
+non-regular, invalidly named, and oversized profiles fail closed. Mutable state
+retains no-symlink restrictions. Persistent instances get an
+ephemeral read-only materialization of the exact `Configure.settings_files`
+snapshot, while memory-only previews get only that immutable snapshot. Tool instances receive
 neither. This is defense in depth for trusted configured same-UID executables, not containment
 from malicious same-UID code or misuse of credentials returned to an authorized
 extension. Secret payloads remain absent from logs, events, journals, generic
 debug output, and errors. See
 [`SPEC-extension-secret-storage`](specs/SPEC-extension-secret-storage.md).
+Startup, setup inspection, and development-copy paths share the
+4,096-profile-per-instance, 1-MiB-per-profile, and per-instance merged snapshot
+byte limits. They validate the opened descriptor, using nonblocking Unix opens
+so a raced special-file target cannot stall discovery.
 
 Named provider API-key bindings use one closed parser shared by setup, harness,
 and provider runtime. The harness consumes the configured declaration without
 forwarding its value in `Configure.secrets`, refreshes only canonical API-key
 records, and replaces unavailable bindings with empty typed records plus
-value-redacted warnings. A per-instance provider-settings lock precedes the
+value-redacted warnings. Cross-layer duplicates fail rather than overriding or
+coalescing. Tau never locks an external config or symlink-target inode; a
+per-instance private-state providers lock precedes the
 Secret-scope lock in setup, removal, and startup, binding source selection and
 credential publication to the exact retained Configure snapshot. Typed
 Tau-component identity, rather than executable argv resemblance, grants this

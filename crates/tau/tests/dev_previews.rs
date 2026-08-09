@@ -360,9 +360,7 @@ fn previews_use_configured_default_role_unless_overridden() {
 fn print_tools_matches_model_defaults_and_explicit_role_grants() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
-    let settings_dir = home
-        .path()
-        .join(".state/tau/provider-settings/provider-builtin");
+    let settings_dir = home.path().join(".state/tau/providers/provider-builtin");
     std::fs::create_dir_all(&config_dir).expect("create config directory");
     std::fs::create_dir_all(&settings_dir).expect("create provider settings directory");
     std::fs::create_dir_all(home.path().join("work")).expect("create work directory");

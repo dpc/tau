@@ -25,7 +25,7 @@ fn hidden_state_restores_only_approved_nested_mounts() {
     let state = temp.path().join("state");
     let own = state.join("ext/selected");
     let sibling = state.join("ext/sibling");
-    let settings = state.join("provider-settings/selected");
+    let settings = state.join("providers/selected");
     let capture = state.join("sessions/s1/debug/provider-requests/selected");
     let cwd = temp.path().join("work");
     for directory in [&own, &sibling, &settings, &capture, &cwd] {
@@ -36,10 +36,10 @@ fn hidden_state_restores_only_approved_nested_mounts() {
     fs::write(settings.join("provider.json"), "settings").expect("settings");
     let state = state.canonicalize().expect("canonical state");
     let own = state.join("ext/selected");
-    let settings = state.join("provider-settings/selected");
+    let settings = state.join("providers/selected");
     let (outer, staging) = mask_roots(&temp);
     let own_source = staging.join("ext/selected");
-    let settings_source = staging.join("provider-settings/selected");
+    let settings_source = staging.join("providers/selected");
     let secret_target = state.join("secrets");
     for target in [&own, &settings] {
         fs::create_dir_all(outer.join(target.strip_prefix(&state).expect("target below state")))
@@ -48,7 +48,7 @@ fn hidden_state_restores_only_approved_nested_mounts() {
     let mut command = Command::new("/bin/sh");
     command.args([
         "-c",
-        "test ! -e \"$1/ext/sibling/value\" && test ! -e \"$1/sessions/s1/debug/provider-requests/selected\" && test ! -e \"$2/staging/secrets\" && ! touch \"$2/mutation\" && test \"$(cat \"$1/provider-settings/selected/provider.json\")\" = settings && touch \"$1/ext/selected/owned\" && ! touch \"$1/provider-settings/selected/mutation\"",
+        "test ! -e \"$1/ext/sibling/value\" && test ! -e \"$1/sessions/s1/debug/provider-requests/selected\" && test ! -e \"$2/staging/secrets\" && ! touch \"$2/mutation\" && test \"$(cat \"$1/providers/selected/provider.json\")\" = settings && touch \"$1/ext/selected/owned\" && ! touch \"$1/providers/selected/mutation\"",
         "sh",
         state.to_str().expect("state path"),
         outer
@@ -91,7 +91,7 @@ fn read_only_state_preserves_only_approved_writable_exceptions() {
     let temp = tempfile::tempdir().expect("tempdir");
     let state = temp.path().join("state");
     let own = state.join("ext/selected");
-    let settings = state.join("provider-settings/selected");
+    let settings = state.join("providers/selected");
     let nested_settings = settings.join("nested");
     let capture = state.join("sessions/s1/debug/provider-requests/selected");
     let cwd = temp.path().join("work");
@@ -108,16 +108,16 @@ fn read_only_state_preserves_only_approved_writable_exceptions() {
     fs::write(state.join("secrets/value"), "secret").expect("secret sentinel");
     let state = state.canonicalize().expect("canonical state");
     let own = state.join("ext/selected");
-    let settings = state.join("provider-settings/selected");
+    let settings = state.join("providers/selected");
     let secret_target = state.join("secrets");
     let (outer, staging) = mask_roots(&temp);
     let own_source = staging.join("ext/selected");
-    let settings_source = staging.join("provider-settings/selected");
+    let settings_source = staging.join("providers/selected");
     let nested_settings_source = settings_source.join("nested");
     let mut command = Command::new("/bin/sh");
     command.args([
         "-c",
-        "grep -F \" $1/provider-settings/selected/nested \" /proc/self/mountinfo >/dev/null && test \"$(cat \"$1/agents\")\" = ambient && test ! -e \"$1/secrets/value\" && test ! -e \"$2/staging/secrets\" && ! touch \"$2/mutation\" && ! touch \"$1/ambient-mutation\" && touch \"$1/ext/selected/owned\" && ! touch \"$1/sessions/s1/debug/provider-requests/selected/capture\" && ! touch \"$1/provider-settings/selected/mutation\" && ! touch \"$1/provider-settings/selected/nested/mutation\"",
+        "grep -F \" $1/providers/selected/nested \" /proc/self/mountinfo >/dev/null && test \"$(cat \"$1/agents\")\" = ambient && test ! -e \"$1/secrets/value\" && test ! -e \"$2/staging/secrets\" && ! touch \"$2/mutation\" && ! touch \"$1/ambient-mutation\" && touch \"$1/ext/selected/owned\" && ! touch \"$1/sessions/s1/debug/provider-requests/selected/capture\" && ! touch \"$1/providers/selected/mutation\" && ! touch \"$1/providers/selected/nested/mutation\"",
         "sh",
         state.to_str().expect("state path"),
         outer

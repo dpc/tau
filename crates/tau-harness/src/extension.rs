@@ -212,9 +212,10 @@ fn supervised_command(
     stderr_log_path: Option<&Path>,
     state_dir: &Path,
     memory_only: bool,
+    provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
     let (mut command, empty_mask) =
-        isolated_supervised_command(config, kind, state_dir, memory_only)?;
+        isolated_supervised_command(config, kind, state_dir, memory_only, provider_settings)?;
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
     if stderr_log_path.is_some() {
         command.stderr(Stdio::piped());
@@ -229,10 +230,11 @@ fn isolated_supervised_command(
     kind: &ClientKind,
     state_dir: &Path,
     memory_only: bool,
+    provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
     #[cfg(test)]
     {
-        let _ = (kind, state_dir, memory_only);
+        let _ = (kind, state_dir, memory_only, provider_settings);
         let mut command = Command::new(&config.command);
         command.args(&config.args);
         if let Some(cwd) = config.cwd.as_ref() {
@@ -327,7 +329,12 @@ fn isolated_supervised_command(
             })
         };
         let own_source = stage_source(own_target.as_deref());
-        let settings_source = stage_source(settings_target.as_deref());
+        let settings_source = settings_target
+            .as_ref()
+            .map(|_| empty_mask.path().join("provider-profile-snapshot"));
+        if let Some(settings_source) = &settings_source {
+            materialize_provider_settings_snapshot(settings_source, provider_settings)?;
+        }
         let secret_mask_target = state_root.as_ref().map(|root| root.join("secrets"));
         crate::extension_launcher::configure_command(
             &mut command,
@@ -356,6 +363,22 @@ fn isolated_supervised_command(
     }
 }
 
+fn materialize_provider_settings_snapshot(
+    root: &Path,
+    settings: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> path_std_io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir(root)?;
+    for (name, contents) in settings {
+        let path = root.join(name);
+        std::fs::write(&path, contents)?;
+        std::fs::set_permissions(&path, path_std_fs::Permissions::from_mode(0o400))?;
+    }
+    std::fs::set_permissions(root, path_std_fs::Permissions::from_mode(0o500))?;
+    Ok(())
+}
+
 fn prepare_provider_settings_mount(
     state_dir: &Path,
     extension_name: &str,
@@ -368,10 +391,7 @@ fn prepare_provider_settings_mount(
     let settings_root =
         tau_config::settings::extension_provider_settings_dir_of(state_dir, extension_name)
             .map_err(|error| HarnessError::Participant(error.to_string()))?;
-    create_private_state_tree(
-        state_dir,
-        &PathBuf::from("provider-settings").join(extension_name),
-    )?;
+    create_private_state_tree(state_dir, &PathBuf::from("providers").join(extension_name))?;
     Ok(Some(settings_root))
 }
 
@@ -404,6 +424,7 @@ pub(crate) fn spawn_supervised(
     tx: &Sender<HarnessEvent>,
     state_dir: &Path,
     memory_only: bool,
+    provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Result<SupervisedSpawn, HarnessError> {
     let (mut command, empty_mask) = supervised_command(
         config,
@@ -411,6 +432,7 @@ pub(crate) fn spawn_supervised(
         stderr_log_path.as_deref(),
         state_dir,
         memory_only,
+        provider_settings,
     )?;
     for key in std::env::vars()
         .map(|(key, _)| key)

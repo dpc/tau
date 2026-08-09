@@ -1,3 +1,4 @@
+use std::fs::{File, Permissions};
 use std::path::PathBuf;
 
 use super::*;
@@ -72,6 +73,162 @@ fn provider_allowlist_copies_exact_instance_registration() {
             .join("openrouter.json")
             .exists()
     );
+}
+
+/// Proves a Home Manager-style config leaf symlink may target a read-only
+/// regular deployment file outside the canonical config instance root.
+#[cfg(unix)]
+#[test]
+fn provider_allowlist_copies_external_config_profile_symlink() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("config");
+    let state = temp.path().join("state");
+    let scratch = temp.path().join("scratch");
+    let allowed = target("provider-builtin", "chatgpt");
+    let deployment = temp.path().join("nix-store-chatgpt.json");
+    std::fs::write(&deployment, "deployed-settings").expect("deployment");
+    std::fs::set_permissions(&deployment, Permissions::from_mode(0o444))
+        .expect("read-only deployment");
+    let profile = extension_provider_config_dir_of(&config, allowed.extension.as_str())
+        .expect("config root")
+        .join("chatgpt.json");
+    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("config instance");
+    symlink(&deployment, profile).expect("profile symlink");
+    let secrets = extension_secret_dir_of(&state, allowed.extension.as_str())
+        .expect("secret root")
+        .join("providers/chatgpt");
+    std::fs::create_dir_all(&secrets).expect("secret directory");
+    std::fs::write(secrets.join("oauth.json"), "host-secret").expect("secret");
+    let access = provider_access_from_dirs_and_settings(
+        Some(config),
+        Some(state),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![allowed],
+        }),
+    );
+
+    access.copy_allowed_profiles().expect("copy registration");
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("providers/provider-builtin/chatgpt.json"))
+            .expect("copied profile"),
+        "deployed-settings"
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            scratch.join("secrets/ext/provider-builtin/providers/chatgpt/oauth.json")
+        )
+        .expect("copied secret"),
+        "host-secret"
+    );
+}
+
+/// Proves tmux rejects an oversized external config profile before copying it
+/// into scratch state.
+#[cfg(unix)]
+#[test]
+fn provider_allowlist_rejects_oversized_external_config_profile() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("config");
+    let state = temp.path().join("state");
+    let scratch = temp.path().join("scratch");
+    let allowed = target("provider-builtin", "chatgpt");
+    let deployment = temp.path().join("oversized.json");
+    let file = File::create(&deployment).expect("deployment");
+    file.set_len(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILE_BYTES + 1)
+        .expect("oversized deployment");
+    let profile = extension_provider_config_dir_of(&config, allowed.extension.as_str())
+        .expect("config root")
+        .join("chatgpt.json");
+    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("config instance");
+    symlink(deployment, profile).expect("profile symlink");
+    let access = provider_access_from_dirs_and_settings(
+        Some(config),
+        Some(state),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![allowed],
+        }),
+    );
+
+    let error = access
+        .copy_allowed_profiles()
+        .expect_err("oversized profile");
+
+    assert!(error.to_string().contains("exceeds"));
+    assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
+}
+
+/// Proves tmux bounds the explicit profile allowlist before touching host
+/// provider state.
+#[test]
+fn provider_allowlist_rejects_too_many_profiles() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let profiles = (0..=tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILES)
+        .map(|index| target("provider-builtin", &format!("p-{index}")))
+        .collect();
+    let access = provider_access_from_dirs_and_settings(
+        None,
+        None,
+        temp.path().join("scratch"),
+        Some(TestingSettings {
+            testing_providers: profiles,
+        }),
+    );
+
+    let error = access
+        .copy_allowed_profiles()
+        .expect_err("too many profiles");
+
+    assert!(error.to_string().contains("allowlist for instance"));
+    assert!(error.to_string().contains("exceeds"));
+}
+
+/// Proves tmux applies the aggregate profile byte budget independently to each
+/// allowlisted provider extension instance.
+#[test]
+fn provider_allowlist_rejects_per_instance_aggregate_profile_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("config");
+    let state = temp.path().join("state");
+    let scratch = temp.path().join("scratch");
+    let mut profiles = Vec::new();
+    for index in 0..16 {
+        let entry = target("provider-builtin", &format!("p-{index}"));
+        let profile = extension_provider_config_dir_of(&config, entry.extension.as_str())
+            .expect("config root")
+            .join(format!("{}.json", entry.provider));
+        std::fs::create_dir_all(profile.parent().expect("profile parent"))
+            .expect("config instance");
+        let file = File::create(profile).expect("profile");
+        file.set_len(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILE_BYTES)
+            .expect("bounded profile");
+        let secrets = extension_secret_dir_of(&state, entry.extension.as_str())
+            .expect("secret root")
+            .join("providers")
+            .join(entry.provider.as_str());
+        std::fs::create_dir_all(secrets).expect("secret directory");
+        profiles.push(entry);
+    }
+    let access = provider_access_from_dirs_and_settings(
+        Some(config),
+        Some(state),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: profiles,
+        }),
+    );
+
+    let error = access.copy_allowed_profiles().expect_err("aggregate bound");
+
+    assert!(error.to_string().contains("snapshot for instance"));
+    assert!(error.to_string().contains("exceeds"));
+    assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
 }
 
 /// Proves an explicit empty allowlist narrows reusable scratch state to none.

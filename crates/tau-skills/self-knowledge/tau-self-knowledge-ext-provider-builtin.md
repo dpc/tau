@@ -1,12 +1,12 @@
 ---
 name: tau-self-knowledge-ext-provider-builtin
-description: Use this extension skill when the user asks about Tau's provider-builtin extension, built-in model providers, ChatGPT/Codex OAuth, OpenAI-compatible Chat Completions, OpenRouter, provider profiles, model publication, or tau provider commands.
+description: Use this extension skill when the user asks about Tau's provider-builtin extension, built-in model providers, ChatGPT/Codex OAuth, OpenAI-compatible Chat Completions, OpenRouter, providers, model publication, or tau provider commands.
 advertise: false
 ---
 
 # Tau provider-builtin extension self-knowledge
 
-`provider-builtin` is Tau's built-in provider extension. It runs `tau-ext-provider-builtin`, is enabled by default, publishes available models from configured provider profiles, and executes agent turns for built-in provider backends.
+`provider-builtin` is Tau's built-in provider extension. It runs `tau-ext-provider-builtin`, is enabled by default, publishes available models from configured providers, and executes agent turns for built-in provider backends.
 
 ## Provider retries
 
@@ -41,6 +41,7 @@ record in the configured extension instance's private state. Manage them with:
 ```sh
 tau provider add
 tau provider list
+tau provider show <name>
 tau provider remove <name>
 ```
 
@@ -48,6 +49,14 @@ Use `--extension <instance>` when more than one enabled built-in provider
 instance exists. Setup writes the credential first and settings last; removal
 deletes settings first. Restart Tau after settings changes. Credential rotation
 is observed at the next prompt boundary without restart.
+
+Add defaults to mutable XDG state. `--config` targets portable XDG config, and
+`--config --output -` emits canonical credential-free JSON for dotfiles while
+publishing credentials only into host-local Secret state. Config and state names
+must be disjoint; list/show report source identity and remove can infer a unique
+source or accept `--config`/`--state`. The retired state `provider-settings/`
+directory is never discovered; manually move only its JSON and leave Secret
+records untouched.
 
 `tau provider add [KIND]` accepts `chatgpt`, `chat-completions`, `responses`,
 or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked

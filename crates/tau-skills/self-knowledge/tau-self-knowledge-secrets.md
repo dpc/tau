@@ -96,7 +96,7 @@ and supervised respawns.
 ## Provider credentials and rotation
 
 Provider settings are credential-free files under
-`$XDG_STATE_HOME/tau/provider-settings/<instance>/<provider>.json`; the
+`$XDG_STATE_HOME/tau/providers/<instance>/<provider>.json`; the
 Provider gets one bounded immutable `Configure.settings_files` snapshot at
 startup. Typed credentials live in that Provider instance's Secret scope.
 

@@ -159,7 +159,7 @@ pub enum Command {
         force: bool,
     },
 
-    /// Manage LLM provider profiles (add, remove, list)
+    /// Manage LLM providers (add, remove, list)
     Provider {
         /// Subcommand and arguments (e.g. `add`, `remove <name>`, `list`)
         #[arg(trailing_var_arg = true)]

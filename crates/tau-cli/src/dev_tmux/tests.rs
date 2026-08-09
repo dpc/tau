@@ -52,7 +52,7 @@ fn tau_shell_command_uses_scratch_environment_and_core_shell_only() {
         ));
 }
 
-/// Ensures provider profiles are copied into the same Tau state directory that
+/// Ensures providers are copied into the same Tau state directory that
 /// the child process derives from its scratch `XDG_STATE_HOME`, preventing
 /// provider-builtin from starting with an empty model list despite copied
 /// testing credentials.
@@ -118,7 +118,7 @@ fn tau_shell_command_quotes_shell_and_harness_config_values() {
         ));
 }
 
-/// Ensures opted-in provider profiles also enable the built-in provider
+/// Ensures opted-in providers also enable the built-in provider
 /// extension while keeping the tmux child limited to explicitly enabled
 /// extensions.
 #[test]

@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::sync::atomic as path_std_sync_atomic;
 use std::{io as path_std_io, time as path_std_time};
 
@@ -6,6 +7,245 @@ use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
 mod compatibility;
 
 use super::*;
+
+/// Proves conflicting add source flags fail before any interactive or
+/// credential-producing work.
+#[test]
+fn provider_add_rejects_conflicting_source_flags() {
+    let network = tau_provider::OutboundNetworkPolicy::from_env();
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+    let error = cmd_add(
+        &["--config".to_owned(), "--state".to_owned()],
+        &network,
+        &extension,
+    )
+    .expect_err("conflicting flags");
+    assert!(error.to_string().contains("exactly one source flag"));
+}
+
+/// Proves conflicting remove source flags cannot select a destructive target by
+/// argv order.
+#[test]
+fn provider_remove_rejects_conflicting_source_flags() {
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+    let error = cmd_remove(
+        &[
+            "--state".to_owned(),
+            "--config".to_owned(),
+            "profile".to_owned(),
+        ],
+        &extension,
+    )
+    .expect_err("conflicting flags");
+    assert!(error.to_string().contains("exactly one source flag"));
+}
+
+fn cli_setup_plan(name: &str) -> setup_store::ProviderSetupPlan {
+    let provider = ProviderName::try_new(name.to_owned()).expect("provider");
+    setup_store::ProviderSetupPlan {
+        extension_instance: tau_proto::ExtensionName::parse("provider-builtin").expect("extension"),
+        provider: provider.clone(),
+        settings: serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "responses",
+            "base_url": "https://example.invalid/v1",
+            "models": [{"id": "model"}],
+            "max_output_tokens": 1024,
+            "transport": "sse",
+            "tags": [],
+            "compat": {},
+            "credential": {
+                "kind": "api_key",
+                "secret_path": format!("providers/{provider}/api-key.json")
+            }
+        }))
+        .expect("settings"),
+        secret: setup_store::SecretWrite {
+            path: ProviderCredentialSlot::ApiKey.path(&provider),
+            contents: setup_store::SecretBytes::new(
+                serde_json::to_vec(&credential_record::ApiKeyCredential::new("key".to_owned()))
+                    .expect("credential"),
+            ),
+        },
+        named_source: None,
+    }
+}
+
+/// Proves command-level list filtering keeps each parsed profile attached to
+/// its source identity.
+#[test]
+fn provider_list_filters_and_displays_profile_sources() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    store
+        .apply_to(
+            &cli_setup_plan("portable"),
+            setup_store::ProfileTarget::Config,
+        )
+        .expect("config profile");
+    store
+        .apply_to(&cli_setup_plan("local"), setup_store::ProfileTarget::State)
+        .expect("state profile");
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+    let mut output = Vec::new();
+
+    cmd_list_from_store(&["--config".to_owned()], &extension, &store, &mut output).expect("list");
+
+    let output = String::from_utf8(output).expect("UTF-8 output");
+    assert!(output.contains("\tportable\tresponses\t"));
+    assert!(output.ends_with("\tconfig\n"));
+    assert!(!output.contains("\tlocal\t"));
+}
+
+/// Proves show reports the owning source and host path without resolving any
+/// credential value.
+#[test]
+fn provider_show_displays_source_path_and_credential_free_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    store
+        .apply_to(
+            &cli_setup_plan("portable"),
+            setup_store::ProfileTarget::Config,
+        )
+        .expect("config profile");
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+    let mut output = Vec::new();
+
+    cmd_show_from_store(&["portable".to_owned()], &extension, &store, &mut output).expect("show");
+
+    let output = String::from_utf8(output).expect("UTF-8 output");
+    assert!(output.contains("source: config\npath: "));
+    assert!(output.contains("config/providers/provider-builtin/portable.json"));
+    assert!(output.contains("\"credential\""));
+    assert!(!output.contains("\"value\""));
+}
+
+/// Proves malformed list entries fail with safe source and path identity rather
+/// than disappearing from output.
+#[test]
+fn provider_list_reports_malformed_source_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    let path = temp
+        .path()
+        .join("config/providers/provider-builtin/bad.json");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("config root");
+    std::fs::write(&path, b"not json").expect("malformed profile");
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+
+    let error = cmd_list_from_store(&[], &extension, &store, &mut Vec::new())
+        .expect_err("malformed profile");
+
+    let error = error.to_string();
+    assert!(error.contains("source=config"));
+    assert!(error.contains(path.to_str().expect("UTF-8 path")));
+    assert!(!error.contains("not json"));
+}
+
+/// Proves command-level discovery rejects an oversized external config profile
+/// before allocating or parsing its contents.
+#[cfg(unix)]
+#[test]
+fn provider_list_rejects_oversized_external_config_profile() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    let deployment = temp.path().join("oversized.json");
+    let file = File::create(&deployment).expect("deployment");
+    file.set_len(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILE_BYTES + 1)
+        .expect("oversized deployment");
+    let profile = temp
+        .path()
+        .join("config/providers/provider-builtin/oversized.json");
+    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("config root");
+    symlink(deployment, profile).expect("profile symlink");
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+
+    let error = cmd_list_from_store(&[], &extension, &store, &mut Vec::new())
+        .expect_err("oversized profile");
+
+    let error = error.to_string();
+    assert!(error.contains("config profile"));
+    assert!(error.contains("exceeds"));
+}
+
+/// Proves command-level discovery bounds the merged config/state entry count.
+#[test]
+fn provider_list_rejects_too_many_profiles() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    let config_profiles = temp.path().join("config/providers/provider-builtin");
+    let state_profiles = temp.path().join("providers/provider-builtin");
+    std::fs::create_dir_all(&config_profiles).expect("config root");
+    std::fs::create_dir_all(&state_profiles).expect("state root");
+    let config_count = tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILES / 2;
+    for index in 0..config_count {
+        std::fs::write(config_profiles.join(format!("c-{index}.json")), b"{}").expect("profile");
+    }
+    for index in 0..=(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILES - config_count) {
+        std::fs::write(state_profiles.join(format!("s-{index}.json")), b"{}").expect("profile");
+    }
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+
+    let error = cmd_list_from_store(&[], &extension, &store, &mut Vec::new())
+        .expect_err("too many profiles");
+
+    let error = error.to_string();
+    assert!(error.contains("state profile discovery"));
+    assert!(error.contains("exceeds"));
+}
+
+/// Proves command-level discovery applies one aggregate byte budget across
+/// config and state profiles.
+#[test]
+fn provider_list_rejects_merged_aggregate_profile_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    for (prefix, root) in [
+        ("c", temp.path().join("config/providers/provider-builtin")),
+        ("s", temp.path().join("providers/provider-builtin")),
+    ] {
+        std::fs::create_dir_all(&root).expect("profile root");
+        for index in 0..8 {
+            let file = File::create(root.join(format!("{prefix}-{index}.json"))).expect("profile");
+            file.set_len(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILE_BYTES)
+                .expect("bounded profile");
+        }
+    }
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+
+    let error =
+        cmd_list_from_store(&[], &extension, &store, &mut Vec::new()).expect_err("aggregate bound");
+
+    assert!(
+        error
+            .to_string()
+            .contains("merged provider profile discovery exceeds")
+    );
+}
+
+/// Proves dotfiles mode writes only canonical JSON to stdout and routes status
+/// text exclusively to stderr.
+#[test]
+fn provider_dotfiles_output_separates_json_and_status() {
+    let settings = br#"{
+  "kind": "responses"
+}"#;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    write_dotfiles_profile(settings, &mut stdout, &mut stderr).expect("output");
+
+    assert_eq!(stdout, [settings.as_slice(), b"\n"].concat());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stdout).expect("canonical JSON"),
+        serde_json::json!({"kind": "responses"})
+    );
+    let stderr = String::from_utf8(stderr).expect("UTF-8 status");
+    assert!(stderr.contains("deploy this config profile"));
+    assert!(!stderr.contains("\"kind\""));
+}
 use crate::chat_completions::OpenRouterProfile;
 
 /// Proves setup recognizes only canonical component suffix identity, never an
@@ -859,7 +1099,7 @@ fn responses_add_omits_effort_override() {
     assert!(models.iter().all(|model| model.efforts.is_none()));
 }
 
-/// Persistent provider profiles reject unknown fields instead of hiding schema
+/// Persistent providers reject unknown fields instead of hiding schema
 /// mistakes.
 #[test]
 fn provider_profiles_reject_unknown_fields() {

@@ -1,9 +1,189 @@
+use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt as _;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use super::*;
+
+/// Proves config-targeted setup publishes credentials in state while keeping
+/// the profile source explicit and collision-free.
+#[test]
+fn config_target_uses_portable_profile_and_host_local_secret() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+
+    let path = store
+        .apply_to(&plan(), ProfileTarget::Config)
+        .expect("config setup")
+        .expect("config path");
+    assert_eq!(
+        path,
+        temp.path()
+            .join("config/providers/provider-work/chatgpt.json")
+    );
+    assert!(
+        temp.path()
+            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .exists()
+    );
+    let snapshot = store.snapshot(&extension()).expect("snapshot");
+    assert_eq!(snapshot.profiles[0].source, ProfileSource::Config);
+}
+
+/// Proves profile inspection follows a Home Manager-style config leaf symlink
+/// to a read-only regular file outside the canonical config instance root.
+#[cfg(unix)]
+#[test]
+fn snapshot_follows_external_config_profile_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let deployment = temp.path().join("nix-store-chatgpt.json");
+    std::fs::write(&deployment, b"{\"deployed\":true}").expect("deployment");
+    std::fs::set_permissions(&deployment, Permissions::from_mode(0o444))
+        .expect("read-only deployment");
+    let profile = temp
+        .path()
+        .join("config/providers/provider-work/chatgpt.json");
+    std::fs::create_dir_all(profile.parent().expect("profile parent")).expect("config instance");
+    symlink(&deployment, &profile).expect("profile symlink");
+
+    let snapshot = store.snapshot(&extension()).expect("snapshot");
+
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.profiles[0].source, ProfileSource::Config);
+    assert_eq!(snapshot.profiles[0].path, profile);
+    assert_eq!(snapshot.profiles[0].contents, b"{\"deployed\":true}");
+}
+
+/// Proves output mode refuses an existing state owner before replacing its
+/// credential record.
+#[test]
+fn stdout_target_rejects_state_collision_before_secret_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store.apply(&plan()).expect("state setup");
+    let secret = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
+    let before = std::fs::read(&secret).expect("credential before collision");
+
+    let error = store
+        .apply_to(
+            &direct_plan_with("new", "replacement"),
+            ProfileTarget::Stdout,
+        )
+        .expect_err("collision");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(secret).expect("credential after collision"),
+        before
+    );
+}
+
+/// Proves removal safely infers the sole config owner and deletes credentials
+/// only after profile deactivation.
+#[test]
+fn remove_infers_unique_config_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store
+        .apply_to(&plan(), ProfileTarget::Config)
+        .expect("config setup");
+
+    assert!(
+        store
+            .remove_from(&extension(), &provider(), None)
+            .expect("remove")
+    );
+    assert!(
+        !temp
+            .path()
+            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .exists()
+    );
+}
+
+/// Proves an explicit source mismatch cannot deactivate another source or
+/// remove its credential.
+#[test]
+fn remove_rejects_source_mismatch_without_touching_credentials() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store.apply(&plan()).expect("state setup");
+    let secret = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
+
+    let error = store
+        .remove_from(&extension(), &provider(), Some(ProfileSource::Config))
+        .expect_err("source mismatch");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(secret.exists());
+}
+
+/// Proves an invalid duplicate owner remains ambiguous and preserves both the
+/// profiles and credential.
+#[test]
+fn remove_rejects_cross_source_ambiguity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store.apply(&plan()).expect("state setup");
+    let config = temp
+        .path()
+        .join("config/providers/provider-work/chatgpt.json");
+    std::fs::create_dir_all(config.parent().expect("parent")).expect("config root");
+    std::fs::write(&config, b"{}").expect("duplicate config");
+
+    let error = store
+        .remove_from(&extension(), &provider(), None)
+        .expect_err("ambiguous source");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(config.exists());
+    assert!(
+        temp.path()
+            .join("providers/provider-work/chatgpt.json")
+            .exists()
+    );
+    assert!(
+        temp.path()
+            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .exists()
+    );
+}
+
+/// Proves a read-only config deletion failure leaves host-local credentials
+/// intact because credentials are removed only after deactivation.
+#[cfg(unix)]
+#[test]
+fn remove_config_failure_preserves_credentials() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    store
+        .apply_to(&plan(), ProfileTarget::Config)
+        .expect("config setup");
+    let config_root = temp.path().join("config/providers/provider-work");
+    std::fs::set_permissions(&config_root, Permissions::from_mode(0o500))
+        .expect("read-only config root");
+
+    let result = store.remove_from(&extension(), &provider(), Some(ProfileSource::Config));
+
+    std::fs::set_permissions(&config_root, Permissions::from_mode(0o700))
+        .expect("restore permissions");
+    assert!(result.is_err());
+    assert!(
+        temp.path()
+            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .exists()
+    );
+}
 
 fn extension() -> tau_proto::ExtensionName {
     tau_proto::ExtensionName::parse("provider-work").expect("extension")
@@ -73,9 +253,7 @@ fn apply_and_remove_use_scoped_private_layout() {
     let settings = plan.settings.clone();
     store.apply(&plan).expect("apply");
 
-    let settings_path = temp
-        .path()
-        .join("provider-settings/provider-work/chatgpt.json");
+    let settings_path = temp.path().join("providers/provider-work/chatgpt.json");
     let secret_path = temp
         .path()
         .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
@@ -138,7 +316,7 @@ fn snapshot_pairs_active_settings_with_matching_credentials_only() {
 
     let snapshot = store.snapshot(&extension()).expect("snapshot");
 
-    assert_eq!(snapshot.settings.len(), 1);
+    assert_eq!(snapshot.profiles.len(), 1);
     assert_eq!(
         snapshot
             .credentials
@@ -152,13 +330,10 @@ fn snapshot_pairs_active_settings_with_matching_credentials_only() {
             .all(|(provider, _)| provider.as_str() != "orphan")
     );
 
-    std::fs::remove_file(
-        temp.path()
-            .join("provider-settings/provider-work/chatgpt.json"),
-    )
-    .expect("remove settings");
+    std::fs::remove_file(temp.path().join("providers/provider-work/chatgpt.json"))
+        .expect("remove settings");
     let empty = store.snapshot(&extension()).expect("empty snapshot");
-    assert!(empty.settings.is_empty());
+    assert!(empty.profiles.is_empty());
     assert!(empty.credentials.is_empty());
 }
 
@@ -200,7 +375,7 @@ fn snapshot_cannot_mix_concurrent_replacement_generations() {
         .expect("replacement thread")
         .expect("replacement");
     assert!(
-        String::from_utf8(snapshot.settings[0].1.clone())
+        String::from_utf8(snapshot.profiles[0].contents.clone())
             .expect("settings")
             .contains("\"marker\":\"old\"")
     );
@@ -211,12 +386,9 @@ fn snapshot_cannot_mix_concurrent_replacement_generations() {
         Some(&b"old-secret".to_vec())
     );
     assert!(
-        std::fs::read_to_string(
-            temp.path()
-                .join("provider-settings/provider-work/chatgpt.json"),
-        )
-        .expect("new settings")
-        .contains("\"marker\":\"new\"")
+        std::fs::read_to_string(temp.path().join("providers/provider-work/chatgpt.json"),)
+            .expect("new settings")
+            .contains("\"marker\":\"new\"")
     );
     assert_eq!(
         std::fs::read(
@@ -241,7 +413,7 @@ fn secret_bytes_debug_redacts_payload() {
 #[test]
 fn named_apply_blocks_on_instance_lock_and_publishes_coherent_pair() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let settings_root = temp.path().join("provider-settings/provider-work");
+    let settings_root = temp.path().join("providers/provider-work");
     std::fs::create_dir_all(&settings_root).expect("settings root");
     std::fs::create_dir_all(temp.path().join("secrets")).expect("source root");
     std::fs::write(
@@ -283,7 +455,7 @@ fn named_apply_blocks_on_instance_lock_and_publishes_coherent_pair() {
     assert_eq!(credential.into_value(), "named-value");
     assert!(
         temp.path()
-            .join("provider-settings/provider-work/chatgpt.json")
+            .join("providers/provider-work/chatgpt.json")
             .is_file()
     );
 }
@@ -303,7 +475,7 @@ fn missing_named_source_does_not_activate_settings_or_write_placeholder() {
     assert!(
         !temp
             .path()
-            .join("provider-settings/provider-work/chatgpt.json")
+            .join("providers/provider-work/chatgpt.json")
             .exists()
     );
     assert!(
@@ -319,7 +491,7 @@ fn missing_named_source_does_not_activate_settings_or_write_placeholder() {
 #[test]
 fn orphan_removal_racing_first_setup_leaves_one_complete_generation() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let settings_root = temp.path().join("provider-settings/provider-work");
+    let settings_root = temp.path().join("providers/provider-work");
     let secret = temp
         .path()
         .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
@@ -397,7 +569,7 @@ fn remove_blocks_on_instance_lock_and_removes_complete_registration() {
     assert!(
         !temp
             .path()
-            .join("provider-settings/provider-work/chatgpt.json")
+            .join("providers/provider-work/chatgpt.json")
             .exists()
     );
     assert!(
@@ -455,12 +627,9 @@ fn setup_replacement_cannot_split_startup_generation() {
     worker.join().expect("setup thread").expect("send result");
 
     assert!(
-        std::fs::read_to_string(
-            temp.path()
-                .join("provider-settings/provider-work/chatgpt.json"),
-        )
-        .expect("new settings")
-        .contains("\"marker\":\"new\"")
+        std::fs::read_to_string(temp.path().join("providers/provider-work/chatgpt.json"),)
+            .expect("new settings")
+            .contains("\"marker\":\"new\"")
     );
     assert_eq!(
         std::fs::read(
@@ -514,7 +683,7 @@ fn removal_cannot_split_startup_generation() {
     assert!(
         !temp
             .path()
-            .join("provider-settings/provider-work/chatgpt.json")
+            .join("providers/provider-work/chatgpt.json")
             .exists()
     );
 }
@@ -528,7 +697,7 @@ fn apply_failure_preserves_secret_first_boundary() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let settings_root = temp.path().join("provider-settings/provider-work");
+    let settings_root = temp.path().join("providers/provider-work");
     std::fs::create_dir_all(&settings_root).expect("settings root");
     let outside = temp.path().join("outside.json");
     std::fs::write(&outside, "outside").expect("outside");
@@ -579,7 +748,7 @@ fn remove_failure_preserves_settings_first_boundary() {
     assert!(
         !temp
             .path()
-            .join("provider-settings/provider-work/chatgpt.json")
+            .join("providers/provider-work/chatgpt.json")
             .exists()
     );
     assert_eq!(

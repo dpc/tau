@@ -1,4 +1,4 @@
-//! Shared typed OpenAI prompt-cache controls for generic provider profiles.
+//! Shared typed OpenAI prompt-cache controls for generic providers.
 
 use serde::{Deserialize, Serialize};
 

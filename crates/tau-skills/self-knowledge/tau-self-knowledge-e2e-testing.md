@@ -35,7 +35,7 @@ of discovering the generated one.
 Provider credentials are not copied by default. When `~/.config/tau/testing.yaml`
 is absent, the helper prints a warning and the tmux Tau remains local-only.
 
-To intentionally allow selected provider profiles for manual E2E testing, create:
+To intentionally allow selected providers for manual E2E testing, create:
 
 ```yaml
 testing_providers:
@@ -57,7 +57,7 @@ The setup registration consists of credential-free settings and one typed
 credential directory:
 
 ```text
-~/.local/state/tau/provider-settings/<extension>/<provider>.json
+~/.local/state/tau/providers/<extension>/<provider>.json
 ~/.local/state/tau/secrets/ext/<extension>/providers/<provider>/
 ```
 
@@ -65,7 +65,7 @@ For provider-management details, read
 `tau-self-knowledge-ext-provider-builtin`.
 
 Only those exact registration pairs are copied into scratch Tau state. Unrelated
-provider profiles, sessions, logs, general
+providers, sessions, logs, general
 `harness.yaml`, `cli.yaml`, and other user config/state are deliberately not
 copied. `tau dev tmux start` enables every exact extension instance named by the
 allowlist. It retains the canonical built-in identity for `provider-builtin` and
@@ -78,7 +78,7 @@ copies no provider credentials.
 ## Security expectations
 
 - Keep the default safe: no provider credentials are available unless
-  `testing.yaml` explicitly lists exact provider profiles.
+  `testing.yaml` explicitly lists exact providers.
 - Do not ask Tau to copy all providers.
 - Do not put path-like names in `testing_providers`; both names use validated Tau
   namespaces.

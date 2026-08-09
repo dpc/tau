@@ -1,26 +1,33 @@
 //! Provider-profile opt-in copying for the manual tmux E2E helper.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io, sync as path_std_sync};
 
+use tau_config::provider_settings::{
+    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES,
+    ProviderProfileLeafSymlinkPolicy, read_provider_profile,
+};
 use tau_config::settings::{
-    TauDirs, TestingProvider, TestingSettings, extension_provider_settings_dir_of,
-    extension_secret_dir_of, load_testing_settings,
+    TauDirs, TestingProvider, TestingSettings, extension_provider_config_dir_of,
+    extension_provider_settings_dir_of, extension_secret_dir_of, load_testing_settings,
 };
 
 use super::{ensure_private_directory, reject_symlink};
 use crate::CliError;
 
 const TESTING_CONFIG_FILE: &str = "testing.yaml";
-const PROVIDER_SETTINGS_DIR: &str = "provider-settings";
+const PROVIDER_SETTINGS_DIR: &str = "providers";
 const EXTENSION_SECRETS_DIR: &str = "secrets/ext";
 
 /// Provider-access plan for one `tau dev tmux start` invocation.
 pub(super) struct TestingProviderAccess {
     /// Real Tau state root used only as the copy source.
     source_state_dir: Option<PathBuf>,
+    /// Real Tau config root used only as a profile copy source.
+    source_config_dir: Option<PathBuf>,
     /// Private scratch Tau state root receiving exact copies.
     scratch_state_dir: PathBuf,
     /// Effective missing, empty, or populated allowlist.
@@ -62,14 +69,32 @@ impl TestingProviderAccess {
         if allowed.is_empty() {
             return Ok(());
         }
+        let mut instance_counts = BTreeMap::<&tau_proto::ExtensionName, usize>::new();
+        for target in allowed {
+            let count = instance_counts.entry(&target.extension).or_default();
+            *count += 1;
+            if MAX_PROVIDER_PROFILE_FILES < *count {
+                return Err(CliError::Participant(format!(
+                    "testing provider allowlist for instance '{}' exceeds \
+                     {MAX_PROVIDER_PROFILE_FILES} profiles",
+                    target.extension
+                )));
+            }
+        }
         let source_state = self.source_state_dir.as_deref().ok_or_else(|| {
             CliError::Participant(
                 "testing provider access is configured, but Tau could not determine the real state directory".to_owned(),
             )
         })?;
+        let mut profile_bytes = BTreeMap::new();
         for target in allowed {
-            if let Err(error) = copy_provider_target(source_state, &self.scratch_state_dir, target)
-            {
+            if let Err(error) = copy_provider_target(
+                self.source_config_dir.as_deref(),
+                source_state,
+                &self.scratch_state_dir,
+                target,
+                &mut profile_bytes,
+            ) {
                 let _ = reconcile_scratch_tree(&self.scratch_state_dir.join(PROVIDER_SETTINGS_DIR));
                 let _ = reconcile_scratch_tree(&self.scratch_state_dir.join(EXTENSION_SECRETS_DIR));
                 return Err(error);
@@ -129,14 +154,25 @@ pub(super) fn prepare_provider_access(
     let settings = load_testing_settings(dirs).map_err(|error| {
         CliError::Participant(format!("{TESTING_CONFIG_FILE} failed to load:\n{error}"))
     })?;
-    Ok(provider_access_from_settings(
+    Ok(provider_access_from_dirs_and_settings(
+        dirs.config_dir.clone(),
         dirs.state_dir.clone(),
         scratch_state_dir.to_path_buf(),
         settings,
     ))
 }
 
+#[cfg(test)]
 fn provider_access_from_settings(
+    source_state_dir: Option<PathBuf>,
+    scratch_state_dir: PathBuf,
+    settings: Option<TestingSettings>,
+) -> TestingProviderAccess {
+    provider_access_from_dirs_and_settings(None, source_state_dir, scratch_state_dir, settings)
+}
+
+fn provider_access_from_dirs_and_settings(
+    source_config_dir: Option<PathBuf>,
     source_state_dir: Option<PathBuf>,
     scratch_state_dir: PathBuf,
     settings: Option<TestingSettings>,
@@ -149,6 +185,7 @@ fn provider_access_from_settings(
     };
     TestingProviderAccess {
         source_state_dir,
+        source_config_dir,
         scratch_state_dir,
         config,
     }
@@ -163,11 +200,13 @@ fn empty_testing_provider_warning() -> &'static str {
 }
 
 fn copy_provider_target(
+    source_config: Option<&Path>,
     source_state: &Path,
     scratch_state: &Path,
     target: &TestingProvider,
+    profile_bytes: &mut BTreeMap<tau_proto::ExtensionName, u64>,
 ) -> Result<(), CliError> {
-    let source_settings =
+    let state_settings =
         extension_provider_settings_dir_of(source_state, target.extension.as_str())
             .map_err(|error| CliError::Participant(error.to_string()))?
             .join(format!("{}.json", target.provider));
@@ -175,9 +214,67 @@ fn copy_provider_target(
         extension_provider_settings_dir_of(scratch_state, target.extension.as_str())
             .map_err(|error| CliError::Participant(error.to_string()))?
             .join(format!("{}.json", target.provider));
-    reject_path_components_no_follow(source_state, &source_settings).map_err(CliError::Io)?;
+    let config_settings = source_config
+        .map(|root| {
+            extension_provider_config_dir_of(root, target.extension.as_str())
+                .map(|path| path.join(format!("{}.json", target.provider)))
+        })
+        .transpose()
+        .map_err(|error| CliError::Participant(error.to_string()))?;
+    reject_path_components_no_follow(source_state, &state_settings).map_err(CliError::Io)?;
     reject_path_components_no_follow(scratch_state, &destination_settings).map_err(CliError::Io)?;
-    copy_regular_private_file(&source_settings, &destination_settings).map_err(|error| {
+    let state_exists = path_entry_exists(&state_settings).map_err(CliError::Io)?;
+    let config_exists = config_settings
+        .as_deref()
+        .map(path_entry_exists)
+        .transpose()
+        .map_err(CliError::Io)?
+        .unwrap_or(false);
+    if state_exists && config_exists {
+        return Err(CliError::Participant(format!(
+            "opted-in provider profile `{}/{}` is duplicated across config and state",
+            target.extension, target.provider
+        )));
+    }
+    let (source_settings, leaf_symlink_policy, source_label) =
+        match (config_settings, state_exists, config_exists) {
+            (Some(path), false, true) => {
+                path.parent()
+                    .expect("provider config path has instance parent")
+                    .canonicalize()
+                    .map_err(CliError::Io)?;
+                let resolved = path.canonicalize().map_err(CliError::Io)?;
+                if !resolved.is_file() {
+                    return Err(CliError::Participant(
+                        "testing provider config profile does not resolve to a regular file"
+                            .to_owned(),
+                    ));
+                }
+                (path, ProviderProfileLeafSymlinkPolicy::Follow, "config")
+            }
+            _ => (
+                state_settings,
+                ProviderProfileLeafSymlinkPolicy::Reject,
+                "state",
+            ),
+        };
+    let settings =
+        read_provider_profile(&source_settings, leaf_symlink_policy).map_err(|error| {
+            CliError::Participant(format!(
+                "failed to read opted-in {} provider profile `{}/{}`: {error}",
+                source_label, target.extension, target.provider
+            ))
+        })?;
+    let instance_bytes = profile_bytes.entry(target.extension.clone()).or_default();
+    *instance_bytes = instance_bytes.saturating_add(settings.len() as u64);
+    if MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES < *instance_bytes {
+        return Err(CliError::Participant(format!(
+            "testing provider profile snapshot for instance '{}' exceeds \
+             {MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES} bytes",
+            target.extension
+        )));
+    }
+    write_private_file(&destination_settings, &settings).map_err(|error| {
         CliError::Participant(format!(
             "failed to copy opted-in provider settings `{}/{}`: {error}",
             target.extension, target.provider
@@ -200,6 +297,14 @@ fn copy_provider_target(
             target.extension, target.provider
         ))
     })
+}
+
+fn path_entry_exists(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn reject_path_components_no_follow(root: &Path, target: &Path) -> path_std_io::Result<()> {
@@ -283,6 +388,19 @@ fn copy_regular_directory(source: &Path, destination: &Path) -> std::io::Result<
 fn copy_regular_private_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     reject_symlink_io(source)?;
     let mut source_file = open_regular_file_no_follow(source)?;
+    prepare_private_file(destination).and_then(|mut destination_file| {
+        std::io::copy(&mut source_file, &mut destination_file)?;
+        destination_file.sync_all()
+    })
+}
+
+fn write_private_file(destination: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut destination_file = prepare_private_file(destination)?;
+    destination_file.write_all(contents)?;
+    destination_file.sync_all()
+}
+
+fn prepare_private_file(destination: &Path) -> std::io::Result<File> {
     reject_symlink_io(destination)?;
     let parent = destination.parent().ok_or_else(|| {
         path_std_io::Error::new(
@@ -292,9 +410,7 @@ fn copy_regular_private_file(source: &Path, destination: &Path) -> std::io::Resu
     })?;
     ensure_private_directory(parent)
         .map_err(|error| path_std_io::Error::other(error.to_string()))?;
-    let mut destination_file = open_private_file_no_follow(destination)?;
-    std::io::copy(&mut source_file, &mut destination_file)?;
-    destination_file.sync_all()
+    open_private_file_no_follow(destination)
 }
 
 fn reject_symlink_io(path: &Path) -> std::io::Result<()> {

@@ -5,11 +5,14 @@ use std::path::{Component, Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_config::provider_settings::{
-    ProviderCredentialSlot, ProviderSettingsInstanceLock, ProviderSettingsLockAttempt,
+    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredentialSlot,
+    ProviderProfileLeafSymlinkPolicy, ProviderSettingsInstanceLock, ProviderSettingsLockAttempt,
+    read_provider_profile,
 };
 use tau_config::secret_sources::{
     EnvironmentDisposition, load_secret_sources, resolve_declared_secret,
 };
+use tau_config::settings::TauDirs;
 
 use crate::credential_record::ApiKeyCredential;
 
@@ -25,6 +28,36 @@ pub(crate) struct ProviderSetupPlan {
     pub(crate) secret: SecretWrite,
     /// Configured named source resolved inside the instance transaction.
     pub(crate) named_source: Option<NamedSecretSource>,
+}
+
+/// Destination selected for a provider profile created by the CLI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProfileTarget {
+    /// Mutable host-local state.
+    State,
+    /// Portable user configuration.
+    Config,
+    /// Standard output for a dotfiles workflow.
+    Stdout,
+}
+
+/// Durable source that owns an existing provider profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProfileSource {
+    /// Portable user configuration.
+    Config,
+    /// Mutable host-local state.
+    State,
+}
+
+impl ProfileSource {
+    /// Returns the stable CLI source label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::State => "state",
+        }
+    }
 }
 
 /// One exact configured declaration selected by the setup picker.
@@ -52,10 +85,22 @@ pub(crate) struct SecretBytes(
 
 /// Coherent settings and credential bytes captured under lifecycle locks.
 pub(crate) struct SetupSnapshot {
-    /// Credential-free provider settings in deterministic provider order.
-    pub(crate) settings: Vec<(tau_proto::ProviderName, Vec<u8>)>,
+    /// Complete profiles in deterministic provider order.
+    pub(crate) profiles: Vec<SetupProfile>,
     /// Existing closed credential slots keyed by provider and family.
     pub(crate) credentials: BTreeMap<(tau_proto::ProviderName, ProviderCredentialSlot), Vec<u8>>,
+}
+
+/// One credential-free provider profile discovered by setup tooling.
+pub(crate) struct SetupProfile {
+    /// Validated provider namespace.
+    pub(crate) provider: tau_proto::ProviderName,
+    /// Durable layer that owns the profile.
+    pub(crate) source: ProfileSource,
+    /// User-visible host path.
+    pub(crate) path: PathBuf,
+    /// Exact credential-free JSON bytes.
+    pub(crate) contents: Vec<u8>,
 }
 
 impl SecretBytes {
@@ -81,6 +126,8 @@ impl std::fmt::Debug for SecretBytes {
 
 /// Harness-layout-aware storage used only by provider setup commands.
 pub(crate) struct SetupStore {
+    /// Tau user-configuration root.
+    config_dir: PathBuf,
     /// Tau user-state root.
     state_dir: PathBuf,
     /// Test-only signal after a nonblocking lock attempt confirms contention.
@@ -97,13 +144,21 @@ pub(crate) struct SetupStore {
 impl SetupStore {
     /// Opens the default user-state setup store.
     pub(crate) fn open_default() -> path_std_io::Result<Self> {
-        let state_dir = tau_config::settings::state_dir().ok_or_else(|| {
+        let dirs = TauDirs::default();
+        let config_dir = dirs.config_dir.ok_or_else(|| {
+            path_std_io::Error::new(
+                path_std_io::ErrorKind::NotFound,
+                "cannot determine Tau config directory",
+            )
+        })?;
+        let state_dir = dirs.state_dir.ok_or_else(|| {
             path_std_io::Error::new(
                 path_std_io::ErrorKind::NotFound,
                 "cannot determine Tau state directory",
             )
         })?;
         Ok(Self {
+            config_dir,
             state_dir,
             #[cfg(test)]
             contention: None,
@@ -113,9 +168,11 @@ impl SetupStore {
     }
 
     #[cfg(test)]
-    fn open_in(state_dir: impl Into<PathBuf>) -> Self {
+    pub(crate) fn open_in(state_dir: impl Into<PathBuf>) -> Self {
+        let state_dir = state_dir.into();
         Self {
-            state_dir: state_dir.into(),
+            config_dir: state_dir.join("config"),
+            state_dir,
             contention: None,
             acquired: None,
         }
@@ -170,7 +227,17 @@ impl SetupStore {
 
     /// Applies secret-first and settings-last, making the settings write the
     /// registration activation point.
-    pub(crate) fn apply(&self, plan: &ProviderSetupPlan) -> path_std_io::Result<PathBuf> {
+    #[cfg(test)]
+    pub(crate) fn apply(&self, plan: &ProviderSetupPlan) -> path_std_io::Result<Option<PathBuf>> {
+        self.apply_to(plan, ProfileTarget::State)
+    }
+
+    /// Applies a setup plan to the explicitly selected profile target.
+    pub(crate) fn apply_to(
+        &self,
+        plan: &ProviderSetupPlan,
+        target: ProfileTarget,
+    ) -> path_std_io::Result<Option<PathBuf>> {
         let settings_root = tau_config::settings::extension_provider_settings_dir_of(
             &self.state_dir,
             plan.extension_instance.as_str(),
@@ -178,7 +245,7 @@ impl SetupStore {
         .map_err(path_std_io::Error::other)?;
         ensure_private_directory_tree(
             &self.state_dir,
-            &PathBuf::from("provider-settings").join(plan.extension_instance.as_str()),
+            &PathBuf::from("providers").join(plan.extension_instance.as_str()),
         )?;
         // Serialize setup with harness startup: settings generation decides which
         // named source may materialize, so this lock must precede Secret scope.
@@ -190,6 +257,27 @@ impl SetupStore {
                     "provider settings directory disappeared before locking",
                 )
             })?;
+        let settings_rel = PathBuf::from(format!("{}.json", plan.provider));
+        let config_root = tau_config::settings::extension_provider_config_dir_of(
+            &self.config_dir,
+            plan.extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        let state_path = settings_root.join(&settings_rel);
+        let config_path = config_root.join(&settings_rel);
+        let conflicting = match target {
+            ProfileTarget::State => &config_path,
+            ProfileTarget::Config | ProfileTarget::Stdout => &state_path,
+        };
+        if conflicting.exists() {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::AlreadyExists,
+                format!(
+                    "provider '{}' already exists in the other profile source",
+                    plan.provider
+                ),
+            ));
+        }
         let named_contents = match &plan.named_source {
             Some(source) => {
                 let sources = load_secret_sources(EnvironmentDisposition::Retain)
@@ -239,19 +327,39 @@ impl SetupStore {
                 .unwrap_or_else(|| plan.secret.contents.expose()),
         )?;
         fs2::FileExt::unlock(&secret_lock)?;
-        let settings_rel = PathBuf::from(format!("{}.json", plan.provider));
-        reject_existing_symlink_components(&settings_root, &settings_rel)?;
-        let settings_path = settings_root.join(settings_rel);
-        atomic_private_write(&settings_path, &plan.settings)?;
-        Ok(settings_path)
+        let path = match target {
+            ProfileTarget::State => {
+                reject_existing_symlink_components(&settings_root, &settings_rel)?;
+                atomic_private_write(&state_path, &plan.settings)?;
+                Some(state_path)
+            }
+            ProfileTarget::Config => {
+                path_std_fs::create_dir_all(&config_root)?;
+                atomic_write(&config_path, &plan.settings)?;
+                Some(config_path)
+            }
+            ProfileTarget::Stdout => None,
+        };
+        Ok(path)
     }
 
     /// Removes settings first and then every credential slot used by
     /// version-zero built-in providers.
+    #[cfg(test)]
     pub(crate) fn remove(
         &self,
         extension_instance: &tau_proto::ExtensionName,
         provider: &tau_proto::ProviderName,
+    ) -> path_std_io::Result<bool> {
+        self.remove_from(extension_instance, provider, None)
+    }
+
+    /// Removes one profile from an inferred or explicitly selected source.
+    pub(crate) fn remove_from(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        provider: &tau_proto::ProviderName,
+        requested_source: Option<ProfileSource>,
     ) -> path_std_io::Result<bool> {
         use fs2::FileExt as _;
 
@@ -262,7 +370,7 @@ impl SetupStore {
         .map_err(path_std_io::Error::other)?;
         ensure_private_directory_tree(
             &self.state_dir,
-            &PathBuf::from("provider-settings").join(extension_instance.as_str()),
+            &PathBuf::from("providers").join(extension_instance.as_str()),
         )?;
         let settings_lock = self
             .acquire_instance_lock(extension_instance)?
@@ -273,8 +381,39 @@ impl SetupStore {
                 )
             })?;
         let settings_rel = PathBuf::from(format!("{provider}.json"));
+        let config_root = tau_config::settings::extension_provider_config_dir_of(
+            &self.config_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        let config_path = config_root.join(&settings_rel);
         reject_existing_symlink_components(&settings_root, &settings_rel)?;
-        let settings_path = settings_root.join(settings_rel);
+        let state_path = settings_root.join(&settings_rel);
+        let config_exists = config_path.exists();
+        let state_exists = state_path.exists();
+        let source = match (requested_source, config_exists, state_exists) {
+            (_, true, true) => {
+                return Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::AlreadyExists,
+                    "provider profile is duplicated across config and state",
+                ));
+            }
+            (Some(ProfileSource::Config), true, false) | (None, true, false) => {
+                ProfileSource::Config
+            }
+            (Some(ProfileSource::State), false, true) | (None, false, true) => ProfileSource::State,
+            (Some(source), _, _) => {
+                return Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    format!("provider profile does not exist in {}", source.label()),
+                ));
+            }
+            (None, false, false) => return Ok(false),
+        };
+        let settings_path = match source {
+            ProfileSource::Config => config_path,
+            ProfileSource::State => state_path,
+        };
         let removed = remove_file_sync(&settings_path)?;
         let secret_root = tau_config::settings::extension_secret_dir_of(
             &self.state_dir,
@@ -305,35 +444,126 @@ impl SetupStore {
     fn settings_files_unlocked(
         &self,
         extension_instance: &tau_proto::ExtensionName,
-    ) -> path_std_io::Result<Vec<(tau_proto::ProviderName, Vec<u8>)>> {
-        let root = tau_config::settings::extension_provider_settings_dir_of(
+    ) -> path_std_io::Result<Vec<SetupProfile>> {
+        let state_root = tau_config::settings::extension_provider_settings_dir_of(
             &self.state_dir,
             extension_instance.as_str(),
         )
         .map_err(path_std_io::Error::other)?;
-        reject_existing_symlink_components(&root, Path::new(""))?;
-        let entries = match path_std_fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
+        reject_existing_symlink_components(&state_root, Path::new(""))?;
+        let config_root = tau_config::settings::extension_provider_config_dir_of(
+            &self.config_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
         let mut files = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
+        let mut total_bytes = 0_u64;
+        for (source, root) in [
+            (ProfileSource::Config, config_root),
+            (ProfileSource::State, state_root),
+        ] {
+            let entries = match path_std_fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let remaining = MAX_PROVIDER_PROFILE_FILES.saturating_sub(files.len());
+            let mut entries = entries.take(remaining + 1).collect::<Result<Vec<_>, _>>()?;
+            if remaining < entries.len() {
+                return Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::InvalidData,
+                    format!(
+                        "{} profile discovery exceeds {MAX_PROVIDER_PROFILE_FILES} files",
+                        source.label()
+                    ),
+                ));
             }
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
+            entries.sort_by_key(path_std_fs::DirEntry::file_name);
+            let resolved_root = if source == ProfileSource::Config {
+                Some(root.canonicalize()?)
+            } else {
+                None
             };
-            let Ok(provider) = tau_proto::ProviderName::try_new(stem.to_owned()) else {
-                continue;
-            };
-            let contents = path_std_fs::read(path)?;
-            files.push((provider, contents));
+            for entry in entries {
+                let presented_path = entry.path();
+                match &resolved_root {
+                    Some(_resolved_root) => {
+                        let resolved = presented_path.canonicalize()?;
+                        if !resolved.is_file() {
+                            return Err(path_std_io::Error::new(
+                                path_std_io::ErrorKind::InvalidInput,
+                                "config profile does not resolve to a regular file",
+                            ));
+                        }
+                    }
+                    None if entry.file_type()?.is_file() => {}
+                    None => {
+                        return Err(path_std_io::Error::new(
+                            path_std_io::ErrorKind::InvalidInput,
+                            "state profile directory contains a non-regular entry",
+                        ));
+                    }
+                }
+                let name = presented_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        path_std_io::Error::new(
+                            path_std_io::ErrorKind::InvalidInput,
+                            "provider profile name is not UTF-8",
+                        )
+                    })?;
+                let stem = name.strip_suffix(".json").ok_or_else(|| {
+                    path_std_io::Error::new(
+                        path_std_io::ErrorKind::InvalidInput,
+                        "provider profile name must end in .json",
+                    )
+                })?;
+                let provider = tau_proto::ProviderName::try_new(stem.to_owned()).map_err(|_| {
+                    path_std_io::Error::new(
+                        path_std_io::ErrorKind::InvalidInput,
+                        "provider profile name is invalid",
+                    )
+                })?;
+                let leaf_symlink_policy = match source {
+                    ProfileSource::Config => ProviderProfileLeafSymlinkPolicy::Follow,
+                    ProfileSource::State => ProviderProfileLeafSymlinkPolicy::Reject,
+                };
+                let contents = read_provider_profile(&presented_path, leaf_symlink_policy)
+                    .map_err(|error| {
+                        path_std_io::Error::new(
+                            error.kind(),
+                            format!("could not read {} profile: {error}", source.label()),
+                        )
+                    })?;
+                total_bytes = total_bytes.saturating_add(contents.len() as u64);
+                if MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES < total_bytes {
+                    return Err(path_std_io::Error::new(
+                        path_std_io::ErrorKind::InvalidData,
+                        format!(
+                            "merged provider profile discovery exceeds \
+                             {MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES} bytes"
+                        ),
+                    ));
+                }
+                if files
+                    .iter()
+                    .any(|existing: &SetupProfile| existing.provider == provider)
+                {
+                    return Err(path_std_io::Error::new(
+                        path_std_io::ErrorKind::AlreadyExists,
+                        format!("provider '{provider}' is duplicated across config and state"),
+                    ));
+                }
+                files.push(SetupProfile {
+                    provider,
+                    source,
+                    path: presented_path,
+                    contents,
+                });
+            }
         }
-        files.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+        files.sort_by(|left, right| left.provider.as_str().cmp(right.provider.as_str()));
         Ok(files)
     }
 
@@ -346,12 +576,7 @@ impl SetupStore {
         use fs2::FileExt as _;
 
         let settings_lock = self.acquire_instance_lock(extension_instance)?;
-        let Some(_settings_lock) = settings_lock else {
-            return Ok(SetupSnapshot {
-                settings: Vec::new(),
-                credentials: BTreeMap::new(),
-            });
-        };
+        let _settings_lock = settings_lock;
         let settings = self.settings_files_unlocked(extension_instance)?;
         let secret_root = tau_config::settings::extension_secret_dir_of(
             &self.state_dir,
@@ -367,11 +592,11 @@ impl SetupStore {
             Err(error) => return Err(error),
         };
         let mut credentials = BTreeMap::new();
-        for (provider, _) in &settings {
+        for profile in &settings {
             for slot in ProviderCredentialSlot::all() {
-                match self.credential(extension_instance, provider, slot) {
+                match self.credential(extension_instance, &profile.provider, slot) {
                     Ok(bytes) => {
-                        credentials.insert((provider.clone(), slot), bytes);
+                        credentials.insert((profile.provider.clone(), slot), bytes);
                     }
                     Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
@@ -382,7 +607,7 @@ impl SetupStore {
             fs2::FileExt::unlock(&secret_lock)?;
         }
         Ok(SetupSnapshot {
-            settings,
+            profiles: settings,
             credentials,
         })
     }
@@ -404,6 +629,21 @@ impl SetupStore {
         reject_existing_symlink_components(&root, &relative)?;
         path_std_fs::read(root.join(relative))
     }
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> path_std_io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidInput,
+            "profile path has no parent",
+        )
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    use std::io::Write as _;
+    temporary.write_all(contents)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 #[cfg(unix)]

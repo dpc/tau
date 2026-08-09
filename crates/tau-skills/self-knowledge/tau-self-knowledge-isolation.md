@@ -68,7 +68,7 @@ When a state root exists, Tau masks the entire Tau secret root in every policy.
 A persistent harness restores the per-instance direct-state bind after the
 restricted state view. A persistent Provider, and only a persistent Provider,
 additionally receives its selected
-`<state>/provider-settings/<instance>` tree as a recursive read-only bind.
+`<state>/providers/<instance>` tree as a recursive read-only bind.
 That tree contains credential-free settings; tool extensions receive neither
 this mount nor a settings snapshot. Provider debug captures do not create a
 writable mount: they cross a dedicated bounded non-journaled protocol message,

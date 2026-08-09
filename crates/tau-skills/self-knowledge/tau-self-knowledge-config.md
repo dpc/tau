@@ -37,7 +37,7 @@ Tau follows the XDG directory layout on Linux:
   - `sessions/<session_id>/` — durable session membership, metadata, logs, and debug captures.
   - `agents/<agent_id>/` — durable agent transcripts and metadata.
   - `cli.json` — persisted CLI runtime toggles.
-  - `provider-settings/<extension>/<provider>.json` — credential-free provider settings.
+  - `providers/<extension>/<provider>.json` — mutable credential-free provider settings.
   - `secrets/ext/<extension>/providers/<provider>/` — typed provider credentials.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`.
   - `<pid>-<instance>.sock` — daemon socket.
@@ -144,10 +144,17 @@ older Tau versions; Tau does not guess whether such an old value was explicit.
 
 Use `tau provider add` for the interactive provider setup wizard. It prompts for provider kind, provider namespace, auth, and model details as needed.
 
+Credential-free profiles may instead live under
+`$XDG_CONFIG_HOME/tau/providers/<extension>/<provider>.json`. Config and state
+profiles form a disjoint union, so duplicate names fail startup rather than
+overriding. `tau provider add --config --output - [KIND]` emits canonical JSON
+for dotfiles; credential records remain in state.
+
 Other provider commands:
 
-- `tau provider list` — show configured provider profiles.
-- `tau provider remove <name>` — remove a provider profile.
+- `tau provider list [--config|--state|--all]` — show providers and sources.
+- `tau provider show <name>` — show credential-free JSON and its source path.
+- `tau provider remove [--config|--state] <name>` — remove a provider profile.
 
 Models are published by provider extensions at runtime; start Tau and use `:model` to inspect the current model list.
 

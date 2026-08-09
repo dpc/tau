@@ -1,12 +1,14 @@
 //! Coherent built-in provider settings snapshot and credential materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read as _};
-use std::path::Path;
+use std::fs::DirEntry;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use tau_config::provider_settings::{
-    ProviderCredentialSlot, ProviderSettingsInstanceLock, parse_provider_credential_reference,
+    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredentialSlot,
+    ProviderProfileLeafSymlinkPolicy, ProviderSettingsInstanceLock,
+    parse_provider_credential_reference, read_provider_profile,
 };
 use tau_config::secret_sources::{SecretSourceError, SecretSources, resolve_declared_secret};
 use tau_config::settings::BuiltinComponentIdentity;
@@ -17,14 +19,6 @@ use super::extension_data::{
 };
 use crate::error::HarnessError;
 use crate::settings::{Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind};
-
-/// Maximum number of CLI-owned settings files sent to one extension at startup.
-const MAX_EXTENSION_SETTINGS_FILES: usize = 4_096;
-/// Maximum bytes accepted from one CLI-owned settings file.
-const MAX_EXTENSION_SETTINGS_FILE_BYTES: u64 = 1024 * 1024;
-/// Maximum total settings bytes, reserving one MiB for the Configure envelope.
-const MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES: u64 =
-    tau_proto::MAX_PROTOCOL_MESSAGE_BYTES - MAX_EXTENSION_SETTINGS_FILE_BYTES;
 
 /// Coherent provider settings, bound declarations, and startup diagnostics.
 #[derive(Debug, Default)]
@@ -40,34 +34,84 @@ pub(super) struct ProviderStartupSnapshot {
     pub(super) skipped_extensions: BTreeSet<String>,
 }
 
-fn load_extension_settings_files_at(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    match std::fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err("settings root is not a real directory".to_owned());
+#[derive(Clone, Copy)]
+enum ProfileSource {
+    Config,
+    State,
+}
+
+impl ProfileSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::State => "state",
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
-        Err(error) => return Err(format!("could not inspect settings directory: {error}")),
     }
-    let entries = match std::fs::read_dir(root) {
+}
+
+fn load_extension_settings_files_at(
+    root: &Path,
+    source: ProfileSource,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let effective_root = match source {
+        ProfileSource::Config => match root.canonicalize() {
+            Ok(root) if root.is_dir() => root,
+            Ok(_) => return Err("config profile root is not a directory".to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+            Err(error) => return Err(format!("could not resolve config profile root: {error}")),
+        },
+        ProfileSource::State => {
+            match std::fs::symlink_metadata(root) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err("state profile root is not a real directory".to_owned());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Default::default());
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "could not inspect state profile directory: {error}"
+                    ));
+                }
+            }
+            root.to_path_buf()
+        }
+    };
+    let entries = match std::fs::read_dir(&effective_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
-        Err(error) => return Err(format!("could not list settings directory: {error}")),
-    };
-    let mut files = BTreeMap::new();
-    let mut total_bytes = 0_u64;
-    for (index, entry) in entries.enumerate() {
-        if MAX_EXTENSION_SETTINGS_FILES <= index {
+        Err(error) => {
             return Err(format!(
-                "settings directory exceeds {MAX_EXTENSION_SETTINGS_FILES} entries"
+                "could not list {} profile directory: {error}",
+                source.label()
             ));
         }
-        let entry = entry.map_err(|error| format!("could not read settings entry: {error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("could not inspect settings entry: {error}"))?;
-        if !file_type.is_file() || file_type.is_symlink() {
-            return Err("settings directory contains a non-regular entry".to_owned());
+    };
+    let mut entries = entries
+        .take(MAX_PROVIDER_PROFILE_FILES + 1)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("could not read {} profile entry: {error}", source.label()))?;
+    if MAX_PROVIDER_PROFILE_FILES < entries.len() {
+        return Err(format!(
+            "{} profile directory exceeds {MAX_PROVIDER_PROFILE_FILES} entries",
+            source.label()
+        ));
+    }
+    entries.sort_by_key(DirEntry::file_name);
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0_u64;
+    for entry in entries {
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "could not inspect {} profile entry: {error}",
+                source.label()
+            )
+        })?;
+        if matches!(source, ProfileSource::State)
+            && (!file_type.is_file() || file_type.is_symlink())
+        {
+            return Err("state profile directory contains a non-regular entry".to_owned());
         }
         let name = entry
             .file_name()
@@ -76,24 +120,31 @@ fn load_extension_settings_files_at(root: &Path) -> Result<BTreeMap<String, Vec<
         if !name.ends_with(".json")
             || tau_proto::ProviderName::try_new(name.trim_end_matches(".json").to_owned()).is_err()
         {
-            return Err("settings file name is not a valid provider JSON name".to_owned());
-        }
-        let mut contents = Vec::new();
-        open_settings_file_no_follow(&entry.path())
-            .and_then(|file| {
-                file.take(MAX_EXTENSION_SETTINGS_FILE_BYTES + 1)
-                    .read_to_end(&mut contents)
-            })
-            .map_err(|error| format!("could not read settings file: {error}"))?;
-        if MAX_EXTENSION_SETTINGS_FILE_BYTES < contents.len() as u64 {
             return Err(format!(
-                "settings file exceeds {MAX_EXTENSION_SETTINGS_FILE_BYTES} bytes"
+                "{} profile file name is not a valid provider JSON name",
+                source.label()
             ));
         }
+        let path = entry.path();
+        if matches!(source, ProfileSource::Config) {
+            let resolved = path
+                .canonicalize()
+                .map_err(|error| format!("could not resolve config profile file: {error}"))?;
+            if !resolved.is_file() {
+                return Err("config profile file does not resolve to a regular file".to_owned());
+            }
+        }
+        let leaf_symlink_policy = match source {
+            ProfileSource::Config => ProviderProfileLeafSymlinkPolicy::Follow,
+            ProfileSource::State => ProviderProfileLeafSymlinkPolicy::Reject,
+        };
+        let contents = read_provider_profile(&path, leaf_symlink_policy)
+            .map_err(|error| format!("could not read {} profile file: {error}", source.label()))?;
         total_bytes = total_bytes.saturating_add(contents.len() as u64);
-        if MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES < total_bytes {
+        if MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES < total_bytes {
             return Err(format!(
-                "settings snapshot exceeds {MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES} bytes"
+                "{} profile snapshot exceeds {MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES} bytes",
+                source.label()
             ));
         }
         files.insert(name, contents);
@@ -101,18 +152,45 @@ fn load_extension_settings_files_at(root: &Path) -> Result<BTreeMap<String, Vec<
     Ok(files)
 }
 
-#[cfg(unix)]
-fn open_settings_file_no_follow(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn open_settings_file_no_follow(path: &Path) -> io::Result<File> {
-    File::open(path)
+fn merged_settings_files(
+    config_root: Option<PathBuf>,
+    state_root: Option<&Path>,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let config = match config_root {
+        Some(root) => load_extension_settings_files_at(&root, ProfileSource::Config)?,
+        None => BTreeMap::new(),
+    };
+    let state = match state_root {
+        Some(root) => load_extension_settings_files_at(root, ProfileSource::State)?,
+        None => BTreeMap::new(),
+    };
+    for name in config.keys() {
+        if state.contains_key(name) {
+            return Err(format!(
+                "provider profile '{}' is duplicated across config and state",
+                name.trim_end_matches(".json")
+            ));
+        }
+    }
+    if MAX_PROVIDER_PROFILE_FILES < config.len() + state.len() {
+        return Err(format!(
+            "merged provider snapshot exceeds {MAX_PROVIDER_PROFILE_FILES} files"
+        ));
+    }
+    let total = config
+        .values()
+        .chain(state.values())
+        .fold(0_u64, |total, bytes| {
+            total.saturating_add(bytes.len() as u64)
+        });
+    if MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES < total {
+        return Err(format!(
+            "merged provider snapshot exceeds {MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES} bytes"
+        ));
+    }
+    let mut merged = config;
+    merged.extend(state);
+    Ok(merged)
 }
 /// Capture each built-in provider instance's settings generation and
 /// publish every named API-key binding selected by that exact
@@ -125,6 +203,7 @@ fn open_settings_file_no_follow(path: &Path) -> io::Result<File> {
 /// restart.
 pub(super) fn snapshot_and_materialize_named_provider_credentials(
     config: &Config,
+    config_dir: Option<&Path>,
     state_dir: &Path,
     secret_sources: &SecretSources,
 ) -> Result<ProviderStartupSnapshot, HarnessError> {
@@ -138,8 +217,8 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
         .filter(|extension| extension.role.as_deref() == Some("provider"))
     {
         let settings_lock =
-            match ProviderSettingsInstanceLock::acquire_existing(state_dir, &extension.name) {
-                Ok(lock) => lock,
+            match ProviderSettingsInstanceLock::acquire_or_create(state_dir, &extension.name) {
+                Ok(lock) => Some(lock),
                 Err(error) if extension.require => return Err(error.into()),
                 Err(_) => {
                     diagnostics.push(ExtensionStartupDiagnostic {
@@ -154,21 +233,31 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
                     continue;
                 }
             };
-        let Some(settings_lock) = settings_lock else {
-            snapshots.insert(extension.name.clone(), BTreeMap::new());
-            continue;
-        };
-        let settings_files = match load_extension_settings_files_at(settings_lock.root()) {
+        let config_root = config_dir
+            .map(|root| {
+                tau_config::settings::extension_provider_config_dir_of(root, &extension.name)
+            })
+            .transpose()
+            .map_err(|error| HarnessError::Participant(error.to_string()))?;
+        let settings_files = match merged_settings_files(
+            config_root,
+            settings_lock
+                .as_ref()
+                .map(ProviderSettingsInstanceLock::root),
+        ) {
             Ok(files) => files,
             Err(error) if extension.require => {
-                return Err(HarnessError::Participant(error));
+                return Err(HarnessError::Participant(format!(
+                    "provider extension '{}' profile discovery failed: {error}",
+                    extension.name
+                )));
             }
-            Err(_) => {
+            Err(error) => {
                 diagnostics.push(ExtensionStartupDiagnostic {
                     extension: extension.name.clone(),
                     message: format!(
-                        "optional provider extension '{}' did not initialize",
-                        extension.name
+                        "optional provider extension '{}' profile discovery failed: {error}",
+                        extension.name,
                     ),
                     kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                 });
@@ -309,6 +398,7 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
 /// extension-secret path cannot expose credential values.
 pub(super) fn snapshot_memory_only_provider_settings(
     config: &Config,
+    config_dir: Option<&Path>,
     state_dir: &Path,
 ) -> Result<ProviderStartupSnapshot, HarnessError> {
     let mut snapshot = ProviderStartupSnapshot::default();
@@ -340,23 +430,36 @@ pub(super) fn snapshot_memory_only_provider_settings(
                     continue;
                 }
             };
-        let settings_files = match settings_lock {
-            Some(lock) => load_extension_settings_files_at(lock.root()),
-            None => Ok(BTreeMap::new()),
-        };
+        let config_root = config_dir
+            .map(|root| {
+                tau_config::settings::extension_provider_config_dir_of(root, &extension.name)
+            })
+            .transpose()
+            .map_err(|error| HarnessError::Participant(error.to_string()))?;
+        let settings_files = merged_settings_files(
+            config_root,
+            settings_lock
+                .as_ref()
+                .map(ProviderSettingsInstanceLock::root),
+        );
         match settings_files {
             Ok(settings_files) => {
                 snapshot
                     .settings
                     .insert(extension.name.clone(), settings_files);
             }
-            Err(error) if extension.require => return Err(HarnessError::Participant(error)),
-            Err(_) => {
+            Err(error) if extension.require => {
+                return Err(HarnessError::Participant(format!(
+                    "provider extension '{}' profile discovery failed: {error}",
+                    extension.name
+                )));
+            }
+            Err(error) => {
                 snapshot.diagnostics.push(ExtensionStartupDiagnostic {
                     extension: extension.name.clone(),
                     message: format!(
-                        "optional provider extension '{}' did not initialize",
-                        extension.name
+                        "optional provider extension '{}' profile discovery failed: {error}",
+                        extension.name,
                     ),
                     kind: ExtensionStartupDiagnosticKind::OptionalSkip,
                 });

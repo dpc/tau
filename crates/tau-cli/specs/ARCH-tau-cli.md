@@ -92,12 +92,12 @@ socket, and cleanup must validate that ownership before killing a session or
 removing the scratch root.
 
 Provider credentials for `tau dev tmux start` are local-only by default. The
-helper must not copy provider profiles, tokens, API keys, provider config, or
+helper must not copy providers, tokens, API keys, provider config, or
 provider state from the user's real Tau directories unless the user explicitly
 opts in through `testing.yaml`. That allowlist names exact extension/provider
 pairs only; the helper may copy only the corresponding credential-free settings
 file and typed credential subtree into scratch state, must not copy general
-config, sessions, logs, unrelated provider profiles, or "all providers", and
+config, sessions, logs, unrelated providers, or "all providers", and
 must refuse symlink/path-traversal attempts around those files. Reused scratch
 destinations must be reconciled to the current allowlist
 and must not write through pre-existing symlinks, non-regular files, or

@@ -1,6 +1,10 @@
-//! Closed credential-reference schema shared by provider setup and startup.
+//! Shared provider-profile bounds, safe reads, lifecycle locking, and closed
+//! credential-reference schema.
 
 use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read as _};
+use std::path::Path;
 
 use serde::Serialize;
 use tau_proto::{ExtensionDataPath, ProviderName};
@@ -8,6 +12,79 @@ use tau_proto::{ExtensionDataPath, ProviderName};
 mod instance_lock;
 
 pub use instance_lock::{ProviderSettingsInstanceLock, ProviderSettingsLockAttempt};
+
+/// Maximum provider profiles accepted for one extension instance.
+pub const MAX_PROVIDER_PROFILE_FILES: usize = 4_096;
+/// Maximum bytes accepted from one provider profile.
+pub const MAX_PROVIDER_PROFILE_FILE_BYTES: u64 = 1024 * 1024;
+/// Maximum merged profile bytes, reserving one MiB for the Configure envelope.
+pub const MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES: u64 =
+    tau_proto::MAX_PROTOCOL_MESSAGE_BYTES - MAX_PROVIDER_PROFILE_FILE_BYTES;
+
+/// Leaf-symlink policy for one provider profile read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderProfileLeafSymlinkPolicy {
+    /// Follow a leaf symlink after validating the opened descriptor.
+    Follow,
+    /// Reject a leaf symlink.
+    Reject,
+}
+
+/// Read one bounded provider profile after validating the opened descriptor.
+pub fn read_provider_profile(
+    path: &Path,
+    leaf_symlink_policy: ProviderProfileLeafSymlinkPolicy,
+) -> io::Result<Vec<u8>> {
+    let file = open_provider_profile(path, leaf_symlink_policy)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "provider profile does not resolve to a regular file",
+        ));
+    }
+    if MAX_PROVIDER_PROFILE_FILE_BYTES < metadata.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("provider profile exceeds {MAX_PROVIDER_PROFILE_FILE_BYTES} bytes"),
+        ));
+    }
+    let mut contents = Vec::new();
+    file.take(MAX_PROVIDER_PROFILE_FILE_BYTES + 1)
+        .read_to_end(&mut contents)?;
+    if MAX_PROVIDER_PROFILE_FILE_BYTES < contents.len() as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("provider profile exceeds {MAX_PROVIDER_PROFILE_FILE_BYTES} bytes"),
+        ));
+    }
+    Ok(contents)
+}
+
+#[cfg(unix)]
+fn open_provider_profile(
+    path: &Path,
+    leaf_symlink_policy: ProviderProfileLeafSymlinkPolicy,
+) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let no_follow = match leaf_symlink_policy {
+        ProviderProfileLeafSymlinkPolicy::Follow => 0,
+        ProviderProfileLeafSymlinkPolicy::Reject => libc::O_NOFOLLOW,
+    };
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | no_follow)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_provider_profile(
+    path: &Path,
+    _leaf_symlink_policy: ProviderProfileLeafSymlinkPolicy,
+) -> io::Result<File> {
+    File::open(path)
+}
 
 /// The only credential slots owned by a built-in provider profile.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

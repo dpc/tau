@@ -2,7 +2,7 @@
 
 `tau-provider` owns provider-neutral storage, retry/repetition helpers, and the
 immutable outbound network policy used by built-in backends. It does not own
-provider profiles, request lowering, session state, logical retry scheduling, or
+providers, request lowering, session state, logical retry scheduling, or
 provider response semantics.
 
 The shared provider debug-capture writer accepts already-serialized request and

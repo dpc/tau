@@ -625,25 +625,40 @@ without a marker. HTTP/SSE and WebSocket serialize the same cache fields.
 
 ### Scoped provider credentials
 
-`tau provider add` writes one registration under the selected enabled built-in
-provider extension instance:
+`tau provider add` defaults to mutable state under the selected enabled built-in
+provider extension instance. `--config` writes the credential-free JSON to XDG
+config instead, and `--config --output -` prints canonical JSON for redirecting
+into dotfiles while publishing the host-local Secret record:
 
 ```text
-provider-settings/<extension>/<provider>.json
-secrets/ext/<extension>/providers/<provider>/{oauth,api-key}.json
+$XDG_CONFIG_HOME/tau/providers/<extension>/<provider>.json
+$XDG_STATE_HOME/tau/providers/<extension>/<provider>.json
+$XDG_STATE_HOME/tau/secrets/ext/<extension>/providers/<provider>/{oauth,api-key}.json
 ```
+
+Config and state names form a disjoint union. A duplicate fails startup even when
+both files are identical; neither source overrides the other. Config symlinks and
+read-only Nix store files are supported. `tau provider list` reports `config` or
+`state`, `show` prints the credential-free JSON and source path, and `remove`
+infers a unique source or accepts `--config`/`--state`.
 
 Settings contain backend and model metadata plus a deterministic credential
 reference, never OAuth tokens or API keys. The runtime loads the typed
 version-zero credential before model publication and at prompt boundaries.
 Credential rotation therefore takes effect without restart; settings changes
-require restart. Missing or malformed credentials exclude that provider.
+require a full harness restart. Provider-process restart does not reload either
+directory, and Tau creates no imported copy or watcher. Missing or malformed
+credentials exclude that provider.
 Initial Configure validates the complete bounded settings snapshot before
 retaining it or publishing any model. One invalid filename or profile—including
 legacy `api_key_secret`, inline API keys, or mixed credential fields—rejects the
 whole snapshot, publishes no models or Ready, and produces one mandatory,
 replayable, redacted configuration warning. Re-register the invalid profile;
 startup does not rewrite or migrate persisted settings.
+
+The old `$XDG_STATE_HOME/tau/provider-settings/` location is not inspected at all.
+Move only its credential-free JSON manually into one new `providers/` location;
+leave the existing Secret records in place.
 
 `tau provider add [KIND]` accepts exactly `chatgpt`, `chat-completions`,
 `responses`, or `openrouter`; without `KIND` it presents those same choices in

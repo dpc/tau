@@ -3939,10 +3939,15 @@ impl Harness {
             diagnostics: provider_diagnostics,
             skipped_extensions: provider_skipped_extensions,
         } = if launch.storage_mode.is_memory_only() {
-            provider_startup::snapshot_memory_only_provider_settings(config, &state_dir)?
+            provider_startup::snapshot_memory_only_provider_settings(
+                config,
+                dirs.config_dir.as_deref(),
+                &state_dir,
+            )?
         } else {
             provider_startup::snapshot_and_materialize_named_provider_credentials(
                 config,
+                dirs.config_dir.as_deref(),
                 &state_dir,
                 &secret_sources,
             )?
@@ -4231,6 +4236,9 @@ impl Harness {
                 &self.tx,
                 &self.state_dir,
                 self.storage_mode.is_memory_only(),
+                self.provider_settings_snapshots
+                    .get(ext_config.name.as_str())
+                    .unwrap_or(&BTreeMap::new()),
             ) {
                 Ok(spawned) => spawned,
                 Err(error) if !ext_config.require => {
@@ -17958,6 +17966,9 @@ impl Harness {
             &self.tx,
             &self.state_dir,
             self.storage_mode.is_memory_only(),
+            self.provider_settings_snapshots
+                .get(config.name.as_str())
+                .unwrap_or(&BTreeMap::new()),
         )?;
         let new_connection_id = spawned.connection_id.clone();
         tracing::info!(

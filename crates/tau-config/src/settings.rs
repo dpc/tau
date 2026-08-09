@@ -2757,7 +2757,17 @@ pub fn extension_provider_settings_dir_of(
     extension_name: &str,
 ) -> Result<PathBuf, InvalidExtensionName> {
     validate_extension_name(extension_name)?;
-    Ok(state_dir.join("provider-settings").join(extension_name))
+    Ok(state_dir.join("providers").join(extension_name))
+}
+
+/// Returns the read-only portable provider profile root for one configured
+/// extension instance.
+pub fn extension_provider_config_dir_of(
+    config_dir: &Path,
+    extension_name: &str,
+) -> Result<PathBuf, InvalidExtensionName> {
+    validate_extension_name(extension_name)?;
+    Ok(config_dir.join("providers").join(extension_name))
 }
 
 /// Validates that an extension name is safe to use as a single path component

@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs::{File, Permissions};
 use std::io as path_std_io;
 use std::io::ErrorKind;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tau_config::secret_sources::SecretSources;
 use tau_config::settings::{BuiltinComponentIdentity, TauStateAccess};
@@ -516,6 +518,7 @@ fn connect_supervised_test_process(
         &h.tx,
         &h.state_dir,
         h.storage_mode.is_memory_only(),
+        &Default::default(),
     )
     .expect("spawn supervised test process");
     let connection_id = spawned.connection_id.clone();
@@ -1957,7 +1960,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     assert!(expected.is_dir(), "{} should exist", expected.display());
 }
 
-/// Proves a stale provider-settings directory for a tool extension cannot cross
+/// Proves a stale providers directory for a tool extension cannot cross
 /// the provider-only Configure boundary, even for a supervised persistent peer.
 #[test]
 fn tool_configure_ignores_stale_provider_settings_directory() {
@@ -1982,11 +1985,11 @@ fn persistent_provider_configure_includes_settings_snapshot() {
     let settings = tau_config::settings::extension_provider_settings_dir_of(&sp, "provider-work")
         .expect("settings path");
     std::fs::create_dir_all(&settings).expect("settings directory");
-    std::fs::write(settings.join("provider.json"), b"provider-settings").expect("settings");
+    std::fs::write(settings.join("provider.json"), b"providers").expect("settings");
     let mut h = quiet_provider_harness(&sp).expect("start");
     h.provider_settings_snapshots.insert(
         "provider-work".to_owned(),
-        BTreeMap::from([("provider.json".to_owned(), b"provider-settings".to_vec())]),
+        BTreeMap::from([("provider.json".to_owned(), b"providers".to_vec())]),
     );
 
     let configure =
@@ -1994,7 +1997,7 @@ fn persistent_provider_configure_includes_settings_snapshot() {
 
     assert_eq!(
         configure.settings_files.get("provider.json"),
-        Some(&b"provider-settings".to_vec())
+        Some(&b"providers".to_vec())
     );
 }
 
@@ -2040,7 +2043,7 @@ fn memory_only_provider_snapshot_omits_named_declaration_value() {
         builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
             optional: false,
         }));
-    let snapshot = provider_startup::snapshot_memory_only_provider_settings(&config, &state)
+    let snapshot = provider_startup::snapshot_memory_only_provider_settings(&config, None, &state)
         .expect("memory-only provider snapshot");
     let resolved = Harness::resolve_startup_extension_secrets(
         &config,
@@ -2091,6 +2094,7 @@ fn provider_startup_retains_materialized_settings_snapshot() {
         &builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
             optional: false,
         })),
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -2122,6 +2126,281 @@ fn provider_startup_retains_materialized_settings_snapshot() {
     assert_eq!(record["value"], "first-key");
 }
 
+/// Proves portable config symlinks and strict mutable state form one
+/// deterministic disjoint startup snapshot.
+#[cfg(unix)]
+#[test]
+fn provider_startup_merges_config_symlink_and_state_profiles() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let deployed = temp.path().join("nix-store-profile.json");
+    std::fs::write(&deployed, br#"{"portable":true}"#).expect("portable profile");
+    std::fs::set_permissions(&deployed, Permissions::from_mode(0o444))
+        .expect("read-only deployment");
+    let config = temp.path().join("config");
+    let config_profiles = config.join("providers/provider-work");
+    std::fs::create_dir_all(&config_profiles).expect("config root");
+    symlink(&deployed, config_profiles.join("portable.json")).expect("leaf profile symlink");
+    let state_profiles =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("state profiles");
+    std::fs::create_dir_all(&state_profiles).expect("state profile root");
+    std::fs::write(state_profiles.join("local.json"), br#"{"local":true}"#).expect("state profile");
+    let mut startup = builtin_provider_startup_config(None);
+    startup
+        .extensions
+        .get_mut("provider-work")
+        .expect("provider")
+        .component = None;
+
+    let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &startup,
+        Some(&config),
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("merged startup snapshot");
+
+    assert_eq!(
+        snapshot.settings["provider-work"]
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["local.json", "portable.json"]
+    );
+}
+
+/// Proves broken and non-regular config profile targets fail with source-aware
+/// diagnostics instead of being skipped.
+#[cfg(unix)]
+#[test]
+fn provider_startup_rejects_unusable_config_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    for non_regular in [false, true] {
+        let temp = TempDir::new().expect("tempdir");
+        let state = temp.path().join("state");
+        let config = temp.path().join("config");
+        let profiles = config.join("providers/provider-work");
+        std::fs::create_dir_all(&profiles).expect("profiles");
+        let target = temp.path().join("target");
+        if non_regular {
+            std::fs::create_dir(&target).expect("directory target");
+        }
+        symlink(&target, profiles.join("bad.json")).expect("profile symlink");
+
+        let error = provider_startup::snapshot_memory_only_provider_settings(
+            &builtin_provider_startup_config(None),
+            Some(&config),
+            &state,
+        )
+        .expect_err("unusable target must fail");
+
+        assert!(error.to_string().contains("config profile"));
+        assert!(
+            !state.exists(),
+            "memory-only snapshot must not create state"
+        );
+    }
+}
+
+/// Proves memory-only discovery never waits on an externally contended config
+/// inode because config is data, not lifecycle-lock authority.
+#[cfg(unix)]
+#[test]
+fn memory_only_provider_snapshot_never_locks_external_config() {
+    use fs2::FileExt as _;
+
+    let temp = TempDir::new().expect("tempdir");
+    let config = temp.path().join("config/providers/provider-work");
+    std::fs::create_dir_all(&config).expect("config root");
+    std::fs::write(config.join("portable.json"), b"{}").expect("profile");
+    let external = File::open(&config).expect("config directory");
+    external.lock_exclusive().expect("external lock");
+    let config_root = temp.path().join("config");
+    let state = temp.path().join("state");
+    let startup = builtin_provider_startup_config(None);
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        tx.send(provider_startup::snapshot_memory_only_provider_settings(
+            &startup,
+            Some(&config_root),
+            &state,
+        ))
+        .expect("result");
+    });
+
+    let result = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("config lock must not block discovery");
+    fs2::FileExt::unlock(&external).expect("unlock");
+    worker.join().expect("worker");
+    assert!(result.is_ok());
+}
+
+/// Proves config/state path aliasing is a logical duplicate error and never a
+/// second lock acquisition.
+#[cfg(unix)]
+#[test]
+fn provider_startup_rejects_config_state_alias_without_deadlock() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let state_profiles = state.join("providers/provider-work");
+    std::fs::create_dir_all(&state_profiles).expect("state profiles");
+    std::fs::write(state_profiles.join("alias.json"), b"{}").expect("profile");
+    let config = temp.path().join("config");
+    std::fs::create_dir_all(config.join("providers")).expect("config providers");
+    symlink(&state_profiles, config.join("providers/provider-work")).expect("logical alias");
+
+    let error = provider_startup::snapshot_memory_only_provider_settings(
+        &builtin_provider_startup_config(None),
+        Some(&config),
+        &state,
+    )
+    .expect_err("alias duplicate");
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicated across config and state")
+    );
+}
+
+/// Proves identical cross-layer bytes remain an ownership error rather than
+/// being silently coalesced.
+#[test]
+fn provider_startup_rejects_cross_layer_duplicate_profiles() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let config = temp.path().join("config");
+    for root in [&state, &config] {
+        let profiles = root.join("providers/provider-work");
+        std::fs::create_dir_all(&profiles).expect("profile root");
+        std::fs::write(profiles.join("duplicate.json"), b"{}").expect("profile");
+    }
+
+    let error = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &builtin_provider_startup_config(None),
+        Some(&config),
+        &state,
+        &SecretSources::default(),
+    )
+    .expect_err("duplicate must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicated across config and state")
+    );
+}
+
+/// Proves optional duplicate failures retain safe source identity in the
+/// visible startup diagnostic.
+#[test]
+fn optional_provider_duplicate_diagnostic_is_source_aware() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let config = temp.path().join("config");
+    for root in [&state, &config] {
+        let profiles = root.join("providers/provider-work");
+        std::fs::create_dir_all(&profiles).expect("profile root");
+        std::fs::write(profiles.join("duplicate.json"), b"{}").expect("profile");
+    }
+    let mut startup = builtin_provider_startup_config(None);
+    startup
+        .extensions
+        .get_mut("provider-work")
+        .expect("provider")
+        .require = false;
+
+    let snapshot =
+        provider_startup::snapshot_memory_only_provider_settings(&startup, Some(&config), &state)
+            .expect("optional snapshot");
+
+    assert!(snapshot.skipped_extensions.contains("provider-work"));
+    assert!(
+        snapshot.diagnostics[0]
+            .message
+            .contains("duplicated across config and state")
+    );
+}
+
+/// Proves the retired state location is wholly undiscovered.
+#[test]
+fn provider_startup_ignores_retired_provider_settings_tree() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let retired = state.join("provider-settings/provider-work");
+    std::fs::create_dir_all(&retired).expect("retired root");
+    std::fs::write(retired.join("legacy.json"), b"not even json").expect("retired profile");
+
+    let snapshot = provider_startup::snapshot_memory_only_provider_settings(
+        &builtin_provider_startup_config(None),
+        None,
+        &state,
+    )
+    .expect("snapshot");
+
+    assert!(snapshot.settings["provider-work"].is_empty());
+}
+
+/// Proves the 4,096-file limit applies to the merged generation rather than
+/// independently permitting a full limit in each source.
+#[test]
+fn provider_startup_applies_file_bound_across_merged_sources() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state/providers/provider-work");
+    let config = temp.path().join("config/providers/provider-work");
+    std::fs::create_dir_all(&state).expect("state root");
+    std::fs::create_dir_all(&config).expect("config root");
+    for index in 0..2_048 {
+        std::fs::write(config.join(format!("c{index:04}.json")), b"{}").expect("config profile");
+    }
+    for index in 0..2_049 {
+        std::fs::write(state.join(format!("s{index:04}.json")), b"{}").expect("state profile");
+    }
+
+    let error = provider_startup::snapshot_memory_only_provider_settings(
+        &builtin_provider_startup_config(None),
+        Some(&temp.path().join("config")),
+        temp.path().join("state").as_path(),
+    )
+    .expect_err("merged file bound");
+
+    assert!(error.to_string().contains("exceeds 4096 files"));
+}
+
+/// Proves aggregate bytes from config and state share one protocol-safe budget.
+#[test]
+fn provider_startup_applies_byte_bound_across_merged_sources() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state/providers/provider-work");
+    let config = temp.path().join("config/providers/provider-work");
+    std::fs::create_dir_all(&state).expect("state root");
+    std::fs::create_dir_all(&config).expect("config root");
+    let one_mib = vec![b' '; 1024 * 1024];
+    for index in 0..8 {
+        std::fs::write(config.join(format!("c{index}.json")), &one_mib).expect("config profile");
+        std::fs::write(state.join(format!("s{index}.json")), &one_mib).expect("state profile");
+    }
+
+    let error = provider_startup::snapshot_memory_only_provider_settings(
+        &builtin_provider_startup_config(None),
+        Some(&temp.path().join("config")),
+        temp.path().join("state").as_path(),
+    )
+    .expect_err("merged byte bound");
+
+    assert!(
+        error
+            .to_string()
+            .contains("merged provider snapshot exceeds")
+    );
+}
+
 /// Proves a missing declaration overwrites an older named materialization with
 /// an empty typed record and emits only a value-redacted disabling diagnostic.
 #[test]
@@ -2147,6 +2426,7 @@ fn provider_startup_missing_declaration_suppresses_stale_credential() {
         ..
     } = provider_startup::snapshot_and_materialize_named_provider_credentials(
         &builtin_provider_startup_config(None),
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -2186,7 +2466,7 @@ fn provider_startup_settings_failure_skips_optional_but_rejects_required() {
     let temp = TempDir::new().expect("tempdir");
     let state = temp.path().join("state");
     std::fs::create_dir_all(&state).expect("state");
-    symlink(temp.path(), state.join("provider-settings")).expect("settings symlink");
+    symlink(temp.path(), state.join("providers")).expect("settings symlink");
     let mut optional = builtin_provider_startup_config(None);
     optional
         .extensions
@@ -2196,6 +2476,7 @@ fn provider_startup_settings_failure_skips_optional_but_rejects_required() {
 
     let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
         &optional,
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -2205,6 +2486,7 @@ fn provider_startup_settings_failure_skips_optional_but_rejects_required() {
     assert!(
         provider_startup::snapshot_and_materialize_named_provider_credentials(
             &builtin_provider_startup_config(None),
+            None,
             &state,
             &SecretSources::default(),
         )
@@ -2242,6 +2524,7 @@ fn provider_startup_source_error_preserves_stale_credential() {
 
     let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
         &optional,
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -2252,6 +2535,7 @@ fn provider_startup_source_error_preserves_stale_credential() {
         &builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
             optional: false,
         })),
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -2301,6 +2585,7 @@ fn provider_startup_does_not_replace_direct_or_keyless_records() {
 
     provider_startup::snapshot_and_materialize_named_provider_credentials(
         &builtin_provider_startup_config(None),
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -2344,6 +2629,7 @@ fn custom_provider_retains_settings_without_builtin_materialization() {
         ..
     } = provider_startup::snapshot_and_materialize_named_provider_credentials(
         &config,
+        None,
         &state,
         &SecretSources::default(),
     )
@@ -3404,6 +3690,7 @@ fn expired_optional_pending_extension_is_disabled_without_blocking_later_ready()
         &h.tx,
         &h.state_dir,
         h.storage_mode.is_memory_only(),
+        &Default::default(),
     )
     .expect("spawn optional extension");
     let optional = spawned.connection_id.clone();

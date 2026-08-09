@@ -34,7 +34,27 @@ This mount mask is defense in depth under Tau's trusted configured same-UID exec
 
 ## Provider registration and runtime
 
-The CLI owns credential-free provider settings below `$XDG_STATE_HOME/tau/provider-settings/<instance>/<provider>.json`. Each configured Provider instance receives one immutable, bounded `Configure.settings_files` startup snapshot. A persistent Provider also receives its selected settings tree through a read-only mount; a memory-only preview receives the snapshot without that mount. Tool instances receive neither surface. Settings, endpoint, model, and compatibility changes therefore require Provider restart.
+Credential-free provider profiles come from the disjoint union of read-only
+`$XDG_CONFIG_HOME/tau/providers/<instance>/<provider>.json` and mutable
+`$XDG_STATE_HOME/tau/providers/<instance>/<provider>.json`. Every profile has
+exactly one source; a cross-layer duplicate is an error even when its bytes are
+identical. Startup follows configuration leaf symlinks that resolve to bounded
+regular files, including targets outside the canonical config instance root in a
+read-only Nix store. Broken links, directories, special files, invalid names, and
+oversized files fail closed. Mutable state retains no-symlink and
+private-directory restrictions.
+
+Each configured Provider instance receives one immutable, bounded merged
+`Configure.settings_files` startup snapshot. A persistent Provider also receives
+an ephemeral harness-owned read-only materialization of those exact bytes at its
+settings mount; a memory-only preview receives the snapshot without that mount.
+Tool instances receive neither surface. Profile changes require a full harness
+restart; extension-only respawn does not rescan either source.
+Harness startup, provider setup inspection, and the tmux helper all enforce the
+same limits: 4,096 profiles per instance, 1 MiB per profile, and a merged byte
+limit below the protocol frame maximum. Each reader validates the opened
+descriptor as a regular file; on Unix a raced FIFO or special-file target is
+opened nonblocking and rejected.
 
 Version-zero credential records use a typed `kind`: `chatgpt_oauth` contains complete access token, refresh token, expiry, and account id; `api_key` contains the complete API-key value. Provider settings contain only a typed credential reference into `providers/<provider>/`.
 
@@ -54,12 +74,19 @@ and unsafe or whitespace names for setup, startup, and provider runtime alike.
 The bound declaration is materialization authority and its value is omitted from
 `Configure.secrets`.
 
-Setup and removal serialize on the provider-settings instance directory, then
-the Secret-scope directory. Setup resolves the selected declaration while
+Setup defaults to mutable state and can explicitly target config or emit canonical
+JSON to standard output for dotfiles deployment. List and show report profile
+source; removal infers a unique source or accepts an explicit source. Setup and
+removal lock only the Tau-private mutable providers instance directory, then the
+Secret-scope directory. Persistent startup may create an empty private instance
+directory as lifecycle metadata for a config-only deployment; it never locks or
+writes config and never imports a profile. Memory-only startup locks that
+directory only when it already exists and otherwise performs a non-transactional
+read-only config snapshot without creating host state. Setup resolves the selected declaration while
 holding the instance lock, writes the complete typed secret, and writes settings
 last as activation. Removal deletes settings first as deactivation, then removes
 closed credential slots. Startup takes the same locks in the same order: under
-the instance lock it captures one bounded settings generation, resolves every
+the instance lock it captures one bounded disjoint-union generation, resolves every
 valid named binding from the one-shot source snapshot, and under one Secret lock
 publishes the resulting typed records. Configure later uses that retained
 settings generation instead of rereading the directory.
@@ -82,7 +109,12 @@ immutable credential-free settings snapshot for model advertisement, but
 perform no source resolution or credential materialization and omit all
 declaration values owned by the typed built-in provider component.
 
-Legacy `auth.d`, `ProviderStore`, `AuthFile`, inline API keys, and mixed settings/credential records have no runtime reader or migration. Users re-register providers and manually remove legacy files.
+The retired `$XDG_STATE_HOME/tau/provider-settings/` tree is completely
+undiscovered: there is no detection, fallback, migration, or warning. Users
+manually move only credential-free profile JSON into one new `providers/` source
+and leave Secret records untouched. Legacy `auth.d`, `ProviderStore`, `AuthFile`,
+inline API keys, and mixed settings/credential records likewise have no runtime
+reader or migration.
 
 
 ## Developer scratch access
