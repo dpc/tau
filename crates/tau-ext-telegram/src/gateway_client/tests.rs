@@ -1,7 +1,8 @@
 use std::io as path_std_io;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, ErrorKind, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use super::*;
 
@@ -28,9 +29,9 @@ fn connect_error_with_response(response: String) -> String {
         writeln!(stream, "{response}").expect("write response");
     });
     let client = GatewayClient::new(GatewayClientConfig { socket_path: path });
-    match client.connect() {
+    match client.connect_cancellable(|| false) {
         Ok(_) => panic!("test caller expects connect failure"),
-        Err(error) => error,
+        Err(error) => error.to_string(),
     }
 }
 
@@ -88,11 +89,11 @@ fn gateway_error_response_is_rejected() {
         .expect("write response");
     });
     let client = GatewayClient::new(GatewayClientConfig { socket_path: path });
-    let error = match client.connect() {
+    let error = match client.connect_cancellable(|| false) {
         Ok(_) => panic!("error response should fail"),
         Err(error) => error,
     };
-    assert_eq!(error, "denied");
+    assert_eq!(error.to_string(), "denied");
 }
 
 /// Gateway response lines are bounded so a broken same-UID socket peer
@@ -121,6 +122,7 @@ fn heartbeat_interval_is_updated_from_response() {
             serde_json::json!({
                 "protocol_version": 0,
                 "ok": true,
+                "gateway_generation": "test",
                 "heartbeat_interval_seconds": 2,
                 "deliveries": [],
             })
@@ -128,6 +130,44 @@ fn heartbeat_interval_is_updated_from_response() {
         .expect("write response");
     });
     let client = GatewayClient::new(GatewayClientConfig { socket_path: path });
-    client.connect().expect("connect");
+    client.connect_cancellable(|| false).expect("connect");
     assert_eq!(client.heartbeat_interval(), Duration::from_secs(2));
+}
+
+/// A bound Unix listener with a full, unaccepted backlog must return from the
+/// connect attempt within the client's finite supervisor cancellation bound.
+#[test]
+fn full_unaccepted_listener_backlog_connect_is_bounded() {
+    let path = socket_path();
+    let _listener = UnixListener::bind(&path).expect("bind unaccepted gateway");
+    let address = socket2::SockAddr::unix(&path).expect("gateway address");
+    let mut fillers = Vec::new();
+    let mut saturated = false;
+    for _ in 0..16_384 {
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .expect("create filler socket");
+        socket.set_nonblocking(true).expect("nonblocking filler");
+        match socket.connect(&address) {
+            Ok(()) => fillers.push(socket),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                fillers.push(socket);
+                saturated = true;
+                break;
+            }
+            Err(error) => panic!("filling Unix listener backlog: {error}"),
+        }
+    }
+    assert!(saturated, "fixture must saturate the Unix accept backlog");
+
+    let client = GatewayClient::new(GatewayClientConfig { socket_path: path });
+    let started = Instant::now();
+    let error = match client.connect_cancellable(|| false) {
+        Ok(_) => panic!("cancelled full-backlog connect must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "bounded full-backlog connect took {:?}: {error}",
+        started.elapsed()
+    );
 }

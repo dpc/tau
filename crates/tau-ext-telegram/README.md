@@ -175,6 +175,14 @@ deliveries locally as `message.delivered_reported`. The sidecar sends
 `message.delivered` with the exact report ID, target, and message identity. It
 includes that delivery's frozen route, so this final ACK remains valid when the
 matching agent has already unloaded.
+
+The sidecar supervises this socket independently of extension configuration
+delivery. If the gateway is initially absent or restarts, the sidecar fails
+delivery and outbound send closed, reconnects with capped exponential backoff,
+sends a fresh `hello`, and reannounces the current live route set before
+resuming. Gateway generation changes and explicit reannouncement hints force
+the same replacement path. Reconfiguration and shutdown cancel and join the
+previous supervisor, so stale workers cannot restore retired routes.
 Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram

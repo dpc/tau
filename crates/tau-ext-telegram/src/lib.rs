@@ -16,6 +16,7 @@ use ureq::tls as path_ureq_tls;
 
 mod gateway;
 mod gateway_client;
+mod gateway_supervisor;
 mod live_checkpoint;
 mod pending_retry_backoff;
 mod stream_owner;
@@ -31,6 +32,7 @@ use std::time::Duration;
 use gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayMessageDelivery, GatewaySocketResponse,
 };
+use gateway_supervisor::{GatewaySupervisor, gateway_response_requires_reconnect};
 use live_checkpoint::{
     ExistingUpdate, LiveCheckpoints, RoutedUpdate, TelegramReportId, TelegramUpdateId,
     TelegramUpdateOffset,
@@ -358,6 +360,8 @@ struct State {
     /// instance.
     state_dir: Option<std::path::PathBuf>,
     config_generation: ConfigGeneration,
+    /// Configuration generation whose gateway supervisor is authoritative.
+    gateway_config_generation: Option<ConfigGeneration>,
     registered_agents: HashSet<AgentId>,
     /// Local registration calls that have reserved update-stream ownership
     /// while checking Telegram webhook status without holding the state mutex.
@@ -384,8 +388,6 @@ struct State {
 /// Exact sidecar correlation retained between gateway report and canonical
 /// fact.
 struct GatewayPendingDelivery {
-    /// Gateway connection that supplied the report.
-    gateway: Arc<GatewayClient>,
     /// Session frozen into the durable gateway route.
     session_id: String,
     /// Exact target agent expected on the canonical fact.
@@ -394,6 +396,8 @@ struct GatewayPendingDelivery {
     message_id: MessageFactId,
     /// Exact configured publisher claim installed on the report.
     publisher_name: tau_proto::ExtensionName,
+    /// Whether the exact live canonical echo has already been validated.
+    canonical_echo_observed: bool,
 }
 
 /// Submit reports for all gateway delivery records targeting the current
@@ -401,6 +405,7 @@ struct GatewayPendingDelivery {
 fn emit_gateway_deliveries(
     state: &SharedState,
     output: &Output,
+    gateway_cell: &Mutex<Option<Arc<GatewayClient>>>,
     gateway: Arc<GatewayClient>,
     deliveries: Vec<GatewayMessageDelivery>,
 ) {
@@ -413,16 +418,21 @@ fn emit_gateway_deliveries(
             );
             continue;
         };
-        let publisher_name = {
-            let state = state.lock();
-            (state
-                .current_session_id
-                .as_ref()
-                .is_some_and(|session_id| delivery.session_id == session_id.as_ref())
-                && state.registered_agents.contains(&agent_id))
-            .then(|| state.publisher_name.clone())
-            .flatten()
-        };
+        let mut state_guard = state.lock();
+        let gateway_guard = gateway_cell.lock().expect("gateway lock");
+        if !gateway_guard
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gateway))
+        {
+            return;
+        }
+        let publisher_name = (state_guard
+            .current_session_id
+            .as_ref()
+            .is_some_and(|session_id| delivery.session_id == session_id.as_ref())
+            && state_guard.registered_agents.contains(&agent_id))
+        .then(|| state_guard.publisher_name.clone())
+        .flatten();
         let Some(publisher_name) = publisher_name else {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -458,22 +468,106 @@ fn emit_gateway_deliveries(
             delivery.text,
         );
         report.extension_data = report_id.extension_data();
-        state.lock().gateway_pending_deliveries.insert(
-            report_id,
-            GatewayPendingDelivery {
-                gateway: Arc::clone(&gateway),
-                session_id: delivery.session_id,
-                agent_id,
-                message_id,
-                publisher_name,
-            },
-        );
+        let mut pending = GatewayPendingDelivery {
+            session_id: delivery.session_id,
+            agent_id,
+            message_id,
+            publisher_name,
+            canonical_echo_observed: false,
+        };
+        if let Some(previous) = state_guard.gateway_pending_deliveries.get(&report_id)
+            && previous.session_id == pending.session_id
+            && previous.agent_id == pending.agent_id
+            && previous.message_id == pending.message_id
+            && previous.publisher_name == pending.publisher_name
+        {
+            pending.canonical_echo_observed = previous.canonical_echo_observed;
+        }
+        state_guard
+            .gateway_pending_deliveries
+            .insert(report_id, pending);
+        drop(gateway_guard);
+        drop(state_guard);
         output.emit_message_report(Event::MessageDeliveredReported(report));
     }
 }
 
-/// Clear gateway-client registration state only when a failure belongs to the
-/// currently active gateway connection.
+/// Retry every validated canonical ACK against the current gateway connection.
+///
+/// Returns false when the connection must be retired and replaced.
+fn retry_gateway_acknowledgements(
+    state: &SharedState,
+    output: &Output,
+    gateway_cell: &Mutex<Option<Arc<GatewayClient>>>,
+    gateway: &Arc<GatewayClient>,
+) -> bool {
+    let mut pending = state
+        .lock()
+        .gateway_pending_deliveries
+        .iter()
+        .filter(|(_, pending)| pending.canonical_echo_observed)
+        .map(|(report_id, pending)| {
+            (
+                report_id.clone(),
+                pending.session_id.clone(),
+                pending.agent_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    pending.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    for (report_id, session_id, agent_id) in pending {
+        let response = match gateway.acknowledge_delivery(
+            report_id.as_str(),
+            &session_id,
+            agent_id.as_ref(),
+        ) {
+            Ok(response) => response,
+            Err(error) if error.is_connection_fatal() => {
+                fail_gateway_client_if_current(gateway_cell, state, gateway);
+                return false;
+            }
+            Err(_) => return true,
+        };
+        if gateway_response_requires_reconnect(gateway, &response) {
+            fail_gateway_client_if_current(gateway_cell, state, gateway);
+            return false;
+        }
+        let mut state_guard = state.lock();
+        let gateway_guard = gateway_cell.lock().expect("gateway lock");
+        let is_current = gateway_guard
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, gateway));
+        let still_matches = state_guard
+            .gateway_pending_deliveries
+            .get(&report_id)
+            .is_some_and(|pending| {
+                pending.canonical_echo_observed
+                    && pending.session_id == session_id
+                    && pending.agent_id == agent_id
+            });
+        if !is_current {
+            return false;
+        }
+        if still_matches {
+            state_guard.gateway_pending_deliveries.remove(&report_id);
+        }
+        drop(gateway_guard);
+        drop(state_guard);
+        emit_gateway_deliveries(
+            state,
+            output,
+            gateway_cell,
+            Arc::clone(gateway),
+            response.deliveries,
+        );
+    }
+    true
+}
+
+/// Retire a failed gateway connection only when it remains current.
+///
+/// Desired local registrations survive so the supervisor can reannounce them
+/// after reconnecting.
 fn fail_gateway_client_if_current(
     gateway_cell: &Mutex<Option<Arc<GatewayClient>>>,
     state: &SharedState,
@@ -494,12 +588,9 @@ fn fail_gateway_client_if_current(
     if !is_current {
         return false;
     }
-    {
-        let mut state = state.lock();
-        state.registered_agents.clear();
-        state.selected_agent_by_chat.clear();
-        state.mark_coordination_changed();
-    }
+    let mut state_guard = state.lock();
+    state_guard.mark_coordination_changed();
+    drop(state_guard);
     state.notify_all();
     true
 }
@@ -630,6 +721,7 @@ impl State {
     /// errors.
     fn clear_active_bridge_state(&mut self) {
         self.config = None;
+        self.gateway_config_generation = None;
         self.update_stream_lock = None;
         self.registered_agents.clear();
         self.selected_agent_by_chat.clear();
@@ -728,6 +820,10 @@ struct Extension {
     state: Arc<SharedState>,
     client: Arc<dyn TelegramClient>,
     gateway: Arc<Mutex<Option<Arc<GatewayClient>>>>,
+    /// Sole connect/reconnect worker for the active gateway configuration.
+    gateway_supervisor: GatewaySupervisor,
+    /// Serializes configuration replacement and supervisor ownership transfer.
+    config_apply: Mutex<()>,
     output: Output,
     shutdown: Arc<AtomicBool>,
     tool_names: ToolNames,
@@ -747,6 +843,8 @@ impl Extension {
             state: Arc::new(SharedState::new()),
             client,
             gateway: Arc::new(Mutex::new(None)),
+            gateway_supervisor: GatewaySupervisor::new(),
+            config_apply: Mutex::new(()),
             output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
             tool_names,
@@ -758,6 +856,7 @@ impl Extension {
         mode: impl Into<BridgeMode>,
         state_dir: Option<std::path::PathBuf>,
     ) -> Result<(), String> {
+        let _apply_guard = self.config_apply.lock().expect("config apply lock");
         match mode.into() {
             BridgeMode::LocalPoll(cfg) => self.apply_local_poll_config(cfg, state_dir),
             BridgeMode::GatewayClient(cfg) => self.apply_gateway_client_config(cfg, state_dir),
@@ -795,7 +894,7 @@ impl Extension {
             else {
                 return;
             };
-            let Some(pending) = state.gateway_pending_deliveries.get(&report_id) else {
+            let Some(pending) = state.gateway_pending_deliveries.get_mut(&report_id) else {
                 return;
             };
             if pending.publisher_name.as_str() != fact.publisher_extension_id.as_str()
@@ -804,18 +903,10 @@ impl Extension {
             {
                 return;
             }
-            let gateway = Arc::clone(&pending.gateway);
-            let session_id = pending.session_id.clone();
-            let agent_id = pending.agent_id.clone();
+            pending.canonical_echo_observed = true;
             drop(state);
-            if gateway
-                .acknowledge_delivery(report_id.as_str(), &session_id, agent_id.as_ref())
-                .is_ok()
-            {
-                self.state
-                    .lock()
-                    .gateway_pending_deliveries
-                    .remove(&report_id);
+            if let Some(gateway) = self.gateway_client() {
+                retry_gateway_acknowledgements(&self.state, &self.output, &self.gateway, &gateway);
             }
             return;
         }
@@ -833,11 +924,8 @@ impl Extension {
         cfg: RuntimeConfig,
         state_dir: Option<std::path::PathBuf>,
     ) -> Result<(), String> {
-        let switched_from_gateway = self.gateway.lock().expect("gateway lock").is_some();
-        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
-            gateway.goodbye();
-        }
         let mut state = self.state.lock();
+        let switched_from_gateway = state.gateway_config_generation.take().is_some();
         state.config_generation = state.config_generation.next();
         if switched_from_gateway {
             state.clear_active_bridge_state();
@@ -883,6 +971,8 @@ impl Extension {
         state.config = Some(cfg);
         state.mark_coordination_changed();
         self.state.notify_all();
+        drop(state);
+        self.stop_gateway_supervisor();
         Ok(())
     }
 
@@ -891,97 +981,81 @@ impl Extension {
         cfg: GatewayClientConfig,
         _state_dir: Option<std::path::PathBuf>,
     ) -> Result<(), String> {
-        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
-            gateway.goodbye();
-        }
-        {
+        let config_generation = {
             let mut state = self.state.lock();
             state.config_generation = state.config_generation.next();
             state.clear_active_bridge_state();
+            state.gateway_config_generation = Some(state.config_generation);
             state.mark_coordination_changed();
             self.state.notify_all();
-        }
-        let gateway = Arc::new(GatewayClient::new(cfg));
-        let response = gateway.connect()?;
-        *self.gateway.lock().expect("gateway lock") = Some(Arc::clone(&gateway));
-        self.apply_gateway_response(response);
-        self.ensure_gateway_heartbeat_started(Arc::clone(&gateway));
-        Ok(())
+            state.config_generation
+        };
+        self.stop_gateway_supervisor();
+        self.gateway_supervisor.start(
+            Arc::clone(&self.state),
+            self.output.clone(),
+            Arc::clone(&self.shutdown),
+            Arc::clone(&self.gateway),
+            config_generation,
+            cfg,
+        )
     }
 
     fn clear_config_after_error(&self) {
-        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
-            gateway.goodbye();
-        }
+        let _apply_guard = self.config_apply.lock().expect("config apply lock");
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
         state.clear_active_bridge_state();
+        state.gateway_config_generation = None;
         state.mark_coordination_changed();
         self.state.notify_all();
+        drop(state);
+        self.stop_gateway_supervisor();
     }
 
     fn gateway_client(&self) -> Option<Arc<GatewayClient>> {
         self.gateway.lock().expect("gateway lock").clone()
     }
 
-    fn ensure_gateway_heartbeat_started(&self, gateway: Arc<GatewayClient>) {
-        let state = Arc::clone(&self.state);
-        let output = self.output.clone();
-        let shutdown = Arc::clone(&self.shutdown);
-        let gateway_cell = Arc::clone(&self.gateway);
-        std::thread::spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(gateway.heartbeat_interval());
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                match gateway.heartbeat() {
-                    Ok(response) => emit_gateway_deliveries(
-                        &state,
-                        &output,
-                        Arc::clone(&gateway),
-                        response.deliveries,
-                    ),
-                    Err(message) => {
-                        if fail_gateway_client_if_current(&gateway_cell, &state, &gateway) {
-                            output.request_notice(message, NoticeLevel::Warning);
-                        }
-                        break;
-                    }
-                }
-            }
-        });
+    /// Return whether gateway-client mode has an active supervisor
+    /// configuration, even while its socket is disconnected.
+    fn gateway_mode_configured(&self) -> bool {
+        self.state.lock().gateway_config_generation.is_some()
     }
 
-    fn apply_gateway_response(&self, response: GatewaySocketResponse) {
-        if response.reannounce_required {
-            self.reannounce_gateway_registrations();
-        }
-        let Some(gateway) = self.gateway_client() else {
-            return;
-        };
-        emit_gateway_deliveries(&self.state, &self.output, gateway, response.deliveries);
+    /// Stop and join the previous bounded gateway supervisor.
+    fn stop_gateway_supervisor(&self) {
+        self.gateway_supervisor.stop(&self.state, &self.gateway);
     }
 
-    fn reannounce_gateway_registrations(&self) {
-        let Some(gateway) = self.gateway_client() else {
-            return;
-        };
-        let (session_id, agents) = {
-            let state = self.state.lock();
-            let Some(session_id) = state.current_session_id.clone() else {
-                return;
-            };
-            let agents = state
-                .registered_agents
-                .iter()
-                .map(|agent_id| (agent_id.clone(), state.agent_labels.get(agent_id).cloned()))
-                .collect::<Vec<_>>();
-            (session_id, agents)
-        };
-        for (agent_id, display_name) in agents {
-            let _ = gateway.register_agent(session_id.as_ref(), agent_id.as_ref(), display_name);
+    /// Accept a response only from the current connection and generation.
+    fn apply_gateway_response(
+        &self,
+        gateway: &Arc<GatewayClient>,
+        response: GatewaySocketResponse,
+    ) -> bool {
+        if gateway_response_requires_reconnect(gateway, &response) {
+            fail_gateway_client_if_current(&self.gateway, &self.state, gateway);
+            gateway.disconnect();
+            return false;
         }
+        if !self
+            .gateway
+            .lock()
+            .expect("gateway lock")
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, gateway))
+        {
+            return false;
+        }
+        emit_gateway_deliveries(
+            &self.state,
+            &self.output,
+            &self.gateway,
+            Arc::clone(gateway),
+            response.deliveries,
+        );
+        true
     }
 
     fn request_shutdown(&self) {
@@ -990,6 +1064,8 @@ impl Extension {
         state.mark_coordination_changed();
         self.shutdown.store(true, Ordering::Relaxed);
         self.state.notify_all();
+        drop(state);
+        self.stop_gateway_supervisor();
     }
 
     fn poll_response_matches_config(&self, config_generation: ConfigGeneration) -> bool {
@@ -1029,7 +1105,7 @@ impl Extension {
             Ok(enabled) => enabled,
             Err(message) => return tool_error(invoke, message),
         };
-        if self.gateway_client().is_some() {
+        if self.gateway_mode_configured() {
             return self.handle_gateway_register(invoke, enabled);
         }
         let mut state = self.state.lock();
@@ -1125,14 +1201,8 @@ impl Extension {
     }
 
     fn handle_gateway_register(&self, invoke: ToolStarted, enabled: bool) -> Event {
-        let Some(gateway) = self.gateway_client() else {
-            return tool_error(
-                invoke,
-                "telegram gateway client is not configured".to_owned(),
-            );
-        };
-        let (session_id, display_name) = {
-            let state = self.state.lock();
+        let (session_id, display_name, config_generation) = {
+            let mut state = self.state.lock();
             let Some(session_id) = state.current_session_id.clone() else {
                 return tool_error(
                     invoke,
@@ -1140,7 +1210,26 @@ impl Extension {
                 );
             };
             let display_name = state.agent_labels.get(&invoke.agent_id).cloned();
-            (session_id, display_name)
+            let config_generation = state.config_generation;
+            if !enabled {
+                state.registered_agents.remove(&invoke.agent_id);
+                state.mark_coordination_changed();
+                self.state.notify_all();
+            }
+            (session_id, display_name, config_generation)
+        };
+        let Some(gateway) = self.gateway_client() else {
+            return if enabled {
+                tool_error(
+                    invoke,
+                    "telegram gateway is disconnected; registration failed closed".to_owned(),
+                )
+            } else {
+                tool_result(
+                    invoke,
+                    "removed local Telegram gateway registration while disconnected",
+                )
+            };
         };
         let response = if enabled {
             gateway.register_agent(session_id.as_ref(), invoke.agent_id.as_ref(), display_name)
@@ -1151,14 +1240,30 @@ impl Extension {
             Ok(response) => {
                 {
                     let mut state = self.state.lock();
+                    let gateway_is_current = self
+                        .gateway
+                        .lock()
+                        .expect("gateway lock")
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &gateway));
+                    if state.config_generation != config_generation || !gateway_is_current {
+                        return tool_error(
+                            invoke,
+                            "telegram gateway configuration changed during registration".to_owned(),
+                        );
+                    }
                     if enabled {
                         state.registered_agents.insert(invoke.agent_id.clone());
-                    } else {
-                        state.registered_agents.remove(&invoke.agent_id);
                     }
                     state.mark_coordination_changed();
                 }
-                self.apply_gateway_response(response);
+                self.state.notify_all();
+                if !self.apply_gateway_response(&gateway, response) {
+                    return tool_error(
+                        invoke,
+                        "telegram gateway changed generation during registration".to_owned(),
+                    );
+                }
                 tool_result(
                     invoke,
                     if enabled {
@@ -1168,7 +1273,12 @@ impl Extension {
                     },
                 )
             }
-            Err(message) => tool_error(invoke, message),
+            Err(message) => {
+                if message.is_connection_fatal() {
+                    fail_gateway_client_if_current(&self.gateway, &self.state, &gateway);
+                }
+                tool_error(invoke, message.to_string())
+            }
         }
     }
 
@@ -1263,7 +1373,13 @@ impl Extension {
         if message.trim().is_empty() {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
-        if let Some(gateway) = self.gateway_client() {
+        if self.gateway_mode_configured() {
+            let Some(gateway) = self.gateway_client() else {
+                return tool_error(
+                    invoke,
+                    "telegram gateway is disconnected; send failed closed".to_owned(),
+                );
+            };
             if message.len() > MAX_GATEWAY_OUTBOUND_MESSAGE_BYTES {
                 return tool_error(
                     invoke,
@@ -1291,7 +1407,12 @@ impl Extension {
             };
             match gateway.send_message(session_id.as_ref(), invoke.agent_id.as_ref(), &message) {
                 Ok(response) => {
-                    self.apply_gateway_response(response);
+                    if !self.apply_gateway_response(&gateway, response) {
+                        return tool_error(
+                            invoke,
+                            "telegram gateway disconnected during send".to_owned(),
+                        );
+                    }
                     self.emit_sent_report(
                         &invoke.agent_id,
                         invoke.call_id.as_str(),
@@ -1300,7 +1421,12 @@ impl Extension {
                     );
                     tool_result(invoke, "sent Telegram message through gateway")
                 }
-                Err(message) => tool_error(invoke, message),
+                Err(message) => {
+                    if message.is_connection_fatal() {
+                        fail_gateway_client_if_current(&self.gateway, &self.state, &gateway);
+                    }
+                    tool_error(invoke, message.to_string())
+                }
             }
         } else {
             let (cfg, chat_id) = {
@@ -1945,9 +2071,6 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
 
 impl Drop for Extension {
     fn drop(&mut self) {
-        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
-            gateway.goodbye();
-        }
         self.request_shutdown();
     }
 }
@@ -2017,6 +2140,8 @@ fn poll_loop_with_tool_names(
         state,
         client,
         gateway: Arc::new(Mutex::new(None)),
+        gateway_supervisor: GatewaySupervisor::new(),
+        config_apply: Mutex::new(()),
         output,
         shutdown: Arc::clone(&shutdown),
         tool_names,
@@ -2348,24 +2473,47 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             state
                 .agent_labels
                 .insert(name.agent_id.clone(), name.display_name.clone());
+            state.mark_coordination_changed();
+            runtime.ext.state.notify_all();
             if let (Some(gateway), Some(session_id)) = (
                 runtime.ext.gateway_client(),
                 state.current_session_id.clone(),
             ) && state.registered_agents.contains(&name.agent_id)
             {
                 drop(state);
-                if let Ok(response) = gateway.register_agent(
+                match gateway.register_agent(
                     session_id.as_ref(),
                     name.agent_id.as_ref(),
                     Some(name.display_name),
                 ) {
-                    runtime.ext.apply_gateway_response(response);
+                    Ok(response) => {
+                        let _ = runtime.ext.apply_gateway_response(&gateway, response);
+                    }
+                    Err(error) if error.is_connection_fatal() => {
+                        fail_gateway_client_if_current(
+                            &runtime.ext.gateway,
+                            &runtime.ext.state,
+                            &gateway,
+                        );
+                    }
+                    Err(_) => {}
                 }
             }
         }
         Event::SessionStarted(started) => {
             let mut state = runtime.ext.state.lock();
+            let session_changed = state
+                .current_session_id
+                .as_ref()
+                .is_some_and(|current| current != &started.session_id);
             state.current_session_id = Some(started.session_id);
+            state.mark_coordination_changed();
+            runtime.ext.state.notify_all();
+            drop(state);
+            if session_changed && let Some(gateway) = runtime.ext.gateway_client() {
+                fail_gateway_client_if_current(&runtime.ext.gateway, &runtime.ext.state, &gateway);
+                gateway.disconnect();
+            }
         }
         Event::AgentStarted(started) => {
             if let Some(display_name) = started.display_name.clone() {
@@ -2374,20 +2522,11 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             }
         }
         Event::SessionAgentUnloaded(unloaded) => {
-            let (gateway, session_id) = {
-                let state = runtime.ext.state.lock();
-                (
-                    runtime.ext.gateway_client(),
-                    state
-                        .current_session_id
-                        .clone()
-                        .or(Some(unloaded.session_id.clone())),
-                )
-            };
-            if let (Some(gateway), Some(session_id)) = (gateway, session_id) {
-                let _ = gateway.unregister_agent(session_id.as_ref(), unloaded.agent_id.as_ref());
-            }
             let mut state = runtime.ext.state.lock();
+            let session_id = state
+                .current_session_id
+                .clone()
+                .or(Some(unloaded.session_id.clone()));
             state.registered_agents.remove(&unloaded.agent_id);
             state.agent_labels.remove(&unloaded.agent_id);
             state
@@ -2398,36 +2537,67 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             }
             state.mark_coordination_changed();
             runtime.ext.state.notify_all();
-        }
-        Event::SessionShutdown(_) => {
-            let gateway = runtime.ext.gateway_client();
-            let (session_id, agents) = {
-                let state = runtime.ext.state.lock();
-                (
-                    state.current_session_id.clone(),
-                    state.registered_agents.iter().cloned().collect::<Vec<_>>(),
-                )
-            };
-            if let (Some(gateway), Some(session_id)) = (gateway.as_ref(), session_id.as_ref()) {
-                for agent_id in &agents {
-                    let _ = gateway.unregister_agent(session_id.as_ref(), agent_id.as_ref());
+            drop(state);
+            if let (Some(gateway), Some(session_id)) = (runtime.ext.gateway_client(), session_id) {
+                match gateway.unregister_agent(session_id.as_ref(), unloaded.agent_id.as_ref()) {
+                    Ok(response) => {
+                        let _ = runtime.ext.apply_gateway_response(&gateway, response);
+                    }
+                    Err(error) => {
+                        if error.is_connection_fatal() {
+                            fail_gateway_client_if_current(
+                                &runtime.ext.gateway,
+                                &runtime.ext.state,
+                                &gateway,
+                            );
+                        }
+                    }
                 }
             }
-            let mut state = runtime.ext.state.lock();
-            state.current_session_id = None;
-            state.registered_agents.clear();
-            state.agent_labels.clear();
-            state.selected_agent_by_chat.clear();
-            state.poller_drained_initial_backlog = false;
-            state.update_stream_lock = None;
+        }
+        Event::SessionShutdown(_) => {
+            let (session_id, agents) = {
+                let mut state = runtime.ext.state.lock();
+                let session_id = state.current_session_id.clone();
+                let agents = state.registered_agents.iter().cloned().collect::<Vec<_>>();
+                state.current_session_id = None;
+                state.registered_agents.clear();
+                state.agent_labels.clear();
+                state.selected_agent_by_chat.clear();
+                state.poller_drained_initial_backlog = false;
+                state.update_stream_lock = None;
+                state.mark_coordination_changed();
+                runtime.ext.state.notify_all();
+                (session_id, agents)
+            };
+            let gateway = runtime.ext.gateway_client();
+            if let (Some(gateway), Some(session_id)) = (gateway.as_ref(), session_id.as_ref()) {
+                for agent_id in &agents {
+                    match gateway.unregister_agent(session_id.as_ref(), agent_id.as_ref()) {
+                        Ok(response) => {
+                            if !runtime.ext.apply_gateway_response(gateway, response) {
+                                break;
+                            }
+                        }
+                        Err(error) if error.is_connection_fatal() => {
+                            fail_gateway_client_if_current(
+                                &runtime.ext.gateway,
+                                &runtime.ext.state,
+                                gateway,
+                            );
+                            break;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
             if gateway.is_none() {
+                let mut state = runtime.ext.state.lock();
                 state.shutdown_requested = true;
-            }
-            state.mark_coordination_changed();
-            if gateway.is_none() {
+                state.mark_coordination_changed();
                 runtime.ext.shutdown.store(true, Ordering::Relaxed);
+                runtime.ext.state.notify_all();
             }
-            runtime.ext.state.notify_all();
         }
         _ => {}
     }

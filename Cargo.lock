@@ -6030,6 +6030,7 @@ dependencies = [
  "fs2",
  "serde",
  "serde_json",
+ "socket2",
  "tau-client",
  "tau-core",
  "tau-proto",

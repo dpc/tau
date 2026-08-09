@@ -1416,7 +1416,7 @@ fn gateway_client_replays_bounded_durable_prefix_in_order() {
     });
     let client = GatewayClient::new(GatewayClientConfig { socket_path });
 
-    let _connected = bounded_gateway_response(client.connect());
+    let _connected = bounded_gateway_response(client.connect_cancellable(|| false));
     let _registered = bounded_gateway_response(client.register_agent(
         "session-alpha",
         "agent-alpha",
@@ -2143,7 +2143,7 @@ fn assert_delivery_batch_splits_two_records(text: &str) {
 
 /// Require the real client to accept a newline-inclusive bounded response.
 fn bounded_gateway_response(
-    response: Result<GatewaySocketResponse, String>,
+    response: Result<GatewaySocketResponse, crate::gateway_client::GatewayClientError>,
 ) -> GatewaySocketResponse {
     response.expect("real GatewayClient must accept a response within the shared line limit")
 }

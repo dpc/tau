@@ -57,6 +57,17 @@ make message text trustworthy or grant Tau tool authority.
   includes the persisted report ID and frozen route, so the gateway accepts only
   that exact durable pair even after the live lease disappears; this same-UID
   local protocol does not treat lease state as an authentication boundary.
+- One cancellable sidecar supervisor owns gateway connect/reconnect. While the
+  socket is absent or failed, socket delivery, ACK transmission, and outbound
+  send fail closed; no
+  token lookup, stream lock, Telegram HTTP fallback, or local polling occurs.
+  An exact canonical echo validated while disconnected remains a local pending
+  ACK obligation and is transmitted only through a subsequently validated live
+  connection.
+  Every replacement connection validates a fresh `hello` generation and
+  reannounces an exact current route snapshot before becoming live. Bounded
+  backoff limits retry load, while configuration generations plus joined
+  cancellation prevent stale workers and responses from restoring authority.
   Non-routed updates commit only after required replies and mutations succeed.
   The same state-file transaction commits an ACK, advances its contiguous
   prefix, and retains one of 128 content-free report-ID/route retry

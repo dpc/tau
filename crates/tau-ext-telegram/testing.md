@@ -25,6 +25,15 @@ installation.
 Focused serialization tests cover the exact
 newline-inclusive 65,536-byte boundary, JSON escaping, and multibyte UTF-8.
 
+Gateway-client supervisor fixtures replace loopback Unix listeners and use
+socket requests plus condition-variable notifications as synchronization. They
+cover an initially absent gateway, fresh hello and exact route reannouncement
+after restart, recovered sends, disconnected fail-closed behavior, bounded
+backoff, and synchronous stale-configuration cancellation without public
+network access or timing sleeps. A response barrier proves reconfiguration
+waits for worker retirement, and a saturated, unaccepted Unix-listener backlog
+proves connect cancellation remains bounded.
+
 Harness tests own report authority and interception, downstream canonical fact
 durability, live order, replay, transcript projection, and model wake. Do not
 duplicate those semantics in this crate or treat protocol-writer flush as a

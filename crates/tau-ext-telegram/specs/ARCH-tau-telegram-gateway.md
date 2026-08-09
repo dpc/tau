@@ -69,3 +69,14 @@ acquire the stream lock, check webhooks, or call Telegram
 forwarded over the same socket as `send_message`; the gateway verifies the sidecar-owned
 live registration and sends only to its configured or linked active chat, never to a
 model-supplied destination.
+
+Each gateway-client sidecar has one bounded, cancellable connection supervisor.
+An absent socket, disconnect, heartbeat failure, changed gateway generation, or
+reannouncement hint retires the current connection and fails socket delivery,
+ACK transmission, and send closed. A validated late canonical echo remains
+pending locally for ACK over the next validated connection. The supervisor
+retries with capped exponential backoff, sends a
+fresh `hello`, and reannounces an exact snapshot of current session/agent routes
+before making the replacement connection live. Reconfiguration and shutdown
+cancel and join the old supervisor; configuration generations prevent stale
+workers or responses from mutating replacement state.

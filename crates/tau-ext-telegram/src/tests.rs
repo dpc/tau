@@ -1,12 +1,31 @@
 use std::io::BufRead;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, atomic as path_std_sync_atomic};
 use std::{io as path_std_io, sync as path_std_sync, time as path_std_time};
 
 use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, ToolStarted};
 
+use super::gateway_supervisor::{
+    GATEWAY_RECONNECT_INITIAL_DELAY, GATEWAY_RECONNECT_MAX_DELAY, next_gateway_retry_delay,
+};
 use super::*;
+
+impl Extension {
+    /// Wait for a fixture-driven supervisor connection notification.
+    fn wait_for_gateway_connection(&self) {
+        let state = self.state.lock();
+        let _state = self
+            .state
+            .wait_timeout_while(state, Duration::from_secs(2), |_| {
+                self.gateway_client().is_none()
+            });
+        assert!(
+            self.gateway_client().is_some(),
+            "gateway supervisor did not connect"
+        );
+    }
+}
 
 /// Valid fake gateway report IDs used across sidecar correlation tests.
 const GATEWAY_REPORT_1: &str =
@@ -325,6 +344,12 @@ fn gateway_mode(socket_path: std::path::PathBuf) -> BridgeMode {
     BridgeMode::GatewayClient(GatewayClientConfig { socket_path })
 }
 
+/// Write one flushed fake gateway response line.
+fn write_gateway_response(stream: &mut UnixStream, response: serde_json::Value) {
+    writeln!(stream, "{response}").expect("write gateway response");
+    stream.flush().expect("flush gateway response");
+}
+
 fn set_test_publisher(ext: &Extension) {
     ext.set_publisher_name(
         tau_proto::ExtensionName::parse("std-telegram").expect("test publisher name"),
@@ -622,6 +647,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                 1 => serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [{
                         "request_id": GATEWAY_REPORT_1,
                         "session_id": "s1",
@@ -636,6 +662,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                 _ => serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [],
                 }),
             };
@@ -649,6 +676,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
     let ext = test_extension(client.clone(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
+    ext.wait_for_gateway_connection();
     {
         let mut state = ext.state.lock();
         state.current_session_id = Some(
@@ -716,6 +744,7 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
                 serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [],
                 })
             )
@@ -729,6 +758,7 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
     let ext = test_extension(client.clone(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
+    ext.wait_for_gateway_connection();
     {
         let mut state = ext.state.lock();
         state.current_session_id = Some(
@@ -772,6 +802,7 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
                 serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [],
                 })
             } else {
@@ -791,6 +822,7 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
     let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
+    ext.wait_for_gateway_connection();
     {
         let mut state = ext.state.lock();
         state.current_session_id = Some(
@@ -802,6 +834,10 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
 
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
     assert!(expect_tool_error(&rx).contains("gateway send failed"));
+    assert!(
+        ext.gateway_client().is_some(),
+        "keep_connection rejection must not churn the live lease"
+    );
     assert!(
         rx.try_recv().is_err(),
         "unexpected message.sent_reported after failure"
@@ -838,6 +874,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
                 serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [],
                 })
             )
@@ -850,6 +887,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
     let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
+    ext.wait_for_gateway_connection();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let message = expect_tool_error(&rx);
     assert!(message.contains("session.started"), "{message}");
@@ -876,6 +914,7 @@ fn gateway_delivery_requires_live_local_registration() {
     let gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
         socket_path: PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
     }));
+    let gateway_cell = Mutex::new(Some(Arc::clone(&gateway)));
     {
         let mut state = state.lock();
         state.current_session_id = Some(
@@ -888,6 +927,7 @@ fn gateway_delivery_requires_live_local_registration() {
     emit_gateway_deliveries(
         &state,
         &Output::Channel(tx.clone()),
+        &gateway_cell,
         Arc::clone(&gateway),
         vec![GatewayMessageDelivery {
             request_id: GATEWAY_REPORT_1.to_owned(),
@@ -906,6 +946,7 @@ fn gateway_delivery_requires_live_local_registration() {
     emit_gateway_deliveries(
         &state,
         &Output::Channel(tx),
+        &gateway_cell,
         gateway,
         vec![GatewayMessageDelivery {
             request_id: GATEWAY_REPORT_2.to_owned(),
@@ -963,11 +1004,32 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
             serde_json::json!({
                 "protocol_version": 0,
                 "ok": true,
+                "gateway_generation": "test",
                 "deliveries": [],
             })
         )
         .expect("write unregister response");
         stream.flush().expect("flush unregister");
+        drop(reader);
+        drop(stream);
+        let (mut stream, _) = listener.accept().expect("accept replacement client");
+        let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut hello = String::new();
+        reader
+            .read_line(&mut hello)
+            .expect("read replacement hello");
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "protocol_version": 0,
+                "ok": true,
+                "gateway_generation": "replacement",
+                "deliveries": [],
+            })
+        )
+        .expect("write replacement hello response");
+        stream.flush().expect("flush replacement hello");
         let mut ack = String::new();
         reader.read_line(&mut ack).expect("read ack");
         *seen_ack_server.lock().expect("seen ack") =
@@ -978,6 +1040,7 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
             serde_json::json!({
                 "protocol_version": 0,
                 "ok": true,
+                "gateway_generation": "replacement",
                 "deliveries": [],
             })
         )
@@ -985,8 +1048,11 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
         stream.flush().expect("flush ack");
     });
 
+    let replacement_socket_path = socket_path.clone();
     let gateway = Arc::new(GatewayClient::new(GatewayClientConfig { socket_path }));
-    gateway.connect().expect("connect gateway client");
+    gateway
+        .connect_cancellable(|| false)
+        .expect("connect gateway client");
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::new();
     let ext = test_extension(client, tx);
@@ -1004,6 +1070,7 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
     emit_gateway_deliveries(
         &ext.state,
         &ext.output,
+        &ext.gateway,
         Arc::clone(&gateway),
         vec![GatewayMessageDelivery {
             request_id: GATEWAY_REPORT_EXACT.to_owned(),
@@ -1030,9 +1097,34 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
     let mut wrong = canonical_delivered(report.clone());
     wrong.message_id = MessageFactId::new("wrong");
     runtime.ext.acknowledge_live_delivery(&wrong);
+    *runtime.ext.gateway.lock().expect("gateway lock") = None;
+    gateway.disconnect();
     runtime
         .ext
         .acknowledge_live_delivery(&canonical_delivered(report));
+    assert!(
+        runtime
+            .ext
+            .state
+            .lock()
+            .gateway_pending_deliveries
+            .values()
+            .any(|pending| pending.canonical_echo_observed),
+        "validated late echo remains a retryable ACK obligation"
+    );
+    let replacement = Arc::new(GatewayClient::new(GatewayClientConfig {
+        socket_path: replacement_socket_path,
+    }));
+    replacement
+        .connect_cancellable(|| false)
+        .expect("connect replacement client");
+    *runtime.ext.gateway.lock().expect("gateway lock") = Some(Arc::clone(&replacement));
+    assert!(retry_gateway_acknowledgements(
+        &runtime.ext.state,
+        &runtime.ext.output,
+        &runtime.ext.gateway,
+        &replacement,
+    ));
     server.join().expect("fake gateway server");
 
     let ack = seen_ack.lock().expect("seen ack").clone().expect("ack");
@@ -1040,6 +1132,194 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
     assert_eq!(ack["report_id"], GATEWAY_REPORT_EXACT);
     assert_eq!(ack["session_id"], "s1");
     assert_eq!(ack["agent_id"], "agent-1");
+}
+
+/// Run an automatic ACK retry where the first replacement ACK response carries
+/// stale authority and deliveries, followed by one valid replacement response.
+fn assert_stale_ack_response_reconnects(
+    stale_generation: &'static str,
+    stale_reannounce_required: bool,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind gateway");
+    let (final_ack_tx, final_ack_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let delivery = serde_json::json!({
+            "request_id": GATEWAY_REPORT_1,
+            "session_id": "s1",
+            "agent_id": "agent-1",
+            "message_id": "telegram:10:99",
+            "sender_id": "42",
+            "source": "alice",
+            "conversation_id": "10",
+            "text": "original"
+        });
+        {
+            let (mut stream, _) = listener.accept().expect("accept original client");
+            let mut reader =
+                path_std_io::BufReader::new(stream.try_clone().expect("clone original"));
+            for index in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read original request");
+                let request: serde_json::Value =
+                    serde_json::from_str(&line).expect("original request JSON");
+                if index == 2 {
+                    assert_eq!(request["kind"], "send_message");
+                    break;
+                }
+                write_gateway_response(
+                    &mut stream,
+                    serde_json::json!({
+                        "protocol_version": 0,
+                        "ok": true,
+                        "gateway_generation": "one",
+                        "reannounce_required": index == 0,
+                        "deliveries": if index == 1 {
+                            vec![delivery.clone()]
+                        } else {
+                            Vec::<serde_json::Value>::new()
+                        },
+                    }),
+                );
+            }
+        }
+        {
+            let (mut stream, _) = listener.accept().expect("accept stale ACK client");
+            let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone stale"));
+            for index in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read stale request");
+                let request: serde_json::Value =
+                    serde_json::from_str(&line).expect("stale request JSON");
+                assert_eq!(
+                    request["kind"],
+                    ["hello", "register_agent", "ack_delivery"][index]
+                );
+                write_gateway_response(
+                    &mut stream,
+                    serde_json::json!({
+                        "protocol_version": 0,
+                        "ok": true,
+                        "gateway_generation": if index == 2 {
+                            stale_generation
+                        } else {
+                            "two"
+                        },
+                        "reannounce_required": index == 0
+                            || (index == 2 && stale_reannounce_required),
+                        "deliveries": if index == 2 {
+                            vec![serde_json::json!({
+                                "request_id": GATEWAY_REPORT_2,
+                                "session_id": "s1",
+                                "agent_id": "agent-1",
+                                "message_id": "telegram:10:100",
+                                "sender_id": "42",
+                                "source": "alice",
+                                "conversation_id": "10",
+                                "text": "stale"
+                            })]
+                        } else {
+                            Vec::<serde_json::Value>::new()
+                        },
+                    }),
+                );
+            }
+        }
+        let final_generation = if stale_generation == "three" {
+            "three"
+        } else {
+            "two"
+        };
+        let (mut stream, _) = listener.accept().expect("accept final ACK client");
+        let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone final"));
+        for index in 0..3 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read final request");
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("final request JSON");
+            assert_eq!(
+                request["kind"],
+                ["hello", "register_agent", "ack_delivery"][index]
+            );
+            write_gateway_response(
+                &mut stream,
+                serde_json::json!({
+                    "protocol_version": 0,
+                    "ok": true,
+                    "gateway_generation": final_generation,
+                    "reannounce_required": index == 0,
+                    "deliveries": if index == 2 {
+                        vec![serde_json::json!({
+                            "request_id": GATEWAY_REPORT_2,
+                            "session_id": "s1",
+                            "agent_id": "agent-1",
+                            "message_id": "telegram:10:100",
+                            "sender_id": "42",
+                            "source": "alice",
+                            "conversation_id": "10",
+                            "text": "current"
+                        })]
+                    } else {
+                        Vec::<serde_json::Value>::new()
+                    },
+                }),
+            );
+        }
+        final_ack_tx.send(()).expect("signal final ACK");
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let ext = test_extension(FakeClient::new(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("configure gateway");
+    ext.wait_for_gateway_connection();
+    ext.state.lock().current_session_id = Some(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("register progress");
+    let original = expect_delivered(&rx);
+    let _result = rx.recv().expect("register result");
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("disconnect")));
+    assert!(expect_tool_error(&rx).contains("closed"));
+    ext.acknowledge_live_delivery(&canonical_delivered(original));
+
+    final_ack_rx.recv().expect("automatic final ACK");
+    let current = expect_delivered(&rx);
+    assert_eq!(current.text, "current");
+    assert!(
+        rx.try_iter().all(|message| !matches!(
+            message,
+            HarnessInputMessage::Emit(ref emit)
+                if matches!(emit.event.as_ref(), Event::MessageDeliveredReported(report) if report.text == "stale")
+        )),
+        "stale ACK-response deliveries must not publish"
+    );
+    assert!(
+        ext.state
+            .lock()
+            .gateway_pending_deliveries
+            .keys()
+            .all(|report_id| report_id.as_str() != GATEWAY_REPORT_1),
+        "valid replacement ACK removes the original obligation"
+    );
+    server.join().expect("ACK authority server");
+}
+
+/// A generation-only ACK response change must preserve and automatically retry
+/// the canonical obligation without publishing stale deliveries.
+#[test]
+fn gateway_ack_generation_change_reconnects_and_retries() {
+    assert_stale_ack_response_reconnects("three", false);
+}
+
+/// A hint-only ACK response must preserve and automatically retry the canonical
+/// obligation without publishing stale deliveries.
+#[test]
+fn gateway_ack_reannouncement_hint_reconnects_and_retries() {
+    assert_stale_ack_response_reconnects("two", true);
 }
 
 /// A heartbeat failure from a stale gateway connection must not clear
@@ -1079,12 +1359,18 @@ fn stale_gateway_heartbeat_failure_does_not_clear_new_registration_state() {
         &state,
         &new_gateway
     ));
-    assert!(state.lock().registered_agents.is_empty());
+    assert!(
+        state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1")),
+        "desired registrations survive current-connection failure"
+    );
     assert!(gateway_cell.lock().expect("gateway lock").is_none());
 }
 
-/// Clearing malformed configuration must send `goodbye` to release gateway
-/// leases instead of silently dropping local state.
+/// Clearing configuration must send `goodbye` and close the supervised socket
+/// so the old worker cannot retain gateway lease authority.
 #[test]
 fn gateway_client_config_error_sends_goodbye() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1099,6 +1385,9 @@ fn gateway_client_config_error_sends_goodbye() {
         for _ in 0..2 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
+            if line.trim().is_empty() {
+                break;
+            }
             seen_requests_thread
                 .lock()
                 .expect("requests")
@@ -1109,6 +1398,7 @@ fn gateway_client_config_error_sends_goodbye() {
                 serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [],
                 })
             )
@@ -1121,6 +1411,7 @@ fn gateway_client_config_error_sends_goodbye() {
     let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
+    ext.wait_for_gateway_connection();
     ext.clear_config_after_error();
     server.join().expect("fake gateway thread");
 
@@ -1158,6 +1449,7 @@ fn gateway_client_agent_unload_sends_unregister() {
                 serde_json::json!({
                     "protocol_version": 0,
                     "ok": true,
+                    "gateway_generation": "test",
                     "deliveries": [],
                 })
             )
@@ -1170,6 +1462,7 @@ fn gateway_client_agent_unload_sends_unregister() {
     let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
+    ext.wait_for_gateway_connection();
     {
         let mut state = ext.state.lock();
         state.current_session_id = Some(
@@ -1198,7 +1491,341 @@ fn gateway_client_agent_unload_sends_unregister() {
     assert_eq!(requests[2]["kind"], "unregister_agent");
     assert_eq!(requests[2]["session_id"], "s1");
     assert_eq!(requests[2]["agent_id"], "agent-1");
-    assert_eq!(requests[3]["kind"], "goodbye");
+    assert!(
+        requests
+            .get(3)
+            .is_none_or(|request| request["kind"] == "goodbye")
+    );
+}
+
+/// Gateway-client configuration must remain valid while the socket is absent;
+/// the sole supervisor connects later without touching Telegram polling.
+#[test]
+fn gateway_supervisor_recovers_when_gateway_starts_late() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let (tx, _rx) = mpsc::channel();
+    let client = FakeClient::new();
+    let ext = test_extension(client.clone(), tx);
+    ext.apply_config(gateway_mode(socket_path.clone()), Some(temp_state_dir()))
+        .expect("absent gateway is a recoverable runtime condition");
+    assert!(ext.gateway_client().is_none());
+
+    let listener = UnixListener::bind(&socket_path).expect("start fake gateway later");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept reconnecting sidecar");
+        let mut reader =
+            path_std_io::BufReader::new(stream.try_clone().expect("clone gateway stream"));
+        for expected_kind in ["hello", "goodbye"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read gateway request");
+            if line.trim().is_empty() {
+                assert_eq!(expected_kind, "goodbye");
+                break;
+            }
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("gateway request JSON");
+            assert_eq!(request["kind"], expected_kind);
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 0,
+                    "ok": true,
+                    "gateway_generation": "late",
+                    "reannounce_required": expected_kind == "hello",
+                    "deliveries": [],
+                })
+            )
+            .expect("write gateway response");
+            stream.flush().expect("flush gateway response");
+        }
+    });
+
+    ext.wait_for_gateway_connection();
+    drop(ext);
+    server.join().expect("late gateway server");
+    assert!(client.poll_timeouts.lock().expect("polls").is_empty());
+}
+
+/// Run one fixture-controlled response-authority replacement scenario.
+fn assert_gateway_response_forces_exact_reannouncement(
+    restart_generation: &'static str,
+    reannounce_required: bool,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind first gateway");
+    let seen = Arc::new(Mutex::new(Vec::<(u8, String)>::new()));
+    let seen_thread = Arc::clone(&seen);
+    let server_path = socket_path.clone();
+    let server = std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().expect("accept first connection");
+            let mut reader =
+                path_std_io::BufReader::new(stream.try_clone().expect("clone first stream"));
+            for index in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read first request");
+                let request: serde_json::Value =
+                    serde_json::from_str(&line).expect("first request JSON");
+                seen_thread.lock().expect("seen").push((
+                    1,
+                    request["kind"].as_str().expect("request kind").to_owned(),
+                ));
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({
+                        "protocol_version": 0,
+                        "ok": true,
+                        "gateway_generation": if index == 2 {
+                            restart_generation
+                        } else {
+                            "one"
+                        },
+                        "reannounce_required": index == 0
+                            || (index == 2 && reannounce_required),
+                        "deliveries": [],
+                    })
+                )
+                .expect("write first response");
+                stream.flush().expect("flush first response");
+            }
+        }
+        std::fs::remove_file(&server_path).expect("remove first listener path");
+        let replacement = UnixListener::bind(&server_path).expect("bind replacement gateway");
+        let (mut stream, _) = replacement.accept().expect("accept replacement connection");
+        let mut reader =
+            path_std_io::BufReader::new(stream.try_clone().expect("clone replacement stream"));
+        for index in 0..3 {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read replacement request");
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("replacement request JSON");
+            seen_thread.lock().expect("seen").push((
+                2,
+                request["kind"].as_str().expect("request kind").to_owned(),
+            ));
+            if index == 1 {
+                assert_eq!(request["session_id"], "s1");
+                assert_eq!(request["agent_id"], "agent-1");
+            }
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 0,
+                    "ok": true,
+                    "gateway_generation": restart_generation,
+                    "reannounce_required": index == 0,
+                    "deliveries": [],
+                })
+            )
+            .expect("write replacement response");
+            stream.flush().expect("flush replacement response");
+        }
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let ext = test_extension(FakeClient::new(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("configure gateway client");
+    ext.wait_for_gateway_connection();
+    ext.state.lock().current_session_id = Some(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("first")));
+    assert!(expect_tool_error(&rx).contains("disconnected"));
+    ext.wait_for_gateway_connection();
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("second")));
+    let sent = expect_successful_send(&rx);
+    assert_eq!(sent.text, "second");
+    server.join().expect("restart gateway server");
+
+    assert_eq!(
+        *seen.lock().expect("seen"),
+        vec![
+            (1, "hello".to_owned()),
+            (1, "register_agent".to_owned()),
+            (1, "send_message".to_owned()),
+            (2, "hello".to_owned()),
+            (2, "register_agent".to_owned()),
+            (2, "send_message".to_owned()),
+        ]
+    );
+}
+
+/// A live response reporting a changed generation must force fresh hello,
+/// exact route replay, and recovered operation without relying on a hint bit.
+#[test]
+fn gateway_generation_change_forces_exact_reannouncement() {
+    assert_gateway_response_forces_exact_reannouncement("two", false);
+}
+
+/// A live response requesting reannouncement must force fresh hello, exact
+/// route replay, and recovered operation even when generation is unchanged.
+#[test]
+fn gateway_reannouncement_hint_forces_exact_reannouncement() {
+    assert_gateway_response_forces_exact_reannouncement("one", true);
+}
+
+/// Replacing gateway configuration must wait for an old worker blocked in its
+/// hello response before it can return and publish the new worker.
+#[test]
+fn gateway_reconfiguration_joins_fixture_blocked_worker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old_path = dir.path().join("old.sock");
+    let new_path = dir.path().join("new.sock");
+    let old_listener = UnixListener::bind(&old_path).expect("bind old gateway");
+    let (hello_seen_tx, hello_seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let old_server = std::thread::spawn(move || {
+        let (mut stream, _) = old_listener.accept().expect("accept old connection");
+        let mut line = String::new();
+        path_std_io::BufReader::new(stream.try_clone().expect("clone old stream"))
+            .read_line(&mut line)
+            .expect("read old hello");
+        hello_seen_tx.send(()).expect("signal blocked hello");
+        release_rx.recv().expect("release old hello");
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "protocol_version": 0,
+                "ok": true,
+                "gateway_generation": "old",
+                "deliveries": [],
+            })
+        )
+        .expect("write old hello response");
+        stream.flush().expect("flush old hello response");
+    });
+    let new_listener = UnixListener::bind(&new_path).expect("bind current gateway");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = new_listener.accept().expect("accept current connection");
+        let mut reader =
+            path_std_io::BufReader::new(stream.try_clone().expect("clone current stream"));
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read current request");
+            if line.trim().is_empty() {
+                break;
+            }
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 0,
+                    "ok": true,
+                    "gateway_generation": "current",
+                    "deliveries": [],
+                })
+            )
+            .expect("write current response");
+            stream.flush().expect("flush current response");
+        }
+    });
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = test_extension(FakeClient::new(), tx);
+    let (retirement_release_tx, retirement_release_rx) = mpsc::channel();
+    *ext.gateway_supervisor
+        .retirement_gate
+        .lock()
+        .expect("retirement gate lock") = Some(retirement_release_rx);
+    ext.apply_config(gateway_mode(old_path), Some(temp_state_dir()))
+        .expect("configure blocked old gateway");
+    hello_seen_rx.recv().expect("old worker reached hello read");
+    let (pre_join_tx, pre_join_rx) = mpsc::channel();
+    *ext.gateway_supervisor
+        .pre_join_observer
+        .lock()
+        .expect("pre-join observer lock") = Some(pre_join_tx);
+    let (post_join_tx, post_join_rx) = mpsc::channel();
+    *ext.gateway_supervisor
+        .post_join_observer
+        .lock()
+        .expect("post-join observer lock") = Some(post_join_tx);
+    let (replace_done_tx, replace_done_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = ext.apply_config(gateway_mode(new_path), Some(temp_state_dir()));
+            replace_done_tx
+                .send(result)
+                .expect("signal replacement result");
+        });
+        release_tx.send(()).expect("release old socket I/O");
+        pre_join_rx
+            .recv()
+            .expect("replacement reached actual pre-join boundary");
+        retirement_release_tx
+            .send(())
+            .expect("release worker retirement");
+        post_join_rx
+            .recv()
+            .expect("replacement produced successful-join token");
+        replace_done_rx
+            .recv()
+            .expect("replacement result")
+            .expect("replace gateway configuration");
+    });
+    ext.wait_for_gateway_connection();
+    drop(ext);
+    old_server.join().expect("old gateway server");
+    server.join().expect("current gateway server");
+}
+
+/// Reconnect delays must grow exponentially but remain at the documented
+/// low-rate cap even across an arbitrarily long outage.
+#[test]
+fn gateway_reconnect_backoff_is_bounded() {
+    let mut delay = GATEWAY_RECONNECT_INITIAL_DELAY;
+    let mut observed = Vec::new();
+    for _ in 0..16 {
+        observed.push(delay);
+        delay = next_gateway_retry_delay(delay);
+    }
+    assert_eq!(observed[0], Duration::from_millis(100));
+    assert_eq!(observed.last(), Some(&GATEWAY_RECONNECT_MAX_DELAY));
+    assert!(
+        observed
+            .iter()
+            .all(|delay| *delay <= GATEWAY_RECONNECT_MAX_DELAY)
+    );
+}
+
+/// Removing a desired route while the gateway is disconnected must succeed
+/// locally so a later supervisor connection cannot reannounce retired
+/// authority.
+#[test]
+fn gateway_disconnected_unregister_removes_desired_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (tx, rx) = mpsc::channel();
+    let ext = test_extension(FakeClient::new(), tx);
+    ext.apply_config(
+        gateway_mode(dir.path().join("absent.sock")),
+        Some(temp_state_dir()),
+    )
+    .expect("configure absent gateway");
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
+    expect_tool_finished(&rx);
+    assert!(ext.state.lock().registered_agents.is_empty());
 }
 
 /// Bot tokens are embedded in Bot API request paths, so endpoint overrides must

@@ -1,6 +1,7 @@
 //! Gateway-client socket protocol for the Telegram sidecar.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,6 +13,44 @@ use crate::MAX_GATEWAY_RESPONSE_BYTES;
 ///
 /// This stays at zero under `GATE-no-backward-compatibility`.
 const SOCKET_PROTOCOL_VERSION: u32 = 0;
+/// Maximum time one socket read may delay cancellation or reconfiguration.
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time one socket write may delay cancellation or reconfiguration.
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Maximum time one connect attempt may run without supervisor cancellation.
+const SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Gateway request failure with connection-retirement guidance.
+#[derive(Debug)]
+pub(crate) struct GatewayClientError {
+    /// Sanitized operation diagnostic.
+    message: String,
+    /// Whether the socket can no longer retain valid lease authority.
+    connection_fatal: bool,
+}
+
+impl GatewayClientError {
+    /// Build a connection-fatal transport or protocol failure.
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            connection_fatal: true,
+        }
+    }
+
+    /// Return whether callers must retire this connection.
+    pub(crate) fn is_connection_fatal(&self) -> bool {
+        self.connection_fatal
+    }
+}
+
+impl std::fmt::Display for GatewayClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GatewayClientError {}
 
 /// Configuration for the no-poll gateway-client sidecar mode.
 #[derive(Clone, Debug)]
@@ -49,22 +88,71 @@ impl GatewayClient {
         *self.heartbeat_interval.lock().expect("heartbeat lock")
     }
 
-    /// Send `hello`, replacing any previous connection.
-    pub(crate) fn connect(&self) -> Result<GatewaySocketResponse, String> {
-        let stream = UnixStream::connect(&self.socket_path)
-            .map_err(|error| format!("connecting Telegram gateway socket: {error}"))?;
+    /// Return the last generation reported by the gateway.
+    pub(crate) fn generation(&self) -> Option<String> {
+        self.generation.lock().expect("generation lock").clone()
+    }
+
+    /// Connect and send hello while checking supervisor cancellation.
+    pub(crate) fn connect_cancellable(
+        &self,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .map_err(|error| {
+                GatewayClientError::fatal(format!("creating Telegram gateway socket: {error}"))
+            })?;
+        let address = socket2::SockAddr::unix(&self.socket_path).map_err(|error| {
+            GatewayClientError::fatal(format!("addressing Telegram gateway socket: {error}"))
+        })?;
+        if cancelled() {
+            return Err(GatewayClientError::fatal(
+                "Telegram gateway connect cancelled",
+            ));
+        }
+        socket
+            .connect_timeout(&address, SOCKET_CONNECT_TIMEOUT)
+            .map_err(|error| {
+                GatewayClientError::fatal(format!("connecting Telegram gateway socket: {error}"))
+            })?;
+        if cancelled() {
+            return Err(GatewayClientError::fatal(
+                "Telegram gateway connect cancelled",
+            ));
+        }
+        let stream = UnixStream::from(OwnedFd::from(socket));
         stream
-            .set_read_timeout(Some(Duration::from_secs(35)))
-            .map_err(|error| format!("configuring Telegram gateway socket timeout: {error}"))?;
+            .set_read_timeout(Some(SOCKET_READ_TIMEOUT))
+            .map_err(|error| {
+                GatewayClientError::fatal(format!(
+                    "configuring Telegram gateway socket timeout: {error}"
+                ))
+            })?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(10)))
-            .map_err(|error| format!("configuring Telegram gateway socket timeout: {error}"))?;
+            .set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))
+            .map_err(|error| {
+                GatewayClientError::fatal(format!(
+                    "configuring Telegram gateway socket timeout: {error}"
+                ))
+            })?;
         *self.stream.lock().expect("gateway stream lock") = Some(stream);
-        self.request(GatewayRequestKind::Hello, GatewayClientRequest::default())
+        let response = self.request(GatewayRequestKind::Hello, GatewayClientRequest::default())?;
+        if response
+            .gateway_generation
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            self.disconnect();
+            return Err(GatewayClientError::fatal(
+                "Telegram gateway hello omitted its generation",
+            ));
+        }
+        *self.generation.lock().expect("generation lock") = response.gateway_generation.clone();
+        Ok(response)
     }
 
     /// Send one heartbeat and drain queued gateway deliveries.
-    pub(crate) fn heartbeat(&self) -> Result<GatewaySocketResponse, String> {
+    pub(crate) fn heartbeat(&self) -> Result<GatewaySocketResponse, GatewayClientError> {
         self.request(
             GatewayRequestKind::Heartbeat,
             GatewayClientRequest::default(),
@@ -77,7 +165,7 @@ impl GatewayClient {
         session_id: &str,
         agent_id: &str,
         display_name: Option<String>,
-    ) -> Result<GatewaySocketResponse, String> {
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
         self.request(
             GatewayRequestKind::RegisterAgent,
             GatewayClientRequest {
@@ -95,7 +183,7 @@ impl GatewayClient {
         &self,
         session_id: &str,
         agent_id: &str,
-    ) -> Result<GatewaySocketResponse, String> {
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
         self.request(
             GatewayRequestKind::UnregisterAgent,
             GatewayClientRequest {
@@ -114,7 +202,7 @@ impl GatewayClient {
         session_id: &str,
         agent_id: &str,
         message: &str,
-    ) -> Result<GatewaySocketResponse, String> {
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
         self.request(
             GatewayRequestKind::SendMessage,
             GatewayClientRequest {
@@ -134,7 +222,7 @@ impl GatewayClient {
         report_id: &str,
         session_id: &str,
         agent_id: &str,
-    ) -> Result<GatewaySocketResponse, String> {
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
         self.request(
             GatewayRequestKind::AcknowledgeDelivery,
             GatewayClientRequest {
@@ -149,6 +237,11 @@ impl GatewayClient {
     /// Send a best-effort goodbye and drop the current connection.
     pub(crate) fn goodbye(&self) {
         let _ = self.request(GatewayRequestKind::Goodbye, GatewayClientRequest::default());
+        self.disconnect();
+    }
+
+    /// Close the current socket without sending another protocol request.
+    pub(crate) fn disconnect(&self) {
         *self.stream.lock().expect("gateway stream lock") = None;
     }
 
@@ -157,11 +250,11 @@ impl GatewayClient {
         &self,
         kind: GatewayRequestKind,
         request: GatewayClientRequest,
-    ) -> Result<GatewaySocketResponse, String> {
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
         let mut guard = self.stream.lock().expect("gateway stream lock");
         let stream = guard
             .as_mut()
-            .ok_or_else(|| "Telegram gateway socket is not connected".to_owned())?;
+            .ok_or_else(|| GatewayClientError::fatal("Telegram gateway socket is not connected"))?;
         let request = GatewayWireRequest {
             protocol_version: SOCKET_PROTOCOL_VERSION,
             kind: kind.as_str(),
@@ -171,46 +264,57 @@ impl GatewayClient {
             display_name: request.display_name,
             report_id: request.report_id,
         };
-        let request = serde_json::to_string(&request)
-            .map_err(|error| format!("encoding Telegram gateway request: {error}"))?;
+        let request = serde_json::to_string(&request).map_err(|error| {
+            GatewayClientError::fatal(format!("encoding Telegram gateway request: {error}"))
+        })?;
         writeln!(stream, "{request}")
             .and_then(|()| stream.flush())
-            .map_err(|error| format!("writing Telegram gateway request: {error}"))?;
+            .map_err(|error| {
+                GatewayClientError::fatal(format!("writing Telegram gateway request: {error}"))
+            })?;
         let mut line = String::new();
         BufReader::new(
             stream
                 .try_clone()
-                .map_err(|error| format!("cloning Telegram gateway socket: {error}"))?
+                .map_err(|error| {
+                    GatewayClientError::fatal(format!("cloning Telegram gateway socket: {error}"))
+                })?
                 .take(MAX_GATEWAY_RESPONSE_BYTES as u64 + 1),
         )
         .read_line(&mut line)
-        .map_err(|error| format!("reading Telegram gateway response: {error}"))?;
+        .map_err(|error| {
+            GatewayClientError::fatal(format!("reading Telegram gateway response: {error}"))
+        })?;
         if line.len() > MAX_GATEWAY_RESPONSE_BYTES {
-            return Err("Telegram gateway response is too large".to_owned());
-        }
-        if line.trim().is_empty() {
-            return Err("Telegram gateway closed the socket".to_owned());
-        }
-        let response: GatewaySocketResponse = serde_json::from_str(&line)
-            .map_err(|error| format!("decoding Telegram gateway response: {error}"))?;
-        if response.protocol_version != SOCKET_PROTOCOL_VERSION {
-            return Err(format!(
-                "unsupported Telegram gateway socket protocol version {}",
-                response.protocol_version
+            return Err(GatewayClientError::fatal(
+                "Telegram gateway response is too large",
             ));
         }
+        if line.trim().is_empty() {
+            return Err(GatewayClientError::fatal(
+                "Telegram gateway closed the socket",
+            ));
+        }
+        let response: GatewaySocketResponse = serde_json::from_str(&line).map_err(|error| {
+            GatewayClientError::fatal(format!("decoding Telegram gateway response: {error}"))
+        })?;
+        if response.protocol_version != SOCKET_PROTOCOL_VERSION {
+            return Err(GatewayClientError::fatal(format!(
+                "unsupported Telegram gateway socket protocol version {}",
+                response.protocol_version
+            )));
+        }
         if !response.ok {
-            return Err(response
-                .error
-                .unwrap_or_else(|| "Telegram gateway request failed".to_owned()));
+            return Err(GatewayClientError {
+                message: response
+                    .error
+                    .unwrap_or_else(|| "Telegram gateway request failed".to_owned()),
+                connection_fatal: !response.keep_connection,
+            });
         }
         if let Some(seconds) = response.heartbeat_interval_seconds {
             *self.heartbeat_interval.lock().expect("heartbeat lock") =
                 Duration::from_secs(seconds.max(1));
-        }
-        let mut generation = self.generation.lock().expect("generation lock");
-        if let Some(new_generation) = &response.gateway_generation {
-            *generation = Some(new_generation.clone());
         }
         Ok(response)
     }
@@ -302,10 +406,13 @@ pub(crate) struct GatewaySocketResponse {
     /// Optional requested heartbeat interval.
     heartbeat_interval_seconds: Option<u64>,
     /// Optional gateway process generation.
-    gateway_generation: Option<String>,
+    pub(crate) gateway_generation: Option<String>,
     /// Whether the gateway asks clients to reannounce registrations.
     #[serde(default)]
     pub(crate) reannounce_required: bool,
+    /// Whether an ordinary rejected operation leaves this connection valid.
+    #[serde(default)]
+    keep_connection: bool,
     /// Queued inbound delivery records for this sidecar.
     #[serde(default)]
     pub(crate) deliveries: Vec<GatewayMessageDelivery>,

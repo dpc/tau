@@ -47,6 +47,18 @@ Live leases disappear on unregister, goodbye, disconnect, heartbeat expiry, or
 restart. A sidecar rechecks current registration before report submission.
 Sends require a live registration owned by that exact requesting sidecar and a
 gateway-selected configured or linked chat, never model coordinates.
+Gateway-client sidecars keep the desired live route set separately from
+connection-owned lease authority. One cancellable supervisor reconnects with
+bounded low-rate backoff, sends a fresh `hello`, validates the gateway
+generation, and exactly reannounces the current desired set before publishing
+the new connection for delivery, ACK, or send. Disconnects and generation or
+reannouncement hints retire only connection-owned authority; stale workers and
+responses cannot publish deliveries, acknowledge reports, mutate newer
+configuration, or restore removed routes.
+An exact canonical echo validated while no gateway connection is live remains
+a pending sidecar ACK obligation. The sidecar transmits it only after a
+replacement connection completes hello validation and route reannouncement;
+stale ACK responses cannot remove that obligation or publish deliveries.
 
 Harness replay performs no Telegram I/O, report submission, or gateway ACK and
 reconstructs no live sidecar registration or routing authority. Gateway restart
