@@ -99,6 +99,8 @@ To explore other entry points, run `tau -h`.
 
 ## Contributing & Contact
 
+**Preferred:** [Tau Zulip chat](https://tauofunix.zulipchat.com)
+
 * [Discord server](https://discord.gg/zens2jjA3U)
 * [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 * [Rostra p2p social network profile](https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy)
