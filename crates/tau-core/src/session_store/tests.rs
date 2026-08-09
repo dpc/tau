@@ -284,6 +284,9 @@ fn failed_frame_append_is_atomic_and_retry_reuses_sequence() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut store = SessionStore::open(temp.path()).expect("store opens");
     store
+        .record_session_meta("session-1")
+        .expect("create canonical session manifest");
+    store
         .append_session_event_at(
             "session-1",
             None,
@@ -432,10 +435,10 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     assert!(matches!(error, SessionStoreError::Read { .. }));
 }
 
-/// Failed journal-derived metadata rebuild remains explicit debt, survives a
-/// restart, and retries after the obstruction clears.
+/// Crash-tail journal repair preserves the canonical creation timestamp instead
+/// of reconstructing the manifest from journal timestamps.
 #[test]
-fn repaired_session_metadata_rebuild_retries() {
+fn repaired_session_journal_preserves_canonical_manifest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let session_dir = temp.path().join("session-1");
     let journal_path = session_dir.join("events.cbor");
@@ -457,35 +460,116 @@ fn repaired_session_metadata_rebuild_retries() {
         .write_all(&[1, 2, 3])
         .expect("append torn header");
     let meta_path = session_dir.join("meta.json");
-    fs::remove_file(&meta_path).expect("remove metadata file");
-    fs::create_dir(&meta_path).expect("obstruct metadata removal");
+    let canonical = SessionMeta {
+        created_at: 7,
+        last_touched: 8,
+    };
+    write_meta(&meta_path, &canonical).expect("replace canonical manifest");
 
     let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
     store
         .lock_and_load_session("session-1")
         .expect("recovery succeeds");
-    assert!(
-        store
-            .dirty_meta_rebuilds
-            .contains(&SessionId::parse("session-1").expect("known-safe SessionId must be valid"))
-    );
-    drop(store);
+    let after = read_meta(&meta_path).expect("read preserved manifest");
+    assert_eq!(after.created_at, canonical.created_at);
+    assert_eq!(after.last_touched, canonical.last_touched);
+}
 
-    let mut store = SessionStore::open_lazy(temp.path()).expect("store restarts");
-    store
-        .lock_and_load_session("session-1")
-        .expect("cold validation rediscovers metadata debt");
-    assert!(
-        store
-            .dirty_meta_rebuilds
-            .contains(&SessionId::parse("session-1").expect("known-safe SessionId must be valid"))
-    );
+/// A deterministic failure after writing the replacement temporary file leaves
+/// the preceding valid manifest byte-for-byte intact.
+#[test]
+fn failed_manifest_replacement_preserves_previous_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("meta.json");
+    let original = SessionMeta {
+        created_at: 11,
+        last_touched: 12,
+    };
+    write_meta(&path, &original).expect("write baseline manifest");
+    let before = fs::read(&path).expect("read baseline manifest");
+    let replacement = SessionMeta {
+        created_at: 11,
+        last_touched: 13,
+    };
 
-    fs::remove_dir(&meta_path).expect("remove obstruction");
+    let error = write_meta_with(&path, &replacement, |_| {
+        Err(io::Error::other("injected pre-replacement failure"))
+    })
+    .expect_err("injected replacement failure");
+
+    assert!(matches!(error, SessionStoreError::Write { .. }));
+    assert_eq!(fs::read(&path).expect("read preserved manifest"), before);
+    assert_eq!(
+        fs::read_dir(temp.path())
+            .expect("list manifest directory")
+            .count(),
+        1,
+        "failed replacement must remove its temporary file"
+    );
+}
+
+/// Refreshing malformed canonical state fails closed and never silently assigns
+/// a new creation timestamp.
+#[test]
+fn malformed_manifest_refresh_preserves_invalid_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+    let path = temp.path().join("session-1/meta.json");
+    fs::create_dir_all(path.parent().expect("manifest parent")).expect("create session");
+    fs::write(&path, b"{not-json").expect("write malformed manifest");
+
+    let error = store
+        .record_session_meta("session-1")
+        .expect_err("malformed canonical manifest must fail");
+
+    assert!(matches!(error, SessionStoreError::Read { .. }));
+    assert_eq!(
+        fs::read(path).expect("read malformed manifest"),
+        b"{not-json"
+    );
+}
+
+/// A first durable append must commit canonical existence before writing the
+/// journal, so manifest failure leaves no authoritative session fact behind.
+#[test]
+fn failed_initial_manifest_prevents_session_journal_creation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path().join("session-1");
+    fs::create_dir_all(session_dir.join("meta.json")).expect("obstruct manifest path");
+    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+
     store
-        .lock_and_load_session("session-1")
-        .expect("retry succeeds");
-    assert!(store.dirty_meta_rebuilds.is_empty());
+        .append_session_event("session-1", None, loaded_event("session-1", "agent-1"))
+        .expect_err("manifest obstruction must reject first append");
+
+    assert!(!session_dir.join("events.cbor").exists());
+    assert!(
+        session_dir.join("lock").exists(),
+        "lock scaffolding may remain"
+    );
+}
+
+/// A missing manifest does not establish durable-session existence even when
+/// other session artifacts remain in the directory.
+#[test]
+fn missing_manifest_is_not_listed_or_resumable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path().join("session-1");
+    fs::create_dir_all(&session_dir).expect("create orphan session directory");
+    fs::write(session_dir.join("events.cbor"), []).expect("write orphan journal");
+
+    assert!(
+        list_session_metas(temp.path())
+            .expect("list session manifests")
+            .is_empty()
+    );
+    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+    assert!(matches!(
+        store
+            .lock_and_load_existing_session("session-1")
+            .expect_err("orphan session must not resume"),
+        SessionStoreError::SessionNotFound { .. }
+    ));
 }
 
 /// A restore-stream write failure leaves bytes and sequence unchanged and

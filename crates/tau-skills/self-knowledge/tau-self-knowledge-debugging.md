@@ -27,7 +27,7 @@ Tau follows the XDG directories:
   - `secrets/ext/<extension>/providers/<provider>/` — typed provider credentials.
 - Sessions: `~/.local/state/tau/sessions/<session_id>/`
   - `events.cbor` — durable per-session membership journal (`session.agent_loaded` / `session.agent_unloaded`).
-  - `meta.json` — session metadata such as creation time and last-touched time.
+  - `meta.json` — canonical durable-session existence manifest with canonical creation time and a derived last-touched ordering/retention hint.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
   - `debug/provider-requests/<provider-instance>/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort for an attributed durable session whose directory still exists. A late capture can land in the old attributed session after rollover. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`; legacy flat uncompressed `.json` or compressed captures may remain until retention cleanup. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.

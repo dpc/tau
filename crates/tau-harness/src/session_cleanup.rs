@@ -52,18 +52,23 @@ pub(crate) fn cleanup_old_sessions(
             "failed to remove stale detached session directories"
         );
     }
-    cleanup_old_sessions_with(sessions_dir, retention, protected_sessions, |path| {
-        fs::remove_dir_all(path)
-    });
+    cleanup_old_sessions_with(
+        sessions_dir,
+        retention,
+        protected_sessions,
+        unix_now(),
+        |path| fs::remove_dir_all(path),
+    );
 }
 
 fn cleanup_old_sessions_with(
     sessions_dir: PathBuf,
     retention: Duration,
     protected_sessions: Vec<SessionId>,
+    now: u64,
     mut remove_dir: impl FnMut(&std::path::Path) -> io::Result<()>,
 ) {
-    let cutoff = unix_now().saturating_sub(retention.as_secs());
+    let cutoff = now.saturating_sub(retention.as_secs());
     let metas = match list_session_metas(&sessions_dir) {
         Ok(metas) => metas,
         Err(error) => {

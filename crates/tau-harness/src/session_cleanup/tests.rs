@@ -96,6 +96,7 @@ fn cleanup_detaches_tree_before_removal_and_writer_reload() {
         sessions_dir.clone(),
         Duration::from_secs(1),
         Vec::new(),
+        u64::MAX,
         |detached_path| {
             removal_observed = true;
             assert_eq!(
@@ -193,4 +194,49 @@ fn cleanup_removes_old_unlocked_session() {
     cleanup_old_sessions(sessions_dir.clone(), Duration::from_secs(1), Vec::new());
 
     assert!(!sessions_dir.join("old").exists());
+}
+
+/// Retention includes the exact cutoff and preserves a manifest touched one
+/// second later, preventing off-by-one deletion at the configured boundary.
+#[test]
+fn cleanup_applies_exact_retention_boundary() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    write_session_meta(&sessions_dir, "at-cutoff", 90);
+    write_session_meta(&sessions_dir, "after-cutoff", 91);
+
+    cleanup_old_sessions_with(
+        sessions_dir.clone(),
+        Duration::from_secs(10),
+        Vec::new(),
+        100,
+        |path| std::fs::remove_dir_all(path),
+    );
+
+    assert!(!sessions_dir.join("at-cutoff").exists());
+    assert!(sessions_dir.join("after-cutoff").exists());
+}
+
+/// Cleanup fails safe when canonical existence cannot be validated, preserving
+/// both missing-manifest and malformed-manifest session directories.
+#[test]
+fn cleanup_preserves_sessions_with_invalid_manifests() {
+    let temp = TempDir::new().expect("temp sessions");
+    let sessions_dir = sessions_dir(&temp);
+    let missing = sessions_dir.join("missing");
+    let malformed = sessions_dir.join("malformed");
+    std::fs::create_dir_all(&missing).expect("create missing-manifest session");
+    std::fs::create_dir_all(&malformed).expect("create malformed-manifest session");
+    std::fs::write(malformed.join("meta.json"), b"{not-json").expect("write malformed manifest");
+
+    cleanup_old_sessions_with(
+        sessions_dir.clone(),
+        Duration::from_secs(10),
+        Vec::new(),
+        100,
+        |path| std::fs::remove_dir_all(path),
+    );
+
+    assert!(missing.exists());
+    assert!(malformed.exists());
 }

@@ -24,11 +24,22 @@ inheritable entries are copied to child agents when an explicit or derived
 parent is known. Tests should assert durable stores, not only runtime delivery,
 when changing durable facts.
 
-Cold resume acquires the selected session's existing lock without creating a
-directory or lock file, then revalidates valid persisted metadata while the lock
-remains held. A target deleted after CLI selection therefore fails startup
-instead of being recreated as an empty session. New-session startup retains the
-separate creating lock path.
+The atomically replaced `sessions/<id>/meta.json` manifest is canonical for a
+durable session's existence and creation time, including an empty session.
+`last_touched` is a derived ordering and retention hint. Cold resume acquires the
+selected session's existing lock without creating a directory or lock file, then
+revalidates this manifest while the lock remains held. A missing or malformed
+manifest does not establish resumable existence and cleanup preserves the
+unvalidated directory. A target deleted after CLI selection therefore fails
+startup instead of being recreated as an empty session. New-session startup
+retains the separate creating lock path.
+
+Session startup, resume, switching, durable session-journal appends, and accepted
+prompt, message-wake, or replay activation of a loaded durable agent refresh
+`last_touched`. The activation refresh projects operational use once per accepted
+dispatch rather than once per transcript event or through a periodic heartbeat.
+A refresh failure preserves the previous valid manifest and does not retract an
+already-committed journal fact.
 
 Agent stores also fold the latest `agent.initialization_context_set` as
 replaceable side state. It carries frozen effective skills and the optional
@@ -102,7 +113,8 @@ syncs journal data and newly created directory entries, retries failures, and
 never blocks or retracts semantic acceptance. Recovery truncation is itself
 marked dirty for background sync.
 
-No durability barrier precedes provider, tool, renderer, or other external
+Manifest replacement is failure-atomic but does not add a synchronous
+stable-storage barrier. No durability barrier precedes provider, tool, renderer, or other external
 effects. A crash may therefore preserve an external effect while losing its
 journal fact. Process crash relies on ordinary kernel writeback; kernel or power
 loss may lose or tear an unsynced suffix. This boundary is governed by

@@ -77,6 +77,13 @@ Store IDs used as path components share one bounded safe grammar with CLI
 minting, metadata listing, lock probes, and cleanup. They exclude path separators,
 NUL, and the reserved `.` and `..` names.
 
+A durable session exists when `sessions/<id>/meta.json` commits successfully.
+This atomically replaced manifest owns the canonical creation timestamp;
+`last_touched` is only a derived ordering and retention hint. Ordinary session
+journals remain authoritative for membership and fallback-message facts, and
+agent journals remain authoritative for identity and transcript facts. Journal
+recovery never reconstructs a missing or invalid canonical session manifest.
+
 Memory-only streams use the same semantic fold as journal-backed streams and
 support same-daemon replay, but create no durable artifact. Agent journals remain
 the sole durable identity and listing authority: atomically replaced `meta.json`

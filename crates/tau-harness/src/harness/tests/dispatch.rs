@@ -70,6 +70,154 @@ fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
     h.shutdown().expect("shutdown");
 }
 
+/// Dispatching work to a loaded durable agent refreshes its session retention
+/// hint while preserving the manifest's canonical creation timestamp.
+#[test]
+fn durable_agent_dispatch_extends_session_retention() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let session_id = h.current_session_id.clone();
+    let meta_path = h
+        .store
+        .sessions_dir()
+        .join(session_id.as_str())
+        .join("meta.json");
+    path_std_fs::write(
+        &meta_path,
+        serde_json::to_vec(&tau_core::SessionMeta {
+            created_at: 7,
+            last_touched: 8,
+        })
+        .expect("encode stale manifest"),
+    )
+    .expect("write stale manifest");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("operational use".to_owned()))
+        .expect("dispatch prompt");
+
+    let meta: tau_core::SessionMeta = serde_json::from_slice(
+        &path_std_fs::read(meta_path).expect("read refreshed session manifest"),
+    )
+    .expect("decode refreshed session manifest");
+    assert_eq!(meta.created_at, 7);
+    assert!(8 < meta.last_touched);
+    h.shutdown().expect("shutdown");
+}
+
+/// Initial durable-session setup commits canonical existence before enabling
+/// session diagnostics, so a manifest failure leaves only lock scaffolding.
+#[test]
+fn failed_initial_manifest_prevents_session_diagnostic_creation() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("harness");
+    let sessions_dir = tau_config::settings::sessions_dir_of(&state);
+    let session_dir = sessions_dir.join("blocked-manifest");
+    path_std_fs::create_dir_all(session_dir.join("meta.json"))
+        .expect("obstruct canonical manifest path");
+
+    h.prepare_initial_session_storage(
+        &sessions_dir,
+        "blocked-manifest",
+        path_std_time::Instant::now(),
+    )
+    .expect_err("manifest obstruction must fail session setup");
+
+    assert!(!session_dir.join("events.jsonl").exists());
+    assert!(
+        session_dir.join("lock").exists(),
+        "lock scaffolding may remain"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A loaded-target durable message wake refreshes session retention at its
+/// accepted activation boundary without changing canonical creation time.
+#[test]
+fn durable_message_wake_extends_session_retention() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    h.resolving_initial_extension_collisions = true;
+    h.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("retention-message").expect("message id"),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: agent_id,
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            message: "operational wake".to_owned(),
+        }),
+    );
+    let meta_path = stale_session_manifest(&h);
+
+    h.resolving_initial_extension_collisions = false;
+    h.try_advance_queue();
+
+    assert_session_manifest_refreshed(&meta_path);
+    h.shutdown().expect("shutdown");
+}
+
+/// A pending replay activation for a loaded durable agent refreshes session
+/// retention even though it bypasses ordinary prompt submission.
+#[test]
+fn durable_replay_activation_extends_session_retention() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    h.agents
+        .get_mut(&cid)
+        .expect("loaded durable agent")
+        .pending_replay_activation = true;
+    let meta_path = stale_session_manifest(&h);
+
+    h.try_advance_queue();
+
+    assert_session_manifest_refreshed(&meta_path);
+    h.shutdown().expect("shutdown");
+}
+
+/// Replace the current session manifest with a deterministic stale retention
+/// hint while retaining a recognizable canonical creation time.
+fn stale_session_manifest(h: &Harness) -> path_std_path::PathBuf {
+    let path = h
+        .store
+        .sessions_dir()
+        .join(h.current_session_id.as_str())
+        .join("meta.json");
+    path_std_fs::write(
+        &path,
+        serde_json::to_vec(&tau_core::SessionMeta {
+            created_at: 7,
+            last_touched: 8,
+        })
+        .expect("encode stale manifest"),
+    )
+    .expect("write stale manifest");
+    path
+}
+
+/// Assert that operational use advanced only the derived retention hint.
+fn assert_session_manifest_refreshed(path: &Path) {
+    let meta: tau_core::SessionMeta =
+        serde_json::from_slice(&path_std_fs::read(path).expect("read refreshed session manifest"))
+            .expect("decode refreshed session manifest");
+    assert_eq!(meta.created_at, 7);
+    assert!(8 < meta.last_touched);
+}
+
 /// Self-compaction envelopes expose only closed bounded status and exact
 /// durable correlation for every terminal class.
 #[test]
@@ -948,6 +1096,7 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
         .iter()
         .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
         .count();
+    let meta_path = stale_session_manifest(&h);
 
     h.try_advance_queue();
 
@@ -966,6 +1115,14 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
     assert!(h.replayable_harness_notices.iter().any(|notice| {
         notice.always_show && notice.message.contains("until its template is repaired")
     }));
+    let meta: tau_core::SessionMeta =
+        serde_json::from_slice(&path_std_fs::read(meta_path).expect("read session manifest"))
+            .expect("decode session manifest");
+    assert_eq!(meta.created_at, 7);
+    assert_eq!(
+        meta.last_touched, 8,
+        "rejected preflight must not extend retention"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -2459,6 +2616,9 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
     {
         let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
         let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        sessions
+            .record_session_meta("s1")
+            .expect("seed canonical session manifest");
         for agent_id in ["engineer_default", "worker_steered"] {
             sessions
                 .append_session_event(
@@ -2587,6 +2747,9 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
     {
         let sessions_dir = tau_config::settings::sessions_dir_of(&state);
         let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        sessions
+            .record_session_meta("s1")
+            .expect("seed canonical session manifest");
         sessions
             .append_session_event(
                 "s1",
@@ -3012,6 +3175,9 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
 fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
     let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    store
+        .record_session_meta(session_id)
+        .expect("seed canonical session manifest");
     store
         .append_session_event(
             session_id,

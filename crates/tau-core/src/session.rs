@@ -3329,12 +3329,13 @@ pub struct AgentMeta {
     pub latest_user_prompt_preview: Option<String>,
 }
 
-/// Per-session sidecar metadata at `<sessions_dir>/<session_id>/meta.json`.
+/// Canonical durable-session manifest at
+/// `<sessions_dir>/<session_id>/meta.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
-    /// Unix epoch seconds when the session was first created.
+    /// Canonical Unix epoch seconds when the durable session was first created.
     pub created_at: u64,
-    /// Unix epoch seconds of the most recent membership append.
+    /// Derived Unix epoch seconds used for ordering and retention.
     pub last_touched: u64,
 }
 

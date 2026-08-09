@@ -20,6 +20,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -28,6 +29,8 @@ use tau_proto::{AgentId, Event, SessionId, UnixMicros};
 
 use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
 use crate::session::{PersistedEventSource, SessionMeta};
+
+static META_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Persistence policy for session events and sidecar state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -413,8 +416,6 @@ pub struct SessionStore {
     ephemeral_membership_overlay: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     restore_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     locks: HashMap<SessionId, File>,
-    /// Sessions whose journal-derived metadata sidecar still needs rebuilding.
-    dirty_meta_rebuilds: std::collections::HashSet<SessionId>,
     mode: SessionPersistenceMode,
 }
 
@@ -465,7 +466,6 @@ impl SessionStore {
             ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
-            dirty_meta_rebuilds: path_std_collections::HashSet::new(),
             mode: SessionPersistenceMode::Durable,
         })
     }
@@ -485,7 +485,6 @@ impl SessionStore {
             ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
-            dirty_meta_rebuilds: path_std_collections::HashSet::new(),
             mode: SessionPersistenceMode::Ephemeral,
         })
     }
@@ -669,9 +668,10 @@ impl SessionStore {
     /// Returns [`SessionStoreError`] for invalid session facts or identifiers,
     /// non-membership/durable-agent facts requested as ephemeral in a durable
     /// store, unmatched overlay unloads, lock failures, or durable I/O
-    /// failures. Rollback uncertainty poisons only the selected durable
-    /// journal. Complete frames advance sequences, membership, and metadata
-    /// before background writeback.
+    /// failures. A durable append commits or validates the canonical session
+    /// manifest before creating its journal. Rollback uncertainty poisons only
+    /// the selected durable journal. Complete frames advance sequences,
+    /// membership, and the derived activity hint before background writeback.
     pub fn append_session_event_at_with_persistence(
         &mut self,
         session_id: &str,
@@ -691,13 +691,17 @@ impl SessionStore {
         let session_dir = self.session_dir(&sid);
         let journal_path = session_dir.join("events.cbor");
         if write_to_disk {
+            if self.ensure_locked(&sid, SessionLockPolicy::Create)? {
+                self.sessions.remove(&sid);
+            }
+            ensure_meta(&session_dir.join("meta.json"))?;
+            self.load_locked_session(sid.clone())?;
             self.framed_appends
                 .ensure_appendable(&journal_path)
                 .map_err(|source| SessionStoreError::Write {
                     path: journal_path.clone(),
                     source,
                 })?;
-            let _ = self.lock_and_load_session(session_id)?;
         } else {
             self.load_session_if_needed(session_id)?;
         }
@@ -754,8 +758,9 @@ impl SessionStore {
         if write_to_disk || retain_in_memory {
             tree.advance_next_event_seq();
         }
-        // Sidecar metadata is derived from the durable event stream. Do not let
-        // a sidecar write failure make the caller retry this already-persisted
+        // The manifest's activity hint follows a durable session-journal append,
+        // but does not participate in that journal's commit. Do not let a
+        // best-effort hint refresh make the caller retry an already-persisted
         // sequence and create a duplicate record.
         if write_to_disk {
             let _ = touch_meta(&session_dir.join("meta.json"));
@@ -976,25 +981,6 @@ impl SessionStore {
         &mut self,
         session_id: SessionId,
     ) -> Result<Option<&SessionMembership>, SessionStoreError> {
-        if self.dirty_meta_rebuilds.contains(&session_id) {
-            let meta_path = self.session_dir(&session_id).join("meta.json");
-            match fs::remove_file(&meta_path) {
-                Ok(()) => {
-                    self.dirty_meta_rebuilds.remove(&session_id);
-                    self.sessions.remove(&session_id);
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    self.dirty_meta_rebuilds.remove(&session_id);
-                    self.sessions.remove(&session_id);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "tau: failed to retry repaired session metadata rebuild {}: {error}",
-                        meta_path.display()
-                    );
-                }
-            }
-        }
         if self.mode.is_durable() && !self.sessions.contains_key(&session_id) {
             let path = self.session_dir(&session_id).join("events.cbor");
             let overlay = self.ephemeral_membership_overlay.get(&session_id);
@@ -1016,24 +1002,6 @@ impl SessionStore {
                         source,
                     })?;
                 let events = recovered.records;
-                let meta_path = self.session_dir(&session_id).join("meta.json");
-                let rebuilt_meta = SessionMeta {
-                    created_at: events
-                        .first()
-                        .map_or(0, |record| record.recorded_at.get() / 1_000_000),
-                    last_touched: events
-                        .last()
-                        .map_or(0, |record| record.recorded_at.get() / 1_000_000),
-                };
-                if let Err(error) = write_meta(&meta_path, &rebuilt_meta) {
-                    eprintln!(
-                        "tau: failed to rebuild session metadata {}: {error}",
-                        meta_path.display()
-                    );
-                    self.dirty_meta_rebuilds.insert(session_id.clone());
-                } else {
-                    self.dirty_meta_rebuilds.remove(&session_id);
-                }
                 let mut membership =
                     SessionMembership::try_from_events(session_id.clone(), &events)?;
                 if let Some(overlay) = overlay {
@@ -1079,7 +1047,7 @@ impl SessionStore {
         self.sessions.values().collect()
     }
 
-    /// Records or refreshes session metadata without storing workspace state.
+    /// Creates or refreshes the canonical durable-session manifest.
     pub fn record_session_meta(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
         if self.mode.is_ephemeral() {
             return Ok(());
@@ -1088,12 +1056,31 @@ impl SessionStore {
         let _ = self.lock_and_load_session(session_id.as_str())?;
         let path = self.session_dir(&session_id).join("meta.json");
         let now = unix_now();
-        let mut meta = read_meta(&path).unwrap_or_default();
-        if meta.created_at == 0 {
-            meta.created_at = now;
-        }
+        let mut meta = match read_meta(&path) {
+            Ok(meta) => meta,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => SessionMeta {
+                created_at: now,
+                last_touched: now,
+            },
+            Err(source) => {
+                return Err(SessionStoreError::Read {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        };
         meta.last_touched = now;
         write_meta(&path, &meta)
+    }
+
+    /// Refreshes the retention hint after operational use of a loaded durable
+    /// agent.
+    pub fn record_session_activity(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return Ok(());
+        }
+        let session_id = validate_session_id(session_id)?;
+        touch_meta(&self.session_dir(&session_id).join("meta.json"))
     }
 }
 
@@ -1253,22 +1240,74 @@ fn read_meta(path: &Path) -> io::Result<SessionMeta> {
 }
 
 fn write_meta(path: &Path, meta: &SessionMeta) -> Result<(), SessionStoreError> {
+    write_meta_with(path, meta, |_| Ok(()))
+}
+
+fn write_meta_with(
+    path: &Path,
+    meta: &SessionMeta,
+    before_replace: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), SessionStoreError> {
     let bytes = serde_json::to_vec_pretty(meta).map_err(|e| SessionStoreError::Write {
         path: path.to_path_buf(),
         source: io::Error::new(io::ErrorKind::InvalidData, e),
     })?;
-    fs::write(path, bytes).map_err(|source| SessionStoreError::Write {
+    let parent = path.parent().ok_or_else(|| SessionStoreError::Write {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidInput, "manifest has no parent"),
+    })?;
+    let suffix = META_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(".meta.json.{}.{}.tmp", std::process::id(), suffix));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut temp = options.open(&temp_path)?;
+        temp.write_all(&bytes)?;
+        drop(temp);
+        before_replace(&temp_path)?;
+        fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result.map_err(|source| SessionStoreError::Write {
         path: path.to_path_buf(),
         source,
     })
 }
 
+/// Validate canonical existence or commit it before the first journal append.
+fn ensure_meta(path: &Path) -> Result<(), SessionStoreError> {
+    match read_meta(path) {
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let now = unix_now();
+            write_meta(
+                path,
+                &SessionMeta {
+                    created_at: now,
+                    last_touched: now,
+                },
+            )
+        }
+        Err(source) => Err(SessionStoreError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
     let now = unix_now();
-    let mut meta = read_meta(path).unwrap_or_default();
-    if meta.created_at == 0 {
-        meta.created_at = now;
-    }
+    let mut meta = read_meta(path).map_err(|source| SessionStoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
     meta.last_touched = now;
     write_meta(path, &meta)
 }

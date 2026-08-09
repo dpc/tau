@@ -3588,6 +3588,12 @@ impl Harness {
             let _ = store.lock_and_load_session(eager_session_id)?;
         }
         if storage_mode.is_durable() {
+            // Commit canonical existence before creating any session-owned
+            // diagnostic artifact. The lock and directory remain scaffolding
+            // until this manifest replacement succeeds.
+            store.record_session_meta(eager_session_id)?;
+        }
+        if storage_mode.is_durable() {
             crate::session_cleanup::spawn_session_cleanup(
                 sessions_dir.clone(),
                 harness_settings.session_retention(),
@@ -3637,10 +3643,6 @@ impl Harness {
             // so the session dir stays self-contained: `events.cbor` +
             // `events.jsonl` + `meta.json` + `lock`.
             let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
-            // Record metadata so `tau resume` can find this session before it has
-            // membership entries. Also acquires the flock on
-            // `<sessions_dir>/<eager_session_id>/lock`.
-            harness.store.record_session_meta(eager_session_id)?;
         }
 
         harness.install_internal_tool_handlers(internal_tool_handlers);
@@ -4155,13 +4157,13 @@ impl Harness {
         if self.storage_mode.is_ephemeral() {
             return Ok(());
         }
-        let _ = self.enable_debug_log(&sessions_dir.join(eager_session_id))?;
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
-        // Record metadata so `tau resume` can find this session before it has
-        // membership entries. Also acquires the flock on
-        // `<sessions_dir>/<eager_session_id>/lock`.
+        // Commit canonical existence before creating session-owned diagnostics.
+        // The creating lock and directory remain incomplete scaffolding if this
+        // replacement fails.
         self.store.record_session_meta(eager_session_id)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
+        let _ = self.enable_debug_log(&sessions_dir.join(eager_session_id))?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
         Ok(())
     }
 

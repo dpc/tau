@@ -156,8 +156,8 @@ test -n "$scratch_root" && test "$scratch_root" != / &&
 
 Keep failure-atomic journal tests separated by ownership. `tau-core`'s
 `record_log` tests exhaust length-prefix and payload offsets plus rollback
-truncation. Agent and session store tests prove derived-state,
-metadata/checkpoint, sequence-retry, restore-stream, and per-path poison
+truncation. Agent and session store tests prove canonical-manifest,
+derived-checkpoint, sequence-retry, restore-stream, and per-path poison
 behavior. Recovery tests append a valid frame after a partial or semantically
 invalid frame and prove the entire suffix is truncated. Read-only snapshot tests
 remain strict. Use deterministic injected I/O failures without

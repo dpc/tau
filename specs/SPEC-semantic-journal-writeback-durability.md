@@ -3,7 +3,7 @@
 ## Record justification
 
 Semantic durability spans core framed storage and sync workers, harness commit
-and external-effect ordering, journal recovery, derived checkpoints, and
+and external-effect ordering, journal recovery, journal-derived checkpoints, and
 lifecycle shutdown, so no one local artifact can own the complete contract.
 
 Authoritative agent, session, and restore CBOR journals use ordered foreground
@@ -32,11 +32,13 @@ bound.
 A process crash normally leaves dirty pages eligible for kernel writeback. A
 kernel or power crash may lose or tear the recent suffix even when an external
 effect survives. Under the existing lock, recovery truncates only an incomplete
-frame header or payload at EOF, rebuilds affected derived state, and marks that
+frame header or payload at EOF, rebuilds affected journal-derived state, and marks that
 crash-tail repair dirty. Complete frames that fail decoding, source-shape,
 sequence, or semantic validation fail closed byte-for-byte without rebuilding
 from a prefix. An empty valid prefix is allowed. Recovery never automatically
-resends uncertain external effects.
+resends uncertain external effects. Session manifest existence and creation time
+are canonical state, not journal-derived state, and recovery does not reconstruct
+them.
 
 Debug `events.jsonl` remains a separate non-authoritative, bounded,
 nonblocking, droppable diagnostic stream with no sync or shutdown-drain

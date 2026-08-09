@@ -161,6 +161,7 @@ impl Harness {
             self.fail_initial_prompt_preflight(correlation);
             return Ok(());
         }
+        self.record_durable_agent_session_activity(agent_id);
         // A fresh ordinary activation explicitly abandons a response-uncertain
         // inference restored from a previous harness runtime. The historical
         // outer start remains unterminated as the crash boundary; this runtime
@@ -313,6 +314,7 @@ impl Harness {
                 else {
                     return;
                 };
+                self.record_durable_agent_session_activity(&agent_id);
                 let Some((durable_agent_id, prompt_id, through, activation_cut)) =
                     self.agents.get_mut(&agent_id).and_then(|agent| {
                         let durable_agent_id = agent.agent_id.clone()?;
@@ -429,6 +431,20 @@ impl Harness {
             .iter()
             .position(|prompt| !prompt.is_passive_background_completion())?;
         conv.pending_prompts.remove(index)
+    }
+
+    /// Project one accepted durable-agent activation into its session's
+    /// best-effort retention hint.
+    fn record_durable_agent_session_activity(&mut self, agent_id: &AgentId) {
+        let Some(session_id) = self.agents.get(agent_id).and_then(|agent| {
+            agent
+                .persistence
+                .is_durable()
+                .then(|| agent.session_id.clone())
+        }) else {
+            return;
+        };
+        let _ = self.store.record_session_activity(session_id.as_str());
     }
 
     /// True when a fresh prompt for one agent should *not* be sent
