@@ -6,9 +6,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use tau_config::provider_settings::{
-    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredentialSlot,
-    ProviderProfileLeafSymlinkPolicy, ProviderSettingsInstanceLock,
-    parse_provider_credential_reference, read_provider_profile,
+    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredential,
+    ProviderCredentialSlot, ProviderProfileLeafSymlinkPolicy, ProviderSettingsInstanceLock,
+    parse_provider_credential, read_provider_profile,
 };
 use tau_config::secret_sources::{SecretSourceError, SecretSources, resolve_declared_secret};
 use tau_config::settings::BuiltinComponentIdentity;
@@ -283,7 +283,9 @@ pub(super) fn snapshot_and_materialize_named_provider_credentials(
             let Some(settings) = settings.as_object() else {
                 continue;
             };
-            let Ok(reference) = parse_provider_credential_reference(&profile, settings) else {
+            let Ok(ProviderCredential::Stored(reference)) =
+                parse_provider_credential(&profile, settings)
+            else {
                 continue;
             };
             let Some(source_name) = reference.named_source().map(str::to_owned) else {

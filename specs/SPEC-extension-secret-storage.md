@@ -56,7 +56,14 @@ limit below the protocol frame maximum. Each reader validates the opened
 descriptor as a regular file; on Unix a raced FIFO or special-file target is
 opened nonblocking and rejected.
 
-Version-zero credential records use a typed `kind`: `chatgpt_oauth` contains complete access token, refresh token, expiry, and account id; `api_key` contains the complete API-key value. Provider settings contain only a typed credential reference into `providers/<provider>/`.
+Version-zero credential records use a typed `kind`: `chatgpt_oauth` contains
+complete access token, refresh token, expiry, and account id; `api_key` contains
+the complete API-key value. Authenticated provider settings contain a typed
+credential reference into `providers/<provider>/`. Supported local-compatible
+profiles may instead select the exact `credential: {"kind":"none"}` form. That
+form authorizes unauthenticated requests without creating or reading a Secret
+record. Omitting `credential`, adding fields to `kind: "none"`, or selecting it
+for a provider kind that requires authentication remains invalid.
 
 Provider setup targets the exact enabled built-in provider extension instance.
 Resolution preserves a typed Tau-component identity before flattening wrapped
@@ -65,7 +72,13 @@ copying component suffix tokens. Omission selects only `provider-builtin`;
 renamed or duplicate instances require `--extension`, and missing, disabled,
 wrong-role, or wrong-component targets fail rather than being guessed.
 
-Add writes the secret first and settings last. Remove deletes settings first and the secret last. There is no cross-file transaction or automatic orphan collector. Runtime reads credentials through Secret RPC before use and reloads them for prompt-time rotation. OAuth refresh replaces only its complete typed secret with compare-and-swap; a concurrent loser reloads the winning generation instead of reusing a rotated token.
+Authenticated add writes the secret first and settings last. Keyless add writes
+only settings. Remove deletes settings first and any secret last. There is no
+cross-file transaction or automatic orphan collector. Runtime reads referenced
+credentials through Secret RPC before use and reloads them for prompt-time
+rotation. OAuth refresh replaces only its complete typed secret with
+compare-and-swap; a concurrent loser reloads the winning generation instead of
+reusing a rotated token.
 
 An API-key settings reference may bind the canonical record to one declared
 named harness secret without serializing its value. The shared closed parser
@@ -82,9 +95,10 @@ Secret-scope directory. Persistent startup may create an empty private instance
 directory as lifecycle metadata for a config-only deployment; it never locks or
 writes config and never imports a profile. Memory-only startup locks that
 directory only when it already exists and otherwise performs a non-transactional
-read-only config snapshot without creating host state. Setup resolves the selected declaration while
-holding the instance lock, writes the complete typed secret, and writes settings
-last as activation. Removal deletes settings first as deactivation, then removes
+read-only config snapshot without creating host state. Stored-credential setup
+resolves the selected declaration while holding the instance lock, writes the
+complete typed secret, and writes settings last as activation. Keyless setup
+writes settings without opening Secret scope. Removal deletes settings first as deactivation, then removes
 closed credential slots. Startup takes the same locks in the same order: under
 the instance lock it captures one bounded disjoint-union generation, resolves every
 valid named binding from the one-shot source snapshot, and under one Secret lock
@@ -100,8 +114,8 @@ policy. Rejection does not mutate or migrate the persisted settings.
 
 An actually unavailable or undeclared bound source replaces the old materialization with
 an empty API-key record, suppresses that profile, and produces a mandatory
-source-name-only warning. Direct-entry and keyless records have no binding and
-are never changed by startup refresh. Source I/O and decoding failures do not
+source-name-only warning. Direct-entry records and explicit keyless settings
+have no binding and are never changed by startup refresh. Source I/O and decoding failures do not
 overwrite an older record: they fail a required provider or skip an optional
 provider with a redacted warning. Settings snapshot/materialization failures
 follow the same required/optional policy. Memory-only harnesses take the same
@@ -119,4 +133,8 @@ reader or migration.
 
 ## Developer scratch access
 
-`tau dev tmux` grants provider access only to explicit `(extension instance, provider)` pairs. It copies exactly the selected credential-free settings file and provider secret subtree into private scratch roots. It never mounts or reads credentials in place from the real state tree.
+`tau dev tmux` grants provider access only to explicit `(extension instance,
+provider)` pairs. It copies exactly the selected credential-free settings file
+and, for a stored-credential profile, its provider Secret subtree into private
+scratch roots. An explicit keyless profile has no Secret subtree to copy. The
+helper never mounts or reads credentials in place from the real state tree.

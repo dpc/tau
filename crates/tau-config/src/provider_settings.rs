@@ -1,5 +1,5 @@
 //! Shared provider-profile bounds, safe reads, lifecycle locking, and closed
-//! credential-reference schema.
+//! credential-selection schema.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -131,23 +131,34 @@ pub struct ProviderCredentialReference {
     named_source: Option<String>,
 }
 
-/// Error returned for an invalid credential-free provider settings binding.
+/// One explicit provider authentication mode selected by portable settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderCredentialReferenceError {
+pub enum ProviderCredential {
+    /// Load a typed credential record from the configured instance's Secret
+    /// scope.
+    Stored(ProviderCredentialReference),
+    /// Send requests without authentication and perform no Secret-scope lookup.
+    Keyless,
+}
+
+/// Error returned for an invalid stored or keyless provider credential
+/// selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderCredentialError {
     /// Redacted explanation of the schema violation.
     message: String,
 }
 
-impl fmt::Display for ProviderCredentialReferenceError {
+impl fmt::Display for ProviderCredentialError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.message.fmt(formatter)
     }
 }
 
-impl std::error::Error for ProviderCredentialReferenceError {}
+impl std::error::Error for ProviderCredentialError {}
 
-fn invalid(message: impl Into<String>) -> ProviderCredentialReferenceError {
-    ProviderCredentialReferenceError {
+fn invalid(message: impl Into<String>) -> ProviderCredentialError {
+    ProviderCredentialError {
         message: message.into(),
     }
 }
@@ -159,7 +170,7 @@ impl ProviderCredentialReference {
         provider: &ProviderName,
         slot: ProviderCredentialSlot,
         named_source: Option<&str>,
-    ) -> Result<Self, ProviderCredentialReferenceError> {
+    ) -> Result<Self, ProviderCredentialError> {
         if slot == ProviderCredentialSlot::OAuth && named_source.is_some() {
             return Err(invalid("OAuth credentials cannot bind a named source"));
         }
@@ -233,7 +244,20 @@ struct SerializedReference<'a> {
 pub fn parse_provider_credential_reference(
     provider: &ProviderName,
     settings: &serde_json::Map<String, serde_json::Value>,
-) -> Result<ProviderCredentialReference, ProviderCredentialReferenceError> {
+) -> Result<ProviderCredentialReference, ProviderCredentialError> {
+    match parse_provider_credential(provider, settings)? {
+        ProviderCredential::Stored(reference) => Ok(reference),
+        ProviderCredential::Keyless => Err(invalid(
+            "provider settings select keyless authentication".to_owned(),
+        )),
+    }
+}
+
+/// Parse the closed stored-credential or explicitly keyless provider schema.
+pub fn parse_provider_credential(
+    provider: &ProviderName,
+    settings: &serde_json::Map<String, serde_json::Value>,
+) -> Result<ProviderCredential, ProviderCredentialError> {
     if settings.contains_key("auth")
         || settings.contains_key("api_key")
         || settings.contains_key("api_key_secret")
@@ -252,6 +276,14 @@ pub fn parse_provider_credential_reference(
         .get("kind")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid("provider credential reference is missing kind".to_owned()))?;
+    if kind == "none" {
+        if credential.len() != 1 {
+            return Err(invalid(
+                "keyless provider credential has unknown fields".to_owned(),
+            ));
+        }
+        return Ok(ProviderCredential::Keyless);
+    }
     let slot = match kind {
         "oauth" => ProviderCredentialSlot::OAuth,
         "api_key" => ProviderCredentialSlot::ApiKey,
@@ -303,6 +335,7 @@ pub fn parse_provider_credential_reference(
         ));
     }
     ProviderCredentialReference::new(provider, slot, named_source.as_deref())
+        .map(ProviderCredential::Stored)
 }
 
 #[cfg(test)]

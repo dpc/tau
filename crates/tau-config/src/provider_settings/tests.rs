@@ -11,6 +11,34 @@ fn parse(value: serde_json::Value) -> Result<ProviderCredentialReference, String
         .map_err(|error| error.to_string())
 }
 
+/// Proves keyless authentication requires the exact explicit marker while a
+/// missing marker and keyless objects carrying Secret authority remain invalid.
+#[test]
+fn parses_only_explicit_closed_keyless_credentials() {
+    let keyless = serde_json::json!({"credential": {"kind": "none"}});
+    assert_eq!(
+        parse_provider_credential(
+            &provider(),
+            keyless.as_object().expect("keyless settings object")
+        )
+        .expect("explicit keyless credential"),
+        ProviderCredential::Keyless
+    );
+    for invalid in [
+        serde_json::json!({}),
+        serde_json::json!({"credential": {"kind": "none", "secret_path": "providers/deepseek/api-key.json"}}),
+        serde_json::json!({"credential": {"kind": "none", "source": {"kind": "named_secret", "name": "key"}}}),
+    ] {
+        assert!(
+            parse_provider_credential(
+                &provider(),
+                invalid.as_object().expect("invalid settings object")
+            )
+            .is_err()
+        );
+    }
+}
+
 /// Proves the shared parser accepts only canonical direct and named API-key
 /// references and preserves the selected source exactly.
 #[test]

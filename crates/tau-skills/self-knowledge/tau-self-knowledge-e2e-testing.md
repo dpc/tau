@@ -53,18 +53,22 @@ scratch tmux session:
 tau provider list
 ```
 
-The setup registration consists of credential-free settings and one typed
-credential directory:
+An authenticated setup registration consists of credential-free settings and
+one typed credential directory:
 
 ```text
 ~/.local/state/tau/providers/<extension>/<provider>.json
 ~/.local/state/tau/secrets/ext/<extension>/providers/<provider>/
 ```
 
+An explicit keyless registration consists only of its settings file and has no
+provider credential directory.
+
 For provider-management details, read
 `tau-self-knowledge-ext-provider-builtin`.
 
-Only those exact registration pairs are copied into scratch Tau state. Unrelated
+Only those exact registration pairs are copied into scratch Tau state. A
+keyless pair copies settings only. Unrelated
 providers, sessions, logs, general
 `harness.yaml`, `cli.yaml`, and other user config/state are deliberately not
 copied. `tau dev tmux start` enables every exact extension instance named by the

@@ -78,10 +78,14 @@ bounded best-effort background writer; overload, write failure, or process
 shutdown can omit captures but never delay provider or UI work. Detailed
 credential and response controls are owned by [`SECURITY.md`](../SECURITY.md).
 
-Provider settings never contain OAuth or API-key values. The extension reloads
-typed version-zero credentials through its configured-instance Secret scope and
-uses compare-and-swap for rotating OAuth refresh tokens. Credential rotation is
-visible without restart; settings changes require restart. See
+Provider settings never contain OAuth or API-key values. Authenticated profiles
+reference typed version-zero credentials in their configured-instance Secret
+scope. Supported local-compatible profiles may instead explicitly select
+`credential: {"kind":"none"}`; they perform no Secret lookup. Missing
+credential selection remains invalid, so credential loss cannot silently become
+an unauthenticated request. The extension uses compare-and-swap for rotating
+OAuth refresh tokens. Credential rotation is visible without restart; settings
+changes require restart. See
 [SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
 
 ## Runtime and worker flow

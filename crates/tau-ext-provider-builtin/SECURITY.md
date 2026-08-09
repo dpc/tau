@@ -79,12 +79,15 @@ implementation.
 
 ## Scoped credential records
 
-Credential-free settings contain one deterministic `credential.secret_path`.
-The runtime reads a typed version-zero OAuth or API-key record through Secret
-RPC before publishing that provider's models and again at every prompt boundary.
-Unavailable, malformed, wrong-kind, or wrong-version records exclude the
-provider. Diagnostics may identify provider names and safe error categories but
-never secret paths, values, or host filesystem paths.
+Authenticated settings contain one deterministic `credential.secret_path`.
+Supported local-compatible profiles may instead use the exact explicit
+`credential: {"kind":"none"}` marker, which neither creates nor reads a Secret
+record. Missing or malformed credential selection remains invalid. For stored
+credentials, the runtime reads a typed version-zero OAuth or API-key record
+through Secret RPC before publishing that provider's models and again at every
+prompt boundary. Unavailable, malformed, wrong-kind, or wrong-version records
+exclude the provider. Diagnostics may identify provider names and safe error
+categories but never secret paths, values, or host filesystem paths.
 
 Initial Configure validates every filename and full provider profile before
 retaining one parsed immutable snapshot or publishing models. One invalid entry

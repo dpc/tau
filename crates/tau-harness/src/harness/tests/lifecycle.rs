@@ -2546,44 +2546,47 @@ fn provider_startup_source_error_preserves_stale_credential() {
     assert_eq!(std::fs::read(credential).expect("credential"), stale);
 }
 
-/// Proves direct and keyless credential records are outside startup
-/// rematerialization authority when their settings contain no named source.
+/// Proves direct stored credentials remain outside rematerialization authority
+/// while an explicit keyless marker creates and changes no Secret state.
 #[test]
-fn provider_startup_does_not_replace_direct_or_keyless_records() {
+fn provider_startup_preserves_direct_and_explicit_keyless_secret_state() {
     let temp = TempDir::new().expect("tempdir");
     let state = temp.path().join("state");
     let settings =
         tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
             .expect("settings");
     std::fs::create_dir_all(&settings).expect("settings root");
-    for (provider, value) in [("direct", "direct-key"), ("keyless", "")] {
-        std::fs::write(
-            settings.join(format!("{provider}.json")),
-            serde_json::to_vec(&serde_json::json!({
-                "kind": "chat_completions",
-                "credential": {
-                    "kind": "api_key",
-                    "secret_path": format!("providers/{provider}/api-key.json")
-                }
-            }))
-            .expect("settings"),
-        )
-        .expect("settings file");
-        let credential = state.join(format!(
-            "secrets/ext/provider-work/providers/{provider}/api-key.json"
-        ));
-        std::fs::create_dir_all(credential.parent().expect("parent")).expect("credential root");
-        std::fs::write(
-            credential,
-            serde_json::to_vec(&serde_json::json!({
-                "version": 0, "kind": "api_key", "value": value
-            }))
-            .expect("credential"),
-        )
-        .expect("credential file");
-    }
+    std::fs::write(
+        settings.join("direct.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "kind": "chat_completions",
+            "credential": {
+                "kind": "api_key",
+                "secret_path": "providers/direct/api-key.json"
+            }
+        }))
+        .expect("direct settings"),
+    )
+    .expect("direct settings file");
+    std::fs::write(
+        settings.join("keyless.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "kind": "chat_completions",
+            "credential": {"kind": "none"}
+        }))
+        .expect("keyless settings"),
+    )
+    .expect("keyless settings file");
+    let direct_credential = state.join("secrets/ext/provider-work/providers/direct/api-key.json");
+    std::fs::create_dir_all(direct_credential.parent().expect("parent")).expect("credential root");
+    let direct_record = serde_json::to_vec(&serde_json::json!({
+        "version": 0, "kind": "api_key", "value": "direct-key"
+    }))
+    .expect("direct record");
+    std::fs::write(&direct_credential, &direct_record).expect("direct credential");
+    let keyless_credential = state.join("secrets/ext/provider-work/providers/keyless/api-key.json");
 
-    provider_startup::snapshot_and_materialize_named_provider_credentials(
+    let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
         &builtin_provider_startup_config(None),
         None,
         &state,
@@ -2591,16 +2594,12 @@ fn provider_startup_does_not_replace_direct_or_keyless_records() {
     )
     .expect("startup snapshot");
 
-    for (provider, value) in [("direct", "direct-key"), ("keyless", "")] {
-        let record: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(state.join(format!(
-                "secrets/ext/provider-work/providers/{provider}/api-key.json"
-            )))
-            .expect("credential"),
-        )
-        .expect("typed record");
-        assert_eq!(record["value"], value);
-    }
+    assert!(snapshot.settings["provider-work"].contains_key("keyless.json"));
+    assert_eq!(
+        std::fs::read(direct_credential).expect("direct credential"),
+        direct_record
+    );
+    assert!(!keyless_credential.exists());
 }
 
 /// Proves all configured Provider instances retain bounded settings snapshots,

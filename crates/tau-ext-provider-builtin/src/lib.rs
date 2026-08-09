@@ -72,7 +72,8 @@ use tau_client::{
     RawEventContext, TauExtension, TauExtensionRunner,
 };
 use tau_config::provider_settings::{
-    ProviderCredentialReference, ProviderCredentialSlot, parse_provider_credential_reference,
+    ProviderCredential, ProviderCredentialReference, ProviderCredentialSlot,
+    parse_provider_credential,
 };
 use tau_config::settings::BuiltinComponentIdentity;
 use tau_proto::{
@@ -167,10 +168,8 @@ impl ChatGptProfile {
 #[derive(Clone, Debug, Default)]
 pub struct BuiltinProviderProfiles {
     providers: BTreeMap<ProviderName, BuiltinProviderProfile>,
-    credential_paths: BTreeMap<ProviderName, tau_proto::ExtensionDataPath>,
-    /// API-key profiles whose empty record means an unavailable named source,
-    /// rather than an intentionally keyless direct-entry profile.
-    named_api_key_profiles: HashSet<ProviderName>,
+    /// Explicit authentication selection retained for each parsed profile.
+    credentials: BTreeMap<ProviderName, ProviderCredential>,
 }
 
 impl BuiltinProviderProfiles {
@@ -1020,7 +1019,7 @@ fn cmd_add_responses(
             transport,
             compat: responses::ResponsesCompat::default(),
         }),
-        api_key_source,
+        ProviderSetupInput::ApiKey(api_key_source),
         target,
     )?;
     Ok(())
@@ -1052,7 +1051,7 @@ fn cmd_add_chatgpt(
             auth,
             responses_lite_compatibility,
         }),
-        ApiKeySource::Keyless,
+        ProviderSetupInput::ProfileOAuth,
         target,
     )?;
     Ok(())
@@ -1087,7 +1086,7 @@ fn cmd_add_chat_completions(
         extension_instance,
         &name,
         &BuiltinProviderProfile::ChatCompletions(profile),
-        api_key_source,
+        ProviderSetupInput::ApiKey(api_key_source),
         target,
     )?;
     Ok(())
@@ -1123,7 +1122,7 @@ fn cmd_add_openrouter(
         extension_instance,
         &name,
         &BuiltinProviderProfile::OpenRouter(profile),
-        api_key_source,
+        ProviderSetupInput::ApiKey(api_key_source),
         target,
     )?;
     Ok(())
@@ -1198,7 +1197,7 @@ fn cmd_list_from_store(
         .into_iter()
         .filter(|profile| source_filter.is_none_or(|wanted| wanted == profile.source))
     {
-        let (parsed, _, _) =
+        let (parsed, _) =
             parse_settings_profile(&profile.provider, &profile.contents).map_err(|reason| {
                 format!(
                     "provider profile '{}' is invalid: {reason} (source={}, path={})",
@@ -1417,6 +1416,14 @@ enum ApiKeySource {
     },
 }
 
+/// Exhaustive credential input accepted by provider profile setup.
+enum ProviderSetupInput {
+    /// Serialize the OAuth credential already present in a ChatGPT profile.
+    ProfileOAuth,
+    /// Apply one explicit API-key authority selection to an API-key profile.
+    ApiKey(ApiKeySource),
+}
+
 impl ApiKeySource {
     /// Return the setup-time value or the empty materialization placeholder.
     fn value(&self) -> String {
@@ -1489,32 +1496,28 @@ fn save_profile(
     extension_instance: &tau_proto::ExtensionName,
     name: &ProviderName,
     profile: &BuiltinProviderProfile,
-    api_key_source: ApiKeySource,
+    credential_input: ProviderSetupInput,
     target: setup_store::ProfileTarget,
 ) -> Result<(), Box<dyn Error>> {
     let ProviderSetupPayload {
         settings,
-        slot,
-        secret,
-        named_source,
-    } = provider_setup_payload(name, profile, api_key_source)?;
+        credential,
+    } = provider_setup_payload(name, profile, credential_input)?;
+    let publishes_secret = matches!(credential, setup_store::CredentialSetup::Stored { .. });
     let settings_output = settings.clone();
     let settings_path = setup_store::SetupStore::open_default()?.apply_to(
         &setup_store::ProviderSetupPlan {
             extension_instance: extension_instance.clone(),
             provider: name.clone(),
             settings,
-            secret: setup_store::SecretWrite {
-                path: slot.path(name),
-                contents: setup_store::SecretBytes::new(secret),
-            },
-            named_source,
+            credential,
         },
         target,
     )?;
     if target == setup_store::ProfileTarget::Stdout {
         write_dotfiles_profile(
             &settings_output,
+            publishes_secret,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )?;
@@ -1535,34 +1538,38 @@ fn save_profile(
 
 fn write_dotfiles_profile(
     settings: &[u8],
+    publishes_secret: bool,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> path_std_io::Result<()> {
     stdout.write_all(settings)?;
     stdout.write_all(b"\n")?;
-    writeln!(
-        stderr,
-        "Published the host-local credential; deploy this config profile before restart."
-    )?;
+    if publishes_secret {
+        writeln!(
+            stderr,
+            "Published the host-local credential; deploy this config profile before restart."
+        )?;
+    } else {
+        writeln!(
+            stderr,
+            "This keyless profile needs no host-local credential; deploy it before restart."
+        )?;
+    }
     Ok(())
 }
 
-/// Credential-free settings and one closed typed-secret publication plan.
+/// Credential-free settings and an exhaustive credential publication plan.
 struct ProviderSetupPayload {
     /// Credential-free provider settings.
     settings: Vec<u8>,
-    /// Closed credential family and exact path authority.
-    slot: ProviderCredentialSlot,
-    /// Complete serialized typed credential record.
-    secret: Vec<u8>,
-    /// Named source resolved only after the instance lifecycle lock is held.
-    named_source: Option<setup_store::NamedSecretSource>,
+    /// Exhaustive keyless or stored credential publication selection.
+    credential: setup_store::CredentialSetup,
 }
 
 fn provider_setup_payload(
     name: &ProviderName,
     profile: &BuiltinProviderProfile,
-    api_key_source: ApiKeySource,
+    credential_input: ProviderSetupInput,
 ) -> Result<ProviderSetupPayload, Box<dyn Error>> {
     use credential_record::{ApiKeyCredential, ChatGptOAuthCredential};
 
@@ -1570,6 +1577,24 @@ fn provider_setup_payload(
     let object = settings
         .as_object_mut()
         .ok_or("provider settings must serialize as an object")?;
+    let api_key_source = match (profile, credential_input) {
+        (BuiltinProviderProfile::Chatgpt(_), ProviderSetupInput::ProfileOAuth) => None,
+        (
+            BuiltinProviderProfile::ChatCompletions(_)
+            | BuiltinProviderProfile::OpenRouter(_)
+            | BuiltinProviderProfile::Responses(_),
+            ProviderSetupInput::ApiKey(source),
+        ) => Some(source),
+        (BuiltinProviderProfile::Chatgpt(_), ProviderSetupInput::ApiKey(_)) => {
+            return Err("ChatGPT setup requires profile OAuth credentials".into());
+        }
+        (
+            BuiltinProviderProfile::ChatCompletions(_)
+            | BuiltinProviderProfile::OpenRouter(_)
+            | BuiltinProviderProfile::Responses(_),
+            ProviderSetupInput::ProfileOAuth,
+        ) => return Err("API-key provider setup requires an API-key authority".into()),
+    };
     let (slot, secret) = match profile {
         BuiltinProviderProfile::Chatgpt(profile) => {
             object.remove("auth");
@@ -1603,24 +1628,57 @@ fn provider_setup_payload(
             )
         }
     };
-    let reference = ProviderCredentialReference::new(
-        name,
-        slot,
-        match &api_key_source {
-            ApiKeySource::Named { name, .. } => Some(name.as_str()),
-            ApiKeySource::Direct(_) | ApiKeySource::Keyless => None,
-        },
-    )?;
-    object.insert("credential".to_owned(), reference.to_value());
+    let keyless = matches!(
+        (profile, api_key_source.as_ref()),
+        (
+            BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::Responses(_),
+            Some(ApiKeySource::Keyless)
+        )
+    );
+    if matches!(
+        (profile, api_key_source.as_ref()),
+        (
+            BuiltinProviderProfile::OpenRouter(_),
+            Some(ApiKeySource::Keyless)
+        )
+    ) {
+        return Err("OpenRouter requires an API key".into());
+    }
+    let reference = (!keyless)
+        .then(|| {
+            ProviderCredentialReference::new(
+                name,
+                slot,
+                match api_key_source.as_ref() {
+                    Some(ApiKeySource::Named { name, .. }) => Some(name.as_str()),
+                    None | Some(ApiKeySource::Direct(_) | ApiKeySource::Keyless) => None,
+                },
+            )
+        })
+        .transpose()?;
+    object.insert(
+        "credential".to_owned(),
+        reference.as_ref().map_or_else(
+            || serde_json::json!({"kind": "none"}),
+            ProviderCredentialReference::to_value,
+        ),
+    );
     Ok(ProviderSetupPayload {
         settings: serde_json::to_vec_pretty(&settings)?,
-        slot,
-        secret,
-        named_source: match api_key_source {
-            ApiKeySource::Named { name, declaration } => {
-                Some(setup_store::NamedSecretSource { name, declaration })
-            }
-            ApiKeySource::Direct(_) | ApiKeySource::Keyless => None,
+        credential: match reference {
+            None => setup_store::CredentialSetup::Keyless,
+            Some(_) => setup_store::CredentialSetup::Stored {
+                secret: setup_store::SecretWrite {
+                    path: slot.path(name),
+                    contents: setup_store::SecretBytes::new(secret),
+                },
+                named_source: match api_key_source {
+                    Some(ApiKeySource::Named { name, declaration }) => {
+                        Some(setup_store::NamedSecretSource { name, declaration })
+                    }
+                    None | Some(ApiKeySource::Direct(_) | ApiKeySource::Keyless) => None,
+                },
+            },
         },
     })
 }
@@ -1695,17 +1753,13 @@ fn insert_settings_profile(
     name: ProviderName,
     contents: &[u8],
 ) -> Result<(), ProviderSettingsValidationError> {
-    let (profile, credential_path, named_api_key) = parse_settings_profile(&name, contents)
-        .map_err(|reason| ProviderSettingsValidationError {
+    let (profile, credential) = parse_settings_profile(&name, contents).map_err(|reason| {
+        ProviderSettingsValidationError {
             provider: name.clone(),
             reason,
-        })?;
-    profiles
-        .credential_paths
-        .insert(name.clone(), credential_path);
-    if named_api_key {
-        profiles.named_api_key_profiles.insert(name.clone());
-    }
+        }
+    })?;
+    profiles.credentials.insert(name.clone(), credential);
     profiles.providers.insert(name, profile);
     Ok(())
 }
@@ -1731,10 +1785,7 @@ fn validate_configure_settings(
 fn parse_settings_profile(
     name: &ProviderName,
     contents: &[u8],
-) -> Result<
-    (BuiltinProviderProfile, tau_proto::ExtensionDataPath, bool),
-    ProviderSettingsValidationReason,
-> {
+) -> Result<(BuiltinProviderProfile, ProviderCredential), ProviderSettingsValidationReason> {
     let mut value: serde_json::Value = serde_json::from_slice(contents)
         .map_err(|_| ProviderSettingsValidationReason::InvalidJson)?;
     let object = value
@@ -1746,16 +1797,18 @@ fn parse_settings_profile(
     {
         return Err(ProviderSettingsValidationReason::CredentialFieldsPresent);
     }
-    let reference = parse_provider_credential_reference(name, object)
+    let credential = parse_provider_credential(name, object)
         .map_err(|_| ProviderSettingsValidationReason::InvalidCredentialReference)?;
     object
         .remove("credential")
         .expect("validated reference must be present");
-    match reference.slot() {
-        ProviderCredentialSlot::OAuth => {
+    match &credential {
+        ProviderCredential::Stored(reference)
+            if reference.slot() == ProviderCredentialSlot::OAuth =>
+        {
             object.insert("auth".to_owned(), serde_json::json!({}));
         }
-        ProviderCredentialSlot::ApiKey => {
+        ProviderCredential::Stored(_) | ProviderCredential::Keyless => {
             object.insert("api_key".to_owned(), serde_json::json!(""));
         }
     }
@@ -1764,26 +1817,29 @@ fn parse_settings_profile(
     profile
         .validate()
         .map_err(|_| ProviderSettingsValidationReason::InvalidProfile)?;
-    let profile_matches_kind = matches!(
-        (&profile, reference.slot()),
+    let profile_matches_kind = match (&profile, &credential) {
+        (BuiltinProviderProfile::Chatgpt(_), ProviderCredential::Stored(reference)) => {
+            reference.slot() == ProviderCredentialSlot::OAuth
+        }
         (
-            BuiltinProviderProfile::Chatgpt(_),
-            ProviderCredentialSlot::OAuth
-        ) | (
             BuiltinProviderProfile::ChatCompletions(_)
-                | BuiltinProviderProfile::OpenRouter(_)
-                | BuiltinProviderProfile::Responses(_),
-            ProviderCredentialSlot::ApiKey
-        )
-    );
+            | BuiltinProviderProfile::OpenRouter(_)
+            | BuiltinProviderProfile::Responses(_),
+            ProviderCredential::Stored(reference),
+        ) => reference.slot() == ProviderCredentialSlot::ApiKey,
+        (
+            BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::Responses(_),
+            ProviderCredential::Keyless,
+        ) => true,
+        (
+            BuiltinProviderProfile::Chatgpt(_) | BuiltinProviderProfile::OpenRouter(_),
+            ProviderCredential::Keyless,
+        ) => false,
+    };
     if !profile_matches_kind {
         return Err(ProviderSettingsValidationReason::CredentialKindMismatch);
     }
-    Ok((
-        profile,
-        reference.path().clone(),
-        reference.named_source().is_some(),
-    ))
+    Ok((profile, credential))
 }
 
 fn hydrate_profile_credentials(
@@ -1792,10 +1848,15 @@ fn hydrate_profile_credentials(
 ) {
     let names = profiles.providers.keys().cloned().collect::<Vec<_>>();
     for name in names {
-        let Some(path) = profiles.credential_paths.get(&name).cloned() else {
+        let Some(credential) = profiles.credentials.get(&name).cloned() else {
             profiles.providers.remove(&name);
             continue;
         };
+        let ProviderCredential::Stored(reference) = credential else {
+            continue;
+        };
+        let path = reference.path().clone();
+        let requires_value = reference.named_source().is_some();
         let result = client.request(
             tau_proto::ExtensionDataScope::Secret,
             tau_proto::ExtensionDataRequestOp::ReadFile { path },
@@ -1828,39 +1889,39 @@ fn hydrate_profile_credentials(
                     .map(credential_record::ChatGptOAuthCredential::into_auth)
                     .map(|auth| profile.auth = auth)
             }
-            Some(BuiltinProviderProfile::ChatCompletions(profile)) => serde_json::from_slice::<
-                credential_record::ApiKeyCredential,
-            >(&contents)
-            .map_err(|_| ())
-            .map(credential_record::ApiKeyCredential::into_value)
-            .and_then(|value| {
-                (!profiles.named_api_key_profiles.contains(&name) || !value.trim().is_empty())
-                    .then_some(value)
-                    .ok_or(())
-            })
-            .map(|value| profile.api_key = value),
-            Some(BuiltinProviderProfile::OpenRouter(profile)) => serde_json::from_slice::<
-                credential_record::ApiKeyCredential,
-            >(&contents)
-            .map_err(|_| ())
-            .map(credential_record::ApiKeyCredential::into_value)
-            .and_then(|value| {
-                (!profiles.named_api_key_profiles.contains(&name) || !value.trim().is_empty())
-                    .then_some(value)
-                    .ok_or(())
-            })
-            .map(|value| profile.api_key = value),
-            Some(BuiltinProviderProfile::Responses(profile)) => serde_json::from_slice::<
-                credential_record::ApiKeyCredential,
-            >(&contents)
-            .map_err(|_| ())
-            .map(credential_record::ApiKeyCredential::into_value)
-            .and_then(|value| {
-                (!profiles.named_api_key_profiles.contains(&name) || !value.trim().is_empty())
-                    .then_some(value)
-                    .ok_or(())
-            })
-            .map(|value| profile.api_key = value),
+            Some(BuiltinProviderProfile::ChatCompletions(profile)) => {
+                serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
+                    .map_err(|_| ())
+                    .map(credential_record::ApiKeyCredential::into_value)
+                    .and_then(|value| {
+                        (!requires_value || !value.trim().is_empty())
+                            .then_some(value)
+                            .ok_or(())
+                    })
+                    .map(|value| profile.api_key = value)
+            }
+            Some(BuiltinProviderProfile::OpenRouter(profile)) => {
+                serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
+                    .map_err(|_| ())
+                    .map(credential_record::ApiKeyCredential::into_value)
+                    .and_then(|value| {
+                        (!requires_value || !value.trim().is_empty())
+                            .then_some(value)
+                            .ok_or(())
+                    })
+                    .map(|value| profile.api_key = value)
+            }
+            Some(BuiltinProviderProfile::Responses(profile)) => {
+                serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
+                    .map_err(|_| ())
+                    .map(credential_record::ApiKeyCredential::into_value)
+                    .and_then(|value| {
+                        (!requires_value || !value.trim().is_empty())
+                            .then_some(value)
+                            .ok_or(())
+                    })
+                    .map(|value| profile.api_key = value)
+            }
             None => continue,
         };
         if valid.is_err() {

@@ -133,8 +133,9 @@ An extension entry can:
 - declare the Tau-managed secrets that the harness may inject; and
 - set `tool_prefix` to distinguish tools from multiple configured instances.
 
-The built-in provider extension stores credentials in its private Secret scope;
-its settings contain only deterministic references. See
+The built-in provider extension stores authenticated-profile credentials in its
+private Secret scope. Supported local-compatible settings may instead contain
+an explicit keyless marker and have no Secret record. See
 [providers](providers.md#scoped-provider-credentials) for rotation and restart
 semantics.
 

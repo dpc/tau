@@ -24,10 +24,21 @@ pub(crate) struct ProviderSetupPlan {
     pub(crate) provider: tau_proto::ProviderName,
     /// Credential-free provider settings JSON.
     pub(crate) settings: Vec<u8>,
-    /// Complete typed credential record.
-    pub(crate) secret: SecretWrite,
-    /// Configured named source resolved inside the instance transaction.
-    pub(crate) named_source: Option<NamedSecretSource>,
+    /// Exhaustive keyless or stored credential publication selection.
+    pub(crate) credential: CredentialSetup,
+}
+
+/// Credential state published atomically before one provider profile.
+pub(crate) enum CredentialSetup {
+    /// Publish settings without creating or changing Secret state.
+    Keyless,
+    /// Publish one typed Secret record before activating settings.
+    Stored {
+        /// Complete typed credential record and canonical destination.
+        secret: SecretWrite,
+        /// Configured named source resolved inside the instance transaction.
+        named_source: Option<NamedSecretSource>,
+    },
 }
 
 /// Destination selected for a provider profile created by the CLI.
@@ -278,7 +289,14 @@ impl SetupStore {
                 ),
             ));
         }
-        let named_contents = match &plan.named_source {
+        let (secret, named_source) = match &plan.credential {
+            CredentialSetup::Keyless => (None, None),
+            CredentialSetup::Stored {
+                secret,
+                named_source,
+            } => (Some(secret), named_source.as_ref()),
+        };
+        let named_contents = match named_source {
             Some(source) => {
                 let sources = load_secret_sources(EnvironmentDisposition::Retain)
                     .map_err(path_std_io::Error::other)?;
@@ -303,30 +321,32 @@ impl SetupStore {
             }
             None => None,
         };
-        let secret_root = tau_config::settings::extension_secret_dir_of(
-            &self.state_dir,
-            plan.extension_instance.as_str(),
-        )
-        .map_err(path_std_io::Error::other)?;
-        ensure_private_directory_tree(
-            &self.state_dir,
-            &PathBuf::from("secrets/ext").join(plan.extension_instance.as_str()),
-        )?;
-        use fs2::FileExt as _;
-        let secret_lock = open_directory_no_follow(&secret_root)?;
-        secret_lock.lock_exclusive()?;
-        let secret_rel = sanitize_secret_path(plan.secret.path.as_str())?;
-        reject_existing_symlink_components(&secret_root, &secret_rel)?;
-        if let Some(parent) = secret_rel.parent() {
-            ensure_private_directory_tree(&secret_root, parent)?;
+        if let Some(secret) = secret {
+            let secret_root = tau_config::settings::extension_secret_dir_of(
+                &self.state_dir,
+                plan.extension_instance.as_str(),
+            )
+            .map_err(path_std_io::Error::other)?;
+            ensure_private_directory_tree(
+                &self.state_dir,
+                &PathBuf::from("secrets/ext").join(plan.extension_instance.as_str()),
+            )?;
+            use fs2::FileExt as _;
+            let secret_lock = open_directory_no_follow(&secret_root)?;
+            secret_lock.lock_exclusive()?;
+            let secret_rel = sanitize_secret_path(secret.path.as_str())?;
+            reject_existing_symlink_components(&secret_root, &secret_rel)?;
+            if let Some(parent) = secret_rel.parent() {
+                ensure_private_directory_tree(&secret_root, parent)?;
+            }
+            atomic_private_write(
+                &secret_root.join(secret_rel),
+                named_contents
+                    .as_deref()
+                    .unwrap_or_else(|| secret.contents.expose()),
+            )?;
+            fs2::FileExt::unlock(&secret_lock)?;
         }
-        atomic_private_write(
-            &secret_root.join(secret_rel),
-            named_contents
-                .as_deref()
-                .unwrap_or_else(|| plan.secret.contents.expose()),
-        )?;
-        fs2::FileExt::unlock(&secret_lock)?;
         let path = match target {
             ProfileTarget::State => {
                 reject_existing_symlink_components(&settings_root, &settings_rel)?;

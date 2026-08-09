@@ -61,8 +61,7 @@ fn responses_profile_round_trips_canonically() {
 
 fn compatibility_profiles() -> BuiltinProviderProfiles {
     BuiltinProviderProfiles {
-        credential_paths: Default::default(),
-        named_api_key_profiles: Default::default(),
+        credentials: Default::default(),
         providers: BTreeMap::from([
             (
                 ProviderName::new("chatgpt"),

@@ -59,14 +59,16 @@ fn cli_setup_plan(name: &str) -> setup_store::ProviderSetupPlan {
             }
         }))
         .expect("settings"),
-        secret: setup_store::SecretWrite {
-            path: ProviderCredentialSlot::ApiKey.path(&provider),
-            contents: setup_store::SecretBytes::new(
-                serde_json::to_vec(&credential_record::ApiKeyCredential::new("key".to_owned()))
-                    .expect("credential"),
-            ),
+        credential: setup_store::CredentialSetup::Stored {
+            secret: setup_store::SecretWrite {
+                path: ProviderCredentialSlot::ApiKey.path(&provider),
+                contents: setup_store::SecretBytes::new(
+                    serde_json::to_vec(&credential_record::ApiKeyCredential::new("key".to_owned()))
+                        .expect("credential"),
+                ),
+            },
+            named_source: None,
         },
-        named_source: None,
     }
 }
 
@@ -235,7 +237,7 @@ fn provider_dotfiles_output_separates_json_and_status() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
-    write_dotfiles_profile(settings, &mut stdout, &mut stderr).expect("output");
+    write_dotfiles_profile(settings, true, &mut stdout, &mut stderr).expect("output");
 
     assert_eq!(stdout, [settings.as_slice(), b"\n"].concat());
     assert_eq!(
@@ -283,6 +285,121 @@ fn provider_setup_component_identity_is_exact() {
     ] {
         assert!(!provider_cli_entry_is_builtin("provider-work", &entry));
     }
+}
+
+/// Proves explicit keyless Chat Completions settings load without a Secret
+/// path, while omission and unsupported keyless provider kinds fail closed.
+#[test]
+fn provider_settings_accept_only_explicit_supported_keyless_profiles() {
+    let provider = ProviderName::new("local");
+    let settings = serde_json::to_vec(&serde_json::json!({
+        "kind": "chat_completions",
+        "models": [{"id": "local-model"}],
+        "credential": {"kind": "none"}
+    }))
+    .expect("keyless settings");
+    let (profile, credential) =
+        parse_settings_profile(&provider, &settings).expect("explicit keyless profile");
+    assert!(matches!(
+        profile,
+        BuiltinProviderProfile::ChatCompletions(_)
+    ));
+    assert_eq!(credential, ProviderCredential::Keyless);
+    let responses = serde_json::to_vec(&serde_json::json!({
+        "kind": "responses",
+        "base_url": "http://localhost:8080/v1",
+        "models": [{"id": "local-model"}],
+        "credential": {"kind": "none"}
+    }))
+    .expect("keyless Responses settings");
+    assert!(matches!(
+        parse_settings_profile(&provider, &responses),
+        Ok((
+            BuiltinProviderProfile::Responses(_),
+            ProviderCredential::Keyless
+        ))
+    ));
+
+    for invalid in [
+        serde_json::json!({
+            "kind": "chat_completions",
+            "models": [{"id": "local-model"}]
+        }),
+        serde_json::json!({
+            "kind": "openrouter",
+            "models": [{"id": "remote-model"}],
+            "credential": {"kind": "none"}
+        }),
+        serde_json::json!({
+            "kind": "chatgpt",
+            "credential": {"kind": "none"}
+        }),
+    ] {
+        assert!(
+            parse_settings_profile(
+                &provider,
+                &serde_json::to_vec(&invalid).expect("invalid settings")
+            )
+            .is_err()
+        );
+    }
+}
+
+/// Proves ChatGPT's explicit OAuth setup input publishes acquired credentials
+/// and can never serialize the API-profile keyless marker.
+#[test]
+fn chatgpt_setup_keeps_oauth_credential_publication() {
+    let provider = ProviderName::new("chatgpt");
+    let payload = provider_setup_payload(
+        &provider,
+        &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: OpenAiAuth {
+                access_token: "fixture-access".to_owned(),
+                refresh_token: "fixture-refresh".to_owned(),
+                expires_at_ms: 1,
+                account_id: None,
+            },
+            responses_lite_compatibility: false,
+        }),
+        ProviderSetupInput::ProfileOAuth,
+    )
+    .expect("ChatGPT setup payload");
+    assert!(matches!(
+        payload.credential,
+        setup_store::CredentialSetup::Stored { .. }
+    ));
+    let settings: serde_json::Value =
+        serde_json::from_slice(&payload.settings).expect("ChatGPT settings");
+    assert_eq!(settings["credential"]["kind"], "oauth");
+}
+
+/// Proves keyless setup emits the explicit portable marker and never plans a
+/// dummy Secret record.
+#[test]
+fn keyless_setup_requires_no_secret_publication() {
+    let provider = ProviderName::new("local");
+    let profile = BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+        base_url: "http://localhost:8080/v1".to_owned(),
+        api_key: String::new(),
+        models: vec![test_chat_model("local-model")],
+        max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
+        extra_body: BTreeMap::new(),
+        tags: Vec::new(),
+        compat: ChatCompletionsCompat::default(),
+    });
+    let payload = provider_setup_payload(
+        &provider,
+        &profile,
+        ProviderSetupInput::ApiKey(ApiKeySource::Keyless),
+    )
+    .expect("keyless payload");
+    assert!(matches!(
+        payload.credential,
+        setup_store::CredentialSetup::Keyless
+    ));
+    let settings: serde_json::Value =
+        serde_json::from_slice(&payload.settings).expect("keyless settings");
+    assert_eq!(settings["credential"], serde_json::json!({"kind": "none"}));
 }
 
 /// Proves the canonical built-in name inherits identity only while its command
@@ -432,6 +549,34 @@ fn provider_settings_snapshot_validation_is_atomic() {
         error.reason,
         ProviderSettingsValidationReason::CredentialFieldsPresent
     );
+}
+
+/// Proves a portable explicit keyless profile crosses Configure and publishes
+/// its model without issuing a Secret request or requiring a dummy record.
+#[test]
+fn keyless_provider_configure_publishes_models_without_secret_state() {
+    let settings = serde_json::to_vec(&serde_json::json!({
+        "kind": "chat_completions",
+        "models": [{"id": "local-model"}],
+        "credential": {"kind": "none"}
+    }))
+    .expect("keyless settings");
+    let (result, frames) =
+        run_provider_configure(BTreeMap::from([("local.json".to_owned(), settings)]));
+
+    assert!(result.is_ok(), "keyless Configure should enter the runtime");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+    assert!(frames.iter().any(|frame| {
+        matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ProviderModelsDeclared(_))
+        )
+    }));
 }
 
 /// Proves invalid initial provider settings become one typed configuration
@@ -862,8 +1007,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
         account_id: None,
     };
     let mut profiles = BuiltinProviderProfiles {
-        credential_paths: Default::default(),
-        named_api_key_profiles: Default::default(),
+        credentials: Default::default(),
         providers: BTreeMap::from([
             (
                 first.clone(),
@@ -1026,8 +1170,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
     let standard = ProviderName::new("standard");
     let lite = ProviderName::new("lite");
     let mut startup = BuiltinProviderProfiles {
-        credential_paths: Default::default(),
-        named_api_key_profiles: Default::default(),
+        credentials: Default::default(),
         providers: BTreeMap::from([
             (
                 standard.clone(),
@@ -1153,8 +1296,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
         compat: chat_completions_add_compat(),
     };
     let mut profiles = BuiltinProviderProfiles {
-        credential_paths: Default::default(),
-        named_api_key_profiles: Default::default(),
+        credentials: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::ChatCompletions(provider),
@@ -1199,8 +1341,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
         models: vec![configured.clone()],
     };
     let mut profiles = BuiltinProviderProfiles {
-        credential_paths: Default::default(),
-        named_api_key_profiles: Default::default(),
+        credentials: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::OpenRouter(profile),

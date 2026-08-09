@@ -222,11 +222,13 @@ over the destination, and syncs the parent directory where supported.
 
 ## Provider credential configuration
 
-`tau-config` owns the dependency-neutral closed provider credential-reference
-schema, canonical slot paths, named-secret source resolution, and nofollow
-per-instance providers lifecycle lock. Provider setup, harness startup,
-and provider runtime share that parser and resolver rather than interpreting
-credential authority independently. Harness source capture removes one-shot
+`tau-config` owns the dependency-neutral closed provider credential-selection
+schema: either a canonical stored reference or the exact explicit keyless
+marker. It also owns canonical slot paths, named-secret source resolution, and
+the nofollow per-instance providers lifecycle lock. The built-in provider owns
+which profile kinds may select keyless operation. Provider setup, harness
+startup, and provider runtime share the selection parser and resolver rather
+than interpreting credential authority independently. Harness source capture removes one-shot
 environment variables before child spawn; setup retains them. Both modes share
 normalization, collision, environment-before-file precedence, trimming,
 optionality, UTF-8 failure, and safe-name rules.

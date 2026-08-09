@@ -628,12 +628,12 @@ without a marker. HTTP/SSE and WebSocket serialize the same cache fields.
 `tau provider add` defaults to mutable state under the selected enabled built-in
 provider extension instance. `--config` writes the credential-free JSON to XDG
 config instead, and `--config --output -` prints canonical JSON for redirecting
-into dotfiles while publishing the host-local Secret record:
+into dotfiles while publishing any required host-local Secret record:
 
 ```text
 $XDG_CONFIG_HOME/tau/providers/<extension>/<provider>.json
 $XDG_STATE_HOME/tau/providers/<extension>/<provider>.json
-$XDG_STATE_HOME/tau/secrets/ext/<extension>/providers/<provider>/{oauth,api-key}.json
+$XDG_STATE_HOME/tau/secrets/ext/<extension>/providers/<provider>/{oauth,api-key}.json  # authenticated only
 ```
 
 Config and state names form a disjoint union. A duplicate fails startup even when
@@ -642,13 +642,19 @@ read-only Nix store files are supported. `tau provider list` reports `config` or
 `state`, `show` prints the credential-free JSON and source path, and `remove`
 infers a unique source or accepts `--config`/`--state`.
 
-Settings contain backend and model metadata plus a deterministic credential
-reference, never OAuth tokens or API keys. The runtime loads the typed
-version-zero credential before model publication and at prompt boundaries.
-Credential rotation therefore takes effect without restart; settings changes
-require a full harness restart. Provider-process restart does not reload either
-directory, and Tau creates no imported copy or watcher. Missing or malformed
-credentials exclude that provider.
+Settings contain backend and model metadata plus either a deterministic
+credential reference or, for supported local-compatible profiles, the exact
+explicit marker `"credential": {"kind": "none"}`. They never contain OAuth
+tokens or API keys. The keyless marker performs no Secret lookup and makes the
+profile fully portable. Omitting `credential`, adding fields to the keyless
+object, or using keyless mode for a provider kind that requires authentication
+remains invalid; losing a referenced Secret therefore never turns an
+authenticated profile into unauthenticated network requests. The runtime loads
+referenced version-zero credentials before model publication and at prompt
+boundaries. Credential rotation therefore takes effect without restart;
+settings changes require a full harness restart. Provider-process restart does
+not reload either directory, and Tau creates no imported copy or watcher.
+Missing or malformed referenced credentials exclude that provider.
 Initial Configure validates the complete bounded settings snapshot before
 retaining it or publishing any model. One invalid filename or profile—including
 legacy `api_key_secret`, inline API keys, or mixed credential fields—rejects the
@@ -673,6 +679,8 @@ consumed for materialization and is not copied into `Configure.secrets`.
 Provider setup/removal and startup serialize per configured instance; the exact
 startup settings snapshot that selects the source also becomes the immutable
 Configure snapshot.
+Keyless setup writes only the explicit portable profile. It does not create an
+empty or dummy API-key record.
 
 Generic Chat Completions models do not support standalone compaction. A local
 model can opt in to Tau summary compaction by declaring its context window plus

@@ -31,6 +31,25 @@ fn config_target_uses_portable_profile_and_host_local_secret() {
     assert_eq!(snapshot.profiles[0].source, ProfileSource::Config);
 }
 
+/// Proves an explicitly keyless portable setup writes only its profile and
+/// never creates a dummy Secret tree or record.
+#[test]
+fn keyless_config_target_does_not_publish_secret_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let mut keyless = plan();
+    keyless.settings =
+        br#"{"kind":"chat_completions","models":[{"id":"local"}],"credential":{"kind":"none"}}"#
+            .to_vec();
+    keyless.credential = CredentialSetup::Keyless;
+
+    store
+        .apply_to(&keyless, ProfileTarget::Config)
+        .expect("keyless config setup");
+
+    assert!(!temp.path().join("secrets/ext/provider-work").exists());
+}
+
 /// Proves profile inspection follows a Home Manager-style config leaf symlink
 /// to a read-only regular file outside the canonical config instance root.
 #[cfg(unix)]
@@ -198,29 +217,33 @@ fn plan() -> ProviderSetupPlan {
         extension_instance: extension(),
         provider: provider(),
         settings: br#"{"kind":"chatgpt","credential":{"kind":"oauth","secret_path":"providers/chatgpt/oauth.json"}}"#.to_vec(),
-        secret: SecretWrite {
-            path: tau_proto::ExtensionDataPath::new(
-                "providers/chatgpt/oauth.json".to_owned(),
-            ),
-            contents: SecretBytes::new(b"typed-secret".to_vec()),
+        credential: CredentialSetup::Stored {
+            secret: SecretWrite {
+                path: tau_proto::ExtensionDataPath::new(
+                    "providers/chatgpt/oauth.json".to_owned(),
+                ),
+                contents: SecretBytes::new(b"typed-secret".to_vec()),
+            },
+            named_source: None,
         },
-        named_source: None,
     }
 }
 
 fn named_plan() -> ProviderSetupPlan {
     ProviderSetupPlan {
         settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","secret_path":"providers/chatgpt/api-key.json","source":{"kind":"named_secret","name":"setup_key"}}}"#.to_vec(),
-        secret: SecretWrite {
-            path: tau_proto::ExtensionDataPath::new(
-                "providers/chatgpt/api-key.json".to_owned(),
-            ),
-            contents: SecretBytes::new(b"placeholder".to_vec()),
+        credential: CredentialSetup::Stored {
+            secret: SecretWrite {
+                path: tau_proto::ExtensionDataPath::new(
+                    "providers/chatgpt/api-key.json".to_owned(),
+                ),
+                contents: SecretBytes::new(b"placeholder".to_vec()),
+            },
+            named_source: Some(NamedSecretSource {
+                name: "setup_key".to_owned(),
+                declaration: tau_config::settings::ExtensionSecretEntry { optional: false },
+            }),
         },
-        named_source: Some(NamedSecretSource {
-            name: "setup_key".to_owned(),
-            declaration: tau_config::settings::ExtensionSecretEntry { optional: false },
-        }),
         ..plan()
     }
 }
@@ -233,13 +256,15 @@ fn direct_plan_with(settings_marker: &str, secret: &str) -> ProviderSetupPlan {
             "{{\"kind\":\"chatgpt\",\"marker\":\"{settings_marker}\",\"credential\":{{\"kind\":\"oauth\",\"secret_path\":\"providers/chatgpt/oauth.json\"}}}}"
         )
         .into_bytes(),
-        secret: SecretWrite {
-            path: tau_proto::ExtensionDataPath::new(
-                "providers/chatgpt/oauth.json".to_owned(),
-            ),
-            contents: SecretBytes::new(secret.as_bytes().to_vec()),
+        credential: CredentialSetup::Stored {
+            secret: SecretWrite {
+                path: tau_proto::ExtensionDataPath::new(
+                    "providers/chatgpt/oauth.json".to_owned(),
+                ),
+                contents: SecretBytes::new(secret.as_bytes().to_vec()),
+            },
+            named_source: None,
         },
-        named_source: None,
     }
 }
 

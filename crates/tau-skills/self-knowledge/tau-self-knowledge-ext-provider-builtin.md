@@ -46,13 +46,15 @@ tau provider remove <name>
 ```
 
 Use `--extension <instance>` when more than one enabled built-in provider
-instance exists. Setup writes the credential first and settings last; removal
-deletes settings first. Restart Tau after settings changes. Credential rotation
-is observed at the next prompt boundary without restart.
+instance exists. Authenticated setup writes the credential first and settings
+last; explicit keyless setup writes only settings. Removal deletes settings
+first. Restart Tau after settings changes. Credential rotation is observed at
+the next prompt boundary without restart.
 
 Add defaults to mutable XDG state. `--config` targets portable XDG config, and
 `--config --output -` emits canonical credential-free JSON for dotfiles while
-publishing credentials only into host-local Secret state. Config and state names
+publishing any required credential only into host-local Secret state. Explicit
+keyless output requires no Secret state. Config and state names
 must be disjoint; list/show report source identity and remove can infer a unique
 source or accept `--config`/`--state`. The retired state `provider-settings/`
 directory is never discovered; manually move only its JSON and leave Secret
@@ -84,11 +86,15 @@ For API-key profiles, setup asks for the authority first: `Enter API key now`,
 the profile kind supports keyless operation. Only direct entry opens the masked
 value prompt.
 
-Settings contain only a deterministic Secret-scope credential reference.
-Provider startup loads and validates that typed record before publishing models.
-Missing or malformed credentials exclude the profile. Runtime reloads credentials
-at prompt boundaries and refreshes ChatGPT OAuth records with compare-and-swap,
-so a losing refresher never retries a rotated token.
+Settings contain either a deterministic Secret-scope credential reference or,
+for supported local-compatible profiles, the exact explicit
+`credential: {"kind":"none"}` marker. Explicit keyless profiles create and read
+no Secret record. Missing or malformed credential selection remains invalid, so
+credential loss never silently enables unauthenticated requests. Provider
+startup loads and validates referenced typed records before publishing models;
+missing or malformed referenced credentials exclude the profile. Runtime
+reloads credentials at prompt boundaries and refreshes ChatGPT OAuth records
+with compare-and-swap, so a losing refresher never retries a rotated token.
 
 Initial Configure validates the complete bounded provider settings snapshot
 before retaining parsed profiles or publishing models. An invalid filename or
