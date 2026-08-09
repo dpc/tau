@@ -6,6 +6,9 @@ shipped default is `hidden`;
 `TAU_EXTENSION_TAU_STATE_ACCESS` accepts only those exact lowercase values and
 is a final process-wide force after all configuration layers. The CLI rejects
 that force on attach because it cannot change an existing daemon.
+Each supervised component independently defaults
+`tau_runtime_socket_access` to `hidden`; only the explicit `legacy` value
+restores its ambient view of Tau harness runtime sockets.
 
 Extension availability is layered in this order: built-in defaults, harness
 configuration/drop-ins, the selected profile, and ordered `--harness-config` layers,

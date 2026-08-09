@@ -32,6 +32,10 @@ same-user executable boundary, not hostile-code containment. `hidden` and
 preserving exact extension-owned state; they do
 not defend against procfs, ptrace, pre-opened descriptors, unrelated host data,
 or authorized secret RPC delivery.
+Supervised components also receive an empty bind-mounted harness runtime socket
+directory by default. A per-component `tau_runtime_socket_access: legacy`
+opt-out restores ambient socket discovery for a trusted component without
+changing its state or secret access.
 The launcher covers its temporary real-state staging tree with an empty
 read-only mount before exec, after installing the exact destination binds, so
 the child cannot bypass the selected view through the staging source path.
@@ -140,7 +144,14 @@ and
 [SPEC-tau-harness-session-state](crates/tau-harness/specs/SPEC-tau-harness-session-state.md).
 
 Peer harness messaging is cooperative same-UID local IPC, not a hostile-process
-sandbox or per-sender ACL. Callback correlation prevents accidental sender/route
+sandbox or per-sender ACL. Harness instances for one user are mutually trusted
+and may deliberately connect to each other's ordinary UI sockets. Together they
+form the harness side of the boundary that hides state and runtime sockets from
+agent-controlled configured components; Tau does not claim procfs, ptrace, or
+hostile same-UID containment. Harness-owned cross-session messaging retains
+runtime socket discovery. A dedicated external-message connection is admitted
+only to its message, callback-authentication, and session-probe RPCs and cannot
+reach UI or Action handlers. Callback correlation prevents accidental sender/route
 confusion before bounded admission or model-spending auto-start, while peer text
 remains model input rather than a harness instruction. Delivery is best-effort
 at-least-once: an ambiguous crash or retry can duplicate receive occurrences,

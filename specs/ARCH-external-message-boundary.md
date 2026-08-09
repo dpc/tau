@@ -54,7 +54,15 @@ egress authority.
 ## Cross-harness messages
 
 Cross-harness agent messages are local IPC between Tau harness daemons for the
-same user. They use a dedicated external-message RPC rather than generic event
+same user. All of that user's harness instances are cooperative and mutually
+trusted; Tau does not try to stop one harness from deliberately using another
+harness's ordinary UI socket. Together they isolate agent-controlled configured
+components from direct Tau state and runtime socket access by default. Hostile
+same-UID, procfs, and ptrace containment remain outside this boundary.
+Harness-owned discovery and messaging retain direct runtime socket access.
+Dedicated external-message connections may send only their cross-harness
+message, authentication, and session-probe RPCs; they cannot fall through to UI
+or Action handlers. They use a dedicated external-message RPC rather than generic event
 `emit`; extensions and ordinary UI clients cannot publish harness-owned
 `agent.message_sent` / `agent.message_received` projections directly. The
 receiving harness performs only bounded syntax and claimed-session checks before

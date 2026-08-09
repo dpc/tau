@@ -5136,3 +5136,24 @@ fn tau_state_access_supports_global_and_instance_configuration() {
         Some(TauStateAccess::ReadOnly)
     );
 }
+
+/// Ensures runtime socket access stays fail-closed unless one component
+/// explicitly requests the legacy ambient view.
+#[test]
+fn tau_runtime_socket_access_requires_an_explicit_component_opt_out() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "extensions:\n  masked:\n    command: [demo]\n  trusted:\n    command: [demo]\n    tau_runtime_socket_access: legacy\n",
+    )
+    .expect("write");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    assert_eq!(
+        settings.extensions["masked"].tau_runtime_socket_access,
+        None
+    );
+    assert_eq!(
+        settings.extensions["trusted"].tau_runtime_socket_access,
+        Some(TauRuntimeSocketAccess::Legacy)
+    );
+}

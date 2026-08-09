@@ -3,7 +3,7 @@ use std::error::Error as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::Duration;
 
-use tau_config::settings::TauStateAccess;
+use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 
 use super::*;
 
@@ -56,6 +56,7 @@ fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
         tau_state_access: TauStateAccess::Legacy,
+        tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
     }
 }
 

@@ -12,7 +12,7 @@ use std::{fs as path_std_fs, io as path_std_io};
 use tau_client::ProtocolIoMeter;
 use tau_config::settings::InvalidExtensionName;
 #[cfg(not(test))]
-use tau_config::settings::TauStateAccess;
+use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 use tau_core::ConnectionOrigin;
 use tau_proto::ClientKind;
 
@@ -252,6 +252,7 @@ fn isolated_supervised_command(
         } else {
             config.tau_state_access
         };
+        let runtime_socket_root = crate::runtime_dir::prepare_harnesses_dir()?;
         let settings_root =
             prepare_provider_settings_mount(state_dir, &config.name, kind, memory_only)?;
         let cwd = config
@@ -282,12 +283,22 @@ fn isolated_supervised_command(
                 config.name
             )));
         }
+        if config.tau_runtime_socket_access == TauRuntimeSocketAccess::Hidden
+            && cwd.starts_with(&runtime_socket_root)
+        {
+            return Err(HarnessError::Participant(format!(
+                "extension `{}` cwd must not be at or below masked Tau runtime sockets",
+                config.name
+            )));
+        }
         let empty_mask = tempfile::Builder::new()
             .prefix("tau-extension-state-mask-")
             .tempdir()?;
         let outer_mask = empty_mask.path().join("outer");
+        let runtime_socket_mask = empty_mask.path().join("runtime-sockets");
         let staging_root = empty_mask.path().join("staging");
         std::fs::create_dir(&outer_mask)?;
+        std::fs::create_dir(&runtime_socket_mask)?;
         std::fs::create_dir(&staging_root)?;
         let state_root_ref = state_root.as_deref();
         let own_target = (!memory_only).then(|| {
@@ -343,6 +354,7 @@ fn isolated_supervised_command(
                 state_root: state_root_ref,
                 tau_state_access,
                 outer_mask: &outer_mask,
+                runtime_socket_mask: &runtime_socket_mask,
                 staging_root: &staging_root,
                 secret_mask_target: secret_mask_target.as_deref(),
                 own_state: own_source.as_deref().zip(own_target.as_deref()).map(
@@ -355,6 +367,8 @@ fn isolated_supervised_command(
                         source,
                         target,
                     }),
+                runtime_socket_root: &runtime_socket_root,
+                tau_runtime_socket_access: config.tau_runtime_socket_access,
                 cwd: &cwd,
             },
         )

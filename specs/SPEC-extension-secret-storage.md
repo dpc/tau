@@ -19,6 +19,10 @@ Compare-and-swap names the BLAKE3 generation of the complete current contents. T
 Secret request and result payloads remain absent from events, journals, logs, generic debug formatting, errors, and OAuth diagnostics. Diagnostics may expose operation kind, byte count, sanitized relative identity, and typed failure only; they never expose credential bytes or host secret paths.
 
 Every supervised extension starts inside a harness-owned outer Linux user and mount namespace. The launcher makes propagation private, masks the whole Tau secret root before applying configured cwd, closes setup authority, and then executes the complete configured prefix, command, and suffix. `tau_state_access` defaults to `hidden`, which presents an empty read-only state tree; `read_only` presents the real tree recursively read-only; `legacy` retains the historical ambient view. In both restricted modes the exact persistent `<state>/ext/<instance>` tree is restored read-write. A Provider additionally receives its selected settings tree read-only. Provider debug captures cross a dedicated bounded non-journaled protocol message as opaque zstd bytes; the harness derives and writes the durable session/instance path without exposing another writable mount. Tool instances receive no Provider exception. Secrets remain masked in every mode. Any namespace, mapping, mount, cwd, or exec failure fails extension startup. Non-Linux systems have no unmasked fallback.
+Independently of state access, supervised components receive an empty read-only
+view of the Tau harness runtime socket directory. Per-component
+`tau_runtime_socket_access: legacy` restores the historical ambient socket view
+without changing state or secret access.
 
 Recursive read-only presentation uses Linux 5.12 `mount_setattr` with
 `AT_RECURSIVE`. Tau does not fall back to a non-recursive remount on older

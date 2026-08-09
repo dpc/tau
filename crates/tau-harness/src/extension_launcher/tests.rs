@@ -2,19 +2,30 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::Command;
 
-use tau_config::settings::TauStateAccess;
+use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 
 use super::{IsolationPlan, MountPlan, configure_command};
 
 /// Builds private outer and staging trees for one direct launcher test.
-fn mask_roots(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+fn mask_roots(
+    temp: &tempfile::TempDir,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let isolation = temp.path().join("isolation");
     fs::create_dir(&isolation).expect("isolation");
     let outer = isolation.join("outer");
     let staging = isolation.join("staging");
+    let runtime = isolation.join("runtime-mask");
     fs::create_dir(&outer).expect("outer");
     fs::create_dir(&staging).expect("staging");
-    (outer, staging)
+    fs::create_dir(&runtime).expect("runtime mask");
+    (outer, staging, runtime)
+}
+
+/// Creates one visible harness runtime directory for launcher policy tests.
+fn runtime_socket_root(temp: &tempfile::TempDir) -> std::path::PathBuf {
+    let runtime = temp.path().join("runtime-sockets");
+    fs::create_dir(&runtime).expect("runtime socket root");
+    runtime
 }
 
 /// Proves hidden state omits siblings while restoring only the selected owned,
@@ -37,7 +48,9 @@ fn hidden_state_restores_only_approved_nested_mounts() {
     let state = state.canonicalize().expect("canonical state");
     let own = state.join("ext/selected");
     let settings = state.join("providers/selected");
-    let (outer, staging) = mask_roots(&temp);
+    let (outer, staging, runtime_mask) = mask_roots(&temp);
+    let runtime = runtime_socket_root(&temp);
+    fs::write(runtime.join("other-harness.sock"), "socket").expect("runtime sentinel");
     let own_source = staging.join("ext/selected");
     let settings_source = staging.join("providers/selected");
     let secret_target = state.join("secrets");
@@ -48,7 +61,7 @@ fn hidden_state_restores_only_approved_nested_mounts() {
     let mut command = Command::new("/bin/sh");
     command.args([
         "-c",
-        "test ! -e \"$1/ext/sibling/value\" && test ! -e \"$1/sessions/s1/debug/provider-requests/selected\" && test ! -e \"$2/staging/secrets\" && ! touch \"$2/mutation\" && test \"$(cat \"$1/providers/selected/provider.json\")\" = settings && touch \"$1/ext/selected/owned\" && ! touch \"$1/providers/selected/mutation\"",
+        "test ! -e \"$1/ext/sibling/value\" && test ! -e \"$1/sessions/s1/debug/provider-requests/selected\" && test ! -e \"$2/staging/secrets\" && test -z \"$(find \"$3\" -mindepth 1 -maxdepth 1 -print -quit)\" && ! touch \"$2/mutation\" && test \"$(cat \"$1/providers/selected/provider.json\")\" = settings && touch \"$1/ext/selected/owned\" && ! touch \"$1/providers/selected/mutation\"",
         "sh",
         state.to_str().expect("state path"),
         outer
@@ -56,6 +69,7 @@ fn hidden_state_restores_only_approved_nested_mounts() {
             .expect("isolation parent")
             .to_str()
             .expect("isolation root"),
+        runtime.to_str().expect("runtime socket root"),
     ]);
     configure_command(
         &mut command,
@@ -64,6 +78,7 @@ fn hidden_state_restores_only_approved_nested_mounts() {
             state_root: Some(&state),
             tau_state_access: TauStateAccess::Hidden,
             outer_mask: &outer,
+            runtime_socket_mask: &runtime_mask,
             staging_root: &staging,
             secret_mask_target: Some(&secret_target),
             own_state: Some(MountPlan {
@@ -75,6 +90,8 @@ fn hidden_state_restores_only_approved_nested_mounts() {
                 target: &settings,
             }),
             test_nested_mount: None,
+            runtime_socket_root: &runtime,
+            tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             cwd: &cwd,
         },
     )
@@ -110,7 +127,9 @@ fn read_only_state_preserves_only_approved_writable_exceptions() {
     let own = state.join("ext/selected");
     let settings = state.join("providers/selected");
     let secret_target = state.join("secrets");
-    let (outer, staging) = mask_roots(&temp);
+    let (outer, staging, runtime_mask) = mask_roots(&temp);
+    let runtime = runtime_socket_root(&temp);
+    fs::write(runtime.join("other-harness.sock"), "socket").expect("runtime sentinel");
     let own_source = staging.join("ext/selected");
     let settings_source = staging.join("providers/selected");
     let nested_settings_source = settings_source.join("nested");
@@ -133,6 +152,7 @@ fn read_only_state_preserves_only_approved_writable_exceptions() {
             state_root: Some(&state),
             tau_state_access: TauStateAccess::ReadOnly,
             outer_mask: &outer,
+            runtime_socket_mask: &runtime_mask,
             staging_root: &staging,
             secret_mask_target: Some(&secret_target),
             own_state: Some(MountPlan {
@@ -144,6 +164,8 @@ fn read_only_state_preserves_only_approved_writable_exceptions() {
                 target: &settings,
             }),
             test_nested_mount: Some(&nested_settings_source),
+            runtime_socket_root: &runtime,
+            tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             cwd: &cwd,
         },
     )
@@ -163,14 +185,17 @@ fn legacy_state_keeps_ambient_state_but_hides_secrets() {
     fs::write(state.join("visible"), "visible").expect("visible sentinel");
     fs::write(state.join("secrets/value"), "secret").expect("secret sentinel");
     let state = state.canonicalize().expect("canonical state");
-    let (outer, staging) = mask_roots(&temp);
+    let (outer, staging, runtime_mask) = mask_roots(&temp);
+    let runtime = runtime_socket_root(&temp);
+    fs::write(runtime.join("other-harness.sock"), "socket").expect("runtime sentinel");
     let secret_target = state.join("secrets");
     let mut command = Command::new("/bin/sh");
     command.args([
         "-c",
-        "test \"$(cat \"$1/visible\")\" = visible && test ! -e \"$1/secrets/value\"",
+        "test \"$(cat \"$1/visible\")\" = visible && test ! -e \"$1/secrets/value\" && test \"$(cat \"$2/other-harness.sock\")\" = socket",
         "sh",
         state.to_str().expect("state path"),
+        runtime.to_str().expect("runtime socket root"),
     ]);
     configure_command(
         &mut command,
@@ -179,11 +204,14 @@ fn legacy_state_keeps_ambient_state_but_hides_secrets() {
             state_root: Some(&state),
             tau_state_access: TauStateAccess::Legacy,
             outer_mask: &outer,
+            runtime_socket_mask: &runtime_mask,
             staging_root: &staging,
             secret_mask_target: Some(&secret_target),
             own_state: None,
             provider_settings: None,
             test_nested_mount: None,
+            runtime_socket_root: &runtime,
+            tau_runtime_socket_access: TauRuntimeSocketAccess::Legacy,
             cwd: &cwd,
         },
     )
@@ -198,7 +226,8 @@ fn absent_state_root_starts_in_configured_cwd() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cwd = temp.path().join("work");
     fs::create_dir_all(&cwd).expect("cwd");
-    let (outer, staging) = mask_roots(&temp);
+    let (outer, staging, runtime_mask) = mask_roots(&temp);
+    let runtime = runtime_socket_root(&temp);
     fs::set_permissions(&outer, fs::Permissions::from_mode(0o700)).expect("mode");
     let mut command = Command::new("/bin/sh");
     command.args([
@@ -214,11 +243,14 @@ fn absent_state_root_starts_in_configured_cwd() {
             state_root: None,
             tau_state_access: TauStateAccess::Hidden,
             outer_mask: &outer,
+            runtime_socket_mask: &runtime_mask,
             staging_root: &staging,
             secret_mask_target: None,
             own_state: None,
             provider_settings: None,
             test_nested_mount: None,
+            runtime_socket_root: &runtime,
+            tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             cwd: &cwd,
         },
     )
@@ -231,7 +263,8 @@ fn absent_state_root_starts_in_configured_cwd() {
 #[test]
 fn setup_failure_fails_closed() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let (outer, staging) = mask_roots(&temp);
+    let (outer, staging, runtime_mask) = mask_roots(&temp);
+    let runtime = runtime_socket_root(&temp);
     let missing = temp.path().join("missing");
     let mut command = Command::new("/bin/true");
     configure_command(
@@ -241,11 +274,14 @@ fn setup_failure_fails_closed() {
             state_root: None,
             tau_state_access: TauStateAccess::Hidden,
             outer_mask: &outer,
+            runtime_socket_mask: &runtime_mask,
             staging_root: &staging,
             secret_mask_target: None,
             own_state: None,
             provider_settings: None,
             test_nested_mount: None,
+            runtime_socket_root: &runtime,
+            tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             cwd: &missing,
         },
     )

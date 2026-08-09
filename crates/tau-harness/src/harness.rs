@@ -15016,6 +15016,17 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
     ) -> Result<ClientMessageDisposition, HarnessError> {
+        if self.external_message_peers.contains(client_id)
+            && !matches!(
+                &message,
+                HarnessInputMessage::ExternalAgentMessage(_)
+                    | HarnessInputMessage::ExternalAgentMessageAuth(_)
+                    | HarnessInputMessage::PeerSessionProbe(_)
+                    | HarnessInputMessage::Disconnect(_)
+            )
+        {
+            return Ok(ClientMessageDisposition::Continue);
+        }
         match message {
             HarnessInputMessage::Hello(hello) => {
                 if let Err(error) = validate_protocol_version(&hello) {

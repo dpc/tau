@@ -281,6 +281,16 @@ pub fn harnesses_dir() -> PathBuf {
     root_runtime_dir().join(HARNESSES_DIR)
 }
 
+/// Creates and validates the private directory that owns harness runtime
+/// sockets.
+pub(crate) fn prepare_harnesses_dir() -> Result<PathBuf, std::io::Error> {
+    let root_dir = root_runtime_dir();
+    ensure_private_runtime_dir(&root_dir)?;
+    let harnesses_dir = root_dir.join(HARNESSES_DIR);
+    ensure_private_runtime_dir(&harnesses_dir)?;
+    harnesses_dir.canonicalize()
+}
+
 /// Returns the runtime path stem for one PID and process instance.
 #[must_use]
 pub fn harness_path_for_process(pid: u32, instance_id: &HarnessInstanceId) -> PathBuf {
@@ -793,11 +803,8 @@ pub(crate) fn prepare_harness_paths_for_instance(
 ) -> Result<HarnessPaths, std::io::Error> {
     validate_session_id_for_metadata(session_id)?;
     let pid = std::process::id();
-    let root_dir = root_runtime_dir();
-    ensure_private_runtime_dir(&root_dir)?;
-    let harnesses_dir = root_dir.join(HARNESSES_DIR);
-    ensure_private_runtime_dir(&harnesses_dir)?;
-    let path = harness_path_for_process(pid, instance_id);
+    let harnesses_dir = prepare_harnesses_dir()?;
+    let path = harnesses_dir.join(format!("{pid}-{}", instance_id.as_str()));
     Ok(HarnessPaths {
         path,
         metadata: DaemonMetadata {

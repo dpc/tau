@@ -7,7 +7,7 @@ use std::io as path_std_io;
 use std::path::Path;
 use std::process::Command;
 
-use tau_config::settings::TauStateAccess;
+use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 
 /// Prevalidated mount inputs for one supervised extension process.
 pub(crate) struct IsolationPlan<'a> {
@@ -19,6 +19,9 @@ pub(crate) struct IsolationPlan<'a> {
     pub(crate) tau_state_access: TauStateAccess,
     /// Empty tree that becomes the hidden state-root presentation.
     pub(crate) outer_mask: &'a Path,
+    /// Dedicated empty tree that becomes the hidden runtime socket
+    /// presentation.
+    pub(crate) runtime_socket_mask: &'a Path,
     /// Private bind staging directory outside the Tau state root.
     pub(crate) staging_root: &'a Path,
     /// Mandatory secret target, hidden in every mode.
@@ -27,6 +30,10 @@ pub(crate) struct IsolationPlan<'a> {
     pub(crate) own_state: Option<MountPlan<'a>>,
     /// Selected provider settings bind restored read-only.
     pub(crate) provider_settings: Option<MountPlan<'a>>,
+    /// Canonical directory containing Tau harness runtime sockets.
+    pub(crate) runtime_socket_root: &'a Path,
+    /// Selected runtime socket visibility policy.
+    pub(crate) tau_runtime_socket_access: TauRuntimeSocketAccess,
     /// Test-only staging descendant made into a real child bind mount before
     /// the state presentation is installed.
     #[cfg(test)]
@@ -67,6 +74,8 @@ struct PreExecIsolationPlan {
     tau_state_access: TauStateAccess,
     /// Empty read-only root used to mask state or secrets.
     outer_mask: std::ffi::CString,
+    /// Dedicated empty root used only to mask harness runtime sockets.
+    runtime_socket_mask: std::ffi::CString,
     /// Private bind staging root outside Tau state.
     staging_root: std::ffi::CString,
     /// Mandatory secret root mask destination when state exists.
@@ -75,6 +84,10 @@ struct PreExecIsolationPlan {
     own_state: Option<PreExecMount>,
     /// Exact read-only provider settings exception.
     provider_settings: Option<PreExecMount>,
+    /// Harness runtime socket directory hidden from the child by default.
+    runtime_socket_root: std::ffi::CString,
+    /// Effective runtime socket visibility policy.
+    tau_runtime_socket_access: TauRuntimeSocketAccess,
     /// Test-only source descendant made into a real child mount before policy
     /// application, proving recursive mount attributes reach it.
     #[cfg(test)]
@@ -111,6 +124,7 @@ pub(crate) fn configure_command(
     let isolation_root = c_path(plan.isolation_root)?;
     let state_root = plan.state_root.map(c_path).transpose()?;
     let outer_mask = c_path(plan.outer_mask)?;
+    let runtime_socket_mask = c_path(plan.runtime_socket_mask)?;
     let staging_root = c_path(plan.staging_root)?;
     let secret_mask_target = plan.secret_mask_target.map(c_path).transpose()?;
     let c_mount = |mount: MountPlan<'_>| {
@@ -121,6 +135,7 @@ pub(crate) fn configure_command(
     };
     let own_state = plan.own_state.map(c_mount).transpose()?;
     let provider_settings = plan.provider_settings.map(c_mount).transpose()?;
+    let runtime_socket_root = c_path(plan.runtime_socket_root)?;
     #[cfg(test)]
     let test_nested_mount = plan.test_nested_mount.map(c_path).transpose()?;
     let cwd = c_path(plan.cwd)?;
@@ -131,10 +146,13 @@ pub(crate) fn configure_command(
         state_root,
         tau_state_access: plan.tau_state_access,
         outer_mask,
+        runtime_socket_mask,
         staging_root,
         secret_mask_target,
         own_state,
         provider_settings,
+        runtime_socket_root,
+        tau_runtime_socket_access: plan.tau_runtime_socket_access,
         #[cfg(test)]
         test_nested_mount,
         cwd,
@@ -305,6 +323,10 @@ fn install_linux_namespace(plan: &PreExecIsolationPlan) -> path_std_io::Result<(
             bind(&mount.source, &mount.target)?;
             make_recursively_read_only(&mount.target)?;
         }
+    }
+    if plan.tau_runtime_socket_access == TauRuntimeSocketAccess::Hidden {
+        bind(&plan.runtime_socket_mask, &plan.runtime_socket_root)?;
+        remount_read_only(&plan.runtime_socket_root, false)?;
     }
 
     // The staged real state was needed only as a bind source. Existing

@@ -27,6 +27,20 @@ The recursive read-only mount operation requires Linux 5.12 or later.
 Tau never weakens a restricted mount to accommodate an older kernel:
 `mount_setattr` failure fails supervised extension startup closed.
 
+Tau also presents an empty read-only view of the harness runtime socket
+directory to every supervised component by default. A trusted component that
+must discover or connect to Tau harnesses can explicitly restore the historical
+ambient view:
+
+```yaml
+extensions:
+  trusted-coordinator:
+    tau_runtime_socket_access: legacy
+```
+
+This opt-out affects runtime socket discovery only. It does not weaken state or
+secret masking.
+
 ## Rostra
 
 The bundled `std-rostra` instance is disabled by default. It runs one full

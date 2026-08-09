@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tau_config::secret_sources::SecretSources;
-use tau_config::settings::{BuiltinComponentIdentity, TauStateAccess};
+use tau_config::settings::{BuiltinComponentIdentity, TauRuntimeSocketAccess, TauStateAccess};
 
 use super::*;
 use crate::agent::{Agent, PendingPrompt};
@@ -503,6 +503,7 @@ fn supervised_test_config(name: &str, script: &str) -> ExtensionConfig {
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
         tau_state_access: TauStateAccess::Legacy,
+        tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
     }
 }
 
@@ -863,6 +864,7 @@ fn configure_supervised_extension(
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),
         tau_state_access: TauStateAccess::Legacy,
+        tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
     });
     entry.state = ExtensionState::Spawning;
 
@@ -912,6 +914,7 @@ fn builtin_provider_startup_config(
                     .map(|declaration| BTreeMap::from([("provider_key".to_owned(), declaration)]))
                     .unwrap_or_default(),
                 tau_state_access: TauStateAccess::Legacy,
+                tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             },
         )]),
         extension_startup_diagnostics: Vec::new(),
@@ -1620,8 +1623,8 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
     );
 }
 
-/// A socket peer dedicated to external-agent messaging cannot use its initial
-/// UI classification to read extension protocol counters.
+/// A dedicated external-message peer cannot reach the UI diagnostics handler or
+/// observe extension protocol counters.
 #[test]
 fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_counters() {
     let td = TempDir::new().expect("tempdir");
@@ -1659,12 +1662,6 @@ fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_cou
     h.handle_client_message(&client_id, debug_event_stats_request("secret-ext"))
         .expect("request stats");
 
-    let notice = read_notice(&mut client);
-    assert_eq!(notice.kind, tau_proto::notice_kind::UI_COMMAND_ERROR);
-    assert_eq!(
-        notice.message,
-        "extension event stats are only available to attached local UIs"
-    );
     assert_no_message(&mut client);
     assert_no_message(&mut other_ui);
 }
@@ -3342,6 +3339,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
                 config: serde_json::json!({"token": "config-secret"}),
                 secrets: BTreeMap::new(),
                 tau_state_access: TauStateAccess::Legacy,
+                tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
             },
         )]),
         extension_startup_diagnostics: Vec::new(),

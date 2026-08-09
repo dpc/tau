@@ -442,6 +442,53 @@ fn action_invoke_routes_to_owner_and_result_returns_only_to_requester() {
     )));
 }
 
+/// A dedicated cross-harness peer has a positive RPC allowlist, so generic
+/// emission cannot fall through to either UI state changes or Action routing.
+#[test]
+fn external_message_peer_cannot_reach_ui_or_action_handlers() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut h = quiet_provider_harness(temp.path()).expect("harness");
+    let extension = connect_action_provider(&mut h, "email-ext");
+    publish_action_schema(&mut h, "email-ext", "email.list");
+    drain_sink(&extension);
+    let _external =
+        connect_test_client(&mut h, "external-message", tau_proto::ClientKind::External);
+    let external_id = crate::test_connection_id("external-message");
+    h.handle_client_message(
+        &external_id,
+        tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::test_extension_name(
+                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+            ),
+            client_kind: tau_proto::ClientKind::External,
+            expected_session_id: None,
+            capabilities: Default::default(),
+        }),
+    )
+    .expect("dedicated peer hello");
+    let selected_role = h.selected_role.clone();
+
+    for event in [
+        Event::UiRoleSelect(tau_proto::UiRoleSelect {
+            role: "engineer-senior".to_owned(),
+        }),
+        Event::ActionInvoke(action_invoke("external-action", "email-ext")),
+    ] {
+        h.handle_client_message(
+            &external_id,
+            tau_proto::HarnessInputMessage::Emit(tau_proto::Emit {
+                event: Box::new(event),
+                persist: false,
+            }),
+        )
+        .expect("denied generic emission");
+    }
+
+    assert_eq!(h.selected_role, selected_role);
+    assert!(extension.lock().expect("extension sink").is_empty());
+}
+
 #[test]
 fn duplicate_action_invocation_id_cannot_steal_result_routing() {
     let temp = TempDir::new().expect("temp dir");

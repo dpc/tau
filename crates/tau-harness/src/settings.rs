@@ -128,6 +128,8 @@ pub struct ExtensionConfig {
     pub secrets: BTreeMap<String, ExtensionSecretEntry>,
     /// Effective Tau-state presentation for this supervised extension.
     pub tau_state_access: path_tau_config_settings::TauStateAccess,
+    /// Effective Tau harness runtime socket presentation for this extension.
+    pub tau_runtime_socket_access: path_tau_config_settings::TauRuntimeSocketAccess,
 }
 
 /// Built-in extension shipped with `tau`. Used by
@@ -224,6 +226,8 @@ struct ResolvedExtension {
     secrets: BTreeMap<String, ExtensionSecretEntry>,
     /// Effective policy after global and instance configuration resolution.
     tau_state_access: path_tau_config_settings::TauStateAccess,
+    /// Effective runtime socket policy after instance configuration resolution.
+    tau_runtime_socket_access: path_tau_config_settings::TauRuntimeSocketAccess,
 }
 
 /// Merge user-provided `extensions` entries on top of the supplied
@@ -356,6 +360,7 @@ impl ResolvedExtension {
             config: builtin.config,
             secrets: builtin.secrets,
             tau_state_access,
+            tau_runtime_socket_access: path_tau_config_settings::TauRuntimeSocketAccess::Hidden,
         }
     }
 
@@ -388,6 +393,7 @@ impl ResolvedExtension {
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
             secrets: user.secrets.clone().unwrap_or_default(),
             tau_state_access: user.tau_state_access.unwrap_or_default(),
+            tau_runtime_socket_access: user.tau_runtime_socket_access.unwrap_or_default(),
         }
     }
 
@@ -438,6 +444,9 @@ impl ResolvedExtension {
         if let Some(tau_state_access) = user.tau_state_access {
             self.tau_state_access = tau_state_access;
         }
+        if let Some(tau_runtime_socket_access) = user.tau_runtime_socket_access {
+            self.tau_runtime_socket_access = tau_runtime_socket_access;
+        }
     }
 
     fn into_enabled_extension_config(
@@ -480,6 +489,7 @@ impl ResolvedExtension {
             config: self.config,
             secrets: self.secrets,
             tau_state_access: self.tau_state_access,
+            tau_runtime_socket_access: self.tau_runtime_socket_access,
         }))
     }
 }

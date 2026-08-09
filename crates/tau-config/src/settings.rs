@@ -73,6 +73,18 @@ pub enum TauStateAccess {
     Legacy,
 }
 
+/// Visibility of Tau harness runtime sockets in a supervised extension mount
+/// namespace.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TauRuntimeSocketAccess {
+    /// Present an empty read-only harness runtime directory.
+    #[default]
+    Hidden,
+    /// Retain the historical ambient harness runtime directory view.
+    Legacy,
+}
+
 impl std::fmt::Display for TauStateAccess {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -2056,6 +2068,8 @@ pub struct ExtensionEntry {
     pub prefix: Option<Vec<String>>,
     /// Optional instance-specific Tau-state presentation.
     pub tau_state_access: Option<TauStateAccess>,
+    /// Optional restoration of the historical ambient Tau runtime socket view.
+    pub tau_runtime_socket_access: Option<TauRuntimeSocketAccess>,
 
     /// Optional immutable prefix for this instance's structural tool names.
     ///
