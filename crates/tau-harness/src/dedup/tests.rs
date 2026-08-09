@@ -49,7 +49,7 @@ fn rebuild_does_not_record_short_dedup_pointer() {
         result_entry("call_a", &big),
         // Dedup pointers are below the normal threshold and therefore do not
         // enter the map. This is a size rule, not marker recognition.
-        result_entry("call_b", &pointer),
+        result_entry("call_b", pointer),
     ];
     let mut map = ResultDedupMap::new();
     map.rebuild_from_branch(&entries, Some(NodeId::new(2)), DEFAULT_THRESHOLD_BYTES);
