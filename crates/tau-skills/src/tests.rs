@@ -769,6 +769,8 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-architecture",
             "tau-self-knowledge-harness",
             "tau-self-knowledge-config",
+            "tau-self-knowledge-secrets",
+            "tau-self-knowledge-isolation",
             "tau-self-knowledge-cli-ui",
             "tau-self-knowledge-email",
             "tau-self-knowledge-ext-pim",
@@ -810,6 +812,8 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(skill.content.contains("tau-self-knowledge-architecture"));
     assert!(skill.content.contains("tau-self-knowledge-harness"));
     assert!(skill.content.contains("tau-self-knowledge-config"));
+    assert!(skill.content.contains("tau-self-knowledge-secrets"));
+    assert!(skill.content.contains("tau-self-knowledge-isolation"));
     assert!(skill.content.contains("tau-self-knowledge-cli-ui"));
     assert!(skill.content.contains("tau-self-knowledge-email"));
     assert!(skill.content.contains("tau-self-knowledge-ext-pim"));
@@ -875,6 +879,24 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in config skill");
     assert!(!config.add_to_prompt);
     assert!(config.content.contains("tau provider add"));
+
+    let secrets = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-secrets")
+        .expect("built-in secret-handling self-knowledge skill");
+    assert!(!secrets.add_to_prompt);
+    assert!(secrets.content.contains("TAU_SECRET_<NAME>"));
+    assert!(secrets.content.contains("Secret RPC"));
+    assert!(secrets.content.contains("provider"));
+
+    let isolation = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-isolation")
+        .expect("built-in isolation self-knowledge skill");
+    assert!(!isolation.add_to_prompt);
+    assert!(isolation.content.contains("tau_state_access"));
+    assert!(isolation.content.contains("read_only"));
+    assert!(isolation.content.contains("defense in depth"));
 
     let cli_ui = skills
         .iter()

@@ -23,6 +23,8 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 - `tau-self-knowledge-architecture` — high-level overview of Tau architecture and core components.
 - `tau-self-knowledge-harness` — harness daemon startup, runtime-dir sockets, initial UI stdio, attach behavior, foreground daemon APIs, socket activation, and embedded runs.
 - `tau-self-knowledge-config` — directories, important config files, and provider setup commands.
+- `tau-self-knowledge-secrets` — declared extension secrets, source resolution, Configure and Secret RPC delivery, provider credentials, redaction, and limits.
+- `tau-self-knowledge-isolation` — supervised-extension state views, Linux namespaces and read-only mounts, component exceptions, and trusted-boundary limits.
 - `tau-self-knowledge-cli-ui` — terminal UI behavior, commands, prompt history, key bindings, and prompt completions.
 - `tau-self-knowledge-email` — secure configuration for the built-in `std-pim`/`std-email` email module.
 - `tau-self-knowledge-ext-pim` — extension capabilities, configuration, OAuth, and approval workflow for the built-in `std-pim` email/calendar extension.
