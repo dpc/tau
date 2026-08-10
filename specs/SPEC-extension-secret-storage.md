@@ -84,6 +84,12 @@ rotation. OAuth refresh replaces only its complete typed secret with
 compare-and-swap; a concurrent loser reloads the winning generation instead of
 reusing a rotated token.
 
+Login hydrates or refreshes an existing authenticated profile by replacing only
+its host-local typed Secret record. It neither writes settings nor creates a
+profile in the other source, and it aborts if the profile source or bytes change
+while authentication is in progress. Config profile leaf symlinks remain
+untouched. A cross-source duplicate remains an error.
+
 An API-key settings reference may bind the canonical record to one declared
 named harness secret without serializing its value. The shared closed parser
 rejects malformed sources, OAuth bindings, noncanonical paths, unknown fields,
@@ -92,10 +98,14 @@ The bound declaration is materialization authority and its value is omitted from
 `Configure.secrets`.
 
 Setup defaults to mutable state and can explicitly target config or emit canonical
-JSON to standard output for dotfiles deployment. List and show report profile
-source; removal infers a unique source or accepts an explicit source. Setup and
-removal lock only the Tau-private mutable providers instance directory, then the
-Secret-scope directory. Persistent startup may create an empty private instance
+JSON to standard output for dotfiles deployment. Bare ChatGPT add offers login
+instead when a config-owned profile lacks current OAuth credentials; outside an
+interactive terminal it reports the exact login command without starting OAuth.
+List reports the same command beside absent or expired ChatGPT authentication,
+including the selected extension instance when it is not the default, and show
+reports profile source. Removal infers a unique source or accepts an explicit
+source. Setup, login, and removal lock only the Tau-private mutable
+providers instance directory, then the Secret-scope directory. Persistent startup may create an empty private instance
 directory as lifecycle metadata for a config-only deployment; it never locks or
 writes config and never imports a profile. Memory-only startup locks that
 directory only when it already exists and otherwise performs a non-transactional

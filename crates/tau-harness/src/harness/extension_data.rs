@@ -8,10 +8,9 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io, path as path_std_path, time as path_std_time};
 
-use crate::EXTENSION_DATA_MAX_FILE_BYTES;
+pub(super) use tau_config::secret_sources::MAX_SECRET_DATA_FILE_BYTES;
 
-/// Maximum bytes accepted for one secret-scope file.
-pub(super) const MAX_SECRET_DATA_FILE_BYTES: u64 = 1024 * 1024;
+use crate::EXTENSION_DATA_MAX_FILE_BYTES;
 /// Maximum directory entries scanned by one extension data list operation.
 const MAX_EXTENSION_DATA_LIST_ENTRIES: usize = 4096;
 

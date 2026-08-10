@@ -152,9 +152,18 @@ for dotfiles; credential records remain in state.
 
 Other provider commands:
 
-- `tau provider list [--config|--state|--all]` — show providers and sources.
+- `tau provider login <name>` — hydrate or refresh only the host-local Secret for
+  an existing profile, preserving its settings source and bytes.
+- `tau provider list [--config|--state|--all]` — show providers and sources, with
+  an actionable login command for absent or expired ChatGPT authentication.
 - `tau provider show <name>` — show credential-free JSON and its source path.
 - `tau provider remove [--config|--state] <name>` — remove a provider profile.
+
+Put `--extension <instance>` before the subcommand when targeting a renamed
+built-in provider instance, for example
+`tau provider --extension provider-work login chatgpt`. Bare ChatGPT add detects
+a config-owned default profile that needs authentication and offers login instead
+of creating a state duplicate.
 
 Models are published by provider extensions at runtime; start Tau and use `:model` to inspect the current model list.
 

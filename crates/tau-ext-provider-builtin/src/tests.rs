@@ -98,6 +98,181 @@ fn provider_list_filters_and_displays_profile_sources() {
     assert!(!output.contains("\tlocal\t"));
 }
 
+/// Proves absent and expired ChatGPT credentials carry the exact login command,
+/// while a current credential omits remediation.
+#[test]
+fn provider_list_shows_actionable_chatgpt_login_remediation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    let provider = ProviderName::new("portable-chatgpt");
+    let payload = provider_setup_payload(
+        &provider,
+        &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: OpenAiAuth {
+                access_token: "fixture-access".to_owned(),
+                refresh_token: "fixture-refresh".to_owned(),
+                expires_at_ms: u64::MAX,
+                account_id: None,
+            },
+            responses_lite_compatibility: false,
+        }),
+        ProviderSetupInput::ProfileOAuth,
+    )
+    .expect("setup payload");
+    let extension = tau_proto::ExtensionName::parse("provider-work").expect("extension");
+    store
+        .apply_to(
+            &setup_store::ProviderSetupPlan {
+                extension_instance: extension.clone(),
+                provider: provider.clone(),
+                settings: payload.settings,
+                credential: setup_store::CredentialSetup::Keyless,
+            },
+            setup_store::ProfileTarget::Config,
+        )
+        .expect("credential-free config profile");
+    let settings = store
+        .snapshot(&extension)
+        .expect("snapshot")
+        .profiles
+        .pop()
+        .expect("profile")
+        .contents;
+    let expected_remediation =
+        "login: tau provider --extension provider-work login portable-chatgpt";
+    for (expires_at_ms, expected_status, expects_remediation) in [
+        (None, "not-configured", true),
+        (Some(1), "expired", true),
+        (Some(u64::MAX), "logged-in", false),
+    ] {
+        if let Some(expires_at_ms) = expires_at_ms {
+            let record = credential_record::ChatGptOAuthCredential::from(OpenAiAuth {
+                access_token: "fixture-access".to_owned(),
+                refresh_token: "fixture-refresh".to_owned(),
+                expires_at_ms,
+                account_id: None,
+            });
+            store
+                .publish_credential(
+                    &extension,
+                    &provider,
+                    setup_store::ProfileSource::Config,
+                    &settings,
+                    &setup_store::SecretWrite {
+                        path: ProviderCredentialSlot::OAuth.path(&provider),
+                        contents: setup_store::SecretBytes::new(
+                            serde_json::to_vec(&record).expect("credential"),
+                        ),
+                    },
+                    None,
+                )
+                .expect("credential publication");
+        }
+        let mut output = Vec::new();
+        cmd_list_from_store(&[], &extension, &store, &mut output).expect("list");
+        let output = String::from_utf8(output).expect("UTF-8 output");
+        let row_prefix = format!(
+            "provider-work\tportable-chatgpt\tchatgpt\t{expected_status}\tresponses-standard\tconfig"
+        );
+        assert!(output.starts_with(&row_prefix), "{output}");
+        assert_eq!(
+            output.contains(expected_remediation),
+            expects_remediation,
+            "{output}"
+        );
+    }
+}
+
+/// Proves bare add preflights outside a terminal: a sole config profile yields
+/// exact login remediation, while a cross-source duplicate remains a collision,
+/// all before OAuth or a state-profile write.
+#[test]
+fn provider_add_chatgpt_noninteractive_preflight_preserves_collision_safety() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = setup_store::SetupStore::open_in(temp.path());
+    let provider = ProviderName::new("chatgpt");
+    let payload = provider_setup_payload(
+        &provider,
+        &BuiltinProviderProfile::Chatgpt(ChatGptProfile {
+            auth: OpenAiAuth {
+                access_token: "fixture-access".to_owned(),
+                refresh_token: "fixture-refresh".to_owned(),
+                expires_at_ms: u64::MAX,
+                account_id: None,
+            },
+            responses_lite_compatibility: false,
+        }),
+        ProviderSetupInput::ProfileOAuth,
+    )
+    .expect("setup payload");
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+    store
+        .apply_to(
+            &setup_store::ProviderSetupPlan {
+                extension_instance: extension.clone(),
+                provider: provider.clone(),
+                settings: payload.settings,
+                credential: setup_store::CredentialSetup::Keyless,
+            },
+            setup_store::ProfileTarget::Config,
+        )
+        .expect("credential-free config profile");
+    let network = tau_provider::OutboundNetworkPolicy::from_env();
+
+    let error = cmd_add_chatgpt_in(
+        &network,
+        &extension,
+        setup_store::ProfileTarget::State,
+        true,
+        &store,
+        false,
+    )
+    .expect_err("noninteractive remediation");
+
+    assert!(error.to_string().contains("tau provider login chatgpt"));
+    assert!(
+        !temp
+            .path()
+            .join("providers/provider-builtin/chatgpt.json")
+            .exists()
+    );
+
+    let config = temp
+        .path()
+        .join("config/providers/provider-builtin/chatgpt.json");
+    let state = temp.path().join("providers/provider-builtin/chatgpt.json");
+    std::fs::write(&state, std::fs::read(config).expect("config settings"))
+        .expect("duplicate state profile");
+    let collision = cmd_add_chatgpt_in(
+        &network,
+        &extension,
+        setup_store::ProfileTarget::State,
+        true,
+        &store,
+        false,
+    )
+    .expect_err("cross-source collision");
+    assert!(
+        collision
+            .to_string()
+            .contains("duplicated across config and state")
+    );
+    assert!(!collision.to_string().contains("tau provider login"));
+}
+
+/// Proves remediation for a renamed provider instance keeps the exact
+/// `--extension` selection instead of accidentally targeting the default.
+#[test]
+fn provider_login_remediation_preserves_extension_instance() {
+    let extension = tau_proto::ExtensionName::parse("provider-work").expect("extension");
+    let provider = ProviderName::new("chatgpt");
+
+    assert_eq!(
+        provider_login_command(&extension, &provider),
+        "tau provider --extension provider-work login chatgpt"
+    );
+}
+
 /// Proves show reports the owning source and host path without resolving any
 /// credential value.
 #[test]
@@ -842,18 +1017,18 @@ fn synthetic_provider_error_is_not_output_item() {
     assert_eq!(finished.error.as_deref(), Some("no model specified"));
 }
 
+/// Proves malformed login invocation fails before profile lookup, secret
+/// prompts, or OAuth network work.
 #[test]
-fn login_subcommand_is_not_part_of_provider_registry_cli() {
-    // Registration is intentionally centered on `tau provider add`; ChatGPT
-    // OAuth happens as part of adding or replacing that provider profile.
-    let args = vec!["login".to_owned(), "chatgpt".to_owned()];
+fn login_subcommand_requires_exactly_one_existing_profile_name() {
+    let args = vec!["login".to_owned()];
 
-    let error = run_provider_cli(&args).expect_err("login subcommand should fail");
+    let error = run_provider_cli(&args).expect_err("missing profile name");
 
     assert!(
         error
             .to_string()
-            .contains("unknown provider subcommand: login")
+            .contains("provider login requires exactly one NAME")
     );
 }
 

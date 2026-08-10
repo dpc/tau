@@ -771,6 +771,7 @@ pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
     let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
     match args.first().map(String::as_str).unwrap_or("help") {
         "add" => cmd_add(&args[1..], &network, &extension_instance)?,
+        "login" => cmd_login(&args[1..], &network, &extension_instance)?,
         "remove" | "delete" => cmd_remove(&args[1..], &extension_instance)?,
         "list" | "status" => cmd_list(&args[1..], &extension_instance)?,
         "show" => cmd_show(&args[1..], &extension_instance)?,
@@ -854,6 +855,7 @@ Usage: tau provider [--extension INSTANCE] <subcommand>
 Subcommands:
   add [--state|--config [--output -]] [KIND]
                                  Add or replace a provider profile (default: state)
+  login <name>                   Authenticate an existing provider profile
   remove [--state|--config] <name>
                                  Remove a provider profile
   list [--state|--config|--all]  List provider profiles with their source
@@ -937,6 +939,7 @@ fn cmd_add(
         }
         index += 1;
     }
+    let implicit_state_target = requested_target.is_none() && !stdout;
     let target = match (requested_target, stdout) {
         (Some(setup_store::ProfileTarget::Config), true) => setup_store::ProfileTarget::Stdout,
         (None, false) | (Some(setup_store::ProfileTarget::State), false) => {
@@ -970,7 +973,7 @@ fn cmd_add(
         _ => return Err("tau provider add accepts at most one KIND".into()),
     };
     match kind {
-        "chatgpt" => cmd_add_chatgpt(network, extension_instance, target)?,
+        "chatgpt" => cmd_add_chatgpt(network, extension_instance, target, implicit_state_target)?,
         "chat-completions" => cmd_add_chat_completions(extension_instance, target)?,
         "responses" => cmd_add_responses(extension_instance, target)?,
         "openrouter" => cmd_add_openrouter(network, extension_instance, target)?,
@@ -1037,8 +1040,53 @@ fn cmd_add_chatgpt(
     network: &tau_provider::OutboundNetworkPolicy,
     extension_instance: &tau_proto::ExtensionName,
     target: setup_store::ProfileTarget,
+    offer_existing_login: bool,
 ) -> Result<(), Box<dyn Error>> {
+    use std::io::IsTerminal as _;
+
+    let store = setup_store::SetupStore::open_default()?;
+    cmd_add_chatgpt_in(
+        network,
+        extension_instance,
+        target,
+        offer_existing_login,
+        &store,
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+    )
+}
+
+fn cmd_add_chatgpt_in(
+    network: &tau_provider::OutboundNetworkPolicy,
+    extension_instance: &tau_proto::ExtensionName,
+    target: setup_store::ProfileTarget,
+    offer_existing_login: bool,
+    store: &setup_store::SetupStore,
+    interactive: bool,
+) -> Result<(), Box<dyn Error>> {
+    if offer_existing_login && !interactive {
+        let default_name = ProviderName::new(CHATGPT_PROVIDER_NAME);
+        if offer_login_for_existing_config_profile_in(
+            network,
+            extension_instance,
+            &default_name,
+            store,
+            false,
+        )? {
+            return Ok(());
+        }
+    }
     let name = prompt_provider_name("chatgpt")?;
+    if offer_existing_login
+        && offer_login_for_existing_config_profile_in(
+            network,
+            extension_instance,
+            &name,
+            store,
+            true,
+        )?
+    {
+        return Ok(());
+    }
     let auth = run_openai_codex_login(network)?;
     let responses_lite_compatibility = Confirm::new()
         .with_prompt("Use legacy Responses Lite compatibility for GPT-5.6?")
@@ -1055,6 +1103,204 @@ fn cmd_add_chatgpt(
         target,
     )?;
     Ok(())
+}
+
+fn offer_login_for_existing_config_profile_in(
+    network: &tau_provider::OutboundNetworkPolicy,
+    extension_instance: &tau_proto::ExtensionName,
+    name: &ProviderName,
+    store: &setup_store::SetupStore,
+    interactive: bool,
+) -> Result<bool, Box<dyn Error>> {
+    let snapshot = store.snapshot(extension_instance)?;
+    let matching = snapshot
+        .profiles
+        .iter()
+        .filter(|profile| profile.provider == *name)
+        .collect::<Vec<_>>();
+    let profile = match matching.as_slice() {
+        [] => return Ok(false),
+        [profile] => *profile,
+        _ => {
+            return Err(
+                format!("provider profile '{name}' is duplicated across config and state").into(),
+            );
+        }
+    };
+    if profile.source != setup_store::ProfileSource::Config {
+        return Ok(false);
+    }
+    let (parsed, _) = parse_settings_profile(name, &profile.contents).map_err(|reason| {
+        format!(
+            "provider profile '{name}' is invalid: {reason} (source=config, path={})",
+            profile.path.display()
+        )
+    })?;
+    if !matches!(parsed, BuiltinProviderProfile::Chatgpt(_)) {
+        return Err(format!("provider '{name}' already exists in config").into());
+    }
+    let needs_login = !snapshot
+        .credentials
+        .get(&(name.clone(), ProviderCredentialSlot::OAuth))
+        .and_then(|bytes| {
+            serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(bytes).ok()
+        })
+        .is_some_and(|record| record.is_unexpired(now_ms()));
+    if !needs_login {
+        return Err(format!(
+            "provider '{name}' already exists in config and is authenticated; use `{}` to refresh its credentials",
+            provider_login_command(extension_instance, name)
+        )
+        .into());
+    }
+    if !interactive {
+        return Err(format!(
+            "provider '{name}' already exists in config and needs authentication; run `{}`",
+            provider_login_command(extension_instance, name)
+        )
+        .into());
+    }
+    let login = Confirm::new()
+        .with_prompt(format!(
+            "Provider '{name}' already exists in config and needs authentication. Log in now?"
+        ))
+        .default(true)
+        .interact()?;
+    if !login {
+        return Err(format!(
+            "provider authentication cancelled; run `{}` when ready",
+            provider_login_command(extension_instance, name)
+        )
+        .into());
+    }
+    login_profile(network, extension_instance, store, name)?;
+    Ok(true)
+}
+
+fn provider_login_command(
+    extension_instance: &tau_proto::ExtensionName,
+    name: &ProviderName,
+) -> String {
+    if extension_instance.as_str() == "provider-builtin" {
+        format!("tau provider login {name}")
+    } else {
+        format!("tau provider --extension {extension_instance} login {name}")
+    }
+}
+
+fn cmd_login(
+    args: &[String],
+    network: &tau_provider::OutboundNetworkPolicy,
+    extension_instance: &tau_proto::ExtensionName,
+) -> Result<(), Box<dyn Error>> {
+    let [name] = args else {
+        return Err("tau provider login requires exactly one NAME".into());
+    };
+    let name = ProviderName::try_new(name.clone())
+        .map_err(|error| format!("invalid provider namespace '{name}': {error}"))?;
+    let store = setup_store::SetupStore::open_default()?;
+    login_profile(network, extension_instance, &store, &name)
+}
+
+/// Authenticates one existing profile and publishes only its host-local Secret
+/// record; the exact source and settings bytes must remain unchanged.
+fn login_profile(
+    network: &tau_provider::OutboundNetworkPolicy,
+    extension_instance: &tau_proto::ExtensionName,
+    store: &setup_store::SetupStore,
+    name: &ProviderName,
+) -> Result<(), Box<dyn Error>> {
+    use credential_record::{ApiKeyCredential, ChatGptOAuthCredential};
+
+    let snapshot = store.snapshot(extension_instance)?;
+    let matching = snapshot
+        .profiles
+        .into_iter()
+        .filter(|profile| profile.provider == *name)
+        .collect::<Vec<_>>();
+    let profile = match matching.as_slice() {
+        [] => return Err(format!("provider profile '{name}' is not configured").into()),
+        [profile] => profile,
+        _ => {
+            return Err(
+                format!("provider profile '{name}' is duplicated across config and state").into(),
+            );
+        }
+    };
+    let (parsed, credential) =
+        parse_settings_profile(name, &profile.contents).map_err(|reason| {
+            format!(
+                "provider profile '{name}' is invalid: {reason} (source={}, path={})",
+                profile.source.label(),
+                profile.path.display()
+            )
+        })?;
+    let ProviderCredential::Stored(reference) = credential else {
+        return Err(
+            format!("provider profile '{name}' is keyless and does not require login").into(),
+        );
+    };
+    let (secret, named_source) = match parsed {
+        BuiltinProviderProfile::Chatgpt(_) => {
+            let auth = run_openai_codex_login(network)?;
+            (
+                setup_store::SecretWrite {
+                    path: reference.path().clone(),
+                    contents: setup_store::SecretBytes::new(serde_json::to_vec(
+                        &ChatGptOAuthCredential::from(auth),
+                    )?),
+                },
+                None,
+            )
+        }
+        BuiltinProviderProfile::ChatCompletions(_)
+        | BuiltinProviderProfile::OpenRouter(_)
+        | BuiltinProviderProfile::Responses(_) => {
+            let named_source = reference
+                .named_source()
+                .map(|source_name| configured_named_secret(extension_instance, source_name))
+                .transpose()?;
+            let value = if named_source.is_some() {
+                String::new()
+            } else {
+                Password::new().with_prompt("API key").interact()?
+            };
+            (
+                setup_store::SecretWrite {
+                    path: reference.path().clone(),
+                    contents: setup_store::SecretBytes::new(serde_json::to_vec(
+                        &ApiKeyCredential::new(value),
+                    )?),
+                },
+                named_source,
+            )
+        }
+    };
+    store.publish_credential(
+        extension_instance,
+        name,
+        profile.source,
+        &profile.contents,
+        &secret,
+        named_source.as_ref(),
+    )?;
+    eprintln!(
+        "Authenticated provider '{name}' for extension '{extension_instance}'; settings were unchanged."
+    );
+    Ok(())
+}
+
+fn configured_named_secret(
+    extension_instance: &tau_proto::ExtensionName,
+    source_name: &str,
+) -> Result<setup_store::NamedSecretSource, Box<dyn Error>> {
+    let Some((name, declaration)) = configured_secrets(extension_instance)?
+        .into_iter()
+        .find(|(name, _)| name == source_name)
+    else {
+        return Err(format!("configured named secret '{source_name}' is not declared").into());
+    };
+    Ok(setup_store::NamedSecretSource { name, declaration })
 }
 
 fn cmd_add_chat_completions(
@@ -1221,6 +1467,15 @@ fn cmd_list_from_store(
                     Some(_) => "expired",
                     _ => "not-configured",
                 };
+                let remediation = match status {
+                    "expired" | "not-configured" => {
+                        format!(
+                            "\tlogin: {}",
+                            provider_login_command(extension_instance, name)
+                        )
+                    }
+                    _ => String::new(),
+                };
                 let mode = if parsed.responses_lite_compatibility {
                     "responses-lite-compatibility"
                 } else {
@@ -1228,7 +1483,7 @@ fn cmd_list_from_store(
                 };
                 writeln!(
                     output,
-                    "{extension_instance}\t{name}\tchatgpt\t{status}\t{mode}\t{source}"
+                    "{extension_instance}\t{name}\tchatgpt\t{status}\t{mode}\t{source}{remediation}"
                 )?;
             }
             BuiltinProviderProfile::ChatCompletions(parsed) => {

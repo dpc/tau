@@ -1,10 +1,12 @@
 use std::fs::Permissions;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use super::*;
+use crate::credential_record::ApiKeyCredential;
 
 /// Proves config-targeted setup publishes credentials in state while keeping
 /// the profile source explicit and collision-free.
@@ -50,11 +52,11 @@ fn keyless_config_target_does_not_publish_secret_state() {
     assert!(!temp.path().join("secrets/ext/provider-work").exists());
 }
 
-/// Proves profile inspection follows a Home Manager-style config leaf symlink
-/// to a read-only regular file outside the canonical config instance root.
+/// Proves inspection and credential-only login follow a Home Manager-style
+/// config leaf symlink without replacing it or modifying its read-only target.
 #[cfg(unix)]
 #[test]
-fn snapshot_follows_external_config_profile_symlink() {
+fn snapshot_and_login_preserve_external_config_profile_symlink() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -75,6 +77,31 @@ fn snapshot_follows_external_config_profile_symlink() {
     assert_eq!(snapshot.profiles[0].source, ProfileSource::Config);
     assert_eq!(snapshot.profiles[0].path, profile);
     assert_eq!(snapshot.profiles[0].contents, b"{\"deployed\":true}");
+
+    let replacement = SecretWrite {
+        path: ProviderCredentialSlot::OAuth.path(&provider()),
+        contents: SecretBytes::new(b"host-local-secret".to_vec()),
+    };
+    store
+        .publish_credential(
+            &extension(),
+            &provider(),
+            ProfileSource::Config,
+            b"{\"deployed\":true}",
+            &replacement,
+            None,
+        )
+        .expect("credential publication");
+    assert!(
+        std::fs::symlink_metadata(&profile)
+            .expect("profile metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(&deployment).expect("deployed profile"),
+        b"{\"deployed\":true}"
+    );
 }
 
 /// Proves output mode refuses an existing state owner before replacing its
@@ -360,6 +387,319 @@ fn snapshot_pairs_active_settings_with_matching_credentials_only() {
     let empty = store.snapshot(&extension()).expect("empty snapshot");
     assert!(empty.profiles.is_empty());
     assert!(empty.credentials.is_empty());
+}
+
+/// Proves login publishes only the host-local Secret and leaves a portable
+/// profile byte-for-byte unchanged without creating a shadow state profile.
+#[test]
+fn publish_credential_preserves_config_profile_without_state_shadow() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let config_path = store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup")
+        .expect("config path");
+    let settings_before = std::fs::read(&config_path).expect("settings");
+    let replacement = SecretWrite {
+        path: ProviderCredentialSlot::ApiKey.path(&plan.provider),
+        contents: SecretBytes::new(b"refreshed-secret".to_vec()),
+    };
+
+    store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings_before,
+            &replacement,
+            None,
+        )
+        .expect("credential publication");
+
+    assert_eq!(
+        std::fs::read(&config_path).expect("settings after"),
+        settings_before
+    );
+    assert!(
+        !temp
+            .path()
+            .join("providers/provider-work/chatgpt.json")
+            .exists()
+    );
+    assert_eq!(
+        store
+            .credential(
+                &plan.extension_instance,
+                &plan.provider,
+                ProviderCredentialSlot::ApiKey
+            )
+            .expect("credential"),
+        b"refreshed-secret"
+    );
+}
+
+/// Proves credential publication refuses changed bytes, moved ownership, and a
+/// cross-source collision while preserving the previously active Secret.
+#[test]
+fn publish_credential_rejects_every_stale_profile_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let config_path = store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup")
+        .expect("config path");
+    let settings_before = std::fs::read(&config_path).expect("settings");
+    let replacement = SecretWrite {
+        path: ProviderCredentialSlot::OAuth.path(&plan.provider),
+        contents: SecretBytes::new(b"new-secret".to_vec()),
+    };
+    let secret_before = store
+        .credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProviderCredentialSlot::OAuth,
+        )
+        .expect("credential");
+
+    std::fs::write(&config_path, b"changed settings").expect("changed settings");
+    for (label, expected_kind) in [
+        ("changed bytes", ErrorKind::InvalidData),
+        ("moved source", ErrorKind::InvalidData),
+        ("cross-source collision", ErrorKind::AlreadyExists),
+    ] {
+        if label == "moved source" {
+            std::fs::remove_file(&config_path).expect("remove config profile");
+            std::fs::write(
+                temp.path().join("providers/provider-work/chatgpt.json"),
+                &settings_before,
+            )
+            .expect("state profile");
+        } else if label == "cross-source collision" {
+            std::fs::write(&config_path, &settings_before).expect("config duplicate");
+        }
+        let error = store
+            .publish_credential(
+                &plan.extension_instance,
+                &plan.provider,
+                ProfileSource::Config,
+                &settings_before,
+                &replacement,
+                None,
+            )
+            .expect_err(label);
+        assert_eq!(error.kind(), expected_kind, "{label}");
+        assert_eq!(
+            store
+                .credential(
+                    &plan.extension_instance,
+                    &plan.provider,
+                    ProviderCredentialSlot::OAuth
+                )
+                .expect("credential after refusal"),
+            secret_before,
+            "{label}"
+        );
+    }
+}
+
+/// Proves login materializes the current named-source value rather than its
+/// placeholder and preserves the old credential when later resolution fails.
+#[test]
+fn publish_credential_materializes_named_source_before_replacement() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let config_path = store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup")
+        .expect("config path");
+    let settings = std::fs::read(config_path).expect("settings");
+    std::fs::create_dir_all(temp.path().join("secrets")).expect("source root");
+    let source_path = temp.path().join("secrets/setup_key.yaml");
+    std::fs::write(&source_path, "resolved-value\n").expect("named source");
+    let replacement = SecretWrite {
+        path: ProviderCredentialSlot::ApiKey.path(&plan.provider),
+        contents: SecretBytes::new(b"placeholder".to_vec()),
+    };
+    let source = NamedSecretSource {
+        name: "setup_key".to_owned(),
+        declaration: tau_config::settings::ExtensionSecretEntry { optional: false },
+    };
+
+    store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings,
+            &replacement,
+            Some(&source),
+        )
+        .expect("named publication");
+    let before = store
+        .credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProviderCredentialSlot::ApiKey,
+        )
+        .expect("materialized credential");
+    let parsed: crate::credential_record::ApiKeyCredential =
+        serde_json::from_slice(&before).expect("typed credential");
+    assert_eq!(parsed.into_value(), "resolved-value");
+
+    std::fs::remove_file(source_path).expect("remove source");
+    store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings,
+            &replacement,
+            Some(&source),
+        )
+        .expect_err("missing named source");
+    assert_eq!(
+        store
+            .credential(
+                &plan.extension_instance,
+                &plan.provider,
+                ProviderCredentialSlot::ApiKey,
+            )
+            .expect("preserved credential"),
+        before
+    );
+}
+
+/// Proves direct credential-only publication accepts the exact Secret file
+/// limit and rejects one extra byte without replacing the accepted record.
+#[test]
+fn publish_credential_enforces_direct_secret_file_limit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let config_path = store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup")
+        .expect("config path");
+    let settings = std::fs::read(config_path).expect("settings");
+    let secret_limit =
+        usize::try_from(MAX_SECRET_DATA_FILE_BYTES).expect("Secret limit fits usize");
+    let exact = SecretWrite {
+        path: ProviderCredentialSlot::OAuth.path(&plan.provider),
+        contents: SecretBytes::new(vec![b'x'; secret_limit]),
+    };
+    store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings,
+            &exact,
+            None,
+        )
+        .expect("exact-limit credential");
+    let too_large = SecretWrite {
+        path: ProviderCredentialSlot::OAuth.path(&plan.provider),
+        contents: SecretBytes::new(vec![b'y'; secret_limit + 1]),
+    };
+
+    let error = store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings,
+            &too_large,
+            None,
+        )
+        .expect_err("oversized credential");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        store
+            .credential(
+                &plan.extension_instance,
+                &plan.provider,
+                ProviderCredentialSlot::OAuth,
+            )
+            .expect("preserved exact-limit credential"),
+        exact.contents.expose()
+    );
+}
+
+/// Proves named-source materialization applies the Secret file limit to the
+/// fully serialized typed record and preserves the exact-limit winner.
+#[test]
+fn publish_credential_enforces_materialized_named_secret_file_limit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let config_path = store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup")
+        .expect("config path");
+    let settings = std::fs::read(config_path).expect("settings");
+    std::fs::create_dir_all(temp.path().join("secrets")).expect("source root");
+    let source_path = temp.path().join("secrets/setup_key.yaml");
+    let serialized_overhead = serde_json::to_vec(&ApiKeyCredential::new(String::new()))
+        .expect("empty typed credential")
+        .len();
+    let secret_limit =
+        usize::try_from(MAX_SECRET_DATA_FILE_BYTES).expect("Secret limit fits usize");
+    let exact_value = "x".repeat(secret_limit - serialized_overhead);
+    std::fs::write(&source_path, &exact_value).expect("exact named source");
+    let replacement = SecretWrite {
+        path: ProviderCredentialSlot::ApiKey.path(&plan.provider),
+        contents: SecretBytes::new(b"placeholder".to_vec()),
+    };
+    let source = NamedSecretSource {
+        name: "setup_key".to_owned(),
+        declaration: tau_config::settings::ExtensionSecretEntry { optional: false },
+    };
+    store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings,
+            &replacement,
+            Some(&source),
+        )
+        .expect("exact-limit named credential");
+    let before = store
+        .credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProviderCredentialSlot::ApiKey,
+        )
+        .expect("exact-limit credential");
+    assert_eq!(before.len(), secret_limit);
+
+    std::fs::write(&source_path, format!("{exact_value}x")).expect("oversized named source");
+    let error = store
+        .publish_credential(
+            &plan.extension_instance,
+            &plan.provider,
+            ProfileSource::Config,
+            &settings,
+            &replacement,
+            Some(&source),
+        )
+        .expect_err("oversized named credential");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        store
+            .credential(
+                &plan.extension_instance,
+                &plan.provider,
+                ProviderCredentialSlot::ApiKey,
+            )
+            .expect("preserved credential"),
+        before
+    );
 }
 
 /// Proves list/status holds the instance lock across settings and credential

@@ -107,15 +107,25 @@ snapshot before credential hydration, so it cannot reparse or log malformed
 persisted settings. Preserve that invariant if runtime reconfiguration or
 snapshot mutation is introduced.
 
-Named API-key sources are setup/startup authorities, not runtime credential
-inputs. Setup resolves the exact configured declaration only while holding the
-providers instance lock, then takes the Secret lock, publishes the typed
-record, and activates settings last. Harness startup uses the same lock order
+Named API-key sources are setup/login/startup authorities, not runtime credential
+inputs. Setup and login resolve the exact configured declaration only while
+holding the providers instance lock, then take the Secret lock and publish the
+bounded typed record. Setup activates settings last; login instead revalidates
+the existing profile's exact source and bytes and changes only its Secret. Login
+never writes a profile, follows and preserves supported config leaf symlinks, and
+cannot create a shadow state profile. Resolution, validation, or size failure
+before atomic replacement leaves the previous credential unchanged.
+A post-replacement permission, directory-sync, or lock-release failure may report
+failure after the new credential became visible. Harness startup uses the same lock order
 and one shared closed reference parser, publishes empty typed records for
 unavailable bindings, and retains that locked settings generation for
 Configure. Bound declaration values never enter Configure, logs, notices, or
 provider settings; warnings expose only configured instance, provider, and
 source names.
+
+Changes to login profile identity checks, lock ordering, named-source resolution,
+Secret size enforcement, config-symlink handling, or settings mutation require
+focused credential-persistence and symlink review.
 
 ## Provider cancellation boundary
 

@@ -9,6 +9,9 @@ use tau_proto::SecretValue;
 
 use crate::settings::ExtensionSecretEntry;
 
+/// Maximum complete file size accepted by Tau's extension Secret scope.
+pub const MAX_SECRET_DATA_FILE_BYTES: u64 = 1024 * 1024;
+
 /// Whether loading removes one-shot secret variables from the process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnvironmentDisposition {

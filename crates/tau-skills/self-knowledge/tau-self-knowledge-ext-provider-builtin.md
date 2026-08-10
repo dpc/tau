@@ -40,6 +40,7 @@ record in the configured extension instance's private state. Manage them with:
 
 ```sh
 tau provider add
+tau provider login <name>
 tau provider list
 tau provider show <name>
 tau provider remove <name>
@@ -59,6 +60,13 @@ must be disjoint; list/show report source identity and remove can infer a unique
 source or accept `--config`/`--state`. The retired state `provider-settings/`
 directory is never discovered; manually move only its JSON and leave Secret
 records untouched.
+
+Login replaces only the existing profile's host-local typed Secret after
+revalidating its source and exact settings bytes. It never changes settings,
+replaces config symlinks, or creates a state shadow. For a renamed instance use
+`tau provider --extension <instance> login <name>`. Bare ChatGPT add offers login
+for a config profile with absent or expired OAuth; noninteractive use and affected
+list rows show that exact command.
 
 `tau provider add [KIND]` accepts `chatgpt`, `chat-completions`, `responses`,
 or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked

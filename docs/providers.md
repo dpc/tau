@@ -640,7 +640,18 @@ Config and state names form a disjoint union. A duplicate fails startup even whe
 both files are identical; neither source overrides the other. Config symlinks and
 read-only Nix store files are supported. `tau provider list` reports `config` or
 `state`, `show` prints the credential-free JSON and source path, and `remove`
-infers a unique source or accepts `--config`/`--state`.
+infers a unique source or accepts `--config`/`--state`. ChatGPT rows whose OAuth
+credential is absent or expired include the exact `tau provider login` command
+needed to repair that profile.
+
+`tau provider login <profile>` hydrates or refreshes an existing profile without
+changing its config- or state-owned settings. It publishes only the host-local
+typed Secret record, revalidates the exact profile source and bytes before the
+write, never replaces a config symlink, and never creates a shadow state profile.
+Use `tau provider --extension <instance> login <profile>` for a renamed built-in
+provider instance. Bare `tau provider add chatgpt` offers this login path when the
+default config-owned `chatgpt` profile needs authentication; noninteractive use
+prints the exact command instead of starting OAuth.
 
 Settings contain backend and model metadata plus either a deterministic
 credential reference or, for supported local-compatible profiles, the exact
@@ -676,7 +687,7 @@ except through Secret RPC. If the named source is unavailable, setup fails befor
 activating settings; a later restart invalidates its old materialization, omits
 the profile, and publishes a source-name-only warning. A bound declaration is
 consumed for materialization and is not copied into `Configure.secrets`.
-Provider setup/removal and startup serialize per configured instance; the exact
+Provider setup/login/removal and startup serialize per configured instance; the exact
 startup settings snapshot that selects the source also becomes the immutable
 Configure snapshot.
 Keyless setup writes only the explicit portable profile. It does not create an

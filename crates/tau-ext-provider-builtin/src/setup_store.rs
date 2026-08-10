@@ -10,7 +10,8 @@ use tau_config::provider_settings::{
     read_provider_profile,
 };
 use tau_config::secret_sources::{
-    EnvironmentDisposition, load_secret_sources, resolve_declared_secret,
+    EnvironmentDisposition, MAX_SECRET_DATA_FILE_BYTES, load_secret_sources,
+    resolve_declared_secret,
 };
 use tau_config::settings::TauDirs;
 
@@ -296,56 +297,17 @@ impl SetupStore {
                 named_source,
             } => (Some(secret), named_source.as_ref()),
         };
-        let named_contents = match named_source {
-            Some(source) => {
-                let sources = load_secret_sources(EnvironmentDisposition::Retain)
-                    .map_err(path_std_io::Error::other)?;
-                let value = resolve_declared_secret(
-                    &self.state_dir,
-                    &sources,
-                    plan.extension_instance.as_str(),
-                    &source.name,
-                    &source.declaration,
-                )
-                .map_err(path_std_io::Error::other)?
-                .ok_or_else(|| {
-                    path_std_io::Error::new(
-                        path_std_io::ErrorKind::NotFound,
-                        format!("configured named secret '{}' is unavailable", source.name),
-                    )
-                })?;
-                Some(
-                    serde_json::to_vec(&ApiKeyCredential::new(value.expose_secret().to_owned()))
-                        .map_err(path_std_io::Error::other)?,
-                )
-            }
-            None => None,
-        };
+        let named_contents = named_source
+            .map(|source| self.materialize_named_secret(&plan.extension_instance, source))
+            .transpose()?;
         if let Some(secret) = secret {
-            let secret_root = tau_config::settings::extension_secret_dir_of(
-                &self.state_dir,
-                plan.extension_instance.as_str(),
-            )
-            .map_err(path_std_io::Error::other)?;
-            ensure_private_directory_tree(
-                &self.state_dir,
-                &PathBuf::from("secrets/ext").join(plan.extension_instance.as_str()),
-            )?;
-            use fs2::FileExt as _;
-            let secret_lock = open_directory_no_follow(&secret_root)?;
-            secret_lock.lock_exclusive()?;
-            let secret_rel = sanitize_secret_path(secret.path.as_str())?;
-            reject_existing_symlink_components(&secret_root, &secret_rel)?;
-            if let Some(parent) = secret_rel.parent() {
-                ensure_private_directory_tree(&secret_root, parent)?;
-            }
-            atomic_private_write(
-                &secret_root.join(secret_rel),
+            self.write_secret(
+                &plan.extension_instance,
+                secret,
                 named_contents
                     .as_deref()
                     .unwrap_or_else(|| secret.contents.expose()),
             )?;
-            fs2::FileExt::unlock(&secret_lock)?;
         }
         let path = match target {
             ProfileTarget::State => {
@@ -361,6 +323,123 @@ impl SetupStore {
             ProfileTarget::Stdout => None,
         };
         Ok(path)
+    }
+
+    /// Publishes one credential for an unchanged existing profile without
+    /// creating, replacing, or removing either profile source.
+    pub(crate) fn publish_credential(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        provider: &tau_proto::ProviderName,
+        expected_source: ProfileSource,
+        expected_settings: &[u8],
+        secret: &SecretWrite,
+        named_source: Option<&NamedSecretSource>,
+    ) -> path_std_io::Result<()> {
+        ensure_private_directory_tree(
+            &self.state_dir,
+            &PathBuf::from("providers").join(extension_instance.as_str()),
+        )?;
+        let _settings_lock = self
+            .acquire_instance_lock(extension_instance)?
+            .ok_or_else(|| {
+                path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    "provider settings directory disappeared before locking",
+                )
+            })?;
+        let matching = self
+            .settings_files_unlocked(extension_instance)?
+            .into_iter()
+            .filter(|profile| profile.provider == *provider)
+            .collect::<Vec<_>>();
+        let [profile] = matching.as_slice() else {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::AlreadyExists,
+                "provider profile is missing or duplicated across config and state",
+            ));
+        };
+        if profile.source != expected_source || profile.contents != expected_settings {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
+                "provider profile changed while authentication was in progress",
+            ));
+        }
+        let named_contents = named_source
+            .map(|source| self.materialize_named_secret(extension_instance, source))
+            .transpose()?;
+        self.write_secret(
+            extension_instance,
+            secret,
+            named_contents
+                .as_deref()
+                .unwrap_or_else(|| secret.contents.expose()),
+        )
+    }
+
+    /// Resolves one declared named source and serializes its canonical typed
+    /// API-key record without exposing the value to callers.
+    fn materialize_named_secret(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        source: &NamedSecretSource,
+    ) -> path_std_io::Result<Vec<u8>> {
+        let sources = load_secret_sources(EnvironmentDisposition::Retain)
+            .map_err(path_std_io::Error::other)?;
+        let value = resolve_declared_secret(
+            &self.state_dir,
+            &sources,
+            extension_instance.as_str(),
+            &source.name,
+            &source.declaration,
+        )
+        .map_err(path_std_io::Error::other)?
+        .ok_or_else(|| {
+            path_std_io::Error::new(
+                path_std_io::ErrorKind::NotFound,
+                format!("configured named secret '{}' is unavailable", source.name),
+            )
+        })?;
+        serde_json::to_vec(&ApiKeyCredential::new(value.expose_secret().to_owned()))
+            .map_err(path_std_io::Error::other)
+    }
+
+    /// Writes one Secret record while preserving the no-symlink private-tree
+    /// contract shared by setup and login.
+    fn write_secret(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        secret: &SecretWrite,
+        contents: &[u8],
+    ) -> path_std_io::Result<()> {
+        use fs2::FileExt as _;
+
+        if MAX_SECRET_DATA_FILE_BYTES < u64::try_from(contents.len()).unwrap_or(u64::MAX) {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
+                format!(
+                    "credential record exceeds the {MAX_SECRET_DATA_FILE_BYTES}-byte Secret limit"
+                ),
+            ));
+        }
+        let secret_root = tau_config::settings::extension_secret_dir_of(
+            &self.state_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        ensure_private_directory_tree(
+            &self.state_dir,
+            &PathBuf::from("secrets/ext").join(extension_instance.as_str()),
+        )?;
+        let secret_lock = open_directory_no_follow(&secret_root)?;
+        secret_lock.lock_exclusive()?;
+        let secret_rel = sanitize_secret_path(secret.path.as_str())?;
+        reject_existing_symlink_components(&secret_root, &secret_rel)?;
+        if let Some(parent) = secret_rel.parent() {
+            ensure_private_directory_tree(&secret_root, parent)?;
+        }
+        atomic_private_write(&secret_root.join(secret_rel), contents)?;
+        fs2::FileExt::unlock(&secret_lock)
     }
 
     /// Removes settings first and then every credential slot used by
