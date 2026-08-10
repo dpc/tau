@@ -32,9 +32,12 @@ use crate::specs::{
 };
 use crate::tools::write::{
     handle as handle_signed_tool_with_limit, parse_tags, pause_before_test_publication,
-    validate_body,
+    pause_before_test_publication_with_deadline_after_entry, validate_body,
 };
 use crate::tools::{ToolFailure, tool_error};
+
+/// Phase-specific scheduling allowance beneath nextest's whole-test watchdog.
+const TEST_GATE_WAIT: Duration = Duration::from_secs(5);
 
 /// Thread-safe protocol writer used to observe asynchronous extension output.
 #[derive(Clone, Default)]
@@ -672,7 +675,10 @@ fn wait_for_output_event(output: &SharedWriter, predicate: impl Fn(&Event) -> bo
 
 /// Ensures a deadline or `ToolCancelRequest` after the admitted-publication
 /// boundary reports exactly one early terminal, retains the write to
-/// completion, and never emits a late result or retries it.
+/// completion, and never emits a late result or retries it. The test's
+/// one-second semantic deadline begins at the controlled post gate. Bounded
+/// phase watchdogs retain direct-test diagnostics while allowing fresh
+/// activation scheduling margin beneath nextest's whole-test liveness bound.
 #[test]
 fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
     let temporary = tempfile::tempdir().expect("temporary directory");
@@ -708,28 +714,49 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
         serde_json::json!({"body":"timeout after publication admission"}),
     );
     timeout_invoke.call_id = tau_proto::ToolCallId::new("timeout-after-admission");
-    let (timeout_entered, timeout_release, timeout_committed) =
-        pause_before_test_publication(timeout_invoke.call_id.clone());
+    let timeout_gate =
+        pause_before_test_publication_with_deadline_after_entry(timeout_invoke.call_id.clone());
     writer
         .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
             timeout_invoke.clone(),
         )))
         .expect("start timeout post");
     writer.flush().expect("flush timeout post");
-    timeout_entered
-        .recv_timeout(Duration::from_secs(2))
+    timeout_gate
+        .entered
+        .recv_timeout(TEST_GATE_WAIT)
         .expect("timeout post reaches publication-admission boundary");
+    assert!(
+        timeout_gate.publication_admitted(),
+        "timeout post enters its test gate only after publication admission"
+    );
     wait_for_output_event(&output, |event| {
         matches!(
             event,
             Event::ToolErrorReported(error) if error.call_id == timeout_invoke.call_id
         )
     });
-    timeout_release
+    let Some(Event::ToolErrorReported(timeout)) =
+        output_events(&output).into_iter().find(|event| {
+            matches!(
+                event,
+                Event::ToolErrorReported(error) if error.call_id == timeout_invoke.call_id
+            )
+        })
+    else {
+        panic!("timeout post reports one early error");
+    };
+    assert!(
+        timeout.message.starts_with("timeout:"),
+        "admitted post deadline reports the timeout category"
+    );
+    timeout_gate
+        .release
         .send(())
         .expect("release timeout publication");
-    timeout_committed
-        .recv_timeout(Duration::from_secs(2))
+    timeout_gate
+        .committed
+        .recv_timeout(TEST_GATE_WAIT)
         .expect("timeout publication commits exactly once");
 
     let mut cancelled_invoke = signed_invoke(
@@ -737,16 +764,16 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
         serde_json::json!({"body":"cancel after publication admission"}),
     );
     cancelled_invoke.call_id = tau_proto::ToolCallId::new("cancel-after-admission");
-    let (cancelled_entered, cancelled_release, cancelled_committed) =
-        pause_before_test_publication(cancelled_invoke.call_id.clone());
+    let cancelled_gate = pause_before_test_publication(cancelled_invoke.call_id.clone());
     writer
         .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
             cancelled_invoke.clone(),
         )))
         .expect("start cancelled post");
     writer.flush().expect("flush cancelled post");
-    cancelled_entered
-        .recv_timeout(Duration::from_secs(2))
+    cancelled_gate
+        .entered
+        .recv_timeout(TEST_GATE_WAIT)
         .expect("cancelled post reaches publication-admission boundary");
     writer
         .write_message(&HarnessOutputMessage::deliver(Event::ToolCancelRequest(
@@ -762,11 +789,13 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
             Event::ToolCancelledReported(cancelled) if cancelled.call_id == cancelled_invoke.call_id
         )
     });
-    cancelled_release
+    cancelled_gate
+        .release
         .send(())
         .expect("release cancelled publication");
-    cancelled_committed
-        .recv_timeout(Duration::from_secs(2))
+    cancelled_gate
+        .committed
+        .recv_timeout(TEST_GATE_WAIT)
         .expect("cancelled publication commits exactly once");
     let mut limited_invoke = signed_invoke(
         "rostra_post",

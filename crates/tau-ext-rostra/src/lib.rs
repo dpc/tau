@@ -490,6 +490,8 @@ fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()> {
 fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()> {
     let invoke = cx.invoke().clone();
     let Some(client) = cx.state.client.clone() else {
+        #[cfg(test)]
+        tools::write::discard_test_publication_gate(&invoke.call_id);
         let event = tools::tool_error(&invoke, tools::ToolFailure::not_ready());
         let outcome = tau_client::ToolTerminalOutcome::try_from(event)
             .map_err(|_| ClientError::handler("internal_failure: invalid terminal event"))?;
@@ -500,6 +502,8 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
     let permit = match Arc::clone(&cx.state.permits).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
+            #[cfg(test)]
+            tools::write::discard_test_publication_gate(&invoke.call_id);
             let event = tools::tool_error(&invoke, tools::ToolFailure::capacity());
             let outcome = tau_client::ToolTerminalOutcome::try_from(event)
                 .map_err(|_| ClientError::handler("internal_failure: invalid terminal event"))?;
@@ -512,6 +516,9 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
     let post_rate_limit = cx.state.post_rate_limit;
     let post_rate_limit_window = Arc::clone(&cx.state.post_rate_limit_window);
     let call_id = invoke.call_id.clone();
+    #[cfg(test)]
+    let deadline_after_publication_entry =
+        tools::write::take_test_deadline_after_publication_entry(&call_id);
     let (start_tx, start_rx) = oneshot::channel();
     let worker = cx
         .state
@@ -547,7 +554,21 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
                 }),
                 publication_admitted: Arc::clone(&publication_admitted),
             };
-            let event = match tokio::time::timeout(TOOL_DEADLINE, &mut task.task).await {
+            #[cfg(test)]
+            let completion = if let Some(deadline_start_rx) = deadline_after_publication_entry {
+                tokio::select! {
+                    completion = &mut task.task => {
+                        tools::write::discard_test_publication_gate(&call_id);
+                        Ok(completion)
+                    }
+                    _ = deadline_start_rx => tokio::time::timeout(TOOL_DEADLINE, &mut task.task).await,
+                }
+            } else {
+                tokio::time::timeout(TOOL_DEADLINE, &mut task.task).await
+            };
+            #[cfg(not(test))]
+            let completion = tokio::time::timeout(TOOL_DEADLINE, &mut task.task).await;
+            let event = match completion {
                 Ok(Ok(Ok(text))) => tools::tool_result(&invoke, text),
                 Ok(Ok(Err(error))) => tools::tool_error(&invoke, error),
                 Ok(Err(_)) => tools::tool_error(&invoke, tools::ToolFailure::internal()),
@@ -605,6 +626,8 @@ fn cancel_call(state: &mut RostraState, call_id: tau_proto::ToolCallId) {
         return;
     };
     call.abort.abort();
+    #[cfg(test)]
+    tools::write::discard_test_publication_gate(&call_id);
     let _ = call.handle.report_tool_cancelled_detached(ToolCancelled {
         presentation: Default::default(),
         call_id,
@@ -615,7 +638,11 @@ fn cancel_call(state: &mut RostraState, call_id: tau_proto::ToolCallId) {
 
 fn abort_all(running: &Mutex<HashMap<tau_proto::ToolCallId, RunningCall>>) {
     if let Ok(mut calls) = running.lock() {
-        calls.drain().for_each(|(_, call)| call.abort.abort());
+        for (_call_id, call) in calls.drain() {
+            call.abort.abort();
+            #[cfg(test)]
+            tools::write::discard_test_publication_gate(&_call_id);
+        }
     }
 }
 

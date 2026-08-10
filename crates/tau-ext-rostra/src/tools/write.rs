@@ -12,6 +12,8 @@ use rostra_core::event::content_kind::PersonasTagsSelector;
 use rostra_core::event::{PersonaTag, SocialPost};
 use rostra_core::id::RostraIdSecretKey;
 use tau_proto::ToolStarted;
+#[cfg(test)]
+use tokio::sync::oneshot;
 
 use super::{ToolFailure, ToolTextResult, decode_args, parse_identity};
 use crate::post_rate_limit::{PostRateLimit, PostRateLimitWindow};
@@ -33,6 +35,58 @@ struct TestPublicationGate {
     release: mpsc::Receiver<()>,
     /// Signals that upstream publication returned its locally stored event.
     committed: mpsc::Sender<()>,
+    /// Optional controlled wrapper deadline for the admitted-timeout test.
+    deadline_after_entry: Option<TestDeadlineAfterPublicationEntry>,
+}
+
+#[cfg(test)]
+impl TestPublicationGate {
+    /// Start the controlled wrapper deadline after this gate has entered.
+    fn start_deadline_after_entry(&mut self) {
+        let Some(deadline_start) = self.deadline_after_entry.take() else {
+            return;
+        };
+        assert!(
+            deadline_start.admitted.load(Ordering::Acquire),
+            "test deadline must start after publication admission"
+        );
+        let _ = deadline_start.deadline_start_tx.send(());
+    }
+}
+
+#[cfg(test)]
+/// Test-owned handles for observing and releasing one paused publication.
+pub(crate) struct TestPublicationControl {
+    /// Receives the post-gate-entry notification.
+    pub(crate) entered: mpsc::Receiver<()>,
+    /// Releases the paused upstream publication.
+    pub(crate) release: mpsc::Sender<()>,
+    /// Receives the local-commit notification.
+    pub(crate) committed: mpsc::Receiver<()>,
+    /// Observes the production admission marker for controlled-deadline tests.
+    admitted: Option<Arc<AtomicBool>>,
+}
+
+#[cfg(test)]
+impl TestPublicationControl {
+    /// Reports whether the matching controlled test call reached admission.
+    pub(crate) fn publication_admitted(&self) -> bool {
+        self.admitted
+            .as_ref()
+            .is_some_and(|admitted| admitted.load(Ordering::Acquire))
+    }
+}
+
+#[cfg(test)]
+/// Test-only state that defers one wrapper deadline until its post gate has
+/// entered after publication admission.
+struct TestDeadlineAfterPublicationEntry {
+    /// Records that the real publication-admission marker preceded gate entry.
+    admitted: Arc<AtomicBool>,
+    /// Wakes the wrapper after the post gate has entered.
+    deadline_start_tx: oneshot::Sender<()>,
+    /// Claimed by the wrapper before it spawns the inner signed write.
+    deadline_start_rx: Option<oneshot::Receiver<()>>,
 }
 
 #[cfg(test)]
@@ -44,15 +98,29 @@ static TEST_PUBLICATION_GATE: OnceLock<Mutex<Option<TestPublicationGate>>> = Onc
 /// Pause a specified test call immediately before upstream publication.
 pub(crate) fn pause_before_test_publication(
     call_id: tau_proto::ToolCallId,
-) -> (mpsc::Receiver<()>, mpsc::Sender<()>, mpsc::Receiver<()>) {
+) -> TestPublicationControl {
+    register_test_publication_gate(call_id, None)
+}
+
+#[cfg(test)]
+/// Register one test post gate and optionally defer its wrapper deadline until
+/// that gate enters.
+fn register_test_publication_gate(
+    call_id: tau_proto::ToolCallId,
+    deadline_after_entry: Option<TestDeadlineAfterPublicationEntry>,
+) -> TestPublicationControl {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (committed_tx, committed_rx) = mpsc::channel();
+    let admitted = deadline_after_entry
+        .as_ref()
+        .map(|deadline_start| Arc::clone(&deadline_start.admitted));
     let gate = TestPublicationGate {
         call_id,
         entered: entered_tx,
         release: release_rx,
         committed: committed_tx,
+        deadline_after_entry,
     };
     let mut slot = TEST_PUBLICATION_GATE
         .get_or_init(|| Mutex::new(None))
@@ -63,7 +131,78 @@ pub(crate) fn pause_before_test_publication(
         "only one signed test publication gate may be active"
     );
     *slot = Some(gate);
-    (entered_rx, release_tx, committed_rx)
+    TestPublicationControl {
+        entered: entered_rx,
+        release: release_tx,
+        committed: committed_rx,
+        admitted,
+    }
+}
+
+#[cfg(test)]
+/// Pause one test post and start its wrapper deadline only after the admitted
+/// post gate has entered.
+pub(crate) fn pause_before_test_publication_with_deadline_after_entry(
+    call_id: tau_proto::ToolCallId,
+) -> TestPublicationControl {
+    let (start_tx, start_rx) = oneshot::channel();
+    let admitted = Arc::new(AtomicBool::new(false));
+    let deadline_start = TestDeadlineAfterPublicationEntry {
+        admitted: Arc::clone(&admitted),
+        deadline_start_tx: start_tx,
+        deadline_start_rx: Some(start_rx),
+    };
+    register_test_publication_gate(call_id, Some(deadline_start))
+}
+
+#[cfg(test)]
+/// Claim the controlled deadline receiver before the matching inner write can
+/// begin.
+pub(crate) fn take_test_deadline_after_publication_entry(
+    call_id: &tau_proto::ToolCallId,
+) -> Option<oneshot::Receiver<()>> {
+    let mut slot = TEST_PUBLICATION_GATE
+        .get()?
+        .lock()
+        .expect("test publication gate lock");
+    if slot.as_ref().is_some_and(|gate| gate.call_id == *call_id) {
+        slot.as_mut()
+            .expect("matched test publication gate")
+            .deadline_after_entry
+            .as_mut()?
+            .deadline_start_rx
+            .take()
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+/// Mark the matching controlled test call as admitted immediately after the
+/// production admission marker changes.
+fn mark_test_publication_admitted(call_id: &tau_proto::ToolCallId) {
+    let Some(slot) = TEST_PUBLICATION_GATE.get() else {
+        return;
+    };
+    let slot = slot.lock().expect("test publication gate lock");
+    if let Some(gate) = slot.as_ref()
+        && gate.call_id == *call_id
+        && let Some(deadline_start) = &gate.deadline_after_entry
+    {
+        deadline_start.admitted.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+/// Drop a matching test gate after its write finishes before reaching entry.
+pub(crate) fn discard_test_publication_gate(call_id: &tau_proto::ToolCallId) {
+    let Some(slot) = TEST_PUBLICATION_GATE.get() else {
+        return;
+    };
+    let mut slot = slot.lock().expect("test publication gate lock");
+    if slot.as_ref().is_some_and(|gate| gate.call_id == *call_id) {
+        let _ = slot.take();
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +245,8 @@ pub(crate) async fn handle(
     // Admission is intentionally before the operation-specific upstream call.
     // Once dispatched, its redb effect cannot be reported reliably after timeout.
     publication_admitted.store(true, Ordering::Release);
+    #[cfg(test)]
+    mark_test_publication_admitted(&invoke.call_id);
     match invoke.tool_name.as_str() {
         POST_TOOL => post(invoke, client, secret).await,
         REACT_TOOL => react(invoke, client, secret).await,
@@ -185,10 +326,11 @@ async fn post(invoke: &ToolStarted, client: &Client, secret: RostraIdSecretKey) 
         .map_err(|_| ToolFailure::invalid("`reply_to` is not a valid external event id"))?;
     let tags = parse_tags(args.persona_tags)?;
     #[cfg(test)]
-    let test_gate = take_test_publication_gate(&invoke.call_id);
+    let mut test_gate = take_test_publication_gate(&invoke.call_id);
     #[cfg(test)]
-    if let Some(gate) = &test_gate {
+    if let Some(gate) = &mut test_gate {
         gate.entered.send(()).expect("test waits for signed commit");
+        gate.start_deadline_after_entry();
         tokio::task::block_in_place(|| {
             gate.release.recv().expect("test releases signed commit");
         });
