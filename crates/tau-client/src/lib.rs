@@ -24,6 +24,7 @@ mod client_error;
 mod client_handle;
 mod config;
 mod contexts;
+mod detached_output;
 mod event_payload;
 mod extension_trait;
 mod handler;

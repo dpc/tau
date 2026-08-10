@@ -90,11 +90,28 @@ buffer; the runner later reports their encode/flush failure while draining that
 buffer before `Ready`. A closed or panicked
 writer is reported as `ClientError`. Detached enqueue helpers are also available
 for background workers that must not block the protocol reader on output
-backpressure; after admission checks, those helpers report queue-closed failures
-to the caller and let the writer thread own any later encode/flush error. `Ready`
-is runner-owned, linearized with pre-Ready `ConfigError`, and rejected by raw
+backpressure. Detached output enters one shared FIFO without blocking on the
+one-item writer notification/command transport. The FIFO retains at most 64
+frames and 8 MiB of aggregate measured encoded bytes across startup and runtime;
+exhaustion returns `Overloaded`. Every frame, including synchronous and
+runner-owned startup output, also has an individual 8 MiB encoded limit.
+Synchronous and runner-owned startup output may backpressure on the transport,
+preserving flush acknowledgement and startup ordering. Admission measures
+serialization without retaining a second full payload, and the writer owns later
+encode/flush errors for accepted detached frames.
+
+Before `Ready`, the FIFO retains accepted output without writing it. The writer
+activates ordered draining only after flushing `Ready`, so runtime output cannot
+overtake pre-Ready output. A successfully admitted pre-Ready `ConfigError`
+instead rejects `Ready`, activates draining, and remains behind every earlier
+accepted detached frame; synchronous pre-Ready `ConfigError` likewise drains
+earlier accepted FIFO entries before its acknowledged write. `Ready` is
+runner-owned, linearized with pre-Ready `ConfigError`, and rejected by raw
 synchronous or detached handle APIs rather than being admitted as ordinary
-output.
+output. Active writer turns drain only a captured batch before checking the
+command transport again, so continuous detached refill cannot starve synchronous
+output. Shutdown closes admission, activates any pre-Ready FIFO, and drains every
+accepted entry before terminating the writer.
 
 `ProtocolIoMeter` is a protocol-mechanical frame counter shared by UI and
 extension transports. It groups already-decoded/encoded frames by delivered or

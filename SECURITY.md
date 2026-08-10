@@ -29,6 +29,17 @@ For technical trust boundaries, start with [ARCH-external-message-boundary](spec
 
 ### Accepted configured-component availability risks
 
+A configured extension's process-local client writer retains detached outbound
+frames in one FIFO capped at 64 frames and 8 MiB of aggregate encoded data, with
+an independent 8-MiB limit per frame. This is an availability safeguard inside
+the trusted same-user extension boundary, not hostile local-IPC containment.
+Accepted pre-Ready frames drain in order after `Ready`, `ConfigError`, or graceful
+shutdown; bounded drain batches prevent continuous detached production from
+starving synchronous writer commands. Exact boundary, ordering, refill/recovery,
+and blocked-writer tests protect these properties. Revisit them when changing
+writer notification, FIFO budget release, startup activation, ConfigError
+ordering, or writer shutdown.
+
 A connected consumer generation that stops advancing may pin shared live-event
 payload retention indefinitely. Tau emits only a rate-limited warning; it does
 not backpressure or reject publication because of egress lag, spool the suffix

@@ -1,6 +1,7 @@
 use std::io::{Cursor, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, time as path_std_time};
@@ -14,6 +15,7 @@ use tau_proto::{
 };
 
 use super::*;
+use crate::writer_thread::WriterCommand;
 
 /// Thread-safe test writer that captures encoded harness-input frames.
 #[derive(Clone, Default)]
@@ -1806,7 +1808,7 @@ fn detached_notice_request_is_written_before_shutdown() {
 fn client_handle_send_after_queued_shutdown_fails_promptly() {
     let blocked = Arc::new((Mutex::new(true), Condvar::new()));
     let (entered_tx, entered_rx) = mpsc::channel();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     handle.finish_startup().expect("finish test startup");
     let cloned = handle.clone();
@@ -1838,6 +1840,12 @@ fn client_handle_send_after_queued_shutdown_fails_promptly() {
                 std::thread::sleep(Duration::from_millis(1));
             }
             Ok(()) => panic!("shutdown did not close cloned handles promptly"),
+            Err(ClientError::Overloaded) if start.elapsed() < Duration::from_secs(1) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(ClientError::Overloaded) => {
+                panic!("shutdown did not close overloaded cloned handles promptly");
+            }
             Err(ClientError::WriterClosed) => break,
             Err(error) => panic!("unexpected detached send error: {error}"),
         }
@@ -3651,7 +3659,7 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
 fn client_handle_scopes_dynamic_register_and_unregister() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3709,7 +3717,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
 fn client_handle_submits_transient_tool_progress_report() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3744,7 +3752,7 @@ fn client_handle_submits_transient_tool_progress_report() {
 fn client_handle_submits_transient_terminal_tool_reports() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3855,7 +3863,7 @@ fn tool_context_binds_terminal_report_correlation() {
 fn config_error_between_declaration_flush_and_ready_withholds_ready() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3893,7 +3901,7 @@ fn config_error_between_declaration_flush_and_ready_withholds_ready() {
 fn detached_config_error_before_ready_withholds_ready() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3920,7 +3928,7 @@ fn detached_config_error_before_ready_withholds_ready() {
 fn raw_ready_is_rejected_during_configure() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3941,7 +3949,7 @@ fn raw_ready_is_rejected_during_configure() {
 fn raw_ready_after_config_error_is_rejected() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3967,7 +3975,7 @@ fn raw_ready_after_config_error_is_rejected() {
 fn detached_raw_ready_cannot_duplicate_official_ready() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
@@ -3983,40 +3991,56 @@ fn detached_raw_ready_cannot_duplicate_official_ready() {
     ));
 }
 
-/// Ready releases the startup gate before waiting on writer backpressure, so a
-/// concurrent detached ConfigError remains nonblocking and is ordered after it.
+/// Detached admission accepts exactly 64 queued frames while transport is
+/// blocked, rejects frame 65, and resumes after the writer releases FIFO
+/// budget.
 #[test]
-fn ready_flush_backpressure_does_not_block_detached_config_error() {
-    /// Capturing writer whose first flush waits for explicit test release.
+fn detached_fifo_item_limit_and_blocked_writer_recovery() {
+    /// Writer that blocks its first flush until the test releases transport.
     struct FirstFlushBlocks {
-        /// Encoded protocol bytes for final ordering assertions.
+        /// Captured protocol output.
         output: SharedWriter,
-        /// Signals that Ready reached the blocked flush.
+        /// Reports entry into the blocked flush.
         entered: mpsc::Sender<()>,
-        /// Releases the first blocked flush.
+        /// Releases the blocked flush.
         release: mpsc::Receiver<()>,
-        /// Whether the one blocking flush has already run.
+        /// Reports that the writer popped the first detached frame.
+        detached_started: Option<mpsc::Sender<()>>,
+        /// Number of frame writes started.
+        writes: usize,
+        /// Whether the first flush has already blocked.
         blocked: bool,
     }
     impl Write for FirstFlushBlocks {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.writes == 1 {
+                self.detached_started
+                    .take()
+                    .expect("detached-start sender")
+                    .send(())
+                    .expect("report detached write");
+            }
+            self.writes += 1;
             self.output.write(bytes)
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
             if !self.blocked {
                 self.blocked = true;
-                self.entered.send(()).expect("signal blocked flush");
+                self.entered.send(()).expect("report blocked flush");
                 self.release.recv().expect("release blocked flush");
             }
             self.output.flush()
         }
     }
 
+    const APPROVED_ITEMS: usize = 64;
+    assert_eq!(crate::detached_output::MAX_FRAMES, APPROVED_ITEMS);
     let written = SharedWriter::default();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let (sender, receiver) = mpsc::channel();
+    let (detached_started_tx, detached_started_rx) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_output = written.clone();
     let writer_thread = std::thread::spawn(move || {
@@ -4025,48 +4049,449 @@ fn ready_flush_backpressure_does_not_block_detached_config_error() {
                 output: writer_output,
                 entered: entered_tx,
                 release: release_rx,
+                detached_started: Some(detached_started_tx),
+                writes: 0,
                 blocked: false,
             },
             receiver,
         )
     });
-    let ready_handle = handle.clone();
-    let ready_thread = std::thread::spawn(move || ready_handle.send_ready(None));
+    handle.finish_startup().expect("enable detached drain");
+    let blocker = handle.clone();
+    let blocking_send = std::thread::spawn(move || {
+        blocker.send(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("transport blocker".to_owned()),
+        }))
+    });
     entered_rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("Ready reached blocked flush");
+        .expect("writer reached blocked transport");
+    let message = HarnessInputMessage::Disconnect(tau_proto::Disconnect::default());
+    for _ in 0..APPROVED_ITEMS {
+        handle
+            .send_detached(message.clone())
+            .expect("admit frame within FIFO item budget");
+    }
+    assert!(matches!(
+        handle.send_detached(message.clone()),
+        Err(ClientError::Overloaded)
+    ));
 
-    let detached_handle = handle.clone();
-    let (detached_done_tx, detached_done_rx) = mpsc::channel();
-    let detached_thread = std::thread::spawn(move || {
-        let result = detached_handle.send_detached(HarnessInputMessage::ConfigError(
-            tau_proto::ConfigError {
-                message: "post-Ready diagnostic".to_owned(),
-            },
-        ));
-        let _ = detached_done_tx.send(result);
-    });
-    let detached_result = detached_done_rx.recv_timeout(Duration::from_secs(1));
-    release_tx.send(()).expect("release Ready flush");
-    ready_thread.join().expect("Ready thread").expect("Ready");
-    let detached_result = match detached_result {
-        Ok(result) => result,
-        Err(error) => {
-            detached_thread.join().expect("detached thread");
-            panic!("detached ConfigError blocked behind Ready flush: {error}");
+    release_tx.send(()).expect("release writer");
+    blocking_send
+        .join()
+        .expect("blocking sender")
+        .expect("send");
+    detached_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer released one FIFO slot");
+    handle
+        .send_detached(message.clone())
+        .expect("detached FIFO recovers after causal budget release");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert_eq!(frames_from_writer(&written).len(), APPROVED_ITEMS + 2);
+}
+
+/// Runtime detached output accepts a legitimate post-Ready burst and preserves
+/// exact FIFO order independently of the one-slot command transport.
+#[test]
+fn detached_post_ready_burst_preserves_fifo_order() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    handle.finish_startup().expect("finish test startup");
+
+    for index in 0..16 {
+        handle
+            .send_detached(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(format!("burst-{index:02}")),
+            }))
+            .expect("admit legitimate burst frame");
+    }
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    let reasons: Vec<_> = frames_from_writer(&written)
+        .into_iter()
+        .map(|message| match message {
+            HarnessInputMessage::Disconnect(disconnect) => disconnect.reason.expect("reason"),
+            other => panic!("unexpected burst frame: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        (0..16)
+            .map(|index| format!("burst-{index:02}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Graceful shutdown activates pre-Ready output, drains every accepted frame in
+/// FIFO order, and closes later admission before returning.
+#[test]
+fn detached_pre_ready_fifo_drains_during_graceful_shutdown() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    for reason in ["first before Ready", "second before Ready"] {
+        handle
+            .send_detached(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(reason.to_owned()),
+            }))
+            .expect("admit pre-Ready frame");
+    }
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+
+    handle.shutdown().expect("graceful shutdown");
+    assert!(matches!(
+        handle.send_detached(HarnessInputMessage::Disconnect(
+            tau_proto::Disconnect::default()
+        )),
+        Err(ClientError::WriterClosed)
+    ));
+    writer_thread.join().expect("writer join").expect("writer");
+    let reasons: Vec<_> = frames_from_writer(&written)
+        .into_iter()
+        .map(|message| match message {
+            HarnessInputMessage::Disconnect(disconnect) => disconnect.reason.expect("reason"),
+            other => panic!("unexpected shutdown frame: {other:?}"),
+        })
+        .collect();
+    assert_eq!(reasons, ["first before Ready", "second before Ready"]);
+}
+
+/// Captured drain batches let a queued synchronous command complete even when a
+/// detached producer causally replenishes every FIFO slot the writer releases.
+#[test]
+fn detached_continuous_refill_does_not_starve_synchronous_output() {
+    /// Writer whose flushes advance only when the test permits one frame.
+    struct SteppedWriter {
+        /// Captured encoded output.
+        output: SharedWriter,
+        /// Reports each frame reaching flush.
+        flushed: mpsc::Sender<()>,
+        /// Permits the current flush to complete.
+        permit: mpsc::Receiver<()>,
+        /// Disables stepping once the synchronous marker is observed.
+        blocking: Arc<AtomicBool>,
+    }
+    impl Write for SteppedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.write(bytes)
         }
-    };
-    detached_result.expect("detached ConfigError");
-    detached_thread.join().expect("detached thread");
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.blocking.load(Ordering::Acquire) {
+                self.flushed.send(()).expect("report stepped flush");
+                self.permit.recv().expect("permit stepped flush");
+            }
+            self.output.flush()
+        }
+    }
+
+    const APPROVED_ITEMS: usize = 64;
+    let written = SharedWriter::default();
+    let (flushed_tx, flushed_rx) = mpsc::channel();
+    let (permit_tx, permit_rx) = mpsc::channel();
+    let blocking = Arc::new(AtomicBool::new(true));
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let command_sender = sender.clone();
+    let handle = ClientHandle::new(sender);
+    handle.finish_startup().expect("enable detached drain");
+    let refill = HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+        reason: Some("detached refill".to_owned()),
+    });
+    for _ in 0..APPROVED_ITEMS {
+        handle
+            .send_detached(refill.clone())
+            .expect("fill detached FIFO");
+    }
+    let writer_output = written.clone();
+    let writer_blocking = Arc::clone(&blocking);
+    let writer_thread = std::thread::spawn(move || {
+        crate::writer_thread::run_writer(
+            SteppedWriter {
+                output: writer_output,
+                flushed: flushed_tx,
+                permit: permit_rx,
+                blocking: writer_blocking,
+            },
+            receiver,
+        )
+    });
+
+    flushed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first detached flush");
+    let (synchronous_ack_tx, synchronous_ack_rx) = mpsc::channel();
+    command_sender
+        .send(WriterCommand::Send(
+            HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some("synchronous marker".to_owned()),
+            }),
+            synchronous_ack_tx,
+        ))
+        .expect("queue synchronous command while writer is blocked");
+
+    let mut marker_observed = false;
+    for _ in 0..=APPROVED_ITEMS {
+        let marker_is_current = matches!(
+            frames_from_writer(&written).last(),
+            Some(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(reason)
+            })) if reason == "synchronous marker"
+        );
+        if marker_is_current {
+            marker_observed = true;
+            blocking.store(false, Ordering::Release);
+            permit_tx.send(()).expect("release marker flush");
+            break;
+        }
+        handle
+            .send_detached(refill.clone())
+            .expect("replenish released FIFO slot");
+        permit_tx.send(()).expect("advance detached flush");
+        flushed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("next stepped flush");
+    }
+    assert!(
+        marker_observed,
+        "synchronous output starved behind replenished detached FIFO"
+    );
+    synchronous_ack_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("synchronous acknowledgement")
+        .expect("synchronous output");
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+}
+
+/// Ready remains ahead of pre-Ready detached output, and later detached output,
+/// including ConfigError, follows the same FIFO without overtaking.
+#[test]
+fn detached_fifo_preserves_ready_and_runtime_config_error_order() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    handle
+        .send_detached(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("before Ready".to_owned()),
+        }))
+        .expect("admit pre-Ready frame");
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.send_ready(None).expect("send Ready");
+    handle
+        .send_detached(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("after Ready".to_owned()),
+        }))
+        .expect("admit post-Ready frame");
+    handle
+        .send_detached(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "runtime diagnostic".to_owned(),
+        }))
+        .expect("admit runtime ConfigError");
     handle.shutdown().expect("shutdown");
     writer_thread.join().expect("writer join").expect("writer");
     assert!(matches!(
         frames_from_writer(&written).as_slice(),
         [
             HarnessInputMessage::Ready(_),
-            HarnessInputMessage::ConfigError(_)
-        ]
+            HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(before)
+            }),
+            HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(after)
+            }),
+            HarnessInputMessage::ConfigError(tau_proto::ConfigError { message })
+        ] if before == "before Ready"
+            && after == "after Ready"
+            && message == "runtime diagnostic"
     ));
+}
+
+/// Synchronous pre-Ready ConfigError waits for all earlier accepted detached
+/// frames, then rejects Ready after its own acknowledged write.
+#[test]
+fn synchronous_config_error_drains_earlier_detached_fifo_entries() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    handle
+        .send_detached(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("accepted first".to_owned()),
+        }))
+        .expect("admit pre-Ready frame");
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle
+        .config_error("synchronous diagnostic")
+        .expect("write ConfigError");
+    assert!(handle.send_ready(None).is_err());
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [
+            HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(before)
+            }),
+            HarnessInputMessage::ConfigError(tau_proto::ConfigError { message })
+        ] if before == "accepted first" && message == "synchronous diagnostic"
+    ));
+}
+
+/// Aggregate byte accounting accepts an exact eight-MiB frame, rejects an
+/// additional frame, and retains the independent per-frame cap.
+#[test]
+fn detached_fifo_byte_limit_and_individual_frame_limit_are_exact() {
+    const APPROVED_BYTES: u64 = 8 * 1024 * 1024;
+    let (sender, _receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    handle
+        .send_detached(disconnect_with_encoded_size(APPROVED_BYTES))
+        .expect("admit exact aggregate byte budget");
+    assert!(matches!(
+        handle.send_detached(HarnessInputMessage::Disconnect(
+            tau_proto::Disconnect::default()
+        )),
+        Err(ClientError::Overloaded)
+    ));
+
+    let (sender, _receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    assert!(matches!(
+        handle.send_detached(disconnect_with_encoded_size(APPROVED_BYTES + 1)),
+        Err(ClientError::Overloaded)
+    ));
+}
+
+/// A pre-Ready detached ConfigError joins behind earlier detached frames at the
+/// item boundary, rejects Ready, and activates ordered draining without drops.
+#[test]
+fn detached_config_error_at_fifo_boundary_drains_in_order_and_rejects_ready() {
+    const APPROVED_ITEMS: usize = 64;
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    for index in 0..APPROVED_ITEMS - 1 {
+        handle
+            .send_detached(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some(format!("before-{index:02}")),
+            }))
+            .expect("admit pre-Ready frame");
+    }
+    handle
+        .send_detached(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "terminal configuration error".to_owned(),
+        }))
+        .expect("admit boundary ConfigError");
+    assert!(matches!(
+        handle.send_detached(HarnessInputMessage::Disconnect(
+            tau_proto::Disconnect::default()
+        )),
+        Err(ClientError::Overloaded)
+    ));
+    assert!(handle.send_ready(None).is_err());
+
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    let frames = frames_from_writer(&written);
+    assert_eq!(frames.len(), APPROVED_ITEMS);
+    assert!(matches!(
+        frames.last(),
+        Some(HarnessInputMessage::ConfigError(tau_proto::ConfigError { message }))
+            if message == "terminal configuration error"
+    ));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+    assert!(matches!(
+        handle.send_detached(HarnessInputMessage::Disconnect(
+            tau_proto::Disconnect::default()
+        )),
+        Err(ClientError::WriterClosed)
+    ));
+}
+
+/// The universal frame cap rejects oversized synchronous and runner-owned
+/// startup output before either can block on writer admission.
+#[test]
+fn synchronous_and_startup_output_enforce_approved_byte_limit() {
+    const APPROVED_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+    let oversized = disconnect_with_encoded_size(APPROVED_OUTPUT_BYTES + 1);
+
+    let startup_writer = SharedWriter::default();
+    let startup_written = startup_writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let startup_handle = ClientHandle::new(sender);
+    let startup_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(startup_writer, receiver));
+    assert!(matches!(
+        startup_handle.send_startup(oversized.clone()),
+        Err(ClientError::Overloaded)
+    ));
+    startup_handle.shutdown().expect("shutdown startup writer");
+    startup_thread.join().expect("writer join").expect("writer");
+    assert!(startup_written.bytes().is_empty());
+
+    let runtime_writer = SharedWriter::default();
+    let runtime_written = runtime_writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let runtime_handle = ClientHandle::new(sender);
+    let runtime_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(runtime_writer, receiver));
+    runtime_handle.finish_startup().expect("finish startup");
+    assert!(matches!(
+        runtime_handle.send(oversized),
+        Err(ClientError::Overloaded)
+    ));
+    runtime_handle.shutdown().expect("shutdown runtime writer");
+    runtime_thread.join().expect("writer join").expect("writer");
+    assert!(runtime_written.bytes().is_empty());
+}
+
+/// Construct a disconnect whose complete CBOR frame has the requested size.
+fn disconnect_with_encoded_size(target: u64) -> HarnessInputMessage {
+    let mut low = 0_usize;
+    let mut high = usize::try_from(target).expect("test target fits usize");
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let candidate = HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("x".repeat(middle)),
+        });
+        let bytes = tau_proto::encode_harness_input_to_vec(&candidate)
+            .expect("encode sized test frame")
+            .len() as u64;
+        if bytes < target {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    let message = HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+        reason: Some("x".repeat(low)),
+    });
+    assert_eq!(
+        tau_proto::encode_harness_input_to_vec(&message)
+            .expect("encode final sized test frame")
+            .len() as u64,
+        target
+    );
+    message
 }
 
 /// Once Ready wins the startup gate, later runtime ConfigError diagnostics
@@ -4075,7 +4500,7 @@ fn ready_flush_backpressure_does_not_block_detached_config_error() {
 fn config_error_after_ready_remains_allowed() {
     let writer = SharedWriter::default();
     let written = writer.clone();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_thread =
         std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));

@@ -13,7 +13,7 @@ use crate::runner::{
     dispatch_initial_configure, dispatch_message, write_hello, write_ready,
     write_startup_after_configure,
 };
-use crate::writer_thread::{WriterCommand, run_writer};
+use crate::writer_thread::run_writer;
 use crate::{ClientError, ClientHandle, ClientResult, TauExtension};
 
 /// Runtime for extensions that need to drive their own harness receive loop.
@@ -1035,7 +1035,7 @@ where
         self.extension.register(&mut builder);
         builder.validate()?;
 
-        let (sender, receiver) = mpsc::channel::<WriterCommand>();
+        let (sender, receiver) = crate::writer_thread::writer_channel();
         let handle = ClientHandle::new(sender);
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
 
@@ -1194,7 +1194,7 @@ where
         builder.validate()?;
         builder.validate_deferred_startup()?;
 
-        let (sender, receiver) = mpsc::channel::<WriterCommand>();
+        let (sender, receiver) = crate::writer_thread::writer_channel();
         let handle = ClientHandle::new(sender);
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
 

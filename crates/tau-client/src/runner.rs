@@ -1,9 +1,8 @@
 use std::io::{Read, Write};
-use std::sync::mpsc;
 
 use crate::builder::ExtensionBuilder;
 use crate::manual_runtime::DispatchOutcome;
-use crate::writer_thread::{WriterCommand, run_writer};
+use crate::writer_thread::{run_writer, writer_channel};
 use crate::{ClientError, ClientHandle, ClientResult, TauExtension, builder as path_crate_builder};
 
 /// Runtime that performs the Tau protocol lifecycle for one extension.
@@ -48,7 +47,7 @@ where
         self.extension.register(&mut builder);
         builder.validate()?;
 
-        let (sender, receiver) = mpsc::channel::<WriterCommand>();
+        let (sender, receiver) = writer_channel();
         let handle = ClientHandle::new(sender);
 
         std::thread::scope(|scope| {
@@ -127,7 +126,7 @@ where
         self.extension.register(&mut builder);
         builder.validate()?;
 
-        let (sender, receiver) = mpsc::channel::<WriterCommand>();
+        let (sender, receiver) = writer_channel();
         let handle = ClientHandle::new(sender);
 
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));

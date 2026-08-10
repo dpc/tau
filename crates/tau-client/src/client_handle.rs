@@ -1,22 +1,21 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
-use crate::writer_thread::WriterCommand;
+use crate::detached_output::{EncodedBytes, QueuedFrame};
+use crate::writer_thread::{WriterCommand, WriterSender};
 use crate::{ClientError, ClientResult};
 
 /// Cloneable outbound handle for sending peer-to-harness protocol frames.
 #[derive(Clone)]
 pub struct ClientHandle {
     /// Channel to the serialized writer thread.
-    sender: Arc<Mutex<Option<mpsc::Sender<WriterCommand>>>>,
+    sender: Arc<Mutex<Option<WriterSender>>>,
     /// Immutable tool-name scope shared by every clone.
     tool_name_scope: Arc<OnceLock<crate::ToolNameScope>>,
     /// Public/background output remains gated until the runner writes `Ready`.
     startup_complete: Arc<AtomicBool>,
     /// Linearizes every pre-Ready ConfigError against the terminal Ready frame.
     startup_gate: Arc<Mutex<StartupGate>>,
-    /// Detached output created by a state factory is released after `Ready`.
-    pending_detached: Arc<Mutex<Vec<tau_proto::HarnessInputMessage>>>,
     /// Initial Configure callbacks may emit immediate diagnostics before Ready.
     configuring: Arc<AtomicBool>,
     /// Configuration-derived declarations replayed after static declarations.
@@ -32,13 +31,12 @@ enum StartupGate {
 impl ClientHandle {
     /// Creates a handle around a writer command channel.
     #[must_use]
-    pub(crate) fn new(sender: mpsc::Sender<WriterCommand>) -> Self {
+    pub(crate) fn new(sender: WriterSender) -> Self {
         Self {
             sender: Arc::new(Mutex::new(Some(sender))),
             tool_name_scope: Arc::new(OnceLock::new()),
             startup_complete: Arc::new(AtomicBool::new(false)),
             startup_gate: Arc::new(Mutex::new(StartupGate::PreReady { rejected: false })),
-            pending_detached: Arc::new(Mutex::new(Vec::new())),
             configuring: Arc::new(AtomicBool::new(false)),
             pending_configure_outputs: Arc::new(Mutex::new(Vec::new())),
         }
@@ -97,7 +95,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error when scope composition fails or the writer has stopped.
+    /// Returns an error when scope composition or frame encoding fails, the
+    /// frame exceeds 8 MiB, the detached FIFO exhausts its 64-frame or
+    /// 8-MiB aggregate budget, or the writer has stopped.
     pub fn register_local_tool_detached(
         &self,
         registration: tau_proto::ToolRegistrationDeclared,
@@ -148,8 +148,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn report_tool_progress_detached(
         &self,
         progress: tau_proto::ToolProgress,
@@ -185,8 +186,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn report_tool_result_detached(&self, result: tau_proto::ToolResult) -> ClientResult<()> {
         self.report_tool_terminal_detached(result.into())
     }
@@ -217,8 +219,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn report_tool_error_detached(&self, error: tau_proto::ToolError) -> ClientResult<()> {
         self.report_tool_terminal_detached(error.into())
     }
@@ -249,8 +252,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn report_tool_cancelled_detached(
         &self,
         cancelled: tau_proto::ToolCancelled,
@@ -280,8 +284,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn report_tool_terminal_detached(
         &self,
         outcome: crate::ToolTerminalOutcome,
@@ -303,8 +308,10 @@ impl ClientHandle {
     ///
     /// Returns an error when raw `Ready` is attempted, ordinary output is sent
     /// before startup Ready outside the initial Configure callback, the writer
-    /// thread has stopped, the frame cannot be encoded or flushed, or the
-    /// writer reports an I/O failure.
+    /// thread has stopped, the encoded frame exceeds 8 MiB, the frame cannot be
+    /// encoded or flushed, or the writer reports an I/O failure. A synchronous
+    /// `ConfigError` waits for accepted pre-Ready detached output to drain
+    /// before entering the writer lane.
     pub fn send(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
         if matches!(&message, tau_proto::HarnessInputMessage::Ready(_)) {
             return Err(ClientError::handler(
@@ -370,9 +377,13 @@ impl ClientHandle {
         let mut gate = self.startup_gate.lock().expect("lock startup gate");
         if let StartupGate::PreReady { rejected } = &mut *gate {
             *rejected = true;
+            self.activate_detached()?;
+            let ack = self.enqueue_after_detached(message)?;
+            drop(gate);
+            return Self::wait_for_ack(ack);
         }
-        let ack = self.enqueue_immediate(message)?;
         drop(gate);
+        let ack = self.enqueue_after_detached(message)?;
         Self::wait_for_ack(ack)
     }
 
@@ -385,8 +396,20 @@ impl ClientHandle {
         &self,
         message: tau_proto::HarnessInputMessage,
     ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
+        ensure_admissible_frame(&message)?;
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.enqueue(WriterCommand::Send(message, ack_sender))?;
+        self.enqueue_blocking(WriterCommand::Send(message, ack_sender))?;
+        Ok(ack_receiver)
+    }
+
+    /// Enqueues one acknowledged frame behind all earlier detached output.
+    fn enqueue_after_detached(
+        &self,
+        message: tau_proto::HarnessInputMessage,
+    ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
+        ensure_admissible_frame(&message)?;
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        self.enqueue_blocking(WriterCommand::SendAfterDetached(message, ack_sender))?;
         Ok(ack_receiver)
     }
 
@@ -404,8 +427,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error when raw `Ready` is attempted or the writer thread has
-    /// already stopped before the frame can be queued.
+    /// Returns [`ClientError::Overloaded`] when the shared 64-frame or 8-MiB
+    /// detached FIFO is exhausted or the encoded frame exceeds 8 MiB. Raw
+    /// `Ready`, encoding failures, and a stopped writer also return errors.
     pub fn send_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
         if matches!(&message, tau_proto::HarnessInputMessage::Ready(_)) {
             return Err(ClientError::handler(
@@ -415,39 +439,55 @@ impl ClientHandle {
         if matches!(&message, tau_proto::HarnessInputMessage::ConfigError(_)) {
             let mut gate = self.startup_gate.lock().expect("lock startup gate");
             if let StartupGate::PreReady { rejected } = &mut *gate {
-                *rejected = true;
+                let result = self.admit_detached(message);
+                if result.is_ok() {
+                    *rejected = true;
+                    if let Err(error) = self.activate_detached() {
+                        drop(gate);
+                        return Err(error);
+                    }
+                }
+                drop(gate);
+                return result;
             }
-            let result = self.enqueue(WriterCommand::SendDetached(message));
             drop(gate);
-            return result;
+            return self.admit_detached(message);
         }
-        if !self.startup_complete.load(Ordering::Acquire) {
-            let mut pending = self
-                .pending_detached
-                .lock()
-                .expect("lock pending detached startup output");
-            if !self.startup_complete.load(Ordering::Acquire) {
-                pending.push(message);
-                return Ok(());
-            }
-        }
-        self.enqueue(WriterCommand::SendDetached(message))
+        self.admit_detached(message)
     }
 
-    /// Releases factory-created detached output after the terminal `Ready`.
+    /// Simulates completed startup in handle-only tests without writing
+    /// `Ready`.
+    ///
+    /// Direct handle tests have no runner to own the terminal startup frame;
+    /// this fixture transition lets them isolate runtime admission and
+    /// writer behavior.
+    #[cfg(test)]
     pub(crate) fn finish_startup(&self) -> ClientResult<()> {
-        let pending = {
-            let mut pending = self
-                .pending_detached
-                .lock()
-                .expect("lock pending detached startup output");
-            self.startup_complete.store(true, Ordering::Release);
-            std::mem::take(&mut *pending)
-        };
-        for message in pending {
-            self.enqueue(WriterCommand::SendDetached(message))?;
-        }
-        Ok(())
+        self.startup_complete.store(true, Ordering::Release);
+        self.activate_detached()
+    }
+
+    /// Enables detached FIFO draining.
+    fn activate_detached(&self) -> ClientResult<()> {
+        let sender = self
+            .sender
+            .lock()
+            .expect("lock client handle sender")
+            .as_ref()
+            .cloned()
+            .ok_or(ClientError::WriterClosed)?;
+        sender.activate_detached()
+    }
+
+    /// Admits one detached frame to the shared bounded FIFO.
+    fn admit_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        let frame = QueuedFrame::measure(message)?;
+        let sender = self.sender.lock().expect("lock client handle sender");
+        sender
+            .as_ref()
+            .ok_or(ClientError::WriterClosed)?
+            .admit_detached(frame)
     }
 
     /// Emits a durable event through the harness.
@@ -466,8 +506,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn emit_detached(&self, event: tau_proto::Event) -> ClientResult<()> {
         self.send_detached(tau_proto::HarnessInputMessage::emit(event))
     }
@@ -488,8 +529,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn emit_transient_detached(&self, event: tau_proto::Event) -> ClientResult<()> {
         self.send_detached(tau_proto::HarnessInputMessage::emit_with_persist(
             event, false,
@@ -531,8 +573,9 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the writer thread has already stopped before
-    /// the frame can be queued.
+    /// Returns an error when frame encoding fails, the frame exceeds 8 MiB, the
+    /// detached FIFO exhausts its 64-frame or 8-MiB aggregate budget, or the
+    /// writer has stopped.
     pub fn request_notice_detached(
         &self,
         message: impl Into<String>,
@@ -631,7 +674,8 @@ impl ClientHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error when sending the underlying protocol frame fails.
+    /// Waits while accepted pre-Ready detached output drains. Encoding,
+    /// admission, writer, and flush failures are returned.
     pub fn config_error(&self, message: impl Into<String>) -> ClientResult<()> {
         self.send(tau_proto::HarnessInputMessage::ConfigError(
             tau_proto::ConfigError {
@@ -673,7 +717,8 @@ impl ClientHandle {
         *gate = StartupGate::Ready;
         drop(gate);
         Self::wait_for_ack(ack)?;
-        self.finish_startup()
+        self.startup_complete.store(true, Ordering::Release);
+        self.activate_detached()
     }
 
     /// Replays accepted configuration-derived output after static declarations.
@@ -735,15 +780,27 @@ impl ClientHandle {
             .expect("lock client handle sender")
             .take()
             .ok_or(ClientError::WriterClosed)?;
-        sender
-            .send(WriterCommand::Shutdown(ack_sender))
-            .map_err(|_| ClientError::WriterClosed)?;
+        sender.close_detached();
+        sender.send(WriterCommand::Shutdown(ack_sender))?;
         ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
-    fn enqueue(&self, command: WriterCommand) -> ClientResult<()> {
-        let sender = self.sender.lock().expect("lock client handle sender");
-        let sender = sender.as_ref().ok_or(ClientError::WriterClosed)?;
-        sender.send(command).map_err(|_| ClientError::WriterClosed)
+    fn enqueue_blocking(&self, command: WriterCommand) -> ClientResult<()> {
+        let sender = self
+            .sender
+            .lock()
+            .expect("lock client handle sender")
+            .as_ref()
+            .cloned()
+            .ok_or(ClientError::WriterClosed)?;
+        sender.send(command)
     }
+}
+
+/// Reject a frame that exceeds the local output-admission byte budget.
+fn ensure_admissible_frame(message: &tau_proto::HarnessInputMessage) -> ClientResult<()> {
+    if EncodedBytes::measure(message)?.exceeds_frame_limit() {
+        return Err(ClientError::Overloaded);
+    }
+    Ok(())
 }

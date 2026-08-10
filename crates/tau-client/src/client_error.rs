@@ -16,6 +16,8 @@ pub enum ClientError {
     Handler(String),
     /// The writer thread stopped before accepting the outbound frame.
     WriterClosed,
+    /// A frame exceeds 8 MiB or detached output exhausted its bounded FIFO.
+    Overloaded,
     /// The reader thread stopped before reporting input EOF or decode failure.
     ReaderClosed,
     /// The reader thread panicked while decoding inbound frames.
@@ -59,6 +61,9 @@ impl fmt::Display for ClientError {
                 f.write_str(message)
             }
             Self::WriterClosed => f.write_str("tau client writer thread is closed"),
+            Self::Overloaded => {
+                f.write_str("tau client detached FIFO or frame byte limit is exhausted")
+            }
             Self::ReaderClosed => f.write_str("tau client reader thread is closed"),
             Self::ReaderPanicked => f.write_str("tau client reader thread panicked"),
             Self::WriterPanicked => f.write_str("tau client writer thread panicked"),
@@ -76,6 +81,7 @@ impl std::error::Error for ClientError {
             | Self::Builder(_)
             | Self::NameScope(_)
             | Self::WriterClosed
+            | Self::Overloaded
             | Self::ReaderClosed
             | Self::ReaderPanicked
             | Self::WriterPanicked => None,
