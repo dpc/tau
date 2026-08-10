@@ -147,7 +147,8 @@ pub enum AttemptOutcome {
 /// Typed terminal failure from an attempt.
 #[derive(Debug)]
 pub struct AttemptFailure {
-    /// Safe fixed diagnostic.
+    /// Safe single-line diagnostic, with escaped bounded provider detail when
+    /// available.
     pub message: String,
     /// Closed failure classification when known.
     pub failure_kind: Option<tau_proto::ProviderFailureKind>,
@@ -166,7 +167,7 @@ enum Error {
     Provider {
         /// Optional status carried by a post-upgrade provider event.
         status: Option<u16>,
-        /// Bounded provider error code or type.
+        /// Bounded provider error code, type, or incomplete reason.
         code: Option<String>,
     },
     Json,
@@ -367,14 +368,19 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
             }
             Error::InvalidRequest => "Responses request was invalid".to_owned(),
             Error::Http(status, _) => format!("provider returned HTTP {status}"),
-            Error::Provider { status, code } => match (status, code) {
-                (Some(status), Some(code)) => {
-                    format!("provider returned WebSocket error {status} ({code})")
+            Error::Provider { status, code } => {
+                let detail = code.as_deref().map(tau_proto::visible_escape_metadata);
+                match (status, detail) {
+                    (Some(status), Some(detail)) => {
+                        format!("provider returned WebSocket error {status} ({detail})")
+                    }
+                    (Some(status), None) => format!("provider returned WebSocket error {status}"),
+                    (None, Some(detail)) => {
+                        format!("provider returned WebSocket error ({detail})")
+                    }
+                    (None, None) => "provider returned a WebSocket error".to_owned(),
                 }
-                (Some(status), None) => format!("provider returned WebSocket error {status}"),
-                (None, Some(code)) => format!("provider returned WebSocket error ({code})"),
-                (None, None) => "provider returned a WebSocket error".to_owned(),
-            },
+            }
             _ => "Responses request failed".to_owned(),
         },
         failure_kind: error.failure_kind(),

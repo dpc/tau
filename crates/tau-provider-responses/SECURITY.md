@@ -9,6 +9,16 @@ bounds apply before the
 parser admits only supported assistant text, plain reasoning, and Function
 calls.
 
+WebSocket terminal code, type, or incomplete-reason detail retains its first
+128 Unicode scalars. Its public failure diagnostic visibly escapes controls and
+terminal-unsafe Unicode into one line while retaining ordinary printable text;
+classification and retry inspect the original bounded detail, while display
+escaping does not alter recovery. Tau deliberately performs no arbitrary secret
+scrubbing, accepting the theoretical risk that an operator-configured provider
+reflects sensitive content in that bounded diagnostic. Revisit this boundary
+when changing captured fields, the scalar cap, escaping policy, public
+diagnostic destinations, or classification/recovery flow.
+
 Validated plain `reasoning_text` is sensitive transcript content. Tau retains
 both its displayable full-reasoning projection and the exact provider item
 sidecar in the durable response, regardless of whether the UI's

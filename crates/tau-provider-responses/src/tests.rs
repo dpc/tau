@@ -1042,6 +1042,31 @@ fn websocket_provider_errors_classify_retries_and_recovery() {
     );
 }
 
+/// A public WebSocket terminal diagnostic must retain ordinary provider detail
+/// while visibly escaping every control and terminal-unsafe Unicode scalar.
+#[test]
+fn websocket_provider_error_message_escapes_unsafe_detail_without_redaction() {
+    let outcome = terminal(
+        Error::Provider {
+            status: Some(400),
+            code: Some("token=example-value\n\t\x1b[2J\u{202e}done".to_owned()),
+        },
+        State::default().progress(),
+    );
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("request rejection must terminalize");
+    };
+
+    assert_eq!(
+        failure.message,
+        "provider returned WebSocket error 400 (token=example-value\\u{000A}\\u{0009}\\u{001B}[2J\\u{202E}done)"
+    );
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+}
+
 /// WebSocket mode must negotiate `/responses`, send the public
 /// `response.create` envelope without SSE-only fields, and consume the ordinary
 /// Responses event stream without falling back to HTTP/SSE.

@@ -124,3 +124,12 @@ Adapters classify typed terminal provider failures independently of display
 text. Terminal failures bypass retries, and raw provider bodies never become
 closed failure categories. Watcher projection of bounded provider work is
 governed by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md).
+
+Public Responses WebSocket terminal code, type, or incomplete-reason detail is
+bounded to 128 Unicode scalars and may enter the final failure diagnostic after
+visible escaping of controls and terminal-unsafe Unicode. Ordinary printable
+detail remains intact: Tau deliberately applies no pattern-based secret
+scrubbing. An operator-configured provider can therefore theoretically reflect
+sensitive content in that bounded diagnostic. The visible display projection
+does not affect the closed failure category, recovery, or retry decision:
+classifiers retain the original bounded detail.
