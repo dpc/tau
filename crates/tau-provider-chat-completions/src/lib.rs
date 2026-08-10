@@ -831,17 +831,17 @@ fn read_chat_stream_body(
                 return Ok(());
             }
             Ok(bytes) => {
-                let (done, progress) = process_stream_chunk(
+                let outcome = process_stream_chunk(
                     &buffer[..bytes],
                     &mut pending,
                     state,
                     raw_events,
                     on_update,
                 )?;
-                if progress {
+                if outcome.provider_event {
                     last_event_at = Instant::now();
                 }
-                if done {
+                if outcome.done {
                     return Ok(());
                 }
                 if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
@@ -869,13 +869,21 @@ fn read_chat_stream_body(
     }
 }
 
+/// Terminal-marker and provider-data observations from parsed SSE chunk bytes.
+struct SseChunkOutcome {
+    /// Whether the current chunk carries the terminal SSE marker.
+    done: bool,
+    /// Whether the current chunk contains a provider `data:` field.
+    provider_event: bool,
+}
+
 fn process_stream_chunk(
     bytes: &[u8],
     pending: &mut Vec<u8>,
     state: &mut StreamState,
     raw_events: &mut Vec<serde_json::Value>,
     on_update: &mut impl FnMut(&StreamState),
-) -> Result<(bool, bool), LlmError> {
+) -> Result<SseChunkOutcome, LlmError> {
     state.record_transport_response_bytes(bytes.len());
     if state.transport_response_bytes > MAX_RESPONSE_BYTES {
         return Err(LlmError::Io(path_std_io::Error::new(
@@ -884,40 +892,35 @@ fn process_stream_chunk(
         )));
     }
     pending.extend_from_slice(bytes);
-    if pending.len() > MAX_SSE_LINE_BYTES {
+    let lines = take_complete_sse_lines(pending)?;
+    let outcome = apply_chat_stream_lines(&lines, state, raw_events, on_update)?;
+    on_update(state);
+    Ok(outcome)
+}
+
+fn take_complete_sse_lines(pending: &mut Vec<u8>) -> Result<Vec<u8>, LlmError> {
+    let complete_len = pending
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if MAX_SSE_LINE_BYTES < pending.len().saturating_sub(complete_len) {
         return Err(LlmError::Io(path_std_io::Error::new(
             path_std_io::ErrorKind::InvalidData,
             "provider SSE line exceeds limit",
         )));
     }
-    let lines = drain_complete_lines(pending);
-    let progress = sse_lines_have_provider_event(&lines);
-    let done = apply_chat_stream_lines(lines, state, raw_events, on_update)?;
-    on_update(state);
-    Ok((done, progress))
+    if complete_len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut lines = std::mem::take(pending);
+    *pending = lines.split_off(complete_len);
+    Ok(lines)
 }
 
-fn sse_lines_have_provider_event(lines: &[String]) -> bool {
-    lines.iter().any(|line| line.starts_with("data: "))
-}
-
-fn drain_complete_lines(pending: &mut Vec<u8>) -> Vec<String> {
-    let mut lines = Vec::new();
-    while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
-        let line_bytes = pending.drain(..=newline_index).collect();
-        lines.push(decode_sse_line(line_bytes));
-    }
-    lines
-}
-
-fn decode_sse_line(mut line_bytes: Vec<u8>) -> String {
-    if line_bytes.last() == Some(&b'\n') {
-        line_bytes.pop();
-    }
-    if line_bytes.last() == Some(&b'\r') {
-        line_bytes.pop();
-    }
-    String::from_utf8_lossy(&line_bytes).into_owned()
+fn sse_line_data(line: &[u8]) -> Option<&[u8]> {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    line.strip_prefix(b"data: ")
 }
 
 fn apply_pending_sse_line(
@@ -929,31 +932,41 @@ fn apply_pending_sse_line(
     if pending.is_empty() {
         return Ok(());
     }
-    let line = decode_sse_line(std::mem::take(pending));
-    let _done = apply_chat_stream_lines(vec![line], state, raw_events, on_update)?;
+    let line = std::mem::take(pending);
+    let _ = apply_chat_stream_lines(&line, state, raw_events, on_update)?;
     Ok(())
 }
 
 fn apply_chat_stream_lines(
-    lines: Vec<String>,
+    lines: &[u8],
     state: &mut StreamState,
     raw_events: &mut Vec<serde_json::Value>,
     on_update: &mut impl FnMut(&StreamState),
-) -> Result<bool, LlmError> {
-    for line in lines {
-        let Some(data) = line.strip_prefix("data: ") else {
+) -> Result<SseChunkOutcome, LlmError> {
+    let mut provider_event = false;
+    for line in lines.split_inclusive(|byte| *byte == b'\n') {
+        let Some(data) = sse_line_data(line) else {
             continue;
         };
-        if data == "[DONE]" {
-            return Ok(true);
+        provider_event = true;
+        if data == b"[DONE]" {
+            return Ok(SseChunkOutcome {
+                done: true,
+                provider_event,
+            });
         }
-        let event: serde_json::Value = serde_json::from_str(data).map_err(LlmError::Json)?;
+        let data = String::from_utf8_lossy(data);
+        let event: serde_json::Value =
+            serde_json::from_str(data.as_ref()).map_err(LlmError::Json)?;
         if raw_events.len() < MAX_DEBUG_EVENTS {
             raw_events.push(event.clone());
         }
         apply_event(state, &event, on_update)?;
     }
-    Ok(false)
+    Ok(SseChunkOutcome {
+        done: false,
+        provider_event,
+    })
 }
 
 #[allow(clippy::too_many_arguments)] // Dispatch and state callbacks have distinct timing ownership.
@@ -1136,17 +1149,17 @@ async fn chat_completions_stream_async(
         }
         match tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, response.chunk()).await {
             Ok(Ok(Some(chunk))) => {
-                let (done, progress) = process_stream_chunk(
+                let outcome = process_stream_chunk(
                     &chunk,
                     &mut pending,
                     &mut state,
                     &mut raw_events,
                     on_update,
                 )?;
-                if progress {
+                if outcome.provider_event {
                     last_event_at = Instant::now();
                 }
-                if done {
+                if outcome.done {
                     return Ok((state, raw_events));
                 }
             }

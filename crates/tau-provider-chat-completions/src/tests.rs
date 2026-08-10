@@ -597,6 +597,34 @@ fn chat_stream_body_rejects_oversized_partial_line() {
     ));
 }
 
+/// Ensures one decoded HTTP chunk may contain more than one MiB of complete,
+/// individually bounded SSE lines without tripping the residual-line bound.
+#[test]
+fn chat_stream_chunk_accepts_many_complete_sub_limit_lines() {
+    let line = format!("data: {{\"padding\":\"{}\"}}\n", "x".repeat(1024));
+    assert!(line.len() < MAX_SSE_LINE_BYTES);
+    let line_count = MAX_SSE_LINE_BYTES / line.len() + 1;
+    let bytes = line.repeat(line_count);
+    assert!(MAX_SSE_LINE_BYTES < bytes.len());
+
+    let mut pending = Vec::new();
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    let outcome = process_stream_chunk(
+        bytes.as_bytes(),
+        &mut pending,
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+    )
+    .expect("complete sub-limit SSE lines must not exhaust the residual-line bound");
+
+    assert!(!outcome.done);
+    assert!(outcome.provider_event);
+    assert!(pending.is_empty());
+    assert_eq!(raw_events.len(), line_count);
+}
+
 /// Ensures debug event retention is bounded even when an upstream emits many
 /// syntactically valid SSE events before completion.
 #[test]
@@ -674,14 +702,24 @@ fn malformed_sse_data_after_delta_rejects_partial_stream() {
 /// idle watchdog while actual `data:` provider events do.
 #[test]
 fn stream_idle_progress_requires_data_event() {
-    assert!(!sse_lines_have_provider_event(&[
-        ": keepalive".to_owned(),
-        String::new(),
-    ]));
-    assert!(sse_lines_have_provider_event(&[
-        ": keepalive".to_owned(),
-        "data: {}".to_owned(),
-    ]));
+    for (bytes, expected_provider_event) in [
+        (b": keepalive\n\n".as_slice(), false),
+        (b": keepalive\ndata: {}\n".as_slice(), true),
+    ] {
+        let mut pending = Vec::new();
+        let mut state = StreamState::new();
+        let mut raw_events = Vec::new();
+        let outcome = process_stream_chunk(
+            bytes,
+            &mut pending,
+            &mut state,
+            &mut raw_events,
+            &mut |_| {},
+        )
+        .expect("SSE framing input must parse");
+        assert!(!outcome.done);
+        assert_eq!(outcome.provider_event, expected_provider_event);
+    }
 }
 fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
