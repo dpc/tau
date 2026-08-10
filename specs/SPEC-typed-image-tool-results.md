@@ -51,8 +51,10 @@ ownership within a process so diagnostic and prompt projections do not deep-copy
 the payload. Live provider-result broadcasts exclude UI clients, and historical
 UI replay converts the durable provider event to a payload-free
 `tool.result_display` projection.
-Recursive debug and TRACE projections clear image buffers before JSON
-serialization, including prompt contexts and compaction replacement windows.
+Debug and TRACE projections that serialize a prompt as JSON recursively clear
+image buffers, including prompt contexts and compaction replacement windows.
+The built-in provider's ordinary TRACE record instead emits only fixed
+content-free structural metadata and does not serialize prompt content.
 The explicitly opted-in local Chat Completions transcript-v1 summary compactor
 also clears image bytes in its dedicated provider request while retaining typed
 metadata and an explicit loss marker. Normal inference and all other directed

@@ -1581,6 +1581,155 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+/// Ensures TRACE prompt diagnostics expose only fixed structural metadata,
+/// never model-visible prompt content that belongs in separately gated private
+/// capture.
+#[test]
+fn provider_prompt_trace_omits_model_visible_content() {
+    let mut prompt = minimal_prompt();
+    let image_bytes = b"trace-image-bytes-sentinel";
+    prompt.system_prompt = "trace-system-prompt-sentinel".to_owned();
+    prompt.context = tau_proto::PromptContext {
+        blocks: vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![
+                    tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                        role: tau_proto::ContextRole::User,
+                        content: vec![tau_proto::ContentPart::Text {
+                            text: "trace-transcript-sentinel".to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: Some("trace-raw-transcript-sentinel".to_owned()),
+                    }),
+                    tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+                        call_id: "trace-call-id".into(),
+                        name: tau_proto::ToolName::new("trace_tool_call"),
+                        tool_type: tau_proto::ToolType::Function,
+                        arguments: tau_proto::CborValue::Text(
+                            "trace-tool-arguments-sentinel".to_owned(),
+                        ),
+                        raw_arguments_json: Some("trace-raw-arguments-sentinel".to_owned()),
+                        responses_envelope: None,
+                    }),
+                ],
+            }),
+            tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    call_id: "trace-call-id".into(),
+                    tool_type: tau_proto::ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                        "trace-tool-result-sentinel".to_owned(),
+                    )),
+                    presentation: Default::default(),
+                    provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                        tau_proto::ImageContent {
+                            media_type: tau_proto::ImageMediaType::Png,
+                            data: image_bytes.to_vec().into(),
+                            width: 1,
+                            height: 1,
+                            detail: tau_proto::ImageDetail::High,
+                        },
+                    )],
+                }],
+            }),
+        ],
+    };
+    prompt.tools = vec![tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("trace_tool_schema"),
+        model_visible_name: None,
+        description: Some("trace-tool-description-sentinel".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "trace-tool-schema-sentinel": {"type": "string"},
+        })),
+        format: None,
+    }];
+    prompt.originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::parse("trace-originator-sentinel").expect("extension"),
+        query_id: "trace-originator-query-sentinel".to_owned(),
+    };
+
+    let mut input = Vec::new();
+    {
+        let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::Configure(
+                tau_proto::Configure {
+                    tool_prefix: None,
+                    config: tau_proto::CborValue::Map(Vec::new()),
+                    instance_name: tau_proto::ExtensionName::parse("provider-builtin")
+                        .expect("extension name"),
+                    state_dir: None,
+                    secrets: BTreeMap::new(),
+                    settings_files: BTreeMap::new(),
+                },
+            ))
+            .expect("encode Configure");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::deliver_live(
+                tau_proto::UnixMicros::new(1),
+                tau_proto::Event::AgentPromptCreated(prompt),
+            ))
+            .expect("encode provider prompt");
+        writer.flush().expect("flush harness input");
+    }
+
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = run(path_std_io::Cursor::new(input), Vec::new());
+    });
+
+    let trace = String::from_utf8(trace.bytes()).expect("TRACE output is UTF-8");
+    let image_json = serde_json::to_string(image_bytes).expect("serialize image bytes");
+    let image_pretty_json =
+        serde_json::to_string_pretty(image_bytes).expect("pretty serialize image bytes");
+    let sentinels = [
+        "trace-system-prompt-sentinel".to_owned(),
+        "trace-transcript-sentinel".to_owned(),
+        "trace-raw-transcript-sentinel".to_owned(),
+        "trace-tool-arguments-sentinel".to_owned(),
+        "trace-raw-arguments-sentinel".to_owned(),
+        "trace-tool-result-sentinel".to_owned(),
+        "trace-image-bytes-sentinel".to_owned(),
+        image_json,
+        image_pretty_json,
+        "trace_tool_schema".to_owned(),
+        "trace-tool-description-sentinel".to_owned(),
+        "trace-tool-schema-sentinel".to_owned(),
+        "trace-originator-sentinel".to_owned(),
+        "trace-originator-query-sentinel".to_owned(),
+    ];
+    for sentinel in &sentinels {
+        assert!(
+            !trace.contains(sentinel),
+            "{sentinel} leaked in TRACE: {trace}"
+        );
+    }
+    let prompt_trace_lines: Vec<_> = trace
+        .lines()
+        .filter(|line| line.contains("provider prompt received; content omitted"))
+        .collect();
+    assert_eq!(prompt_trace_lines.len(), 1, "TRACE output: {trace}");
+    assert!(
+        prompt_trace_lines[0].contains(
+            "agent_prompt_id=ap-test system_prompt_present=true context_blocks=2 \
+             context_items=3 tools=1 tools_ref_present=false"
+        ),
+        "TRACE fields changed or are not fixed: {}",
+        prompt_trace_lines[0]
+    );
+}
+
 fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
     let mut reader = tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes));
     let mut frames = Vec::new();

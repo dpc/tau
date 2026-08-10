@@ -4972,31 +4972,26 @@ fn trace_provider_prompt(
     if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
         return;
     }
-    let mut redacted = prompt.clone();
-    redacted.context.clear_provider_image_bytes();
-    trace_prompt_like("provider prompt", &redacted, agent_prompt_id);
-}
-
-fn trace_prompt_like<T: serde::Serialize>(
-    label: &str,
-    value: &T,
-    agent_prompt_id: &tau_proto::AgentPromptId,
-) {
-    if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
-        return;
-    }
-    match serde_json::to_string_pretty(value) {
-        Ok(json) => tracing::trace!(
-            target: LOG_TARGET,
-            agent_prompt_id = %agent_prompt_id,
-            "{label}:\n{json}"
-        ),
-        Err(error) => tracing::trace!(
-            target: LOG_TARGET,
-            agent_prompt_id = %agent_prompt_id,
-            "{label} (failed to serialize for log: {error})"
-        ),
-    }
+    let context_items: usize = prompt
+        .context
+        .blocks
+        .iter()
+        .map(|block| match block {
+            tau_proto::ContextBlock::UserInput(block) => block.items.len(),
+            tau_proto::ContextBlock::AssistantResponse(block) => block.output_items.len(),
+            tau_proto::ContextBlock::ToolResults(block) => block.items.len(),
+        })
+        .sum();
+    tracing::trace!(
+        target: LOG_TARGET,
+        agent_prompt_id = %agent_prompt_id,
+        system_prompt_present = !prompt.system_prompt.is_empty(),
+        context_blocks = prompt.context.blocks.len(),
+        context_items,
+        tools = prompt.tools.len(),
+        tools_ref_present = prompt.tools_ref.is_some(),
+        "provider prompt received; content omitted"
+    );
 }
 
 fn write_prompt_submitted<W: Write>(

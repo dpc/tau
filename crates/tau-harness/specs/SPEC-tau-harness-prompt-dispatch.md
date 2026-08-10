@@ -183,9 +183,11 @@ Typed image bytes in provider tool results are never generic UI traffic. Live
 `provider.tool_result` delivery excludes UI clients; they receive the separate
 payload-free `tool.result_display` event. Historical UI replay projects the durable
 provider event back to that same typed display event. Debug and TRACE prompt
-projections recursively remove image buffers before JSON serialization. Debug
-JSONL represents full prompt work as a bounded content-free count summary rather
-than serializing prompt structure or content.
+projections that serialize a prompt as JSON recursively remove image buffers
+before serialization. The built-in provider's ordinary TRACE projection instead
+emits fixed content-free structural metadata without serializing prompt content.
+Debug JSONL represents full prompt work as a bounded content-free count summary
+rather than serializing prompt structure or content.
 
 All subscriber broadcasts and historical replay project typed image buffers out
 of provider tool results, live full-prompt contexts, compaction windows, and
