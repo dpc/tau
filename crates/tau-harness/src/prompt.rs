@@ -1169,10 +1169,14 @@ pub(crate) fn assemble_prompt_context_from(
                 message,
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
-                    contains_exact_sentinel_envelope |=
-                        *direction == tau_core::AgentMessageDirection::Inbound;
-                    let message_text = match (direction, sender_session_id) {
-                        (tau_core::AgentMessageDirection::Inbound, Some(sender_session_id)) => {
+                    if *direction == tau_core::AgentMessageDirection::Outbound {
+                        // The original tool call/result already records the sender turn.
+                        // Replaying this routing fact would fabricate assistant output.
+                        continue;
+                    }
+                    contains_exact_sentinel_envelope = true;
+                    let message_text = match sender_session_id {
+                        Some(sender_session_id) => {
                             let body = tau_proto::escape_exact_sentinel_close(
                                 message,
                                 PEER_MESSAGE_CLOSE,
@@ -1185,7 +1189,7 @@ pub(crate) fn assemble_prompt_context_from(
                                 body
                             ))
                         }
-                        (tau_core::AgentMessageDirection::Inbound, None) => {
+                        None => {
                             let body = tau_proto::escape_exact_sentinel_close(
                                 message,
                                 MESSAGE_CLOSE,
@@ -1195,19 +1199,11 @@ pub(crate) fn assemble_prompt_context_from(
                                 "You have received a message from {sender_id}\n\n<message>\n{body}\n</message>"
                             ))
                         }
-                        (tau_core::AgentMessageDirection::Outbound, _) => message.clone(),
                     };
                     blocks.push(tau_proto::ContextBlock::UserInput(
                         tau_proto::UserInputBlock {
                             items: vec![ContextItem::Message(tau_proto::MessageItem {
-                                role: match direction {
-                                    tau_core::AgentMessageDirection::Outbound => {
-                                        tau_proto::ContextRole::Assistant
-                                    }
-                                    tau_core::AgentMessageDirection::Inbound => {
-                                        tau_proto::ContextRole::User
-                                    }
-                                },
+                                role: tau_proto::ContextRole::User,
                                 content: vec![tau_proto::ContentPart::Text { text: message_text }],
                                 phase: None,
                                 responses_raw_json: None,

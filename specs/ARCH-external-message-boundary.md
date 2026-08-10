@@ -91,10 +91,12 @@ entrypoint role/provider/skill authority immediately before receive commit.
 Best-effort at-least-once delivery deliberately has no distributed crash
 transaction; an ambiguous retry may duplicate a receive occurrence, activation,
 agent, model work, or spend.
-Each accepted directional occurrence is nevertheless its owning transcript's
-sole canonical payload projection. Live recipient activation is a runtime-only,
-sequence-keyed wake; replay renders the typed fact without waking. Complete
-placement, rendering, checkpoint, and branch behavior is specified by
+Each accepted directional occurrence nevertheless remains its owning
+transcript's sole canonical payload authority. Ordinary outbound `Message`
+occurrences have no sender provider rendering; applicable inbound projections
+remain provider context. Live recipient activation is a runtime-only,
+sequence-keyed wake; replay reassembles the applicable provider context without
+waking. Complete placement, rendering, checkpoint, and branch behavior is specified by
 [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
 
 Peer-session discovery uses a metadata-schema-versioned `peer_entrypoint` hint

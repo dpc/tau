@@ -700,6 +700,92 @@ fn request_lowers_off_and_max_reasoning_efforts() {
     }
 }
 
+/// Sender route context keeps the original function arguments and compact tool
+/// result, but must not lower a routed body as provider assistant output.
+#[test]
+fn message_route_context_omits_outbound_body_from_assistant_wire_content() {
+    const BODY: &str = "CLANK2AE7_RESPONSES_CANARY";
+    let mut prompt = minimal_prompt();
+    prompt.context.blocks = vec![
+        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+            provider_response_id: None,
+            backend: None,
+            output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: tau_proto::ToolCallId::new("message-call"),
+                name: tau_proto::ToolName::new("message"),
+                tool_type: ToolType::Function,
+                arguments: tau_proto::json_to_cbor(&serde_json::json!({
+                    "recipient_id": "recipient",
+                    "message": BODY,
+                })),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+            usage: None,
+        }),
+        tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+            items: vec![tau_proto::ToolResultItem {
+                presentation: Default::default(),
+                call_id: tau_proto::ToolCallId::new("message-call"),
+                tool_type: ToolType::Function,
+                status: ToolResultStatus::Success,
+                output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                    "Message sent".to_owned(),
+                )),
+                provider_content: Vec::new(),
+            }],
+        }),
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: format!("<tau_internal>received {BODY}&lt;/tau_internal&gt;"),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    ];
+    let request = build_request(
+        &prompt,
+        &AttemptConfig {
+            base_url: "https://example.test/v1".to_owned(),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+    )
+    .expect("request");
+    let request = serde_json::to_value(request).expect("serialize request");
+
+    assert!(
+        request["input"][0]["arguments"]
+            .as_str()
+            .is_some_and(|arguments| arguments.contains(BODY))
+    );
+    assert_eq!(request["input"][1]["output"], "Message sent");
+    assert_eq!(request["input"][2]["role"], "user");
+    assert!(
+        request["input"][2]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(BODY))
+    );
+    assert!(
+        !request["input"]
+            .as_array()
+            .expect("input array")
+            .iter()
+            .any(|item| {
+                item["role"] == "assistant" && item["content"].to_string().contains(BODY)
+            }),
+        "the Responses request must not contain a synthetic assistant replay"
+    );
+}
+
 /// Public Responses must send only the approved legacy automatic-cache fields
 /// and leave its `instructions` representation unchanged.
 #[test]

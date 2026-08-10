@@ -32713,7 +32713,9 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
 /// activating-input `wait` while the sender projection remains parked in a
 /// non-idle publication batch. Both durable terminals must schedule exactly one
 /// successor after the batch, leave no deferred dispatch ownership behind, and
-/// preserve later activation dispatchability.
+/// preserve later activation dispatchability. The sender's successor retains
+/// the original tool call and compact result without replaying the routed body
+/// as an assistant response.
 #[test]
 fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     const BODY: &str = "nested publication wake";
@@ -32827,6 +32829,39 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
         .expect("recipient successor");
     let sender_successor = read_prompt_created(&h, &sender_successor_id);
     let recipient_successor = read_prompt_created(&h, &recipient_successor_id);
+    let sender_context = sender_successor.context.flatten();
+    assert!(sender_context.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::ToolCall(call)
+                if call.call_id.as_str() == MESSAGE_CALL_ID
+                    && cbor_map_text(&call.arguments, "message") == Some(BODY)
+        )
+    }));
+    assert_eq!(
+        sender_context
+            .iter()
+            .filter(|item| tool_result_id(item) == Some(MESSAGE_CALL_ID))
+            .count(),
+        1
+    );
+    assert!(
+        !sender_context.iter().any(|item| {
+            matches!(
+                item,
+                ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content,
+                    ..
+                }) if content.iter().any(|part| matches!(
+                    part,
+                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text }
+                        if text.contains(BODY)
+                ))
+            )
+        }),
+        "the sender must not replay the routed body as assistant output"
+    );
     let recipient_context = recipient_successor.context.flatten();
     assert_eq!(
         recipient_context
@@ -32848,16 +32883,6 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
             .count(),
         1
     );
-    assert_eq!(
-        sender_successor
-            .context
-            .flatten()
-            .iter()
-            .filter(|item| tool_result_id(item) == Some(MESSAGE_CALL_ID))
-            .count(),
-        1
-    );
-
     let recipient_events = h
         .agent_store
         .agent_events(recipient_id.as_str())

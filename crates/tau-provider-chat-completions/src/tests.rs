@@ -1245,6 +1245,84 @@ fn tool_call_replay_preserves_raw_function_arguments_json() {
     );
 }
 
+/// Sender route context keeps the original function arguments and compact tool
+/// result, but must not lower a routed body as provider assistant output.
+#[test]
+fn message_route_context_omits_outbound_body_from_assistant_wire_content() {
+    const BODY: &str = "CLANK2AE7_CHAT_COMPLETIONS_CANARY";
+    let mut replay = prompt();
+    replay.context = tau_proto::PromptContext {
+        blocks: vec![
+            tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: tau_proto::ToolCallId::new("message-call"),
+                    name: tau_proto::ToolName::new("message"),
+                    tool_type: ToolType::Function,
+                    arguments: tau_proto::json_to_cbor(&serde_json::json!({
+                        "recipient_id": "recipient",
+                        "message": BODY,
+                    })),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                usage: None,
+            }),
+            tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
+                    call_id: tau_proto::ToolCallId::new("message-call"),
+                    tool_type: ToolType::Function,
+                    status: ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                        "Message sent".to_owned(),
+                    )),
+                    provider_content: Vec::new(),
+                }],
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text {
+                        text: format!("<tau_internal>received {BODY}&lt;/tau_internal&gt;"),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+        ],
+    };
+    let provider = provider();
+    let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+    let request = serde_json::to_value(request).expect("request json");
+
+    let messages = request["messages"].as_array().expect("messages array");
+    assert!(messages.iter().any(|message| {
+        message["role"] == "assistant"
+            && message["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .is_some_and(|arguments| arguments.contains(BODY))
+    }));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["role"] == "tool" && message["content"] == "Message sent")
+    );
+    assert!(messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains(BODY))
+    }));
+    assert!(
+        !messages.iter().any(|message| {
+            message["role"] == "assistant" && message["content"].to_string().contains(BODY)
+        }),
+        "the Chat Completions request must not contain a synthetic assistant replay"
+    );
+}
+
 /// Ensures old persisted Chat Completions tool calls without a raw JSON sidecar
 /// still replay by serializing the parsed CBOR semantic arguments.
 #[test]

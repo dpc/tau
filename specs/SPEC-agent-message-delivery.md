@@ -67,7 +67,8 @@ provider work rather than reordering either durable occurrence.
 Provider assembly renders typed materialized projections, not delivery-created
 prompt text:
 
-- outbound `Message` uses assistant role;
+- outbound ordinary `Message` projections are omitted from the sender's provider
+  context;
 - local inbound `Message` uses user role and exactly this shape, with stable
   sender ID and an exact-close-framed body:
 
@@ -100,6 +101,14 @@ families' close tokens. The outer `<tau_internal>` frame additionally replaces
 every exact `</tau_internal>` collision after the inner body frame. Dynamic peer
 attributes retain separate attribute-safe escaping. See
 [SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
+
+The omission affects provider context only. The sender-owned
+`AgentMessageSent` fact remains durable, ordered, replayed, and delivered to
+typed UI consumers. It does not alter the original `message` tool call or its
+compact `Message sent` result. An agent recipient retains its authenticated
+inbound user-role projection. UI rendering continues to consume the directional
+facts under its existing message-display policy, including always-full
+user-recipient delivery.
 
 ## Live activation and waits
 

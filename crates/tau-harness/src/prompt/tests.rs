@@ -1993,12 +1993,10 @@ fn assemble_conversation_preserves_agent_phase() {
     assert_eq!(assistant.phase, Some(tau_proto::MessagePhase::Commentary));
 }
 
-/// Split durable agent-message events must preserve prompt roles: sender-side
-/// projections replay as assistant history, while recipient-side projections
-/// replay as user-style input. Otherwise a follow-up prompt can invert who said
-/// what after an agent-agent or agent-user handoff.
+/// Outbound message facts must not become synthetic assistant history, while
+/// inbound facts remain authenticated user input for the recipient.
 #[test]
-fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
+fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: tau_proto::AgentMessageId::parse("msg-user")
@@ -2006,7 +2004,7 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
         sender_id: tau_proto::AgentId::parse("main").expect("agent id"),
         recipient: tau_proto::AgentMessageRecipient::User,
         kind: tau_proto::AgentMessageKind::Message,
-        message: "status update".to_owned(),
+        message: "CLANK2AE7_PROMPT_PROJECTION_CANARY".to_owned(),
     }));
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
@@ -2019,27 +2017,106 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
-            message: "please investigate".to_owned(),
+            message: "CLANK2AE7_PROMPT_PROJECTION_CANARY".to_owned(),
         },
     ));
 
     let items = assemble_conversation_from(&tree, tree.head());
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 1);
     assert!(matches!(
         &items[0],
-        ContextItem::Message(MessageItem { role, content, .. })
-            if *role == ContextRole::Assistant
-                && matches!(&content[0], ContentPart::Text { text } if text == "status update")
-    ));
-    assert!(matches!(
-        &items[1],
         ContextItem::Message(MessageItem { role, content, .. })
             if *role == ContextRole::User
                 && matches!(
                     &content[0],
                     ContentPart::Text { text }
                         if text
-                            == "<tau_internal>You have received a message from manager\n\n<message>\nplease investigate\n</message></tau_internal>"
+                            == "<tau_internal>You have received a message from manager\n\n<message>\nCLANK2AE7_PROMPT_PROJECTION_CANARY\n</message></tau_internal>"
+                )
+    ));
+}
+
+/// Live and cold-replayed message projections must agree for each owner, so a
+/// restart cannot restore an omitted sender body or discard recipient
+/// authority.
+#[test]
+fn agent_message_prompt_projection_is_identical_after_cold_replay() {
+    const BODY: &str = "CLANK2AE7_COLD_REPLAY_CANARY";
+    let sent = Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: tau_proto::AgentMessageId::parse("msg-sent")
+            .expect("test identifier must satisfy its grammar"),
+        sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
+        recipient: tau_proto::AgentMessageRecipient::Agent {
+            agent_id: tau_proto::AgentId::parse("recipient").expect("agent id"),
+        },
+        kind: tau_proto::AgentMessageKind::Message,
+        message: BODY.to_owned(),
+    });
+    let received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("msg-received")
+            .expect("test identifier must satisfy its grammar"),
+        sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
+        sender_session_id: None,
+        recipient_id: tau_proto::AgentId::parse("recipient").expect("agent id"),
+        kind: tau_proto::AgentMessageKind::Message,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        message: BODY.to_owned(),
+    });
+
+    let mut live_sender = tau_core::AgentTree::from_events(crate::parse_agent_id("sender"), &[]);
+    live_sender.apply_event(&sent);
+    let replay_sender = tau_core::AgentTree::from_events(
+        crate::parse_agent_id("sender"),
+        &[tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+            seq: tau_core::PersistedAgentEventSeq::new(0),
+            source: None,
+            event: sent,
+            parent: tau_core::AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::new(1),
+        }],
+    );
+    let live_sender_context = assemble_conversation_from(&live_sender, live_sender.head());
+    assert_eq!(
+        live_sender_context,
+        assemble_conversation_from(&replay_sender, replay_sender.head())
+    );
+    assert!(
+        live_sender_context
+            .iter()
+            .all(|item| !context_text(item).is_some_and(|text| text.contains(BODY))),
+        "the sender must not receive a later assistant-role body replay"
+    );
+
+    let mut live_recipient =
+        tau_core::AgentTree::from_events(crate::parse_agent_id("recipient"), &[]);
+    live_recipient.apply_event(&received);
+    let replay_recipient = tau_core::AgentTree::from_events(
+        crate::parse_agent_id("recipient"),
+        &[tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([1_u8; 16]),
+            seq: tau_core::PersistedAgentEventSeq::new(0),
+            source: None,
+            event: received,
+            parent: tau_core::AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::new(1),
+        }],
+    );
+    let live_recipient_context = assemble_conversation_from(&live_recipient, live_recipient.head());
+    assert_eq!(
+        live_recipient_context,
+        assemble_conversation_from(&replay_recipient, replay_recipient.head())
+    );
+    assert!(matches!(
+        live_recipient_context.as_slice(),
+        [ContextItem::Message(MessageItem { role, content, .. })]
+            if *role == ContextRole::User
+                && matches!(
+                    &content[0],
+                    ContentPart::Text { text }
+                        if text.contains(BODY) && text.starts_with("<tau_internal>")
                 )
     ));
 }
