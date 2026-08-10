@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderValue};
-use tokio::runtime::Builder as RuntimeBuilder;
 
 use super::*;
 
@@ -93,36 +92,21 @@ fn response_byte_bounds_cover_frames_and_cumulative_streams() {
     );
 }
 
-/// Repeated immediately-ready control frames driven through the production
-/// deadline selector must still terminate at the original semantic deadline.
+/// Repeated control frames must not refresh semantic-idle time, while actual
+/// semantic drips cannot move the absolute stream deadline.
 #[test]
 fn control_frames_cannot_refresh_response_deadlines() {
-    let runtime = RuntimeBuilder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("test runtime");
-    runtime.block_on(async {
-        let deadline = Instant::now() + Duration::from_millis(20);
-        let mut controls = 0_u64;
-        let mut never_canceled = || false;
-        loop {
-            match await_with_deadline(
-                std::future::ready(Message::Ping(Vec::new().into())),
-                deadline,
-                &mut never_canceled,
-            )
-            .await
-            {
-                Ok(Message::Ping(_)) => controls = controls.saturating_add(1),
-                Err(WaitError::Deadline) => break,
-                other => panic!("unexpected deadline result: {other:?}"),
-            }
-        }
-        assert!(0 < controls);
-        assert!(response_deadline_expired(
-            deadline,
-            deadline,
-            Instant::now()
-        ));
-    });
+    let start = Instant::now();
+    let mut deadlines = deadlines::StreamDeadlines::new(start);
+
+    for minute in 1..5 {
+        let heartbeat = start + Duration::from_secs(minute * 60);
+        assert!(!deadlines.expired(heartbeat));
+    }
+    assert!(deadlines.expired(start + deadlines::STREAM_IDLE_TIMEOUT));
+
+    deadlines = deadlines::StreamDeadlines::new(start);
+    deadlines.renew_for_qualifying_progress(start + Duration::from_secs(4 * 60));
+    assert!(!deadlines.expired(start + Duration::from_secs(8 * 60 + 59)));
+    assert!(deadlines.expired(start + deadlines::STREAM_TOTAL_TIMEOUT));
 }

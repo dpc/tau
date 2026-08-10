@@ -556,15 +556,17 @@ fn completed_reasoning_state() -> State {
 #[test]
 fn function_call_arguments_keep_raw_spelling() {
     let mut state = State::default();
-    state.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":""}}"#,
-    )
-    .expect("function call item");
-    state.apply_event(r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{ \"path\""}"#,
-    )
-    .expect("argument delta");
-    state.apply_event(r#"{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{ \"path\" : \"/tmp\" }"}"#,
-    )
-    .expect("argument completion");
+    state
+        .apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":""}}"#)
+        .expect("function call item");
+    assert!(
+        state
+            .apply_event(r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{ \"path\""}"#)
+            .expect("argument delta")
+    );
+    let done = r#"{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{ \"path\" : \"/tmp\" }"}"#;
+    assert!(state.apply_event(done).expect("argument completion"));
+    assert!(!state.apply_event(done).expect("duplicate completion"));
     let ContextItem::ToolCall(call) = &state.items[0].item else {
         panic!("function call slot");
     };
@@ -584,6 +586,71 @@ fn completion_event_ends_stream_without_done_sentinel() {
     .expect("completion event");
     assert!(state.terminal);
     assert_eq!(state.response_id.as_deref(), Some("resp_1"));
+}
+
+/// Keepalive and empty/unknown events must not report qualifying semantic
+/// progress, while a non-empty text delta does renew stream-idle time.
+#[test]
+fn qualifying_stream_progress_excludes_heartbeats_and_empty_events() {
+    let mut state = State::default();
+
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.heartbeat"}"#)
+            .expect("unknown heartbeat event")
+    );
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":""}"#)
+            .expect("empty text delta")
+    );
+
+    assert!(
+        state
+            .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"drip"}"#)
+            .expect("text drip")
+    );
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.heartbeat"}"#)
+            .expect("later heartbeat event")
+    );
+}
+
+/// Item completion that changes only provider status, IDs, or sidecars must
+/// not renew idle time after the same message or Function semantics arrived.
+#[test]
+fn item_metadata_completion_does_not_renew_semantic_idle() {
+    let mut state = State::default();
+    assert!(
+        state
+            .apply_event(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"drip"}]}}"#,
+            )
+            .expect("message item")
+    );
+    assert!(
+        !state
+            .apply_event(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"message-1","status":"completed","type":"message","role":"assistant","content":[{"type":"output_text","text":"drip"}]}}"#,
+            )
+            .expect("message metadata completion")
+    );
+
+    assert!(
+        state
+            .apply_event(
+                r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call-1","name":"run","arguments":"{\"x\":1}"}}"#,
+            )
+            .expect("Function item")
+    );
+    assert!(
+        !state
+            .apply_event(
+                r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"item-1","status":"completed","type":"function_call","call_id":"call-1","name":"run","arguments":"{\"x\":1}","provider_metadata":"only metadata changed"}}"#,
+            )
+            .expect("Function metadata completion")
+    );
 }
 
 /// The text-only assistant contract must reject image- and file-bearing items
@@ -1531,9 +1598,15 @@ fn compressed_error_body_read_is_capped_after_decoding() {
             .send()
             .await
             .expect("response");
-        read_capped_error_body(response, &url, &mut || false, &network)
-            .await
-            .expect("capped body")
+        read_capped_error_body(
+            response,
+            &url,
+            &mut || false,
+            &network,
+            deadlines::StreamDeadlines::new(Instant::now()),
+        )
+        .await
+        .expect("capped body")
     });
     server.join().expect("join error server");
     assert_eq!(body.len(), MAX_HTTP_ERROR_BODY_BYTES as usize);

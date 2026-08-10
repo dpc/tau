@@ -35,6 +35,13 @@ they cannot write protocol frames. Codex resolved credentials/configuration are
 opaque non-`Debug` values, and backend dispatch/byte/semantic-progress facts
 contain no bearer, account, prompt, or provider-body data.
 
+Public Responses attempts bound request/connect/header work and then separately
+bound each SSE/WebSocket stream's semantic-idle and absolute lifetimes.
+Qualifying semantic output renews only the former; transport keepalives and
+control traffic cannot prolong a stalled attempt. Cancellation remains
+cooperative during these waits. Revisit this boundary when changing public
+Responses timeout, framing, semantic-progress, or cancellation behavior.
+
 Codex OAuth response parsing, byte caps, and credential-safe error formatting
 are governed by [`tau-provider-codex/SECURITY.md`](../tau-provider-codex/SECURITY.md). This
 extension logs only the typed error's default safe projection and never its

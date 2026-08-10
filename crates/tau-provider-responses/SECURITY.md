@@ -9,6 +9,19 @@ bounds apply before the
 parser admits only supported assistant text, plain reasoning, and Function
 calls.
 
+Every public Responses attempt has finite network work: request, connection,
+and response headers have a five-minute bound, then a successful SSE or
+WebSocket body has an unextendable ten-minute total bound and a renewable
+five-minute semantic-idle bound. Only accepted non-empty assistant or
+displayable reasoning text, a completed material opaque reasoning item, a
+non-empty Function name, or non-empty Function arguments renews idle time.
+SSE comments, WebSocket control frames, transport bytes, status/usage,
+allocations, empty/duplicate semantic events, and unknown events do not. This
+prevents endpoint keepalives from retaining an otherwise stalled attempt while
+preserving cooperative cancellation. Revisit this availability boundary when
+changing transport framing, semantic parsing, timeout constants, or
+cancellation waits.
+
 WebSocket terminal code, type, or incomplete-reason detail retains its first
 128 Unicode scalars. Its public failure diagnostic visibly escapes controls and
 terminal-unsafe Unicode into one line while retaining ordinary printable text;

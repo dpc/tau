@@ -16,7 +16,10 @@ Completions and OpenRouter profiles use the Chat Completions backend. Generic
 public `responses` profiles use the separate API-key Responses backend with
 per-profile HTTP/SSE or WebSocket transport and always fully replay their typed
 transcript. This public WebSocket route remains separate from private Codex and
-OpenAI Realtime. The
+OpenAI Realtime. Every public Responses wire attempt has bounded
+request/connect/header work and a separately bounded SSE/WebSocket stream;
+semantic output may renew only stream-idle time, never its absolute lifetime.
+The
 extension owns immutable startup-profile resolution, model publication, event ordering,
 public response sampling, logical retries, cancellation, and supervised prewarm
 work. Backends return typed outcomes and never serialize harness frames.

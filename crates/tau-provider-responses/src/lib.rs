@@ -3,6 +3,7 @@
 //! This intentionally does not share the private ChatGPT/Codex WebSocket
 //! implementation. It sends a complete typed transcript on every turn.
 
+mod deadlines;
 mod websocket;
 
 use std::collections::BTreeMap;
@@ -24,8 +25,6 @@ use tokio::runtime as path_tokio_runtime;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const ATTEMPT_PHASE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Wire transport selected explicitly by a public Responses profile.
@@ -575,8 +574,8 @@ impl Slot {
         item: &Value,
         phase: OutputItemPhase,
         raw_json: Option<&RawValue>,
-    ) -> Result<(), Error> {
-        match item["type"].as_str().unwrap_or("") {
+    ) -> Result<bool, Error> {
+        let qualifying_progress = match item["type"].as_str().unwrap_or("") {
             "message" if item["role"].as_str() == Some("assistant") => {
                 if !matches!(self.state, SlotState::Empty | SlotState::Message) {
                     return Err(Error::UnsupportedOutput);
@@ -601,8 +600,18 @@ impl Slot {
                         }
                     }
                 }
+                let changed = match &self.item {
+                    ContextItem::Message(previous) => previous.content != message.content,
+                    _ => true,
+                };
+                let qualifies = changed
+                    && message
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, ContentPart::Text { text } if !text.is_empty()));
                 self.item = ContextItem::Message(message);
                 self.state = SlotState::Message;
+                qualifies
             }
             "function_call" => {
                 if !matches!(self.state, SlotState::Empty | SlotState::FunctionCall) {
@@ -611,7 +620,7 @@ impl Slot {
                 let arguments = item["arguments"].as_str().unwrap_or("{}");
                 let call_id = item["call_id"].as_str().ok_or(Error::InvalidRequest)?;
                 let name = item["name"].as_str().ok_or(Error::InvalidRequest)?;
-                self.item = ContextItem::ToolCall(ToolCallItem {
+                let call = ToolCallItem {
                     call_id: tau_proto::ToolCallId::new(call_id),
                     name: tau_proto::ToolName::try_new(name.to_owned())
                         .ok_or(Error::InvalidRequest)?,
@@ -629,8 +638,23 @@ impl Slot {
                         status: item["status"].as_str().map(ToOwned::to_owned),
                         extra_fields: tool_call_extra_fields(item),
                     }),
-                });
+                };
+                let changed = match &self.item {
+                    ContextItem::ToolCall(previous) => {
+                        previous.name != call.name
+                            || previous.raw_arguments_json != call.raw_arguments_json
+                    }
+                    _ => true,
+                };
+                let qualifies = changed
+                    && (!call.name.as_str().is_empty()
+                        || call
+                            .raw_arguments_json
+                            .as_deref()
+                            .is_some_and(|arguments| !arguments.is_empty()));
+                self.item = ContextItem::ToolCall(call);
                 self.state = SlotState::FunctionCall;
+                qualifies
             }
             "reasoning" => {
                 match phase {
@@ -693,10 +717,17 @@ impl Slot {
                 } else {
                     self.state = SlotState::ReasoningAdded;
                 }
+                matches!(
+                    phase,
+                    OutputItemPhase::Completed | OutputItemPhase::TerminalFallback
+                ) || self
+                    .reasoning_text
+                    .as_ref()
+                    .is_some_and(|reasoning| !reasoning.text.is_empty())
             }
             _ => return Err(Error::UnsupportedOutput),
-        }
-        Ok(())
+        };
+        Ok(qualifying_progress)
     }
 }
 
@@ -713,6 +744,8 @@ struct State {
     terminal: bool,
     usage: Option<ProviderTokenUsage>,
     response_id: Option<String>,
+    /// Monotonic revision advanced only by qualifying semantic observations.
+    semantic_progress_revision: u64,
 }
 
 /// Raw JSON projections retained alongside semantically parsed SSE events.
@@ -782,26 +815,38 @@ impl State {
                 })
                 .collect(),
             response_bytes_received: self.bytes,
-            has_timed_semantic_output: self.items.iter().any(|slot| {
-                slot.reasoning_text
-                    .as_ref()
-                    .is_some_and(|item| !item.text.is_empty())
-                    || match &slot.item {
-                        ContextItem::Message(message) => message.content.iter().any(
-                            |part| matches!(part, ContentPart::Text { text } if !text.is_empty()),
-                        ),
-                        ContextItem::ToolCall(call) => {
-                            !call.name.as_str().is_empty()
-                                || call
-                                    .raw_arguments_json
-                                    .as_deref()
-                                    .is_some_and(|value| !value.is_empty())
-                        }
-                        ContextItem::Reasoning(_) => true,
-                        _ => false,
-                    }
-            }),
+            has_timed_semantic_output: self.has_qualifying_stream_progress(),
         }
+    }
+
+    /// Returns whether this state contains material semantic stream output.
+    ///
+    /// This intentionally matches first-semantic-output timing: non-empty
+    /// assistant or reasoning text, non-empty function name or arguments, and
+    /// a completed opaque reasoning item qualify. Transport bytes, item
+    /// allocation, empty deltas, status/control events, and unknown events do
+    /// not qualify.
+    fn has_qualifying_stream_progress(&self) -> bool {
+        self.items.iter().any(|slot| {
+            slot.reasoning_text
+                .as_ref()
+                .is_some_and(|item| !item.text.is_empty())
+                || match &slot.item {
+                    ContextItem::Message(message) => message
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, ContentPart::Text { text } if !text.is_empty())),
+                    ContextItem::ToolCall(call) => {
+                        !call.name.as_str().is_empty()
+                            || call
+                                .raw_arguments_json
+                                .as_deref()
+                                .is_some_and(|value| !value.is_empty())
+                    }
+                    ContextItem::Reasoning(_) => slot.state == SlotState::ReasoningCompleted,
+                    _ => false,
+                }
+        })
     }
 
     fn has_incomplete_reasoning(&self) -> bool {
@@ -824,14 +869,14 @@ impl State {
         item: &Value,
         phase: OutputItemPhase,
         raw_json: Option<&RawValue>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         if let Some(slot) = self.items.iter_mut().find(|slot| slot.index == index) {
             return slot.apply_item(item, phase, raw_json);
         }
         let mut slot = Slot::new(index);
-        slot.apply_item(item, phase, raw_json)?;
+        let qualifying_progress = slot.apply_item(item, phase, raw_json)?;
         self.items.push(slot);
-        Ok(())
+        Ok(qualifying_progress)
     }
 
     fn existing_slot_mut(&mut self, index: u32) -> Result<&mut Slot, Error> {
@@ -841,20 +886,24 @@ impl State {
             .ok_or(Error::UnsupportedOutput)
     }
 
-    fn apply_event(&mut self, data: &str) -> Result<(), Error> {
+    fn apply_event(&mut self, data: &str) -> Result<bool, Error> {
         let event: Value = serde_json::from_str(data).map_err(|_| Error::Json)?;
         let raw_event: RawEvent<'_> = serde_json::from_str(data).map_err(|_| Error::Json)?;
-        match event["type"].as_str().unwrap_or("") {
+        let qualifying_progress = match event["type"].as_str().unwrap_or("") {
             "response.output_item.added" => {
                 let index = output_index(&event)?;
                 if let Some(item) = event.get("item") {
-                    self.apply_item_at(index, item, OutputItemPhase::Added, raw_event.item)?;
+                    self.apply_item_at(index, item, OutputItemPhase::Added, raw_event.item)?
+                } else {
+                    false
                 }
             }
             "response.output_item.done" => {
                 let index = output_index(&event)?;
                 if let Some(item) = event.get("item") {
-                    self.apply_item_at(index, item, OutputItemPhase::Completed, raw_event.item)?;
+                    self.apply_item_at(index, item, OutputItemPhase::Completed, raw_event.item)?
+                } else {
+                    false
                 }
             }
             "response.output_text.delta" | "response.content_part.delta" => {
@@ -873,6 +922,7 @@ impl State {
                         }
                     }
                 }
+                !delta.is_empty()
             }
             "response.function_call_arguments.delta" => {
                 let index = output_index(&event)?;
@@ -886,6 +936,7 @@ impl State {
                         .get_or_insert_with(String::new)
                         .push_str(delta);
                 }
+                !delta.is_empty()
             }
             "response.function_call_arguments.done" => {
                 let index = output_index(&event)?;
@@ -900,8 +951,13 @@ impl State {
                     return Err(Error::UnsupportedOutput);
                 }
                 if let ContextItem::ToolCall(call) = &mut slot.item {
+                    let qualifying_progress = !arguments.is_empty()
+                        && call.raw_arguments_json.as_deref() != Some(arguments);
                     call.raw_arguments_json = Some(arguments.to_owned());
                     call.arguments = parsed;
+                    qualifying_progress
+                } else {
+                    false
                 }
             }
             "response.reasoning_text.delta" => {
@@ -915,6 +971,7 @@ impl State {
                 let item_id = slot.reasoning_event_id(&event)?;
                 slot.append_reasoning_delta(content_index, delta)?;
                 slot.reasoning_item_id = Some(item_id);
+                !delta.is_empty()
             }
             "response.reasoning_text.done" => {
                 let index = output_index(&event)?;
@@ -925,8 +982,13 @@ impl State {
                     return Err(Error::UnsupportedOutput);
                 }
                 let item_id = slot.reasoning_event_id(&event)?;
+                let has_text = slot
+                    .reasoning_parts
+                    .get(&content_index)
+                    .is_some_and(|part| !part.text.is_empty());
                 slot.complete_reasoning_part(content_index, text)?;
                 slot.reasoning_item_id = Some(item_id);
+                !has_text && !text.is_empty()
             }
             "response.completed" | "response.done" => {
                 let response = event.get("response").unwrap_or(&event);
@@ -973,13 +1035,18 @@ impl State {
                 self.response_id = response_id;
                 self.usage = usage;
                 self.terminal = true;
+                false
             }
             "response.failed" | "response.incomplete" | "error" => {
                 return Err(Error::StreamFailure);
             }
-            _ => {}
+            _ => false,
+        };
+        let previous_revision = self.semantic_progress_revision;
+        if qualifying_progress {
+            self.semantic_progress_revision = self.semantic_progress_revision.saturating_add(1);
         }
-        Ok(())
+        Ok(previous_revision < self.semantic_progress_revision)
     }
 }
 
@@ -1020,7 +1087,7 @@ async fn stream_sse(
     if !config.api_key.trim().is_empty() {
         request = request.bearer_auth(&config.api_key);
     }
-    let header_deadline = Instant::now() + ATTEMPT_PHASE_TIMEOUT;
+    let header_deadline = Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT;
     let mut send = Box::pin(request.send());
     let response = loop {
         tokio::select! {
@@ -1029,6 +1096,9 @@ async fn stream_sse(
                     &url, tau_provider::OutboundPhase::Request, &error,
                 )), State::default().progress())
             })?,
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(header_deadline)) => {
+                return Err((Error::StreamFailure, State::default().progress()));
+            }
             () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                 if is_canceled() {
                     return Err((Error::Canceled, State::default().progress()));
@@ -1039,25 +1109,34 @@ async fn stream_sse(
             }
         }
     };
+    if header_deadline <= Instant::now() {
+        return Err((Error::StreamFailure, State::default().progress()));
+    }
     if !response.status().is_success() {
         let status = response.status().as_u16();
         if let Some(error) = network.proxy_response_error(&url, status) {
             return Err((Error::Outbound(error), State::default().progress()));
         }
-        let body = read_capped_error_body(response, &url, is_canceled, network)
-            .await
-            .map_err(|error| (error, State::default().progress()))?;
+        let body = read_capped_error_body(
+            response,
+            &url,
+            is_canceled,
+            network,
+            deadlines::StreamDeadlines::new(Instant::now()),
+        )
+        .await
+        .map_err(|error| (error, State::default().progress()))?;
         return Err((Error::Http(status, body), State::default().progress()));
     }
     let mut response = response;
     let mut state = State::default();
     let mut pending = Vec::new();
+    let mut deadlines = deadlines::StreamDeadlines::new(Instant::now());
     loop {
         if is_canceled() {
             return Err((Error::Canceled, state.progress()));
         }
         let mut next_chunk = Box::pin(response.chunk());
-        let idle_deadline = Instant::now() + STREAM_IDLE_TIMEOUT;
         let chunk = loop {
             tokio::select! {
                 chunk = &mut next_chunk => break chunk.map_err(|error| {
@@ -1065,11 +1144,14 @@ async fn stream_sse(
                         &url, tau_provider::OutboundPhase::Body, &error,
                     )), state.progress())
                 })?,
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadlines.next_deadline())) => {
+                    return Err((Error::StreamFailure, state.progress()));
+                }
                 () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                     if is_canceled() {
                         return Err((Error::Canceled, state.progress()));
                     }
-                    if idle_deadline <= Instant::now() {
+                    if deadlines.expired(Instant::now()) {
                         return Err((Error::StreamFailure, state.progress()));
                     }
                 }
@@ -1078,6 +1160,9 @@ async fn stream_sse(
         let Some(chunk) = chunk else {
             return Ok(state);
         };
+        if deadlines.expired(Instant::now()) {
+            return Err((Error::StreamFailure, state.progress()));
+        }
         state.bytes = state.bytes.saturating_add(chunk.len() as u64);
         if MAX_RESPONSE_BYTES < state.bytes {
             return Err((Error::StreamFailure, state.progress()));
@@ -1100,10 +1185,13 @@ async fn stream_sse(
                     state.terminal = true;
                     return Ok(state);
                 }
-                state
+                let qualifying_progress = state
                     .apply_event(data)
                     .map_err(|error| (error, state.progress()))?;
                 on_update(state.progress());
+                if qualifying_progress {
+                    deadlines.renew_for_qualifying_progress(Instant::now());
+                }
                 if state.terminal {
                     return Ok(state);
                 }
@@ -1117,21 +1205,24 @@ async fn read_capped_error_body(
     url: &str,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    deadlines: deadlines::StreamDeadlines,
 ) -> Result<String, Error> {
     let mut body = Vec::new();
     while body.len() < MAX_HTTP_ERROR_BODY_BYTES as usize {
         let mut next_chunk = Box::pin(response.chunk());
-        let deadline = Instant::now() + STREAM_IDLE_TIMEOUT;
         let chunk = loop {
             tokio::select! {
                 chunk = &mut next_chunk => break chunk.map_err(|error| Error::Outbound(
                     network.reqwest_error(url, tau_provider::OutboundPhase::Body, &error)
                 ))?,
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadlines.next_deadline())) => {
+                    return Err(Error::StreamFailure);
+                }
                 () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                     if is_canceled() {
                         return Err(Error::Canceled);
                     }
-                    if deadline <= Instant::now() {
+                    if deadlines.expired(Instant::now()) {
                         return Err(Error::StreamFailure);
                     }
                 }
@@ -1678,5 +1769,7 @@ fn cbor_to_json(value: &tau_proto::CborValue) -> Value {
     }
 }
 
+#[cfg(test)]
+mod deadlines_tests;
 #[cfg(test)]
 mod tests;

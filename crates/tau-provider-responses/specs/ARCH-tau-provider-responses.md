@@ -22,6 +22,17 @@ therefore reconnects and replays the complete local transcript rather than
 depending on connection-local continuation state. WebSocket selection never
 falls back to SSE.
 
+Each transport gives request dispatch, connection, and response-header work
+five minutes. After successful headers, one response stream has a separate
+ten-minute absolute deadline plus a five-minute semantic-idle deadline.
+Accepted qualifying semantic output renews only the idle deadline; it never
+extends the absolute deadline. Qualifying progress is a non-empty assistant or
+displayable reasoning-text addition, a completed material opaque reasoning
+item, a non-empty Function name, or non-empty Function arguments. Transport
+bytes, SSE comments, WebSocket ping/pong/control frames, status and usage,
+empty allocations/deltas, unknown events, and duplicate semantic state do not
+qualify. Cancellation remains cooperative throughout every bounded wait.
+
 Every request also lowers the harness-selected effective reasoning effort as
 `reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining
 canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass

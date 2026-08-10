@@ -11,9 +11,8 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use super::{
-    ATTEMPT_PHASE_TIMEOUT, AttemptConfig, AttemptProgress, CANCELLATION_POLL_INTERVAL, Error,
-    MAX_EVENT_BYTES, MAX_RESPONSE_BYTES, RequestBody, STREAM_IDLE_TIMEOUT, State,
-    read_capped_error_body,
+    AttemptConfig, AttemptProgress, CANCELLATION_POLL_INTERVAL, Error, MAX_EVENT_BYTES,
+    MAX_RESPONSE_BYTES, RequestBody, State, deadlines, read_capped_error_body,
 };
 
 /// Runs one fresh-socket WebSocket attempt.
@@ -55,7 +54,7 @@ pub(super) async fn stream(
     for (name, value) in handshake.headers() {
         outbound = outbound.header(name, value);
     }
-    let deadline = Instant::now() + ATTEMPT_PHASE_TIMEOUT;
+    let deadline = Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT;
     let mut send = Box::pin(outbound.send());
     let response = loop {
         tokio::select! {
@@ -64,6 +63,9 @@ pub(super) async fn stream(
                     &websocket_url, tau_provider::OutboundPhase::Request, &error,
                 )), State::default().progress())
             })?,
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                return Err((Error::StreamFailure, State::default().progress()));
+            }
             () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                 if is_canceled() {
                     return Err((Error::Canceled, State::default().progress()));
@@ -74,26 +76,42 @@ pub(super) async fn stream(
             }
         }
     };
+    if deadline <= Instant::now() {
+        return Err((Error::StreamFailure, State::default().progress()));
+    }
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
         let status = response.status().as_u16();
         if let Some(error) = network.proxy_response_error(&websocket_url, status) {
             return Err((Error::Outbound(error), State::default().progress()));
         }
-        let body = read_capped_error_body(response, &websocket_url, is_canceled, network)
-            .await
-            .map_err(|error| (error, State::default().progress()))?;
+        let body = read_capped_error_body(
+            response,
+            &websocket_url,
+            is_canceled,
+            network,
+            deadlines::StreamDeadlines::new(Instant::now()),
+        )
+        .await
+        .map_err(|error| (error, State::default().progress()))?;
         return Err((Error::Http(status, body), State::default().progress()));
     }
     validate_websocket_upgrade(&response, &key, network, &websocket_url)
         .map_err(|error| (error, State::default().progress()))?;
-    let upgraded = response.upgrade().await.map_err(|_| {
-        (
-            Error::Outbound(
-                network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
-            ),
-            State::default().progress(),
-        )
-    })?;
+    let mut deadlines = deadlines::StreamDeadlines::new(Instant::now());
+    let upgraded = match await_with_deadline(response.upgrade(), deadline, is_canceled).await {
+        Ok(Ok(upgraded)) => upgraded,
+        Ok(Err(_)) | Err(WaitError::Deadline) => {
+            return Err((
+                Error::Outbound(
+                    network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
+                ),
+                State::default().progress(),
+            ));
+        }
+        Err(WaitError::Canceled) => {
+            return Err((Error::Canceled, State::default().progress()));
+        }
+    };
     let mut socket = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
     let mut envelope =
         serde_json::to_value(body).map_err(|_| (Error::Json, State::default().progress()))?;
@@ -111,20 +129,18 @@ pub(super) async fn stream(
         &mut socket,
         Message::Text(serialized.into()),
         is_canceled,
-        Instant::now() + ATTEMPT_PHASE_TIMEOUT,
+        (Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT).min(deadlines.next_deadline()),
         &State::default(),
     )
     .await?;
 
     let mut state = State::default();
-    let absolute_deadline = Instant::now() + ATTEMPT_PHASE_TIMEOUT;
-    let mut semantic_idle_deadline = Instant::now() + STREAM_IDLE_TIMEOUT;
     loop {
         if is_canceled() {
             return Err((Error::Canceled, state.progress()));
         }
-        let deadline = absolute_deadline.min(semantic_idle_deadline);
-        if response_deadline_expired(absolute_deadline, semantic_idle_deadline, Instant::now()) {
+        let deadline = deadlines.next_deadline();
+        if deadlines.expired(Instant::now()) {
             return Err((Error::StreamFailure, state.progress()));
         }
         let frame = match await_with_deadline(socket.next(), deadline, is_canceled).await {
@@ -132,6 +148,9 @@ pub(super) async fn stream(
             Err(WaitError::Canceled) => return Err((Error::Canceled, state.progress())),
             Err(WaitError::Deadline) => return Err((Error::StreamFailure, state.progress())),
         };
+        if deadlines.expired(Instant::now()) {
+            return Err((Error::StreamFailure, state.progress()));
+        }
         match frame {
             Some(Ok(Message::Text(text))) => {
                 let Some(bytes) = checked_response_bytes(state.bytes, text.len()) else {
@@ -143,11 +162,13 @@ pub(super) async fn stream(
                 if let Some(error) = provider_terminal_error(&value) {
                     return Err((error, state.progress()));
                 }
-                state
+                let qualifying_progress = state
                     .apply_event(text.as_ref())
                     .map_err(|error| (error, state.progress()))?;
                 on_update(state.progress());
-                semantic_idle_deadline = Instant::now() + STREAM_IDLE_TIMEOUT;
+                if qualifying_progress {
+                    deadlines.renew_for_qualifying_progress(Instant::now());
+                }
                 if state.terminal {
                     return Ok(state);
                 }
@@ -157,7 +178,7 @@ pub(super) async fn stream(
                     &mut socket,
                     Message::Pong(payload),
                     is_canceled,
-                    absolute_deadline.min(semantic_idle_deadline),
+                    deadlines.next_deadline(),
                     &state,
                 )
                 .await?;
@@ -168,10 +189,6 @@ pub(super) async fn stream(
             }
         }
     }
-}
-
-fn response_deadline_expired(absolute: Instant, semantic_idle: Instant, now: Instant) -> bool {
-    absolute.min(semantic_idle) <= now
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,7 +211,12 @@ async fn await_with_deadline<T>(
     let mut future = Box::pin(future);
     loop {
         tokio::select! {
-            result = &mut future => return Ok(result),
+            result = &mut future => {
+                if deadline <= Instant::now() {
+                    return Err(WaitError::Deadline);
+                }
+                return Ok(result);
+            }
             () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                 return Err(WaitError::Deadline);
             }
@@ -226,7 +248,13 @@ async fn send_bounded(
     loop {
         tokio::select! {
             result = &mut send => {
+                if deadline <= Instant::now() {
+                    return Err((Error::StreamFailure, state.progress()));
+                }
                 return result.map_err(|_| (Error::StreamFailure, state.progress()));
+            }
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                return Err((Error::StreamFailure, state.progress()));
             }
             () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                 if is_canceled() {
