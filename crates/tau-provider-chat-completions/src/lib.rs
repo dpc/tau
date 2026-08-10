@@ -827,10 +827,7 @@ fn read_chat_stream_body(
         }
         match reader.read(&mut buffer) {
             Ok(0) => {
-                if !pending.is_empty() {
-                    let line = decode_sse_line(std::mem::take(&mut pending));
-                    let _done = apply_chat_stream_lines(vec![line], state, raw_events, on_update)?;
-                }
+                apply_pending_sse_line(&mut pending, state, raw_events, on_update)?;
                 return Ok(());
             }
             Ok(bytes) => {
@@ -923,6 +920,20 @@ fn decode_sse_line(mut line_bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&line_bytes).into_owned()
 }
 
+fn apply_pending_sse_line(
+    pending: &mut Vec<u8>,
+    state: &mut StreamState,
+    raw_events: &mut Vec<serde_json::Value>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let line = decode_sse_line(std::mem::take(pending));
+    let _done = apply_chat_stream_lines(vec![line], state, raw_events, on_update)?;
+    Ok(())
+}
+
 fn apply_chat_stream_lines(
     lines: Vec<String>,
     state: &mut StreamState,
@@ -936,10 +947,7 @@ fn apply_chat_stream_lines(
         if data == "[DONE]" {
             return Ok(true);
         }
-        let event: serde_json::Value = match serde_json::from_str(data) {
-            Ok(event) => event,
-            Err(_) => continue,
-        };
+        let event: serde_json::Value = serde_json::from_str(data).map_err(LlmError::Json)?;
         if raw_events.len() < MAX_DEBUG_EVENTS {
             raw_events.push(event.clone());
         }
@@ -1142,7 +1150,10 @@ async fn chat_completions_stream_async(
                     return Ok((state, raw_events));
                 }
             }
-            Ok(Ok(None)) => return Ok((state, raw_events)),
+            Ok(Ok(None)) => {
+                apply_pending_sse_line(&mut pending, &mut state, &mut raw_events, on_update)?;
+                return Ok((state, raw_events));
+            }
             Ok(Err(error)) => {
                 return Err(LlmError::Outbound(network.reqwest_error(
                     context.url,

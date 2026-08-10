@@ -278,27 +278,28 @@ fn stream_state_reports_tool_argument_response_bytes() {
     );
 }
 
-/// Ensures transport progress moves as soon as response bytes arrive, even when
-/// the provider has not yet sent a complete SSE line that can be parsed
-/// semantically.
+/// Ensures truncated SSE data at EOF rejects the attempt after transport bytes
+/// have been recorded, rather than treating an incomplete provider event as a
+/// successful response.
 #[test]
-fn chat_stream_body_counts_transport_bytes_before_complete_sse_line() {
+fn chat_stream_body_rejects_incomplete_data_at_eof() {
     let bytes = b"data: {\"choices\"";
     let mut state = StreamState::new();
     let mut raw_events = Vec::new();
     let mut observed = Vec::new();
 
-    read_chat_stream_body(
+    let error = read_chat_stream_body(
         path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
         &mut |state| observed.push(state.response_bytes_received()),
         &mut || false,
     )
-    .expect("partial stream read");
+    .expect_err("incomplete SSE data must reject the stream");
 
     assert_eq!(observed, vec![bytes.len() as u64]);
     assert!(raw_events.is_empty());
+    assert!(matches!(error, LlmError::Json(_)));
 }
 
 struct DoneThenPanicReader {
@@ -616,6 +617,57 @@ fn chat_stream_body_bounds_debug_event_retention() {
     )
     .expect("bounded event stream");
     assert_eq!(raw_events.len(), MAX_DEBUG_EVENTS);
+}
+
+/// Ensures malformed SSE data rejects the attempt after accepted output, so EOF
+/// cannot complete a partial response while the retry owner retains that
+/// progress.
+#[test]
+fn malformed_sse_data_after_delta_rejects_partial_stream() {
+    let events = concat!(
+        ": keepalive\n",
+        "event: message\n",
+        "id: ignored\n",
+        "retry: 1000\n",
+        "\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        "data: {malformed-json}",
+    );
+    let server = ScriptedTcpServer::spawn(move |mut socket| {
+        let mut request = [0_u8; 16 * 1024];
+        let _ = path_std_io::Read::read(&mut socket, &mut request).expect("read request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .expect("write streamed response");
+    });
+    let mut configured = provider();
+    configured.base_url = format!("http://{}/v1", server.address());
+    let model = configured.models[0].clone();
+    let resolved = resolved_provider(&configured);
+    let outcome = run_attempt(
+        &prompt(),
+        &resolved,
+        &model,
+        false,
+        &mut |_| {},
+        &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(
+            path_std_collections::BTreeMap::new(),
+            None,
+        ),
+    );
+    server.finish();
+
+    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+        panic!("malformed data must remain retryable");
+    };
+    assert_eq!(decision.class, RetryClass::Unknown);
+    assert_eq!(progress, SemanticProgress::Parsed);
 }
 
 /// Ensures SSE comments and blank heartbeat lines do not reset the semantic
