@@ -156,9 +156,21 @@ provider/tool replay surface once the tool call is complete.
 
 ## Provider error authority
 
-Terminal context classification trusts only canonical OpenAI-style `error.code` and `error.type`;
-echoed nested fields and provider prose are not authoritative. Known canonical transient
-identifiers override deterministic HTTP status classification and remain retryable.
+Terminal context classification accepts the exact
+`context_length_exceeded` identifier only from canonical OpenAI-style
+`error.code` and `error.type` fields. Streamed error classification additionally
+accepts that same context-window identifier and the bounded retry-class
+identifier set in `tau_provider::retry_policy::classify_error_code` from the
+well-known `error.metadata.error_type` field. This nested path supports typed
+context-window recovery and retry classes from providers that put the stream
+error identifier there.
+
+New structured paths for terminal context or streamed identifier classification
+may participate only after review documents their exact field path and bounded
+accepted identifiers. Provider prose, unknown identifiers, and arbitrary or
+unrecognized nested metadata are non-authoritative in those classifications.
+Known accepted transient identifiers override deterministic HTTP status
+classification and remain retryable.
 
 Watcher-visible retry state never includes the upstream body or human error text;
 only the provider's closed structured classification crosses into the harness.

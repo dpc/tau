@@ -1723,17 +1723,47 @@ fn streamed_context_error_is_typed_terminal_without_assistant_output() {
     );
 }
 
-/// Ensures a typed transient stream code retains scheduler classification while
-/// provider-authored prose remains outside the structured outcome.
+/// Ensures only the reviewed streamed metadata path and exact identifiers can
+/// classify context recovery; arbitrary metadata and provider prose stay
+/// unknown.
 #[test]
-fn streamed_rate_limit_error_is_typed_retryable() {
+fn streamed_error_ignores_unknown_nested_metadata_and_prose() {
+    for error in [
+        serde_json::json!({
+            "metadata": {
+                "error_type": "unknown_provider_error",
+                "nested": {"error_type": "context_length_exceeded"}
+            },
+            "message": "context_length_exceeded"
+        }),
+        serde_json::json!({
+            "metadata": {"context_length_exceeded": true},
+            "message": "context_length_exceeded"
+        }),
+    ] {
+        let failure = classify_stream_error(error.as_object().expect("error object"));
+        assert_eq!(failure.failure_kind, None);
+        assert_eq!(
+            failure
+                .retry
+                .expect("unknown streamed error is retryable")
+                .class,
+            RetryClass::Unknown
+        );
+    }
+}
+
+/// Ensures the reviewed streamed metadata path maps an allowlisted retry
+/// identifier, while provider-authored prose remains outside the outcome.
+#[test]
+fn streamed_allowlisted_metadata_retry_error_is_typed_retryable() {
     let mut state = StreamState::new();
     let error = apply_event(
         &mut state,
         &serde_json::json!({
             "error": {
-                "code": 429,
-                "metadata": {"error_type": "provider_error"},
+                "code": 400,
+                "metadata": {"error_type": "rate_limit_exceeded"},
                 "message": "secret-bearing arbitrary text"
             }
         }),
@@ -1746,7 +1776,7 @@ fn streamed_rate_limit_error_is_typed_retryable() {
     let AttemptOutcome::Retryable { decision, progress } =
         finish_attempt(Err(error), SemanticProgress::Parsed)
     else {
-        panic!("numeric streamed 429 must be retryable");
+        panic!("allowlisted streamed metadata must be retryable");
     };
     assert_eq!(decision.class, RetryClass::Throttle);
     assert_eq!(progress, SemanticProgress::Parsed);
