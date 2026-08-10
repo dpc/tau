@@ -277,15 +277,15 @@ pub(crate) enum AgentPublishCompletion {
         /// Accepted initial-prompt identity.
         correlation: crate::agent::InitialPromptCorrelation,
     },
-    /// Apply one Working final disposition only after its durable append
+    /// Apply one gated-final disposition only after its durable append
     /// commits.
-    WorkingFinal {
+    GatedFinal {
         /// Prompt identity of the durable candidate response.
         agent_prompt_id: tau_proto::AgentPromptId,
         /// Selected transcript head that owned the provider response.
         batch_parent: tau_proto::AgentHead,
         /// Exact post-commit terminal or continuation behavior.
-        disposition: super::working_final::WorkingFinalDisposition,
+        disposition: super::gated_final::GatedFinalDisposition,
         /// Exact interceptor-approved event retained after append rejection.
         retry_event: Option<Box<Event>>,
     },
@@ -317,8 +317,8 @@ impl AgentPublishCompletion {
     fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
         match self {
             Self::StandaloneContinuation { transaction_id, .. } => transaction_id,
-            Self::WorkingFinal { .. } | Self::InitialPromptSubmission { .. } => {
-                unreachable!("working finals do not own compaction transactions")
+            Self::GatedFinal { .. } | Self::InitialPromptSubmission { .. } => {
+                unreachable!("gated finals do not own compaction transactions")
             }
         }
     }
@@ -972,7 +972,7 @@ impl Harness {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
                 .first()
                 .is_some_and(path_crate_agent::PendingPrompt::should_notify_watchers),
-            AgentPublishCompletion::WorkingFinal { .. } => false,
+            AgentPublishCompletion::GatedFinal { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {

@@ -23,30 +23,119 @@ fn report_validation_rejects_non_model_phases_and_titles() {
     }
 }
 
-/// Accepted status reports and delivered notices suppress routine repeats until
-/// a genuine activation explicitly offers one new acknowledgement.
+/// Task work, accepted status, final refusal, and fresh activations keep
+/// independent activation-scoped lifecycle state.
 #[test]
-fn acknowledgement_is_scoped_to_genuine_activations() {
+fn start_status_lifecycle_is_scoped_to_genuine_activations() {
     let mut status = WorkStatus::default();
-    assert!(status.mark_ack_notice_delivered());
-    assert!(!status.mark_ack_notice_delivered());
-    status.begin_ack_activation(tau_proto::ObservationId::random());
-    assert!(status.mark_ack_notice_delivered());
+    assert!(!status.mark_start_reminder_delivered());
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+    assert!(status.mark_start_reminder_delivered());
+    assert!(!status.mark_start_reminder_delivered());
+    assert_eq!(
+        status.decide_start_status_final(true),
+        Some(StartStatusFinalDecision::Challenge)
+    );
+    status.record_start_status_final_challenge();
+    assert_eq!(
+        status.decide_start_status_final(true),
+        Some(StartStatusFinalDecision::Fail)
+    );
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Working,
         "first title"
     ));
-    assert!(!status.mark_ack_notice_delivered());
-    assert!(report(&mut status, AgentWorkStatusPhase::Done, "done"));
-    assert!(!status.mark_ack_notice_delivered());
-    status.begin_ack_activation(tau_proto::ObservationId::random());
-    assert!(status.mark_ack_notice_delivered());
-    status.join_ack_activation(tau_proto::ObservationId::random());
-    assert!(!status.mark_ack_notice_delivered());
-    status.begin_ack_activation(tau_proto::ObservationId::random());
-    status.retire_ack_notice_for_activation();
-    assert!(!status.mark_ack_notice_delivered());
+    assert_eq!(status.decide_start_status_final(true), None);
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    assert!(!status.mark_start_reminder_delivered());
+    status.record_task_work();
+    assert!(status.mark_start_reminder_delivered());
+    status.retire_task_activation();
+    assert_eq!(status.decide_start_status_final(true), None);
+}
+
+/// No-tool and lifecycle-only activations stay exempt, while accepted status
+/// suppresses work admitted before or after it in the same parallel round.
+#[test]
+fn start_status_exemptions_and_parallel_suppression_are_order_independent() {
+    let mut status = WorkStatus::default();
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    assert_eq!(status.decide_start_status_final(true), None);
+
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Working,
+        "parallel status first"
+    ));
+    status.record_task_work();
+    assert!(!status.mark_start_reminder_delivered());
+    assert_eq!(status.decide_start_status_final(true), None);
+
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Done,
+        "parallel status last"
+    ));
+    assert!(!status.mark_start_reminder_delivered());
+    assert_eq!(status.decide_start_status_final(true), None);
+}
+
+/// Qualifying work without an accepted status receives one reminder and the
+/// bounded final refusal sequence.
+#[test]
+fn missing_accepted_status_keeps_start_status_enforcement() {
+    let mut status = WorkStatus::default();
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+    assert!(status.mark_start_reminder_delivered());
+    assert_eq!(
+        status.decide_start_status_final(true),
+        Some(StartStatusFinalDecision::Challenge)
+    );
+    status.record_start_status_final_challenge();
+    assert_eq!(
+        status.decide_start_status_final(true),
+        Some(StartStatusFinalDecision::Fail)
+    );
+    assert_eq!(status.decide_start_status_final(false), None);
+}
+
+/// A status report rejected by release-effective validation never mutates the
+/// activation gate or suppresses its reminder.
+#[test]
+fn rejected_status_report_cannot_suppress_start_status_enforcement() {
+    let mut status = WorkStatus::default();
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+    let rejected = WorkStatusReport::new(AgentWorkStatusPhase::Unreported, "invalid".to_owned());
+    assert!(rejected.is_err());
+    assert!(status.mark_start_reminder_delivered());
+    assert_eq!(
+        status.decide_start_status_final(true),
+        Some(StartStatusFinalDecision::Challenge)
+    );
+}
+
+/// Queued addressed work cannot take ownership until the active foreground
+/// round has made its own reminder decision.
+#[test]
+fn queued_activation_promotes_only_after_old_round_settles() {
+    let mut status = WorkStatus::default();
+    let old = tau_proto::ObservationId::random();
+    let new = tau_proto::ObservationId::random();
+    status.begin_task_activation(old);
+    status.record_task_work();
+    status.join_task_activation(new);
+    assert!(status.mark_start_reminder_delivered());
+
+    status.promote_pending_task_activation();
+    assert!(!status.mark_start_reminder_delivered());
+    status.record_task_work();
+    assert!(status.mark_start_reminder_delivered());
 }
 
 /// Done and Blocked disable the Working final gate without changing the runtime

@@ -21,8 +21,8 @@ mod ui_liveness;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
+use crate::harness::gated_final::GatedFinalDisposition;
 use crate::harness::interception::AgentPublishCompletion;
-use crate::harness::working_final::WorkingFinalDisposition;
 use crate::harness::{PendingTool, background_completion_prompt};
 
 /// Construct one authenticated-provenance report for ordinary extension
@@ -81,22 +81,16 @@ fn clear_interception_fixture_models(h: &mut Harness) {
     h.set_provider_models(&crate::test_connection_id(&provider_id), Vec::new());
 }
 
-/// A must-pass challenged final cannot be dropped after interception; its
+/// A start-status challenged final cannot be dropped after interception; its
 /// reminder starts only after the candidate commits.
 #[test]
-fn challenged_working_final_drop_is_overridden_until_post_commit() {
+fn challenged_start_status_final_drop_is_overridden_until_post_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Working,
-            "intercepted final".to_owned(),
-        )
-        .expect("valid report"),
-    )
-    .expect("working");
+    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
     let prompt_id =
         tau_proto::AgentPromptId::parse("working-final-drop").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
@@ -388,11 +382,11 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
-    let make_completion = |batch_parent, suffix: &str| AgentPublishCompletion::WorkingFinal {
+    let make_completion = |batch_parent, suffix: &str| AgentPublishCompletion::GatedFinal {
         agent_prompt_id: tau_proto::AgentPromptId::parse(format!("retained-{suffix}"))
             .expect("known-safe prompt id"),
         batch_parent,
-        disposition: WorkingFinalDisposition::Challenge {
+        disposition: GatedFinalDisposition::Challenge {
             title: "exact parent".to_owned(),
         },
         retry_event: Some(Box::new(Event::ProviderResponseFinished(

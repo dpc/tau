@@ -112,7 +112,7 @@ use crate::harness::extension_data::{
 use crate::harness::extensions::StartupDeadline;
 
 /// Model-visible reminder to report meaningful work through the status tool.
-pub(crate) const STATUS_REMINDER: &str = "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible.";
+pub(crate) const STATUS_REMINDER: &str = "When you start working on a task, call `status` to report what you're doing. Batch it with other tool calls when possible.";
 
 /// Diagnostic-only lag that indicates a component is pathologically behind.
 const LIVE_EGRESS_LAG_WARNING_POSITIONS: u64 = 10_000;
@@ -131,6 +131,7 @@ use crate::harness::extensions::{
     DeferredExtensionMessage, ExtensionActivationStage, ExtensionFrameAdmission,
     ExtensionRuntimeState, StagedExtensionPublish, StagedSessionBound,
 };
+use crate::harness::gated_final::{CommittedGatedFinal, GatedFinalDisposition};
 use crate::harness::interception::{
     AgentPublishCompletion, ConversationHeadSync, DeferredPublish, InterceptorRegistry,
     PendingIntercept, PostCommitContinuation, PromptDispatchContinuation, PromptDispatchPhase,
@@ -138,7 +139,6 @@ use crate::harness::interception::{
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::subagents_tool::SubagentToolState;
-use crate::harness::working_final::{CommittedWorkingFinal, WorkingFinalDisposition};
 use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
     LoadedRoles, MissingDefaultRole, baseline_params_for_selection, context_percent_used,
@@ -1795,8 +1795,8 @@ mod subagents_tool;
 mod ui_create_agent;
 pub(crate) use subagents_tool::PeerIoPermit;
 pub use subagents_tool::normalized_wait_timeout_minutes;
+mod gated_final;
 mod user_skill_invocation;
-mod working_final;
 
 pub(crate) use subagents_tool::ExternalMessageToolCompletion;
 
@@ -5086,15 +5086,15 @@ impl Harness {
         );
     }
 
-    /// Join one dispatched addressed input to the current acknowledgement
-    /// batch.
-    pub(crate) fn join_addressed_ack_activation(
+    /// Join one dispatched addressed input to the current task-status
+    /// lifecycle.
+    pub(crate) fn join_task_status_activation(
         &mut self,
         cid: &AgentId,
         activation: tau_proto::ObservationId,
     ) {
         if let Some(agent) = self.agents.get_mut(cid) {
-            agent.work_status.join_ack_activation(activation);
+            agent.work_status.join_task_activation(activation);
         }
     }
 
@@ -5446,7 +5446,7 @@ impl Harness {
         let must_pass = matches!(
             completion,
             Some(
-                AgentPublishCompletion::WorkingFinal { .. }
+                AgentPublishCompletion::GatedFinal { .. }
                     | AgentPublishCompletion::InitialPromptSubmission { .. }
             )
         );
@@ -6060,12 +6060,11 @@ impl Harness {
             return;
         }
         if let Some(sync) = sync_head_for.as_ref()
-            && let Some(AgentPublishCompletion::WorkingFinal { batch_parent, .. }) =
-                sync.completion()
+            && let Some(AgentPublishCompletion::GatedFinal { batch_parent, .. }) = sync.completion()
             && self.selected_head_for_agent(&sync.cid) != Some(*batch_parent)
         {
             self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
-            self.emit_info("retaining Working final until its owning branch is selected");
+            self.emit_info("retaining gated final until its owning branch is selected");
             return;
         }
         let mut commit_timing = CommitEventTiming::new(event.name());
@@ -6619,18 +6618,39 @@ impl Harness {
                 .insert(cid.clone(), correlation);
             return;
         }
-        if let AgentPublishCompletion::WorkingFinal { disposition, .. } = completion {
+        if let AgentPublishCompletion::GatedFinal {
+            agent_prompt_id,
+            disposition,
+            ..
+        } = completion
+        {
             match disposition {
-                WorkingFinalDisposition::Challenge { title } => {
+                GatedFinalDisposition::StartStatusChallenge => {
+                    if let Some(agent) = self.agents.get_mut(cid) {
+                        agent.work_status.record_start_status_final_challenge();
+                        agent
+                            .pending_prompts
+                            .push_back(PendingPrompt::internal(STATUS_REMINDER.to_owned()));
+                    }
+                    self.continue_after_gated_final_challenge(cid);
+                }
+                GatedFinalDisposition::StartStatusFailure { terminal } => {
+                    self.emit_harness_failure(
+                        "harness policy failure: agent attempted to finish without an accepted `status` call after the required challenge",
+                    );
+                    self.clear_prompt_tool_snapshot(&agent_prompt_id);
+                    self.complete_committed_start_status_failure(cid, *terminal);
+                }
+                GatedFinalDisposition::Challenge { title } => {
                     if let Some(agent) = self.agents.get_mut(cid) {
                         agent.work_status.record_final_challenge();
                         agent
                             .pending_prompts
                             .push_back(PendingPrompt::internal(working_status_reminder(&title)));
                     }
-                    self.continue_after_working_final_challenge(cid);
+                    self.continue_after_gated_final_challenge(cid);
                 }
-                WorkingFinalDisposition::AcceptUnknown { terminal } => {
+                GatedFinalDisposition::AcceptUnknown { terminal } => {
                     if self
                         .agents
                         .get_mut(cid)
@@ -6705,12 +6725,12 @@ impl Harness {
         );
     }
 
-    /// Return whether the currently committing publication owns a Working-final
+    /// Return whether the currently committing publication owns a gated-final
     /// disposition for this exact prompt.
-    pub(crate) fn committing_working_final(&self, prompt_id: &AgentPromptId) -> bool {
+    pub(crate) fn committing_gated_final(&self, prompt_id: &AgentPromptId) -> bool {
         matches!(
             self.committing_agent_publish_completion.as_ref(),
-            Some(AgentPublishCompletion::WorkingFinal {
+            Some(AgentPublishCompletion::GatedFinal {
                 agent_prompt_id,
                 ..
             }) if agent_prompt_id == prompt_id
@@ -6750,7 +6770,7 @@ impl Harness {
                 approved_retry_event,
                 ..
             } => *approved_retry_event = Some(Box::new(event.clone())),
-            AgentPublishCompletion::WorkingFinal { retry_event, .. } => {
+            AgentPublishCompletion::GatedFinal { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
             AgentPublishCompletion::InitialPromptSubmission { .. } => {
@@ -6772,7 +6792,7 @@ impl Harness {
         let Some(completion) = self.pending_agent_publish_completions.remove(cid) else {
             return;
         };
-        if let AgentPublishCompletion::WorkingFinal {
+        if let AgentPublishCompletion::GatedFinal {
             batch_parent,
             retry_event,
             ..
@@ -6787,7 +6807,7 @@ impl Harness {
                 return;
             };
             let mut approved = completion;
-            let AgentPublishCompletion::WorkingFinal { retry_event, .. } = &mut approved else {
+            let AgentPublishCompletion::GatedFinal { retry_event, .. } = &mut approved else {
                 unreachable!()
             };
             *retry_event = None;
@@ -6805,7 +6825,7 @@ impl Harness {
                 retry_prompts.clone(),
                 approved_retry_event.clone(),
             ),
-            AgentPublishCompletion::WorkingFinal { .. } => unreachable!("returned above"),
+            AgentPublishCompletion::GatedFinal { .. } => unreachable!("returned above"),
             AgentPublishCompletion::InitialPromptSubmission { .. } => {
                 unreachable!("initial submissions are never retained for retry")
             }
@@ -8347,7 +8367,7 @@ impl Harness {
             addressed_activation
         });
         if let Some(activation) = addressed_activation {
-            self.join_addressed_ack_activation(cid, activation);
+            self.join_task_status_activation(cid, activation);
         }
     }
 
@@ -22980,7 +23000,7 @@ impl Harness {
             && let Some(agent) = self.agents.get_mut(cid)
         {
             agent.lifecycle_notification_only_turn = false;
-            agent.work_status.retire_ack_notice_for_activation();
+            agent.work_status.retire_task_activation();
         }
     }
 
@@ -26517,19 +26537,37 @@ impl Harness {
             }
         }
 
-        let status_gate = (!requested_tool_calls)
-            .then(|| self.apply_working_final_response_gate(&cid, &response))
+        let successful = response.error.is_none()
+            && response.failure_kind.is_none()
+            && !matches!(
+                response.stop_reason,
+                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+            );
+        let start_status_gate = (!requested_tool_calls)
+            .then(|| {
+                self.agents
+                    .get(&cid)?
+                    .work_status
+                    .decide_start_status_final(successful)
+            })
             .flatten();
-        let completion = match status_gate {
+        let working_status_gate = if start_status_gate.is_none() {
+            (!requested_tool_calls)
+                .then(|| self.apply_working_final_response_gate(&cid, &response))
+                .flatten()
+        } else {
+            None
+        };
+        let completion = match working_status_gate {
             Some(path_crate_agent::WorkingFinalDecision::Challenge) => {
-                Some(AgentPublishCompletion::WorkingFinal {
+                Some(AgentPublishCompletion::GatedFinal {
                     agent_prompt_id: response.agent_prompt_id.clone(),
                     batch_parent: self
                         .agents
                         .get(&cid)
                         .and_then(|agent| agent.head)
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    disposition: WorkingFinalDisposition::Challenge {
+                    disposition: GatedFinalDisposition::Challenge {
                         title: self
                             .agents
                             .get(&cid)
@@ -26541,15 +26579,15 @@ impl Harness {
                 })
             }
             Some(path_crate_agent::WorkingFinalDecision::AcceptUnknown) => {
-                Some(AgentPublishCompletion::WorkingFinal {
+                Some(AgentPublishCompletion::GatedFinal {
                     agent_prompt_id: response.agent_prompt_id.clone(),
                     batch_parent: self
                         .agents
                         .get(&cid)
                         .and_then(|agent| agent.head)
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    disposition: WorkingFinalDisposition::AcceptUnknown {
-                        terminal: Box::new(CommittedWorkingFinal {
+                    disposition: GatedFinalDisposition::AcceptUnknown {
+                        terminal: Box::new(CommittedGatedFinal {
                             response: response.clone(),
                             response_contains_compaction,
                             input_tokens,
@@ -26563,19 +26601,49 @@ impl Harness {
             }
             None => None,
         };
+        let completion = match start_status_gate {
+            Some(path_crate_agent::StartStatusFinalDecision::Challenge) => {
+                Some(AgentPublishCompletion::GatedFinal {
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    batch_parent: self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.head)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    disposition: GatedFinalDisposition::StartStatusChallenge,
+                    retry_event: None,
+                })
+            }
+            Some(path_crate_agent::StartStatusFinalDecision::Fail) => {
+                Some(AgentPublishCompletion::GatedFinal {
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    batch_parent: self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.head)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    disposition: GatedFinalDisposition::StartStatusFailure {
+                        terminal: Box::new(CommittedGatedFinal {
+                            response: response.clone(),
+                            response_contains_compaction,
+                            input_tokens,
+                            context_size_alerts: context_size_alerts.clone(),
+                            is_non_tool_ext_query,
+                            source: source.cloned(),
+                        }),
+                    },
+                    retry_event: None,
+                })
+            }
+            None => completion,
+        };
         self.publish_finished_response_for_agent(&cid, source, &response, completion);
-        if status_gate.is_some() {
+        if start_status_gate.is_some() || working_status_gate.is_some() {
             return Ok(());
         }
         if response_contains_compaction {
             self.clear_agent_context_usage(&cid);
-        } else if response.error.is_none()
-            && response.failure_kind.is_none()
-            && !matches!(
-                response.stop_reason,
-                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
-            )
-        {
+        } else if successful {
             self.queue_crossed_context_size_alerts(&cid, input_tokens, &context_size_alerts);
         }
         if self.handle_finished_response_side_conversation(
@@ -28097,8 +28165,8 @@ impl Harness {
 
     /// Perform ordinary or delegated completion only after an accepted Working
     /// final crossed its semantic append boundary.
-    fn complete_committed_working_final(&mut self, cid: &AgentId, terminal: CommittedWorkingFinal) {
-        let CommittedWorkingFinal {
+    fn complete_committed_working_final(&mut self, cid: &AgentId, terminal: CommittedGatedFinal) {
+        let CommittedGatedFinal {
             response,
             response_contains_compaction,
             input_tokens,
@@ -28154,9 +28222,56 @@ impl Harness {
         );
     }
 
+    /// Close a repeated start-status refusal without projecting its candidate
+    /// as an accepted final response.
+    fn complete_committed_start_status_failure(
+        &mut self,
+        cid: &AgentId,
+        terminal: CommittedGatedFinal,
+    ) {
+        const POLICY_FAILURE: &str =
+            "harness policy failure: required `status` call was not accepted";
+        if self
+            .agents
+            .get_mut(cid)
+            .is_some_and(|agent| agent.work_status.invalidate_working())
+        {
+            self.notify_work_status_transition(cid);
+        }
+        let side_originator = self.agents.get(cid).and_then(|agent| {
+            (!Self::is_peer_entrypoint_agent(agent)
+                && agent.originator == terminal.response.originator)
+                .then(|| {
+                    Self::finished_response_side_originator(
+                        &agent.originator,
+                        false,
+                        terminal.is_non_tool_ext_query,
+                    )
+                })
+                .flatten()
+        });
+        if let Some((name, query_id)) = side_originator {
+            self.deliver_finished_side_conversation_result(
+                cid,
+                &name,
+                &query_id,
+                tau_proto::StartAgentResult {
+                    query_id: query_id.clone(),
+                    text: String::new(),
+                    error: Some(POLICY_FAILURE.to_owned()),
+                },
+                terminal.source.as_ref(),
+            );
+            self.complete_finished_side_conversation(cid, Some(&terminal.response.agent_prompt_id));
+            return;
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        self.try_advance_queue();
+    }
+
     /// Dispatch a challenged candidate as an inner continuation without closing
     /// its durable outer turn or changing its runtime generation.
-    fn continue_after_working_final_challenge(&mut self, cid: &AgentId) {
+    fn continue_after_gated_final_challenge(&mut self, cid: &AgentId) {
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.turn_state = AgentTurnState::Idle;
         }
@@ -28901,12 +29016,15 @@ impl Harness {
             false
         };
         if should_send {
-            if let Some(activation) = self.ready_addressed_ack_activation(cid)
+            self.queue_start_status_reminder_if_needed(cid);
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent.work_status.promote_pending_task_activation();
+            }
+            if let Some(activation) = self.ready_addressed_task_activation(cid)
                 && let Some(agent) = self.agents.get_mut(cid)
             {
-                agent.work_status.begin_ack_activation(activation);
+                agent.work_status.begin_task_activation(activation);
             }
-            self.queue_status_acknowledgement_if_needed(cid, completed_call_id);
             let pending_ui = self.pending_ui_compactions_after_wait.remove(cid);
             if let Some(pending) = pending_ui
                 && pending.wait_call_id.as_str() == completed_call_id
@@ -28966,9 +29084,9 @@ impl Harness {
         }
     }
 
-    /// Fold at most one acknowledgement into the complete foreground tool-round
-    /// continuation, after every parallel terminal has settled.
-    fn queue_status_acknowledgement_if_needed(&mut self, cid: &AgentId, completed_call_id: &str) {
+    /// Fold at most one start-status reminder into the complete foreground
+    /// tool-round continuation after every parallel terminal has settled.
+    fn queue_start_status_reminder_if_needed(&mut self, cid: &AgentId) {
         if self
             .agents
             .get(cid)
@@ -28976,18 +29094,10 @@ impl Harness {
         {
             return;
         }
-        let status_was_available = self
-            .prompt_tool_call_prompts
-            .get(completed_call_id)
-            .and_then(|prompt_id| self.prompt_tool_specs.get(prompt_id))
-            .is_some_and(|specs| specs.iter().any(|spec| spec.name.as_str() == "status"));
-        if !status_was_available {
-            return;
-        }
         let Some(agent) = self.agents.get_mut(cid) else {
             return;
         };
-        if !agent.work_status.mark_ack_notice_delivered() {
+        if !agent.work_status.mark_start_reminder_delivered() {
             return;
         }
         agent
@@ -28995,8 +29105,8 @@ impl Harness {
             .push_back(PendingPrompt::internal(STATUS_REMINDER.to_owned()));
     }
 
-    /// Return addressed work already selected to share the next continuation.
-    fn ready_addressed_ack_activation(&self, cid: &AgentId) -> Option<tau_proto::ObservationId> {
+    /// Return addressed work already selected to own the next continuation.
+    fn ready_addressed_task_activation(&self, cid: &AgentId) -> Option<tau_proto::ObservationId> {
         let agent = self.agents.get(cid)?;
         if let Some(activation) = agent.pending_prompts.iter().find_map(|prompt| {
             matches!(
@@ -29604,6 +29714,20 @@ impl Harness {
 
         match self.registry.route_tool_request(request) {
             Ok(route) => {
+                let status_was_available = prompt_id
+                    .as_ref()
+                    .and_then(|prompt_id| self.prompt_tool_specs.get(prompt_id))
+                    .is_some_and(|specs| {
+                        specs
+                            .iter()
+                            .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+                    });
+                if status_was_available
+                    && !matches!(visible_tool_name.as_str(), "status" | "wait")
+                    && let Some(agent) = self.agents.get_mut(cid)
+                {
+                    agent.work_status.record_task_work();
+                }
                 let started = route.invoke;
                 match route.target {
                     ToolRouteTarget::Internal => {

@@ -780,10 +780,10 @@ impl<'a> InternalToolHost<'a> {
             .is_some_and(|agent| !agent.terminating && !agent.lifecycle_notification_only_turn)
     }
 
-    /// Return whether the committing publication owns any Working-final
+    /// Return whether the committing publication owns any gated-final
     /// disposition for this exact prompt.
-    pub fn is_working_final_response(&self, prompt_id: &tau_proto::AgentPromptId) -> bool {
-        self.harness.committing_working_final(prompt_id)
+    pub fn is_gated_final_response(&self, prompt_id: &tau_proto::AgentPromptId) -> bool {
+        self.harness.committing_gated_final(prompt_id)
     }
 
     /// Prune a stale watch relationship after notification delivery failed.

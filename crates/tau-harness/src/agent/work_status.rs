@@ -98,6 +98,15 @@ pub(crate) enum WorkingFinalDecision {
     AcceptUnknown,
 }
 
+/// Harness action for a successful final that violates start-status policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StartStatusFinalDecision {
+    /// Withhold the candidate and continue once with the status reminder.
+    Challenge,
+    /// End the turn as an explicit policy failure after repeated refusal.
+    Fail,
+}
+
 /// Runtime-only self-reported work state for one loaded agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkStatus {
@@ -107,10 +116,18 @@ pub(crate) struct WorkStatus {
     title: Option<String>,
     /// Runtime-local generation incremented by a new working epoch.
     epoch: u64,
-    /// Whether the acknowledgement notice was already scheduled.
-    ack_notice_delivered: bool,
-    /// Addressed-work activation currently owning the acknowledgement decision.
-    ack_activation: Option<tau_proto::ObservationId>,
+    /// Ordinary activation currently owning start-status enforcement.
+    task_activation: Option<tau_proto::ObservationId>,
+    /// Addressed activation queued while the current tool round still runs.
+    pending_task_activation: Option<tau_proto::ObservationId>,
+    /// Whether this activation admitted non-lifecycle task work.
+    task_work_seen: bool,
+    /// Whether this activation accepted a status report.
+    start_status_seen: bool,
+    /// Whether this activation already received its routine reminder.
+    start_reminder_delivered: bool,
+    /// Whether the final candidate was challenged for missing start status.
+    start_final_challenge_sent: bool,
     /// Number of committed nominal final responses challenged in this epoch.
     final_reminders_sent: u8,
     /// Wait duration completed during the current Working epoch.
@@ -130,8 +147,12 @@ impl Default for WorkStatus {
             phase: AgentWorkStatusPhase::Unreported,
             title: None,
             epoch: 0,
-            ack_notice_delivered: false,
-            ack_activation: None,
+            task_activation: None,
+            pending_task_activation: None,
+            task_work_seen: false,
+            start_status_seen: false,
+            start_reminder_delivered: false,
+            start_final_challenge_sent: false,
             final_reminders_sent: 0,
             completed_wait: Duration::ZERO,
             wait_started_at: None,
@@ -167,7 +188,7 @@ impl WorkStatus {
     ) -> bool {
         let WorkStatusReport { phase, title } = report;
         if self.phase == phase && self.title.as_deref() == Some(title.as_str()) {
-            self.ack_notice_delivered = true;
+            self.start_status_seen = self.task_activation.is_some();
             if phase == AgentWorkStatusPhase::Working {
                 self.synchronize_wait_at(wait_installed, now);
             }
@@ -186,7 +207,7 @@ impl WorkStatus {
         }
         self.phase = phase;
         self.title = Some(title);
-        self.ack_notice_delivered = true;
+        self.start_status_seen = self.task_activation.is_some();
         true
     }
 
@@ -323,34 +344,81 @@ impl WorkStatus {
         Some(WorkingFinalDecision::Challenge)
     }
 
-    /// Offer one acknowledgement for a newly accepted work activation.
-    pub(crate) fn begin_ack_activation(&mut self, activation: tau_proto::ObservationId) {
-        if self.ack_activation != Some(activation) {
-            self.ack_activation = Some(activation);
-            self.ack_notice_delivered = false;
+    /// Start a fresh task-work lifecycle for one dispatched ordinary
+    /// activation.
+    pub(crate) fn begin_task_activation(&mut self, activation: tau_proto::ObservationId) {
+        if self.task_activation != Some(activation) {
+            self.task_activation = Some(activation);
+            self.pending_task_activation = None;
+            self.task_work_seen = false;
+            self.start_status_seen = false;
+            self.start_reminder_delivered = false;
+            self.start_final_challenge_sent = false;
         }
     }
 
-    /// Join addressed input to an acknowledgement batch already being formed.
-    pub(crate) fn join_ack_activation(&mut self, activation: tau_proto::ObservationId) {
-        if self.ack_activation.is_none() {
-            self.begin_ack_activation(activation);
+    /// Join addressed input to a task activation already being formed.
+    pub(crate) fn join_task_activation(&mut self, activation: tau_proto::ObservationId) {
+        if self.task_activation.is_none() {
+            self.begin_task_activation(activation);
+        } else if self.task_activation != Some(activation) && self.pending_task_activation.is_none()
+        {
+            self.pending_task_activation = Some(activation);
         }
     }
 
-    /// Retire any unused acknowledgement when its outer turn settles.
-    pub(crate) fn retire_ack_notice_for_activation(&mut self) {
-        self.ack_activation = None;
-        self.ack_notice_delivered = true;
+    /// Promote queued addressed work after the preceding foreground round
+    /// settles.
+    pub(crate) fn promote_pending_task_activation(&mut self) {
+        if let Some(activation) = self.pending_task_activation.take() {
+            self.begin_task_activation(activation);
+        }
     }
 
-    /// Mark the acknowledgement as delivered unless it was already delivered.
-    pub(crate) fn mark_ack_notice_delivered(&mut self) -> bool {
-        if self.ack_notice_delivered {
+    /// Retire task-work enforcement when its outer turn settles.
+    pub(crate) fn retire_task_activation(&mut self) {
+        self.task_activation = None;
+        self.pending_task_activation = None;
+        self.task_work_seen = false;
+        self.start_status_seen = false;
+        self.start_reminder_delivered = false;
+        self.start_final_challenge_sent = false;
+    }
+
+    /// Record one admitted non-lifecycle tool request for this activation.
+    pub(crate) fn record_task_work(&mut self) {
+        if self.task_activation.is_some() {
+            self.task_work_seen = true;
+        }
+    }
+
+    /// Mark the routine start-status reminder as delivered when required.
+    pub(crate) fn mark_start_reminder_delivered(&mut self) -> bool {
+        if !self.task_work_seen || self.start_status_seen || self.start_reminder_delivered {
             return false;
         }
-        self.ack_notice_delivered = true;
+        self.start_reminder_delivered = true;
         true
+    }
+
+    /// Decide whether a successful final violates start-status policy.
+    pub(crate) fn decide_start_status_final(
+        &self,
+        successful: bool,
+    ) -> Option<StartStatusFinalDecision> {
+        if !successful || !self.task_work_seen || self.start_status_seen {
+            return None;
+        }
+        if !self.start_final_challenge_sent {
+            Some(StartStatusFinalDecision::Challenge)
+        } else {
+            Some(StartStatusFinalDecision::Fail)
+        }
+    }
+
+    /// Record the sole final challenge allowed by start-status policy.
+    pub(crate) fn record_start_status_final_challenge(&mut self) {
+        self.start_final_challenge_sent = true;
     }
 
     /// Record one committed challenged response.

@@ -1021,7 +1021,7 @@ fn agent_watch_ignores_internal_originated_responses() {
 /// A committing publication-local Working final is owned by the harness
 /// post-commit path and must not also fan out through the built-in handler.
 #[test]
-fn agent_watch_suppresses_committing_working_final_response() {
+fn agent_watch_suppresses_committing_gated_final_response() {
     let response = ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

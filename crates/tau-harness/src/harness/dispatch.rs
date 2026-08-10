@@ -185,7 +185,7 @@ impl Harness {
             agent.lifecycle_notification_only_turn = false;
         }
         if acknowledgement_activation && let Some(activation) = prompt.activation_observation {
-            self.join_addressed_ack_activation(agent_id, activation);
+            self.join_task_status_activation(agent_id, activation);
         }
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);

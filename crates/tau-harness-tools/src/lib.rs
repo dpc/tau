@@ -567,8 +567,8 @@ impl BuiltinTools {
         host: &mut InternalToolHost<'_>,
         response: &ProviderResponseFinished,
     ) -> Result<(), HarnessError> {
-        let working_final = host.is_working_final_response(&response.agent_prompt_id);
-        let Some(message) = agent_watch_response_should_notify(response, working_final) else {
+        let gated_final = host.is_gated_final_response(&response.agent_prompt_id);
+        let Some(message) = agent_watch_response_should_notify(response, gated_final) else {
             return Ok(());
         };
         let sender_id = response.agent_id.to_string();
@@ -1801,13 +1801,12 @@ fn sanitized_display_agent_id(arguments: &CborValue) -> Option<String> {
 
 fn agent_watch_response_should_notify(
     response: &ProviderResponseFinished,
-    working_final: bool,
+    gated_final: bool,
 ) -> Option<String> {
     // Only interactive user turns produce per-turn watch responses. Side-agent
     // provider turns are summarized through `StartAgentResult`, and internal
     // steering/tool-completion turns must stay local to the watched agent.
-    if working_final || !response.originator.is_user() || response.stop_reason.requests_tool_calls()
-    {
+    if gated_final || !response.originator.is_user() || response.stop_reason.requests_tool_calls() {
         return None;
     }
     if response.failure_kind.is_some() || response.error.is_some() {

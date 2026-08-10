@@ -68,12 +68,24 @@ as untrusted visible metadata and uses the generic shape
 inferring start/update sequencing.
 
 The default `status` tool remains subject to each effective prompt's ordinary
-tool policy. Each dispatched visible-user or external-message activation and
-each ordinary agent-message activation (direct message, watched final response,
-or watched user prompt) containing `status` receives one acknowledgement
-opportunity. An accepted status report or delivered notice
-suppresses reminders across later routine tool-round snapshots. Isolated
-watch-notification turns never request acknowledgement from the watcher. Done
+tool policy. In a dispatched visible-user, external-message, or ordinary
+agent-message activation (direct message, watched final response, or watched
+user prompt), the harness requires a start-status report only after it admits a
+model-originated tool request other than lifecycle-only `status` and `wait`, and
+only when that activation's frozen effective tool surface contains `status`.
+Rejected requests do not count; admitted calls count even if they later fail,
+cancel, or background. An accepted status report in any phase suppresses the
+successful-final gate for that activation. After the first qualifying
+foreground round settles without an accepted report, the harness delivers one
+reminder and never repeats that routine reminder within the activation. The
+harness withholds a later successful final once with the same reminder, then
+ends a repeated refusal as a harness-policy failure. Challenged candidates keep
+the existing semantic append, interception, post-commit continuation, and
+withheld watch/delegated/detach projection ownership; policy failure closes the
+originator's correlated turn without projecting the candidate as an accepted
+final. Pure conversation, status-only, wait-only, status-unavailable,
+background-completion, and isolated watch-notification turns never request
+acknowledgement. Done
 and Blocked mutate reported status only, never close a turn or install a wait,
 and a later activation does not silently change them.
 Tool guidance asks agents to report meaningful user-level work rather than
@@ -88,6 +100,9 @@ accepted or current status. This event-payload semantic was explicitly approved
 under
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 
+Start-status enforcement runs before and independently from the persistent
+Working final gate. An accepted Working report satisfies the start-status gate,
+but a later successful final still enters the following Working gate.
 Successful no-tool finals while Working are durable candidate responses. Watch,
 delegated result, and detach projections remain withheld until the candidate's
 semantic append commits. A bounded challenge continues the same outer turn;

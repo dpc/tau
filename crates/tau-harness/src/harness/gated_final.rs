@@ -1,12 +1,19 @@
-//! Publication-local Working-final continuation state.
+//! Publication-local gated-final continuation state.
 
 use std::collections::BTreeMap;
 
 use tau_proto::{ConnectionId, ProviderResponseFinished};
 
-/// Publication-local post-commit behavior for one Working final candidate.
+/// Publication-local post-commit behavior for one gated final candidate.
 #[derive(Clone)]
-pub(crate) enum WorkingFinalDisposition {
+pub(crate) enum GatedFinalDisposition {
+    /// Require an accepted start-status report before accepting a final.
+    StartStatusChallenge,
+    /// Terminate after the agent repeats a final without the required report.
+    StartStatusFailure {
+        /// Complete response-time state needed for correlated failure cleanup.
+        terminal: Box<CommittedGatedFinal>,
+    },
     /// Queue the next same-outer-turn reminder after the candidate commits.
     Challenge {
         /// Canonical work title captured with the candidate.
@@ -16,13 +23,13 @@ pub(crate) enum WorkingFinalDisposition {
     /// projection.
     AcceptUnknown {
         /// Complete response-time state needed after the append boundary.
-        terminal: Box<CommittedWorkingFinal>,
+        terminal: Box<CommittedGatedFinal>,
     },
 }
 
-/// Response-time state retained until an accepted Working final commits.
+/// Response-time state retained until one gated final candidate commits.
 #[derive(Clone)]
-pub(crate) struct CommittedWorkingFinal {
+pub(crate) struct CommittedGatedFinal {
     /// Exact committed provider response.
     pub(super) response: ProviderResponseFinished,
     /// Whether the response carries a compaction projection.

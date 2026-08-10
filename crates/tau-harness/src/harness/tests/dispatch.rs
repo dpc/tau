@@ -28892,6 +28892,270 @@ fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
     h.shutdown().expect("shutdown");
 }
 
+/// The production final path withholds one status-less candidate, carries the
+/// exact challenge into the same outer turn, and accepts a later final only
+/// after an accepted status report.
+#[test]
+fn start_status_final_gate_accepts_after_late_status() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let first = test_agent_prompt_id("start-status-final");
+    seed_agent_thinking(&mut h, &cid, first.as_str());
+    h.agents.get_mut(&cid).expect("agent").turn_generation = 7;
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
+    h.prompt_agents.insert(first.clone(), cid.clone());
+    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+
+    h.handle_provider_response_finished(provider_text_response(
+        &first,
+        agent_id.clone(),
+        "premature final",
+    ))
+    .expect("challenge premature final");
+    let challenged_prompt = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("challenge did not dispatch: {state:?}"),
+    };
+    let rendered = serde_json::to_string(&read_prompt_created(&h, &challenged_prompt).context)
+        .expect("context");
+    assert!(rendered.contains(STATUS_REMINDER));
+
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "reported before final".to_owned(),
+        )
+        .expect("valid status"),
+    )
+    .expect("accepted late status");
+    h.handle_provider_response_finished(provider_text_response(
+        &challenged_prompt,
+        agent_id.clone(),
+        "working-gated final",
+    ))
+    .expect("challenge final through subsequent Working gate");
+    let working_prompt = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("Working challenge did not dispatch: {state:?}"),
+    };
+    let rendered =
+        serde_json::to_string(&read_prompt_created(&h, &working_prompt).context).expect("context");
+    assert!(rendered.contains("Your `status` is set to `working`"));
+
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "reported before final".to_owned(),
+        )
+        .expect("valid done status"),
+    )
+    .expect("finish persistent Working status");
+    h.handle_provider_response_finished(provider_text_response(
+        &working_prompt,
+        agent_id,
+        "accepted final",
+    ))
+    .expect("accept final after both gates");
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    h.shutdown().expect("shutdown");
+}
+
+/// Repeating a successful final after the sole start-status challenge ends the
+/// turn as a harness-policy failure instead of accepting or looping.
+#[test]
+fn start_status_final_gate_fails_after_repeated_refusal() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let first = test_agent_prompt_id("start-status-refusal");
+    seed_agent_thinking(&mut h, &cid, first.as_str());
+    h.agents.get_mut(&cid).expect("agent").turn_generation = 7;
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
+    h.prompt_agents.insert(first.clone(), cid.clone());
+    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+
+    h.handle_provider_response_finished(provider_text_response(
+        &first,
+        agent_id.clone(),
+        "first refusal",
+    ))
+    .expect("challenge first refusal");
+    let challenged_prompt = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("challenge did not dispatch: {state:?}"),
+    };
+    h.handle_provider_response_finished(provider_text_response(
+        &challenged_prompt,
+        agent_id,
+        "second refusal",
+    ))
+    .expect("fail second refusal");
+
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        2
+    );
+    assert!(event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::HarnessNotice(notice)
+            if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
+                && notice.message.contains("harness policy failure"))
+    }));
+    h.shutdown().expect("shutdown");
+}
+
+/// A delegated activation that repeats a status-less final returns an explicit
+/// correlated failure and unloads the child instead of leaving its owner open.
+#[test]
+fn delegated_start_status_refusal_returns_failure_and_closes_child() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let frames = connect_test_tool(&mut h, "conn-status-refusal");
+    let parent_cid = ensure_test_user_agent(&mut h);
+    h.tool_agents
+        .insert("parent-agent-start".into(), parent_cid.clone());
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-status-refusal"),
+        StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
+            parent_agent: None,
+            query_id: "q-status-refusal".to_owned(),
+            instruction: "Perform delegated work.".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: Some("parent-agent-start".into()),
+            task_name: None,
+        },
+    )
+    .expect("start delegated agent");
+    let child_cid = ext_query_cid(&h, "q-status-refusal").expect("delegated child");
+    let first = h
+        .prompt_agents
+        .iter()
+        .find_map(|(prompt_id, prompt_cid)| (prompt_cid == &child_cid).then(|| prompt_id.clone()))
+        .expect("delegated prompt");
+    let child_agent_id = durable_agent_id_for_conversation(&h, &child_cid);
+    let status = &mut h.agents.get_mut(&child_cid).expect("child").work_status;
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name("conn-status-refusal"),
+        query_id: "q-status-refusal".to_owned(),
+    };
+
+    let mut first_response =
+        provider_text_response(&first, child_agent_id.clone(), "first refusal");
+    first_response.originator = originator.clone();
+    h.handle_provider_response_finished(first_response)
+        .expect("challenge delegated refusal");
+    let challenged = match &h.agents[&child_cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("delegated challenge did not dispatch: {state:?}"),
+    };
+    let mut second_response =
+        provider_text_response(&challenged, child_agent_id.clone(), "second refusal");
+    second_response.originator = originator;
+    h.handle_provider_response_finished(second_response)
+        .expect("fail delegated refusal");
+
+    let child = h
+        .agents
+        .get(&child_cid)
+        .expect("detached child remains loaded");
+    assert!(child.parent_tool_call_id.is_none());
+    assert!(child.parent_agent_id.is_none());
+    assert!(matches!(child.turn_state, AgentTurnState::Idle));
+    assert!(h.session_loaded_agents.contains(&child_agent_id));
+    let result = frames
+        .lock()
+        .expect("frames")
+        .iter()
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q-status-refusal" => {
+                Some(result.clone())
+            }
+            _ => None,
+        })
+        .expect("correlated policy failure");
+    assert!(result.text.is_empty());
+    assert_eq!(
+        result.error.as_deref(),
+        Some("harness policy failure: required `status` call was not accepted")
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A persistent peer entrypoint uses ordinary policy-failure cleanup even
+/// though its prompt originator is an extension.
+#[test]
+fn peer_entrypoint_start_status_refusal_retains_endpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name("peer-entrypoint"),
+        query_id: "peer-status-refusal".to_owned(),
+    };
+    let first = test_agent_prompt_id("peer-status-refusal");
+    seed_agent_thinking(&mut h, &cid, first.as_str());
+    h.prompt_agents.insert(first.clone(), cid.clone());
+    {
+        let agent = h.agents.get_mut(&cid).expect("peer endpoint");
+        agent.peer_entrypoint_endpoint = true;
+        agent.originator = originator.clone();
+        agent
+            .work_status
+            .begin_task_activation(tau_proto::ObservationId::random());
+        agent.work_status.record_task_work();
+    }
+
+    let mut first_response = provider_text_response(&first, agent_id.clone(), "first refusal");
+    first_response.originator = originator.clone();
+    h.handle_provider_response_finished(first_response)
+        .expect("challenge peer refusal");
+    let challenged = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("peer challenge did not dispatch: {state:?}"),
+    };
+    let mut second_response = provider_text_response(&challenged, agent_id, "second refusal");
+    second_response.originator = originator;
+    h.handle_provider_response_finished(second_response)
+        .expect("fail peer refusal");
+
+    assert!(h.agents.contains_key(&cid));
+    assert!(h.agents[&cid].peer_entrypoint_endpoint);
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::StartAgentResult(result) if result.query_id == "peer-status-refusal"
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// The production response handler makes an unsuccessful terminal Unknown
 /// exactly once without scheduling a Working continuation.
 #[test]
@@ -28994,189 +29258,304 @@ fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
     h.shutdown().expect("shutdown");
 }
 
-/// Status-enabled snapshots offer an initial acknowledgement, tool-policy
-/// revocation suppresses it, and Working survives routine tool continuations.
+/// Reminder rendering and lifecycle decisions are exact, one-shot, and reset
+/// only by a genuinely fresh activation.
 #[test]
-fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let status_spec = shared_test_tool_spec("status");
-
-    for (prompt, call) in [
-        ("ack-prompt-1", "ack-call-1"),
-        ("ack-prompt-2", "ack-call-2"),
-    ] {
-        let prompt_id = test_agent_prompt_id(prompt);
-        h.prompt_tool_specs
-            .insert(prompt_id.clone(), vec![status_spec.clone()]);
-        h.prompt_tool_call_prompts.insert(call.into(), prompt_id);
-        h.agents
-            .get_mut(&cid)
-            .expect("agent")
-            .work_status
-            .begin_ack_activation(tau_proto::ObservationId::random());
-        h.queue_status_acknowledgement_if_needed(&cid, call);
-    }
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
-    assert!(
-        h.agents[&cid]
-            .pending_prompts
-            .iter()
-            .all(|prompt| { prompt.text == STATUS_REMINDER })
+fn start_status_reminder_is_activation_scoped_and_one_shot() {
+    assert_eq!(
+        STATUS_REMINDER,
+        "When you start working on a task, call `status` to report what you're doing. Batch it with other tool calls when possible."
     );
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .pending_prompts
-        .clear();
-
-    let revoked_prompt = test_agent_prompt_id("ack-revoked");
-    h.prompt_tool_specs
-        .insert(revoked_prompt.clone(), Vec::new());
-    h.prompt_tool_call_prompts
-        .insert("ack-revoked-call".into(), revoked_prompt);
-    h.queue_status_acknowledgement_if_needed(&cid, "ack-revoked-call");
-    assert!(h.agents[&cid].pending_prompts.is_empty());
-
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .begin_ack_activation(tau_proto::ObservationId::random());
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Working,
-            "changed same-turn title".to_owned(),
-        )
-        .expect("valid changed report"),
-    )
-    .expect("changed Working report");
-    let changed_prompt = test_agent_prompt_id("ack-changed");
-    h.prompt_tool_specs
-        .insert(changed_prompt.clone(), vec![status_spec.clone()]);
-    h.prompt_tool_call_prompts
-        .insert("ack-changed-call".into(), changed_prompt);
-    h.queue_status_acknowledgement_if_needed(&cid, "ack-changed-call");
-    assert!(h.agents[&cid].pending_prompts.is_empty());
-
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "completed".to_owned(),
-        )
-        .expect("valid Done report"),
-    )
-    .expect("report Done");
-    for call in ["post-done-call-1", "post-done-call-2"] {
-        let prompt = test_agent_prompt_id(call);
-        h.prompt_tool_specs
-            .insert(prompt.clone(), vec![status_spec.clone()]);
-        h.prompt_tool_call_prompts.insert(call.into(), prompt);
-        h.queue_status_acknowledgement_if_needed(&cid, call);
-    }
-    assert!(
-        h.agents[&cid].pending_prompts.is_empty(),
-        "Done status must suppress same-activation acknowledgement repeats"
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Actual visible-user dispatch re-arms acknowledgement, while queued
-/// observation alone cannot disturb the active turn's delivered decision.
-#[test]
-fn status_acknowledgement_resets_at_addressed_work_dispatch() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
-    status.begin_ack_activation(tau_proto::ObservationId::random());
-    assert!(status.mark_ack_notice_delivered());
-    h.observe_activation_queued(&cid, tau_proto::ActivationKind::VisibleUser, None, None);
-    assert!(
-        !h.agents
-            .get_mut(&cid)
-            .expect("agent")
-            .work_status
-            .mark_ack_notice_delivered(),
-        "queueing future work must not reset the active turn"
-    );
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .retire_ack_notice_for_activation();
-    let mut prompt = PendingPrompt::human_ui("new addressed work".to_owned());
-    h.ensure_prompt_activation_observed(&cid, &mut prompt);
-    h.dispatch_prompt_for_agent(&cid, prompt)
-        .expect("dispatch visible user prompt");
-    assert!(
-        h.agents
-            .get_mut(&cid)
-            .expect("agent")
-            .work_status
-            .mark_ack_notice_delivered(),
-        "actual visible-user dispatch must offer one acknowledgement"
-    );
 
+    assert!(!status.mark_start_reminder_delivered());
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    assert!(!status.mark_start_reminder_delivered());
+    status.record_task_work();
+    assert!(status.mark_start_reminder_delivered());
+    assert!(!status.mark_start_reminder_delivered());
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    assert!(!status.mark_start_reminder_delivered());
+    status.record_task_work();
+    assert!(status.mark_start_reminder_delivered());
     h.shutdown().expect("shutdown");
 }
 
-/// A queued addressed activation coalesced with the preceding tool completion
-/// keeps the first reminder delivered when that same activation dispatches.
+/// Settling the first production foreground round after admitted task work
+/// renders the exact reminder once in the next provider continuation.
 #[test]
-fn coalesced_addressed_work_receives_one_status_reminder() {
-    assert_eq!(
-        STATUS_REMINDER,
-        "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible."
-    );
+fn qualifying_foreground_settlement_renders_exact_one_shot_reminder() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let mut prompt = PendingPrompt::human_ui("queued addressed work".to_owned());
-    h.ensure_prompt_activation_observed(&cid, &mut prompt);
-    let activation = prompt.activation_observation.expect("activation identity");
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .pending_prompts
-        .push_back(prompt.clone());
-    assert_eq!(h.ready_addressed_ack_activation(&cid), Some(activation));
+    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::ToolsRunning {
+        remaining_calls: vec!["qualifying-call".into()],
+    };
+
+    h.maybe_complete_agent_turn_for(&cid, "qualifying-call");
+    let prompt_id = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("reminder continuation did not dispatch: {state:?}"),
+    };
+    let rendered =
+        serde_json::to_string(&read_prompt_created(&h, &prompt_id).context).expect("context");
+    assert_eq!(rendered.matches(STATUS_REMINDER).count(), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Completing an old foreground round cannot arm or deliver the reminder for a
+/// newly queued addressed activation.
+#[test]
+fn queued_addressed_work_does_not_inherit_old_tool_reminder() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
     h.agents
         .get_mut(&cid)
         .expect("agent")
         .work_status
-        .begin_ack_activation(activation);
+        .begin_task_activation(tau_proto::ObservationId::random());
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "old activation acknowledged".to_owned(),
+        )
+        .expect("valid old status"),
+    )
+    .expect("accept old status");
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::ToolsRunning {
+        remaining_calls: vec!["old-call".into()],
+    };
 
-    let status_spec = shared_test_tool_spec("status");
-    for call in ["coalesced-call-1", "coalesced-call-2"] {
-        let prompt_id = test_agent_prompt_id(call);
-        h.prompt_tool_specs
-            .insert(prompt_id.clone(), vec![status_spec.clone()]);
-        h.prompt_tool_call_prompts
-            .insert(call.to_owned().into(), prompt_id);
-    }
-    h.queue_status_acknowledgement_if_needed(&cid, "coalesced-call-1");
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
-    h.join_addressed_ack_activation(&cid, tau_proto::ObservationId::random());
+    let mut prompt = PendingPrompt::human_ui("queued addressed work".to_owned());
+    h.ensure_prompt_activation_observed(&cid, &mut prompt);
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .push_back(prompt);
+    h.maybe_complete_agent_turn_for(&cid, "old-call");
 
-    h.dispatch_prompt_for_agent(&cid, prompt)
-        .expect("dispatch coalesced activation");
-    h.queue_status_acknowledgement_if_needed(&cid, "coalesced-call-2");
+    let queued_prompt_id = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("queued addressed prompt did not dispatch: {state:?}"),
+    };
+    let rendered = serde_json::to_string(&read_prompt_created(&h, &queued_prompt_id).context)
+        .expect("context");
+    assert!(!rendered.contains(STATUS_REMINDER));
+
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .record_task_work();
+    assert_eq!(
+        h.agents[&cid].work_status.decide_start_status_final(true),
+        Some(crate::agent::StartStatusFinalDecision::Challenge),
+        "queued activation must own its fresh work before tool admission"
+    );
+    h.queue_start_status_reminder_if_needed(&cid);
     assert_eq!(
         h.agents[&cid]
             .pending_prompts
             .iter()
-            .filter(|prompt| { prompt.text == STATUS_REMINDER })
+            .filter(|prompt| prompt.text == STATUS_REMINDER)
             .count(),
         1,
-        "same activation must retain exactly one reminder"
+        "fresh activation must receive its own one-shot reminder"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A selected ordinary message wake transfers start-status ownership after the
+/// old round settles and before the successor can admit task work.
+#[test]
+fn queued_message_wake_owns_fresh_start_status_lifecycle() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .begin_task_activation(tau_proto::ObservationId::random());
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "old message activation acknowledged".to_owned(),
+        )
+        .expect("valid old status"),
+    )
+    .expect("accept old status");
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::ToolsRunning {
+        remaining_calls: vec!["old-message-call".into()],
+    };
+    let delivered = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "fresh-message-wake".to_owned(),
+            message_id: tau_proto::AgentMessageId::parse("fresh-message-wake").expect("message id"),
+            capability: "test-only".to_owned(),
+            sender_session_id: test_session_id("sender-session"),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                &recipient_id,
+            )),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "fresh ordinary work".to_owned(),
+        },
+    );
+    assert_eq!(delivered.error, None);
+
+    h.maybe_complete_agent_turn_for(&cid, "old-message-call");
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .record_task_work();
+    assert_eq!(
+        h.agents[&cid].work_status.decide_start_status_final(true),
+        Some(crate::agent::StartStatusFinalDecision::Challenge)
+    );
+    h.queue_start_status_reminder_if_needed(&cid);
+    assert_eq!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text == STATUS_REMINDER)
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// The production dispatch boundary counts only accepted non-lifecycle calls
+/// from a status-capable frozen tool surface, and accepted parallel status
+/// suppresses enforcement independently of admission order.
+#[test]
+fn start_status_task_work_is_recorded_at_tool_admission() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let skill_call = |id: &str| AgentToolCall {
+        call_ref: None,
+        id: id.into(),
+        name: ToolName::new("skill"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text("dpc".to_owned()),
+        )]),
+    };
+
+    let unavailable_prompt = test_agent_prompt_id("status-unavailable-admission");
+    h.prompt_tool_specs.insert(
+        unavailable_prompt.clone(),
+        vec![shared_test_tool_spec("skill")],
+    );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .begin_task_activation(tau_proto::ObservationId::random());
+    let unavailable_call = skill_call("status-unavailable-work");
+    h.prompt_tool_call_prompts
+        .insert(unavailable_call.id.clone(), unavailable_prompt);
+    h.execute_agent_tool_call(&cid, &unavailable_call)
+        .expect("accepted status-unavailable skill");
+    assert_eq!(
+        h.agents[&cid].work_status.decide_start_status_final(true),
+        None
+    );
+
+    let prompt_id = test_agent_prompt_id("status-admission");
+    h.prompt_tool_specs.insert(
+        prompt_id.clone(),
+        vec![
+            shared_test_tool_spec("status"),
+            shared_test_tool_spec("skill"),
+        ],
+    );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .begin_task_activation(tau_proto::ObservationId::random());
+    let call = skill_call("accepted-task-work");
+    h.prompt_tool_call_prompts
+        .insert(call.id.clone(), prompt_id);
+    h.execute_agent_tool_call(&cid, &call)
+        .expect("accepted skill call");
+    assert_eq!(
+        h.agents[&cid].work_status.decide_start_status_final(true),
+        Some(crate::agent::StartStatusFinalDecision::Challenge)
+    );
+
+    let parallel_prompt = test_agent_prompt_id("parallel-status-admission");
+    h.prompt_tool_specs.insert(
+        parallel_prompt.clone(),
+        vec![
+            shared_test_tool_spec("status"),
+            shared_test_tool_spec("skill"),
+        ],
+    );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .begin_task_activation(tau_proto::ObservationId::random());
+    let parallel_work = skill_call("parallel-task-work");
+    h.prompt_tool_call_prompts
+        .insert(parallel_work.id.clone(), parallel_prompt.clone());
+    h.execute_agent_tool_call(&cid, &parallel_work)
+        .expect("accepted parallel skill");
+    let parallel_status = AgentToolCall {
+        call_ref: None,
+        id: "parallel-status".into(),
+        name: ToolName::new("status"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("state".to_owned()),
+                CborValue::Text("done".to_owned()),
+            ),
+            (
+                CborValue::Text("task_name".to_owned()),
+                CborValue::Text("parallel status admission".to_owned()),
+            ),
+        ]),
+    };
+    h.prompt_tool_call_prompts
+        .insert(parallel_status.id.clone(), parallel_prompt);
+    h.execute_agent_tool_call(&cid, &parallel_status)
+        .expect("accepted parallel status");
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "parallel status admission".to_owned(),
+        )
+        .expect("valid accepted status"),
+    )
+    .expect("apply accepted parallel status");
+    assert_eq!(
+        h.agents[&cid].work_status.decide_start_status_final(true),
+        None,
+        "accepted status suppresses regardless of parallel admission order"
     );
     h.shutdown().expect("shutdown");
 }
@@ -29225,8 +29604,11 @@ fn isolated_watch_notification_does_not_request_status_acknowledgement() {
         .get_mut(&cid)
         .expect("agent")
         .lifecycle_notification_only_turn = true;
+    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+    status.begin_task_activation(tau_proto::ObservationId::random());
+    status.record_task_work();
 
-    h.queue_status_acknowledgement_if_needed(&cid, "isolated-watch-call");
+    h.queue_start_status_reminder_if_needed(&cid);
 
     assert!(
         h.agents[&cid].pending_prompts.is_empty(),
