@@ -61,9 +61,94 @@ impl RoutedFrame {
     }
 }
 
+/// Process-local identity of one shared connection egress stream.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SharedDeliveryGroup(
+    /// Owner-allocated value meaningful only inside the current process.
+    u64,
+);
+
+impl SharedDeliveryGroup {
+    /// Creates a stream identity from an owner-allocated process-local value.
+    #[must_use]
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Process-local identity of one consumer generation in a shared stream.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SharedConsumerId(
+    /// Owner-allocated generation value meaningful only inside its stream.
+    u64,
+);
+
+impl SharedConsumerId {
+    /// Creates a consumer identity from an owner-allocated process-local value.
+    #[must_use]
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Opaque process-local destination in a shared connection egress stream.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SharedDeliveryTarget {
+    /// Identifies the shared stream that owns this destination.
+    group: SharedDeliveryGroup,
+    /// Identifies one consumer generation within the shared stream.
+    consumer: SharedConsumerId,
+}
+
+impl SharedDeliveryTarget {
+    /// Creates one immutable target from semantic stream and generation IDs.
+    #[must_use]
+    pub fn new(group: SharedDeliveryGroup, consumer: SharedConsumerId) -> Self {
+        Self { group, consumer }
+    }
+
+    /// Returns the shared stream identity.
+    #[must_use]
+    pub fn group(self) -> SharedDeliveryGroup {
+        self.group
+    }
+
+    /// Returns the consumer generation identity.
+    #[must_use]
+    pub fn consumer(self) -> SharedConsumerId {
+        self.consumer
+    }
+}
+
 /// A sink that accepts routed frames for one live connection.
 pub trait ConnectionSink {
+    /// Sends one frame through the sink's legacy per-connection path.
     fn send(&mut self, frame: RoutedFrame) -> Result<(), ConnectionSendError>;
+
+    /// Returns the sink's immutable shared-stream destination, when supported.
+    fn shared_delivery_target(&self) -> Option<SharedDeliveryTarget> {
+        None
+    }
+
+    /// Admits one frame once for all named destinations in this sink's stream.
+    fn send_shared(
+        &mut self,
+        frame: RoutedFrame,
+        targets: &[SharedDeliveryTarget],
+    ) -> Result<Vec<SharedDeliveryTarget>, ConnectionSendError> {
+        debug_assert_eq!(targets.len(), 1);
+        self.send(frame)?;
+        Ok(targets.to_vec())
+    }
+
+    /// Pauses follower output while replay establishes its live-tail barrier.
+    fn begin_catch_up(&mut self) {}
+
+    /// Releases follower output after replay and its completion boundary.
+    fn finish_catch_up(&mut self) {}
+
+    /// Retires this exact consumer generation without draining retained output.
+    fn retire(&mut self) {}
 }
 
 /// A per-connection visibility hook.

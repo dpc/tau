@@ -25,6 +25,16 @@ eligible semantic facts, and broadcasts delivery frames. Direct calls to
 `commit_event` are reserved for code that has already resolved interception.
 Extension prompt-fragment projection runs only after this ordinary commit.
 
+Live output uses one process-local logical stream governed by
+[GATE-runtime-live-event-log-cursors](../../../specs/GATE-runtime-live-event-log-cursors.md).
+Routing freezes eligible connection generations when it admits each frame.
+Each writer follows the stream from its own runtime cursor and advances only
+after successful encoding, write, flush, and downlink metering; retirement
+releases that generation's remaining obligations. The stream prunes only
+through the lowest active cursor. Replay establishes a live-tail barrier before
+catch-up output and releases the follower after the replay-complete boundary.
+Runtime positions neither enter semantic journals nor appear on the wire.
+
 `tau_harness::commit_timing` traces each accepted non-message commit's exact
 monotonic microsecond total plus debug-log, semantic-persistence, bus-enqueue,
 post-commit, and residual/unattributed phases. It carries only event name,
@@ -129,6 +139,15 @@ diagnostics (critical notices
 and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
+
+A connected interceptor may intentionally leave an intercept request
+unanswered and thereby stall that publication plus every globally serialized
+publication behind it indefinitely. The harness deliberately applies no
+timeout, admission budget, lag quarantine/disconnect, rejection, or
+backpressure policy to `pending_intercept` or `deferred_publishes`. Deferred
+publications retain their full events while stalled and can therefore consume
+memory without bound. This is an accepted consequence of granting trusted
+interceptors authority to stop publication pending an explicit decision.
 Canonical `shell.command_finished` is likewise immutable and must-pass so UI
 completion and optional post-commit transcript injection cannot diverge.
 Canonical shell progress retains its harness-owned mapped command/target

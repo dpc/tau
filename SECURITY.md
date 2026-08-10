@@ -26,6 +26,25 @@ prompts, answers, identifiers, and collections remain size-validated inputs.
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
 
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
+
+### Accepted configured-component availability risks
+
+A connected consumer generation that stops advancing may pin shared live-event
+payload retention indefinitely. Tau emits only a rate-limited warning; it does
+not backpressure or reject publication because of egress lag, spool the suffix
+to disk, or expire/disconnect the component solely for lag. Revisit this
+accepted trusted-component risk when changing live routing, cursor identity,
+target freezing, pruning, or lag diagnostics and lifecycle.
+
+A connected trusted interceptor may leave an intercept request unanswered and
+thereby stall that publication plus every globally serialized publication
+behind it indefinitely. Deferred publications retain their full events and may
+consume memory without bound. Tau deliberately applies no timeout, admission
+budget, rejection, quarantine/disconnect, or backpressure mitigation. Revisit
+this accepted authority and availability risk when changing interception,
+pending-intercept resolution, deferred-publication ownership, or component
+lifecycle.
+
 Supervised extension state isolation is defense in depth inside the configured
 same-user executable boundary, not hostile-code containment. `hidden` and
 `read_only` prevent ordinary discovery or mutation of unrelated Tau state while

@@ -1,17 +1,169 @@
 use std::process::Stdio;
 use std::{net as path_std_net, process as path_std_process};
 
+use tau_proto::{Event, HarnessOutputReader};
+
 use super::*;
+use crate::event_log::EventLog;
+
+fn disconnected_event_named(name: &str) -> HarnessEvent {
+    HarnessEvent::Disconnected {
+        connection_id: crate::test_connection_id(name),
+    }
+}
+
+fn disconnected_event() -> HarnessEvent {
+    disconnected_event_named("ingress-test")
+}
+
+/// Capacity zero must rendezvous with harness consumption rather than using
+/// timing or a hidden forwarding queue as correctness authority.
+#[test]
+fn component_ingress_capacity_zero_rendezvous() {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let (ingress, sender) = ComponentIngress::new(wake_tx, ComponentIngressCapacity::Rendezvous);
+    let (done_tx, done_rx) = mpsc::channel();
+    let producer = thread::spawn(move || {
+        sender.send(disconnected_event()).expect("send ingress");
+        done_tx.send(()).expect("report completion");
+    });
+
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    assert!(matches!(
+        ingress.take_ready(),
+        Some(HarnessEvent::Disconnected { .. })
+    ));
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("rendezvous completes after consumption");
+    producer.join().expect("producer joins");
+}
+
+/// Rendezvous completion must acknowledge the sender's own consumed payload,
+/// even when a blocked successor immediately occupies the shared slot.
+#[test]
+fn component_ingress_rendezvous_acknowledges_own_ticket() {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let (ingress, sender) = ComponentIngress::new(wake_tx, ComponentIngressCapacity::Rendezvous);
+    let (first_done_tx, first_done_rx) = mpsc::channel();
+    let first_sender = sender.clone();
+    let first = thread::spawn(move || {
+        first_done_tx
+            .send(first_sender.send(disconnected_event_named("first-rendezvous")))
+            .expect("report first");
+    });
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+
+    let second_sender = sender.clone();
+    let second =
+        thread::spawn(move || second_sender.send(disconnected_event_named("second-rendezvous")));
+    ingress.wait_for_blocked_sender();
+    let Some(HarnessEvent::Disconnected { connection_id }) = ingress.take_ready() else {
+        panic!("first rendezvous payload");
+    };
+    assert_eq!(connection_id.as_str(), "first-rendezvous");
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    assert_eq!(
+        first_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first sender acknowledges its own payload"),
+        Ok(())
+    );
+    ingress.close();
+    assert_eq!(second.join().expect("second producer joins"), Err(()));
+    first.join().expect("first producer joins");
+}
+
+/// Capacity one must block a second producer behind the occupied slot, retain
+/// both payloads in order, and release a saturated producer on shutdown.
+#[test]
+fn component_ingress_capacity_one_saturates_orders_and_closes() {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let (ingress, sender) = ComponentIngress::new(wake_tx, ComponentIngressCapacity::One);
+    sender
+        .send(disconnected_event_named("first"))
+        .expect("send first");
+    let (done_tx, done_rx) = mpsc::channel();
+    let second_sender = sender.clone();
+    let second = thread::spawn(move || {
+        let result = second_sender.send(disconnected_event_named("second"));
+        done_tx.send(result).expect("report second result");
+    });
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    ingress.wait_for_blocked_sender();
+    assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    let Some(HarnessEvent::Disconnected { connection_id }) = ingress.take_ready() else {
+        panic!("first payload");
+    };
+    assert_eq!(connection_id.as_str(), "first");
+    assert_eq!(
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second enters after first consumption"),
+        Ok(())
+    );
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    let Some(HarnessEvent::Disconnected { connection_id }) = ingress.take_ready() else {
+        panic!("second payload");
+    };
+    assert_eq!(connection_id.as_str(), "second");
+    second.join().expect("second producer joins");
+
+    sender
+        .send(disconnected_event_named("occupied"))
+        .expect("occupy slot");
+    let blocked_sender = sender.clone();
+    let blocked = thread::spawn(move || blocked_sender.send(disconnected_event_named("blocked")));
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    ingress.wait_for_blocked_sender();
+    ingress.close();
+    assert_eq!(blocked.join().expect("blocked producer joins"), Err(()));
+}
+
+/// Closing component ingress during shutdown must wake a rendezvous producer
+/// so joining a reader cannot deadlock after the event loop stops.
+#[test]
+fn component_ingress_close_wakes_blocked_sender() {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let (ingress, sender) = ComponentIngress::new(wake_tx, ComponentIngressCapacity::Rendezvous);
+    let producer = thread::spawn(move || sender.send(disconnected_event()));
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    ingress.close();
+    assert_eq!(producer.join().expect("producer joins"), Err(()));
+}
 
 #[test]
 fn extension_reader_waits_for_initialized_ack() {
     let (reader_stream, writer_stream) = UnixStream::pair().expect("stream pair");
     let (tx, rx) = mpsc::channel();
+    let (ingress, ingress_tx) = ComponentIngress::new(tx, ComponentIngressCapacity::One);
     let (initialized_tx, initialized_rx) = mpsc::channel();
     spawn_reader_thread_after_initialized(
         crate::test_connection_id("conn-test"),
         reader_stream,
-        tx,
+        ingress_tx,
         initialized_rx,
     );
 
@@ -33,9 +185,11 @@ fn extension_reader_waits_for_initialized_ack() {
     ));
 
     initialized_tx.send(()).expect("send initialized ack");
-    let event = rx
+    let wake = rx
         .recv_timeout(Duration::from_secs(1))
         .expect("reader forwards after initialized ack");
+    assert!(matches!(wake, HarnessEvent::ComponentIngressReady));
+    let event = ingress.take_ready().expect("ingress payload");
     match event {
         HarnessEvent::FromConnection {
             connection_id,
@@ -52,7 +206,8 @@ fn extension_reader_waits_for_initialized_ack() {
         | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_)
         | HarnessEvent::SupervisedWriterCleanupComplete { .. }
-        | HarnessEvent::Command(_) => panic!("unexpected harness event"),
+        | HarnessEvent::Command(_)
+        | HarnessEvent::ComponentIngressReady => panic!("unexpected harness event"),
     }
 }
 
@@ -60,10 +215,11 @@ fn extension_reader_waits_for_initialized_ack() {
 fn reader_reports_decode_failure_separately_from_clean_disconnect() {
     let (reader_stream, mut writer_stream) = UnixStream::pair().expect("stream pair");
     let (tx, rx) = mpsc::channel();
+    let (ingress, ingress_tx) = ComponentIngress::new(tx, ComponentIngressCapacity::One);
     spawn_reader_thread(
         crate::test_connection_id("conn-malformed"),
         reader_stream,
-        tx,
+        ingress_tx,
     );
 
     writer_stream
@@ -75,7 +231,11 @@ fn reader_reports_decode_failure_separately_from_clean_disconnect() {
 
     assert!(matches!(
         rx.recv_timeout(Duration::from_secs(1)),
-        Ok(HarnessEvent::ReadFailed { connection_id, .. })
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    assert!(matches!(
+        ingress.take_ready(),
+        Some(HarnessEvent::ReadFailed { connection_id, .. })
             if connection_id.as_str() == "conn-malformed"
     ));
 }
@@ -94,6 +254,228 @@ impl Write for FailingWriter {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Thread-safe byte collector used to observe follower transport output.
+#[derive(Clone, Default)]
+struct SharedWriter(
+    /// Bytes flushed by a production follower under test.
+    Arc<Mutex<Vec<u8>>>,
+);
+
+impl Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("shared writer")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn decoded_output_count(writer: &SharedWriter) -> usize {
+    let bytes = writer.0.lock().expect("shared writer").clone();
+    let mut reader = HarnessOutputReader::new(BufReader::new(bytes.as_slice()));
+    let mut count = 0;
+    while reader.read_message().expect("decode output").is_some() {
+        count += 1;
+    }
+    count
+}
+
+/// A follower write failure must retire its cursor immediately and notify the
+/// harness control lane instead of waiting for eventual reader EOF.
+#[test]
+fn shared_follower_reports_writer_failure() {
+    let log = EventLog::new();
+    let (control_tx, control_rx) = mpsc::channel();
+    let writer_tx = spawn_writer_thread(FailingWriter, None);
+    let connection_id = crate::test_connection_id("writer-failure");
+    let mut sink = ChannelSink::new(
+        &writer_tx,
+        Arc::clone(&log),
+        control_tx,
+        connection_id.clone(),
+    )
+    .expect("configure follower");
+    sink.send(tau_core::RoutedFrame::new(
+        None,
+        HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: "test".to_owned(),
+            message: "fail".to_owned(),
+            level: tau_proto::NoticeLevel::Info,
+            always_show: false,
+        })),
+    ))
+    .expect("admit frame");
+
+    assert!(matches!(
+        control_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ReadFailed {
+            connection_id: failed,
+            ..
+        }) if failed == connection_id
+    ));
+}
+
+/// Failing follower setup must roll back its registered generation so a closed
+/// writer command receiver cannot pin later shared retention.
+#[test]
+fn shared_follower_setup_failure_retires_generation() {
+    let log = EventLog::new();
+    let (writer_tx, writer_rx) = mpsc::channel();
+    drop(writer_rx);
+    let (control_tx, _control_rx) = mpsc::channel();
+    let result = ChannelSink::new(
+        &writer_tx,
+        Arc::clone(&log),
+        control_tx,
+        crate::test_connection_id("closed-writer"),
+    );
+    assert!(result.is_err());
+    assert_eq!(log.consumer_count(), 0);
+}
+
+/// A writer-retired generation that remains briefly registered in EventBus
+/// must reject a directed route instead of claiming route admission.
+#[test]
+fn retired_shared_generation_is_not_reported_as_directed_delivery() {
+    let log = EventLog::new();
+    let (control_tx, control_rx) = mpsc::channel();
+    let writer_tx = spawn_writer_thread(FailingWriter, None);
+    let connection_id = crate::test_connection_id("retired-directed");
+    let sink = ChannelSink::new(
+        &writer_tx,
+        Arc::clone(&log),
+        control_tx,
+        connection_id.clone(),
+    )
+    .expect("configure follower");
+    let mut bus = tau_core::EventBus::new();
+    bus.connect(tau_core::Connection::new(
+        tau_core::PendingConnectionMetadata {
+            id: Some(connection_id.clone()),
+            name: crate::test_extension_name("retired-directed"),
+            kind: tau_proto::ClientKind::Provider,
+            origin: tau_core::ConnectionOrigin::InMemory,
+        },
+        Box::new(sink),
+    ));
+    let frame = HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: "test".to_owned(),
+        message: "first".to_owned(),
+        level: tau_proto::NoticeLevel::Info,
+        always_show: false,
+    }));
+    let first = bus
+        .send_to(&connection_id, None, frame.clone())
+        .expect("first route");
+    assert_eq!(
+        first.delivered_to.as_slice(),
+        std::slice::from_ref(&connection_id)
+    );
+    assert!(matches!(
+        control_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ReadFailed { .. })
+    ));
+
+    let retired = bus
+        .send_to(&connection_id, None, frame)
+        .expect("retired route report");
+    assert!(retired.delivered_to.is_empty());
+    assert_eq!(retired.failed_deliveries.len(), 1);
+}
+
+/// Production ChannelSink followers must withhold a paused consumer's live
+/// suffix, preserve publication-time eligibility across subscription
+/// replacement, and let an independent target advance concurrently.
+#[test]
+fn shared_channel_sink_catch_up_barrier_freezes_targets_independently() {
+    let log = EventLog::new();
+    let (control_tx, _control_rx) = mpsc::channel();
+    let paused_id = crate::test_connection_id("paused");
+    let healthy_id = crate::test_connection_id("healthy");
+    let paused_writer = SharedWriter::default();
+    let healthy_writer = SharedWriter::default();
+    let paused_tx = spawn_writer_thread(paused_writer.clone(), None);
+    let healthy_tx = spawn_writer_thread(healthy_writer.clone(), None);
+    let paused_sink = ChannelSink::new(
+        &paused_tx,
+        Arc::clone(&log),
+        control_tx.clone(),
+        paused_id.clone(),
+    )
+    .expect("paused sink");
+    let paused_handle = paused_sink.handle();
+    let healthy_sink = ChannelSink::new(
+        &healthy_tx,
+        Arc::clone(&log),
+        control_tx,
+        healthy_id.clone(),
+    )
+    .expect("healthy sink");
+    let healthy_handle = healthy_sink.handle();
+    let mut bus = tau_core::EventBus::new();
+    for (connection_id, sink) in [
+        (
+            paused_id.clone(),
+            Box::new(paused_sink) as Box<dyn ConnectionSink>,
+        ),
+        (
+            healthy_id.clone(),
+            Box::new(healthy_sink) as Box<dyn ConnectionSink>,
+        ),
+    ] {
+        bus.connect(tau_core::Connection::new(
+            tau_core::PendingConnectionMetadata {
+                id: Some(connection_id),
+                name: crate::test_extension_name("shared-test"),
+                kind: tau_proto::ClientKind::Tool,
+                origin: tau_core::ConnectionOrigin::InMemory,
+            },
+            sink,
+        ));
+    }
+    let selector = tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
+    for connection_id in [&paused_id, &healthy_id] {
+        bus.set_subscriptions(
+            connection_id,
+            vec![selector.clone()],
+            vec![selector.clone()],
+        )
+        .expect("subscribe");
+    }
+    bus.begin_catch_up(&paused_id).expect("pause catch-up");
+    let notice = |message: &str| {
+        HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: "test".to_owned(),
+            message: message.to_owned(),
+            level: tau_proto::NoticeLevel::Info,
+            always_show: false,
+        }))
+    };
+    bus.publish(notice("frozen"));
+    bus.set_subscriptions(&paused_id, vec![selector], Vec::new())
+        .expect("replace while paused");
+    bus.publish(notice("future-only"));
+
+    healthy_handle.flush();
+    assert_eq!(decoded_output_count(&healthy_writer), 2);
+    assert!(
+        paused_writer.0.lock().expect("paused writer").is_empty(),
+        "paused follower must withhold its frozen live suffix"
+    );
+    bus.finish_catch_up(&paused_id).expect("release catch-up");
+    paused_handle.flush();
+    assert_eq!(
+        decoded_output_count(&paused_writer),
+        1,
+        "subscription replacement cannot retract the already frozen target"
+    );
 }
 
 fn process_exists(pid: u32) -> bool {

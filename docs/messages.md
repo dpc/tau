@@ -164,12 +164,17 @@ late subscriber.
 replays matching historical facts and current-state snapshots first, sends non-replay
 `agent.replay_complete` / `session.replay_complete` boundaries, then releases
 live delivery for that connection. Live events selected while catch-up is in
-progress are queued for that connection and flushed after the session boundary.
+progress enter one shared process-local stream with frozen consumer-generation
+targets. The connection's cursor pauses at its live-tail barrier until the
+replay boundary, then follows the retained live suffix in order.
 
 The protocol no longer has an `ack` input message. The harness does not retain
-the runtime event stream in memory; late catch-up for any subscribed peer is
-rebuilt from durable session/agent stores, session restore facts, and current
-harness snapshots. Peers that perform side effects must register live handlers
+runtime positions as durable or wire authority. It does retain the shared
+in-memory live suffix while an eligible connection cursor may still require a
+payload, and releases each payload after its own frozen targets advance or
+retire. Historical catch-up for any subscribed peer remains rebuilt from
+durable session/agent stores, session restore facts, and current harness
+snapshots. Peers that perform side effects must register live handlers
 and ignore `deliver` frames with `replay: true`; restore handlers may opt in to
 historical execution facts such as `tool.request` and `tool.started` and to
 catch-up snapshots such as `session.agent_loaded` or `harness.session_dir`.

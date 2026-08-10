@@ -130,7 +130,9 @@ impl DebugEventLog {
                     "recorded_at_micros": recorded_at,
                 })
             }
-            HarnessEvent::SupervisedWriterCleanupComplete { .. } | HarnessEvent::Command(_) => {
+            HarnessEvent::SupervisedWriterCleanupComplete { .. }
+            | HarnessEvent::Command(_)
+            | HarnessEvent::ComponentIngressReady => {
                 return Ok(());
             }
         };

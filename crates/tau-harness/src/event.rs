@@ -122,6 +122,206 @@ pub(crate) enum HarnessEvent {
     },
     /// Internal state transition requested by harness helpers.
     Command(HarnessCommand),
+    /// Non-payload control wake indicating bounded component ingress is ready.
+    ComponentIngressReady,
+}
+
+/// Shared state for the trivially small component-ingress rendezvous lane.
+struct ComponentIngressState {
+    /// At most one component payload awaiting harness consumption.
+    slot: Option<PendingIngress>,
+    /// Whether the harness still accepts component ingress.
+    receiver_alive: bool,
+    /// Producers currently waiting behind an occupied one-slot lane.
+    blocked_senders: usize,
+    /// Next sender-specific acknowledgement ticket.
+    next_ticket: IngressTicket,
+    /// Greatest ticket whose exact payload the harness consumed.
+    consumed_through: Option<IngressTicket>,
+}
+
+/// Sender-specific identity for one component-ingress payload.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct IngressTicket(
+    /// Monotonic owner-local ticket value.
+    u64,
+);
+
+impl IngressTicket {
+    /// Returns the following owner-local ticket.
+    fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// One payload occupying the shared component-ingress slot.
+struct PendingIngress {
+    /// Sender-specific acknowledgement identity.
+    ticket: IngressTicket,
+    /// Component payload awaiting harness consumption.
+    event: HarnessEvent,
+}
+
+/// Harness-owned receiver for bounded or rendezvous component ingress.
+pub(crate) struct ComponentIngress {
+    /// Shared slot and lifecycle state.
+    state: Arc<(Mutex<ComponentIngressState>, Condvar)>,
+}
+
+/// Cloneable producer for bounded or rendezvous component ingress.
+#[derive(Clone)]
+pub(crate) struct ComponentIngressSender {
+    /// Shared slot and lifecycle state.
+    state: Arc<(Mutex<ComponentIngressState>, Condvar)>,
+    /// Control-lane wake sender; it never carries the component payload.
+    wake_tx: Sender<HarnessEvent>,
+    /// Selected rendezvous or one-slot backpressure behavior.
+    capacity: ComponentIngressCapacity,
+}
+
+/// Supported component-ingress backpressure modes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ComponentIngressCapacity {
+    /// Producer completes only after harness consumption.
+    Rendezvous,
+    /// One payload may wait for harness consumption.
+    One,
+}
+
+impl ComponentIngress {
+    /// Creates a component ingress lane correct at capacities zero and one.
+    pub(crate) fn new(
+        wake_tx: Sender<HarnessEvent>,
+        capacity: ComponentIngressCapacity,
+    ) -> (Self, ComponentIngressSender) {
+        let state = Arc::new((
+            Mutex::new(ComponentIngressState {
+                slot: None,
+                receiver_alive: true,
+                blocked_senders: 0,
+                next_ticket: IngressTicket(1),
+                consumed_through: None,
+            }),
+            Condvar::new(),
+        ));
+        (
+            Self {
+                state: Arc::clone(&state),
+            },
+            ComponentIngressSender {
+                state,
+                wake_tx,
+                capacity,
+            },
+        )
+    }
+
+    /// Takes the payload associated with one control-lane wake.
+    pub(crate) fn take_ready(&self) -> Option<HarnessEvent> {
+        let (state, changed) = &*self.state;
+        let mut state = state.lock().expect("component ingress mutex poisoned");
+        let event = state.slot.take().map(|pending| {
+            state.consumed_through = Some(pending.ticket);
+            pending.event
+        });
+        changed.notify_all();
+        event
+    }
+
+    /// Closes ingress and wakes every producer before component joins begin.
+    pub(crate) fn close(&self) {
+        let (state, changed) = &*self.state;
+        let mut state = state.lock().expect("component ingress mutex poisoned");
+        state.receiver_alive = false;
+        state.slot = None;
+        changed.notify_all();
+    }
+
+    /// Waits until one producer demonstrably blocks behind the occupied slot.
+    #[cfg(test)]
+    fn wait_for_blocked_sender(&self) {
+        let (state, changed) = &*self.state;
+        let state = state.lock().expect("component ingress mutex poisoned");
+        let (state, timeout) = changed
+            .wait_timeout_while(state, Duration::from_secs(1), |state| {
+                state.blocked_senders == 0
+            })
+            .expect("component ingress mutex poisoned while observing saturation");
+        assert!(!timeout.timed_out(), "producer did not saturate ingress");
+        assert_eq!(state.blocked_senders, 1);
+    }
+}
+
+impl ComponentIngressSender {
+    /// Sends one component frame or lifecycle observation with natural
+    /// backpressure from harness consumption.
+    fn send(&self, event: HarnessEvent) -> Result<(), ()> {
+        let (state, changed) = &*self.state;
+        let mut state = state.lock().expect("component ingress mutex poisoned");
+        let blocked = state.receiver_alive && state.slot.is_some();
+        if blocked {
+            state.blocked_senders = state.blocked_senders.saturating_add(1);
+            changed.notify_all();
+        }
+        while state.receiver_alive && state.slot.is_some() {
+            state = changed
+                .wait(state)
+                .expect("component ingress mutex poisoned while sending");
+        }
+        if blocked {
+            state.blocked_senders = state.blocked_senders.saturating_sub(1);
+        }
+        if !state.receiver_alive {
+            return Err(());
+        }
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.next();
+        state.slot = Some(PendingIngress { ticket, event });
+        drop(state);
+        if self
+            .wake_tx
+            .send(HarnessEvent::ComponentIngressReady)
+            .is_err()
+        {
+            self.close_after_wake_failure();
+            return Err(());
+        }
+        if self.capacity == ComponentIngressCapacity::Rendezvous {
+            let mut state = state_lock(&self.state);
+            while state.receiver_alive
+                && state
+                    .consumed_through
+                    .is_none_or(|consumed| consumed < ticket)
+            {
+                state = changed
+                    .wait(state)
+                    .expect("component ingress mutex poisoned during rendezvous");
+            }
+            if state
+                .consumed_through
+                .is_none_or(|consumed| consumed < ticket)
+            {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Marks the receiver closed when the control wake lane has disappeared.
+    fn close_after_wake_failure(&self) {
+        let (state, changed) = &*self.state;
+        let mut state = state.lock().expect("component ingress mutex poisoned");
+        state.receiver_alive = false;
+        state.slot = None;
+        changed.notify_all();
+    }
+}
+
+/// Locks component ingress state without repeating tuple destructuring.
+fn state_lock(
+    state: &Arc<(Mutex<ComponentIngressState>, Condvar)>,
+) -> std::sync::MutexGuard<'_, ComponentIngressState> {
+    state.0.lock().expect("component ingress mutex poisoned")
 }
 
 impl HarnessEvent {
@@ -147,21 +347,168 @@ impl HarnessEvent {
 /// Commands accepted by per-connection writer threads.
 pub(crate) enum WriterCommand {
     /// Write one protocol frame to the connection.
+    #[cfg(test)]
     Message(HarnessOutputMessage),
     /// Flush all previously queued frames, then acknowledge completion.
+    #[cfg(test)]
+    #[expect(
+        dead_code,
+        reason = "legacy writer tests exercise payload writes directly"
+    )]
     Flush(Sender<()>),
+    /// Switches this writer permanently to cursor-followed shared delivery.
+    Follow {
+        /// Shared logical live stream.
+        log: Arc<crate::event_log::EventLog>,
+        /// Runtime-only consumer generation.
+        consumer: tau_core::SharedConsumerId,
+        /// Lifecycle/control sender used for explicit writer-failure
+        /// retirement.
+        failure_tx: Sender<HarnessEvent>,
+        /// Exact connection generation identity associated with this writer.
+        connection_id: tau_proto::ConnectionId,
+    },
 }
 
-/// Connection sink — sends to the per-connection writer channel.
+/// Connection sink that admits payloads to one shared logical live stream.
 pub(crate) struct ChannelSink {
-    pub(crate) tx: Sender<WriterCommand>,
+    /// Shared live stream used by every connection in this harness.
+    log: Arc<crate::event_log::EventLog>,
+    /// Runtime-only consumer generation.
+    consumer: tau_core::SharedConsumerId,
+    /// Shared-stream identity used by the route planner.
+    group: tau_core::SharedDeliveryGroup,
+    /// Whether explicit lifecycle retirement already released this cursor.
+    retired: bool,
+}
+
+/// Cloneable cursor barrier and lag view retained by harness lifecycle code.
+#[derive(Clone)]
+pub(crate) struct LiveConsumerHandle {
+    /// Shared logical live stream.
+    log: Arc<crate::event_log::EventLog>,
+    /// Runtime-only consumer generation.
+    consumer: tau_core::SharedConsumerId,
+}
+
+impl LiveConsumerHandle {
+    /// Waits until this generation reaches the stream's current tail.
+    pub(crate) fn flush(&self) {
+        self.log.flush_consumer(self.consumer);
+    }
+}
+
+impl ChannelSink {
+    /// Registers a fresh cursor and switches the writer to follower mode.
+    pub(crate) fn new(
+        tx: &Sender<WriterCommand>,
+        log: Arc<crate::event_log::EventLog>,
+        failure_tx: Sender<HarnessEvent>,
+        connection_id: tau_proto::ConnectionId,
+    ) -> Result<Self, ConnectionSendError> {
+        let consumer = log.register_consumer();
+        if tx
+            .send(WriterCommand::Follow {
+                log: Arc::clone(&log),
+                consumer,
+                failure_tx,
+                connection_id,
+            })
+            .is_err()
+        {
+            log.retire_consumer(consumer);
+            return Err(ConnectionSendError::new("writer closed"));
+        }
+        let group = log.group();
+        Ok(Self {
+            log,
+            consumer,
+            group,
+            retired: false,
+        })
+    }
+
+    /// Returns a lifecycle handle for cursor barriers and lag diagnostics.
+    pub(crate) fn handle(&self) -> LiveConsumerHandle {
+        LiveConsumerHandle {
+            log: Arc::clone(&self.log),
+            consumer: self.consumer,
+        }
+    }
 }
 
 impl ConnectionSink for ChannelSink {
     fn send(&mut self, routed: tau_core::RoutedFrame) -> Result<(), ConnectionSendError> {
-        self.tx
-            .send(WriterCommand::Message(routed.frame))
-            .map_err(|_| ConnectionSendError::new("writer closed"))
+        let admitted = self.log.append_egress(
+            routed,
+            &[tau_core::SharedDeliveryTarget::new(
+                self.group,
+                self.consumer,
+            )],
+        );
+        if admitted.is_empty() {
+            Err(ConnectionSendError::new("consumer generation retired"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn shared_delivery_target(&self) -> Option<tau_core::SharedDeliveryTarget> {
+        Some(tau_core::SharedDeliveryTarget::new(
+            self.group,
+            self.consumer,
+        ))
+    }
+
+    fn send_shared(
+        &mut self,
+        frame: tau_core::RoutedFrame,
+        targets: &[tau_core::SharedDeliveryTarget],
+    ) -> Result<Vec<tau_core::SharedDeliveryTarget>, ConnectionSendError> {
+        Ok(self.log.append_egress(frame, targets))
+    }
+
+    fn begin_catch_up(&mut self) {
+        self.log.set_catch_up_paused(self.consumer, true);
+    }
+
+    fn finish_catch_up(&mut self) {
+        self.log.set_catch_up_paused(self.consumer, false);
+    }
+
+    fn retire(&mut self) {
+        self.log.retire_consumer(self.consumer);
+        self.retired = true;
+    }
+}
+
+impl Drop for ChannelSink {
+    fn drop(&mut self) {
+        if !self.retired {
+            self.log.retire_consumer(self.consumer);
+        }
+    }
+}
+
+/// Non-queueing synchronous sink for internal summarized observations.
+pub(crate) struct SynchronousSink {
+    /// Callback that consumes each routed payload before `send` returns.
+    observe: Box<dyn FnMut(tau_core::RoutedFrame)>,
+}
+
+impl SynchronousSink {
+    /// Creates a sink around one non-retaining synchronous callback.
+    pub(crate) fn new(observe: impl FnMut(tau_core::RoutedFrame) + 'static) -> Self {
+        Self {
+            observe: Box::new(observe),
+        }
+    }
+}
+
+impl ConnectionSink for SynchronousSink {
+    fn send(&mut self, routed: tau_core::RoutedFrame) -> Result<(), ConnectionSendError> {
+        (self.observe)(routed);
+        Ok(())
     }
 }
 
@@ -169,7 +516,7 @@ impl ConnectionSink for ChannelSink {
 pub(crate) fn spawn_reader_thread(
     connection_id: tau_proto::ConnectionId,
     stream: impl io::Read + Send + 'static,
-    tx: Sender<HarnessEvent>,
+    tx: ComponentIngressSender,
 ) {
     spawn_reader_thread_inner(connection_id, stream, tx, None);
 }
@@ -179,7 +526,7 @@ pub(crate) fn spawn_reader_thread(
 pub(crate) fn spawn_reader_thread_after_initialized(
     connection_id: tau_proto::ConnectionId,
     stream: impl io::Read + Send + 'static,
-    tx: Sender<HarnessEvent>,
+    tx: ComponentIngressSender,
     initialized_rx: Receiver<()>,
 ) {
     spawn_reader_thread_inner(connection_id, stream, tx, Some(initialized_rx));
@@ -188,7 +535,7 @@ pub(crate) fn spawn_reader_thread_after_initialized(
 fn spawn_reader_thread_inner(
     connection_id: tau_proto::ConnectionId,
     stream: impl io::Read + Send + 'static,
-    tx: Sender<HarnessEvent>,
+    tx: ComponentIngressSender,
     initialized_rx: Option<Receiver<()>>,
 ) {
     thread::spawn(move || {
@@ -484,8 +831,16 @@ fn spawn_writer_thread_inner(
         // fall through to the shutdown sequence so supervised children are
         // reaped instead of being abandoned after stdin breaks.
         let mut can_write_disconnect = true;
+        #[cfg_attr(
+            not(test),
+            expect(
+                clippy::never_loop,
+                reason = "production receives one permanent Follow command; tests also exercise legacy messages"
+            )
+        )]
         while let Ok(command) = rx.recv() {
             match command {
+                #[cfg(test)]
                 WriterCommand::Message(message) => {
                     let Ok(frame_bytes) = w.write_message_with_size(&message) else {
                         can_write_disconnect = false;
@@ -499,9 +854,43 @@ fn spawn_writer_thread_inner(
                         protocol_io.record_downlink_frame_bytes(&message, frame_bytes);
                     }
                 }
+                #[cfg(test)]
                 WriterCommand::Flush(ack) => {
                     let _ = w.flush();
                     let _ = ack.send(());
+                }
+                WriterCommand::Follow {
+                    log,
+                    consumer,
+                    failure_tx,
+                    connection_id,
+                } => {
+                    let mut writer_failed = false;
+                    while let Some(pending) = log.next_egress(consumer) {
+                        let message = pending.frame();
+                        let Ok(frame_bytes) = w.write_message_with_size(message) else {
+                            can_write_disconnect = false;
+                            writer_failed = true;
+                            break;
+                        };
+                        if w.flush().is_err() {
+                            can_write_disconnect = false;
+                            writer_failed = true;
+                            break;
+                        }
+                        if let Some(protocol_io) = &protocol_io {
+                            protocol_io.record_downlink_frame_bytes(message, frame_bytes);
+                        }
+                        log.acknowledge_egress(consumer, &pending);
+                    }
+                    log.retire_consumer(consumer);
+                    if writer_failed {
+                        let _ = failure_tx.send(HarnessEvent::ReadFailed {
+                            connection_id,
+                            error: "connection writer failed".to_owned(),
+                        });
+                    }
+                    break;
                 }
             }
         }

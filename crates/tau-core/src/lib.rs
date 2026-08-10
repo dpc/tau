@@ -36,7 +36,7 @@ pub use bus::EventBus;
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
     ConnectionSink, DeliveryFailure, PendingConnectionMetadata, RouteError, RouteReport,
-    RoutedFrame, VisibilityFilter,
+    RoutedFrame, SharedConsumerId, SharedDeliveryGroup, SharedDeliveryTarget, VisibilityFilter,
 };
 pub use memory::{MemoryInbox, memory_connection};
 pub use session::{

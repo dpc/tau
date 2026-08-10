@@ -492,6 +492,7 @@ impl Harness {
             })
             .map_err(|error| format!("failed to load agent `{agent_id}` for replay: {error}"));
         for (client_id, kind, selectors) in subscribers {
+            let _ = self.bus.begin_catch_up(&client_id);
             let mut errors = Vec::new();
             match &snapshot {
                 Ok((tree, events)) => {
@@ -550,6 +551,7 @@ impl Harness {
                 agent_id.clone(),
                 (!errors.is_empty()).then(|| errors.join("; ")),
             );
+            let _ = self.bus.finish_catch_up(&client_id);
         }
     }
 

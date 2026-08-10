@@ -6,6 +6,7 @@ use std::time::Duration;
 use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 
 use super::*;
+use crate::event::{ComponentIngress as PathComponentIngress, ComponentIngressCapacity};
 
 /// Proves the persistent Provider mount source contains the exact retained
 /// Configure bytes and is read-only before namespace setup.
@@ -160,11 +161,14 @@ fn builtin_spawn_failure_is_contextual_and_secret_safe() {
     config.config = serde_json::json!({"token": "config-secret"});
 
     let (tx, _rx) = mpsc::channel();
+    let (_ingress, ingress_tx) =
+        PathComponentIngress::new(tx.clone(), ComponentIngressCapacity::One);
     let error = match spawn_supervised(
         &config,
         ClientKind::Provider,
         None,
         &tx,
+        &ingress_tx,
         Path::new("/tmp/tau-state"),
         false,
         &Default::default(),
@@ -211,11 +215,14 @@ fn custom_spawn_failure_includes_only_relevant_bounded_context() {
     config.config = serde_json::json!({"secret": "config-secret"});
 
     let (tx, _rx) = mpsc::channel();
+    let (_ingress, ingress_tx) =
+        PathComponentIngress::new(tx.clone(), ComponentIngressCapacity::One);
     let error = match spawn_supervised(
         &config,
         ClientKind::Tool,
         None,
         &tx,
+        &ingress_tx,
         Path::new("/tmp/tau-state"),
         false,
         &Default::default(),

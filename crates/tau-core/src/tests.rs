@@ -30,9 +30,7 @@ fn test_connection(origin: ConnectionOrigin) -> (Connection, MemoryInbox) {
             kind: tau_proto::ClientKind::Ui,
             origin,
         },
-        Box::new(MemorySink {
-            inbox: inbox.clone(),
-        }),
+        Box::new(MemorySink::new(inbox.clone())),
     );
     (connection, inbox)
 }

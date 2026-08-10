@@ -59,4 +59,5 @@ built.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+proptest.workspace = true
 tau-ext-shell = { workspace = true, features = ["echo-agent"] }

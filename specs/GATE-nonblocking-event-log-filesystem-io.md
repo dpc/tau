@@ -2,13 +2,13 @@
 
 ## Gate
 
-During normal live publication, canonical acceptance, ordering, and enqueueing
-delivery to each live subscriber or extension's per-connection writer channel
-may wait only for immediate bounded in-memory persistence-queue admission,
-never filesystem I/O or its completion. Admission must be nonblocking; when
-full, it must reject before canonical acceptance rather than block, discard an
-accepted event, or grow without bound. Delivery ends at writer-channel enqueue,
-not pipe or socket completion or an extension acknowledgement.
+During normal live publication, canonical acceptance, ordering, and admission
+to the process-local live delivery stream may wait only for immediate bounded
+in-memory persistence-queue admission, never filesystem I/O or its completion.
+Persistence admission must be nonblocking; when full, it must reject before
+canonical acceptance rather than block, discard an accepted event, or grow
+without bound. Live delivery admission does not imply pipe or socket completion
+or an extension acknowledgement.
 
 One ordered persistence worker must preserve canonical journal disk order, but
 frame completion need not precede broadcast. An admitted and published event
@@ -27,6 +27,6 @@ skill reads.
 ## Justification
 
 The user wants slow or stalled storage never to delay canonical live
-publication or extension-delivery enqueueing. Bounded asynchronous persistence
-keeps the live harness responsive without hiding queue pressure or retracting
-already accepted events.
+publication or admission to the logical live delivery stream. Bounded
+asynchronous persistence keeps the live harness responsive without hiding
+queue pressure or retracting already accepted events.

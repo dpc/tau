@@ -31319,10 +31319,10 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
 
     let deadline = Instant::now() + path_std_time::Duration::from_secs(5);
     let result = loop {
-        match target
+        let received = target
             .rx
-            .recv_timeout(path_std_time::Duration::from_millis(20))
-        {
+            .recv_timeout(path_std_time::Duration::from_millis(20));
+        match received.map(|event| target.expand_component_ingress_wake(event)) {
             Ok(HarnessEvent::FromConnection {
                 connection_id,
                 message,
@@ -31463,7 +31463,8 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let result = loop {
         for harness in [&mut target, &mut sender] {
-            match harness.rx.recv_timeout(Duration::from_millis(10)) {
+            let received = harness.rx.recv_timeout(Duration::from_millis(10));
+            match received.map(|event| harness.expand_component_ingress_wake(event)) {
                 Ok(HarnessEvent::FromConnection {
                     connection_id,
                     message,
@@ -31606,7 +31607,8 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
             break snapshot;
         }
         assert!(Instant::now() < deadline, "timed out waiting for discovery");
-        match target.rx.recv_timeout(Duration::from_millis(10)) {
+        let received = target.rx.recv_timeout(Duration::from_millis(10));
+        match received.map(|event| target.expand_component_ingress_wake(event)) {
             Ok(HarnessEvent::NewClient(stream)) => {
                 target.accept_client(stream).expect("accept probe client");
             }

@@ -1,14 +1,17 @@
 //! Thread-safe runtime event sequencer.
 //!
 //! The harness assigns one globally monotonic [`EventLogSeq`] to every
-//! committed runtime event, but the sequencer does not retain event payloads
-//! and the sequence never leaves the process. Subscribe-time catch-up comes
-//! from semantic state instead: durable session/agent stores, current harness
-//! snapshots, and the append-only `events.jsonl` debug trace.
+//! committed runtime event. The same process-local owner retains one canonical
+//! representation of each admitted live output until every frozen consumer
+//! generation advances or retires. Neither sequence leaves the process.
+//! Subscribe-time historical catch-up still comes from semantic state:
+//! durable session/agent stores and current harness snapshots.
 
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use tau_proto::UnixMicros;
 #[cfg(test)]
@@ -54,31 +57,339 @@ pub(crate) struct LogEntry {
     pub event: Event,
 }
 
+/// Mutable state protected by one event-log mutex.
 struct EventLogInner {
+    /// Next committed-event observation sequence.
     next_seq: EventLogSeq,
+    /// Test-only committed-event observations.
     #[cfg(test)]
     entries: BTreeMap<EventLogSeq, LogEntry>,
+    /// Next contiguous position in the logical live egress stream.
+    next_egress_seq: EgressPosition,
+    /// Cursor-continuity positions with payloads only while targets require
+    /// them.
+    retained: VecDeque<LivePosition>,
+    /// Active consumer generations and their independent cursors.
+    consumers: HashMap<tau_core::SharedConsumerId, ConsumerState>,
+    /// Next owner-allocated consumer generation value.
+    next_consumer: u64,
+}
+
+/// Contiguous process-local position in the logical egress stream.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+struct EgressPosition(
+    /// Contiguous owner-local position value.
+    u64,
+);
+
+impl EgressPosition {
+    /// Returns the following logical stream position.
+    fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    /// Returns the number of positions from `earlier` through this position.
+    fn distance_from(self, earlier: Self) -> u64 {
+        self.0.saturating_sub(earlier.0)
+    }
+}
+
+/// One lightweight logical position and any still-required shared payload.
+struct LivePosition {
+    /// Contiguous position in the logical live egress stream.
+    seq: EgressPosition,
+    /// Canonical frame retained once while at least one frozen target requires
+    /// it.
+    payload: Option<Arc<tau_core::RoutedFrame>>,
+    /// Frozen generations that have not yet acknowledged this position.
+    pending_targets: HashSet<tau_core::SharedConsumerId>,
+}
+
+/// Mutable cursor metadata for one connected consumer generation.
+#[derive(Clone, Copy, Debug)]
+struct ConsumerState {
+    /// Next stream position the follower must inspect.
+    cursor: EgressPosition,
+    /// Whether replay is still establishing the live-tail barrier.
+    catch_up_paused: bool,
+}
+
+/// One frame selected by a consumer without advancing its delivery cursor.
+pub(crate) struct PendingEgress {
+    /// Stream position acknowledged only after write, flush, and metering.
+    seq: EgressPosition,
+    /// Shared canonical routed frame.
+    frame: Arc<tau_core::RoutedFrame>,
+}
+
+impl PendingEgress {
+    /// Returns the protocol frame selected for this consumer.
+    pub(crate) fn frame(&self) -> &tau_proto::HarnessOutputMessage {
+        &self.frame.frame
+    }
 }
 
 /// Thread-safe runtime event sequencer.
 ///
-/// Production builds keep only the next sequence counter. Tests also keep a
-/// small observer log so existing behavioral assertions can inspect what the
-/// harness committed without introducing a production retention path.
+/// Production builds retain only the cursor-pinned live suffix. Tests also
+/// keep a small committed-event observer log for behavioral assertions.
 pub(crate) struct EventLog {
+    /// Process-local identity shared by every sink attached to this log.
+    group: tau_core::SharedDeliveryGroup,
+    /// Mutable stream state.
     inner: Mutex<EventLogInner>,
+    /// Wakeup for append, cursor advancement, retirement, and catch-up release.
+    changed: Condvar,
 }
+
+/// Allocates process-local stream identities without exposing pointer values.
+static NEXT_DELIVERY_GROUP: AtomicU64 = AtomicU64::new(1);
 
 impl EventLog {
     /// Creates an empty sequencer.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
+            group: tau_core::SharedDeliveryGroup::new(
+                NEXT_DELIVERY_GROUP.fetch_add(1, Ordering::Relaxed),
+            ),
             inner: Mutex::new(EventLogInner {
                 next_seq: EventLogSeq::new(0),
                 #[cfg(test)]
                 entries: BTreeMap::new(),
+                next_egress_seq: EgressPosition::default(),
+                retained: VecDeque::new(),
+                consumers: HashMap::new(),
+                next_consumer: 1,
             }),
+            changed: Condvar::new(),
         })
+    }
+
+    /// Returns this log's process-local shared-stream identity.
+    pub(crate) fn group(&self) -> tau_core::SharedDeliveryGroup {
+        self.group
+    }
+
+    /// Registers a fresh consumer generation at the current live tail.
+    pub(crate) fn register_consumer(&self) -> tau_core::SharedConsumerId {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        let consumer = tau_core::SharedConsumerId::new(inner.next_consumer);
+        inner.next_consumer = inner.next_consumer.saturating_add(1);
+        let cursor = inner.next_egress_seq;
+        inner.consumers.insert(
+            consumer,
+            ConsumerState {
+                cursor,
+                catch_up_paused: false,
+            },
+        );
+        consumer
+    }
+
+    /// Admits one canonical frame with an immutable target-generation set.
+    pub(crate) fn append_egress(
+        &self,
+        frame: tau_core::RoutedFrame,
+        targets: &[tau_core::SharedDeliveryTarget],
+    ) -> Vec<tau_core::SharedDeliveryTarget> {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        let seq = inner.next_egress_seq;
+        inner.next_egress_seq = inner.next_egress_seq.next();
+        let admitted = targets
+            .iter()
+            .copied()
+            .filter(|target| {
+                target.group() == self.group && inner.consumers.contains_key(&target.consumer())
+            })
+            .collect::<Vec<_>>();
+        let pending_targets = admitted
+            .iter()
+            .map(|target| target.consumer())
+            .collect::<HashSet<_>>();
+        let payload = (!pending_targets.is_empty()).then(|| Arc::new(frame));
+        inner.retained.push_back(LivePosition {
+            seq,
+            payload,
+            pending_targets,
+        });
+        Self::prune_locked(&mut inner);
+        drop(inner);
+        self.changed.notify_all();
+        admitted
+    }
+
+    /// Waits for the next targeted frame, skipping non-target positions.
+    pub(crate) fn next_egress(
+        &self,
+        consumer: tau_core::SharedConsumerId,
+    ) -> Option<PendingEgress> {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        loop {
+            let state = *inner.consumers.get(&consumer)?;
+            if state.catch_up_paused {
+                inner = self
+                    .changed
+                    .wait(inner)
+                    .expect("event log mutex poisoned while catch-up paused");
+                continue;
+            }
+            if state.cursor == inner.next_egress_seq {
+                inner = self
+                    .changed
+                    .wait(inner)
+                    .expect("event log mutex poisoned while waiting");
+                continue;
+            }
+            let first = inner
+                .retained
+                .front()
+                .map_or(inner.next_egress_seq, |entry| entry.seq);
+            if state.cursor < first {
+                // Prefix pruning cannot pass an active cursor.
+                unreachable!("active live cursor fell behind retained prefix");
+            }
+            let index = usize::try_from(state.cursor.distance_from(first))
+                .expect("egress index fits usize");
+            let entry = inner
+                .retained
+                .get(index)
+                .expect("cursor before tail must name a retained entry");
+            if entry.pending_targets.contains(&consumer) {
+                return Some(PendingEgress {
+                    seq: entry.seq,
+                    frame: Arc::clone(
+                        entry
+                            .payload
+                            .as_ref()
+                            .expect("pending target must retain its shared payload"),
+                    ),
+                });
+            }
+            inner
+                .consumers
+                .get_mut(&consumer)
+                .expect("consumer remains registered")
+                .cursor = state.cursor.next();
+            Self::prune_locked(&mut inner);
+            self.changed.notify_all();
+        }
+    }
+
+    /// Advances after successful encode, write, flush, and protocol metering.
+    pub(crate) fn acknowledge_egress(
+        &self,
+        consumer: tau_core::SharedConsumerId,
+        pending: &PendingEgress,
+    ) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        if inner
+            .consumers
+            .get(&consumer)
+            .is_some_and(|state| state.cursor == pending.seq)
+        {
+            let first = inner
+                .retained
+                .front()
+                .map_or(inner.next_egress_seq, |entry| entry.seq);
+            let index =
+                usize::try_from(pending.seq.distance_from(first)).expect("egress index fits usize");
+            let position = inner
+                .retained
+                .get_mut(index)
+                .expect("acknowledged position remains retained");
+            position.pending_targets.remove(&consumer);
+            if position.pending_targets.is_empty() {
+                position.payload = None;
+            }
+            inner
+                .consumers
+                .get_mut(&consumer)
+                .expect("consumer remains registered")
+                .cursor = pending.seq.next();
+            Self::prune_locked(&mut inner);
+        }
+        drop(inner);
+        self.changed.notify_all();
+    }
+
+    /// Retires a generation and releases every retention obligation it held.
+    pub(crate) fn retire_consumer(&self, consumer: tau_core::SharedConsumerId) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        inner.consumers.remove(&consumer);
+        for position in &mut inner.retained {
+            position.pending_targets.remove(&consumer);
+            if position.pending_targets.is_empty() {
+                position.payload = None;
+            }
+        }
+        Self::prune_locked(&mut inner);
+        drop(inner);
+        self.changed.notify_all();
+    }
+
+    /// Pauses or resumes a follower around semantic replay.
+    pub(crate) fn set_catch_up_paused(&self, consumer: tau_core::SharedConsumerId, paused: bool) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        if let Some(state) = inner.consumers.get_mut(&consumer) {
+            state.catch_up_paused = paused;
+        }
+        drop(inner);
+        self.changed.notify_all();
+    }
+
+    /// Captures the current tail and waits until the consumer reaches it or
+    /// retires.
+    pub(crate) fn flush_consumer(&self, consumer: tau_core::SharedConsumerId) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        let barrier = inner.next_egress_seq;
+        while inner
+            .consumers
+            .get(&consumer)
+            .is_some_and(|state| state.cursor < barrier)
+        {
+            inner = self
+                .changed
+                .wait(inner)
+                .expect("event log mutex poisoned while flushing");
+        }
+    }
+
+    /// Returns the largest active consumer lag in logical stream positions.
+    pub(crate) fn max_consumer_lag(&self) -> u64 {
+        let inner = self.inner.lock().expect("event log mutex poisoned");
+        inner
+            .consumers
+            .values()
+            .map(|state| inner.next_egress_seq.distance_from(state.cursor))
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// Returns active consumer count for lifecycle regression tests.
+    #[cfg(test)]
+    pub(crate) fn consumer_count(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("event log mutex poisoned")
+            .consumers
+            .len()
+    }
+
+    /// Prunes every prefix position inspected by all active generations.
+    fn prune_locked(inner: &mut EventLogInner) {
+        let min_cursor = inner
+            .consumers
+            .values()
+            .map(|state| state.cursor)
+            .min()
+            .unwrap_or(inner.next_egress_seq);
+        while inner
+            .retained
+            .front()
+            .is_some_and(|entry| entry.seq < min_cursor)
+        {
+            inner.retained.pop_front();
+        }
     }
 
     /// Reserves the next harness runtime event-log sequence.
@@ -99,8 +410,8 @@ impl EventLog {
     ///
     /// Stamping happens at the publish chokepoint so the wire delivery, any
     /// durable semantic record, and the debug JSONL line all carry the same
-    /// timestamp. The timestamp is returned to the caller and is not retained
-    /// in production memory.
+    /// timestamp. The timestamp is returned to the caller; live routing later
+    /// retains its delivery envelope only while consumer cursors require it.
     pub(crate) fn append(&self) -> (EventLogSeq, UnixMicros) {
         let recorded_at = UnixMicros::now();
         let seq = self.reserve_seq();

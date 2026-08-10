@@ -1,5 +1,15 @@
 # ARCH-tau-harness: tau-harness architecture
 
+Live delivery uses one process-local logical stream with runtime-only positions.
+The event bus freezes selector, visibility, exclusion, and directed-route
+eligibility as consumer generations when admitting a frame. Per-connection
+writers follow independent cursors and shared retention prunes after every
+active generation advances or retires; a stalled connected generation remains
+eligible and can pin retention. Replay pauses its follower at a captured live
+tail until the replay-complete boundary. This architecture is governed by
+[GATE-runtime-live-event-log-cursors](../../../specs/GATE-runtime-live-event-log-cursors.md)
+and does not change semantic journals or protocol envelopes.
+
 Harness storage policy is immutable for one process. Durable mode owns normal
 session, agent, diagnostic, retention, and extension storage;
 session-ephemeral mode suppresses only session-owned artifacts; memory-only

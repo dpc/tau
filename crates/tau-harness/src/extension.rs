@@ -18,8 +18,9 @@ use tau_proto::ClientKind;
 
 use crate::error::{ExtensionSpawnError, HarnessError};
 use crate::event::{
-    HarnessEvent, SupervisedWriterHandle, WriterCommand, spawn_reader_thread_after_initialized,
-    spawn_supervised_writer_thread_with_isolation_tempdir, spawn_writer_thread,
+    ComponentIngressSender, HarnessEvent, SupervisedWriterHandle, WriterCommand,
+    spawn_reader_thread_after_initialized, spawn_supervised_writer_thread_with_isolation_tempdir,
+    spawn_writer_thread,
 };
 use crate::prompt::chrono_free_date;
 use crate::settings::ExtensionConfig;
@@ -143,7 +144,8 @@ pub(crate) fn spawn_in_process<F>(
     _name: &str,
     _kind: ClientKind,
     run: F,
-    tx: &Sender<HarnessEvent>,
+    _tx: &Sender<HarnessEvent>,
+    ingress_tx: &ComponentIngressSender,
 ) -> Result<InProcessSpawn, HarnessError>
 where
     F: FnOnce(UnixStream, UnixStream) -> Result<(), String> + Send + 'static,
@@ -161,7 +163,7 @@ where
     spawn_reader_thread_after_initialized(
         connection_id.clone(),
         harness_read,
-        tx.clone(),
+        ingress_tx.clone(),
         initialized_rx,
     );
 
@@ -431,11 +433,16 @@ fn create_private_state_tree(root: &Path, relative: &Path) -> Result<(), Harness
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "component ingress and control lanes have deliberately separate lifecycle ownership"
+)]
 pub(crate) fn spawn_supervised(
     config: &ExtensionConfig,
     kind: ClientKind,
     stderr_log_path: Option<PathBuf>,
     tx: &Sender<HarnessEvent>,
+    ingress_tx: &ComponentIngressSender,
     state_dir: &Path,
     memory_only: bool,
     provider_settings: &std::collections::BTreeMap<String, Vec<u8>>,
@@ -492,7 +499,7 @@ pub(crate) fn spawn_supervised(
     spawn_reader_thread_after_initialized(
         connection_id.clone(),
         stdout,
-        tx.clone(),
+        ingress_tx.clone(),
         initialized_rx,
     );
 

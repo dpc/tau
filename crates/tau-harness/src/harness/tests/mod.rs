@@ -1639,9 +1639,10 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
         if started.elapsed() >= Duration::from_secs(3) {
             panic!("timed out waiting for {target_call_id} to complete");
         }
-        let event =
+        let event = h.expand_component_ingress_wake(
             h.rx.recv_timeout(Duration::from_secs(1))
-                .expect("tool result should arrive");
+                .expect("tool result should arrive"),
+        );
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
@@ -1676,6 +1677,7 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
             HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
                 .handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())
                 .expect("supervised cleanup"),
+            HarnessEvent::ComponentIngressReady => unreachable!("wake expanded"),
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
     }
@@ -1690,9 +1692,10 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
         if started.elapsed() >= Duration::from_secs(3) {
             panic!("timed out waiting for tool turn to empty");
         }
-        let event =
+        let event = h.expand_component_ingress_wake(
             h.rx.recv_timeout(Duration::from_secs(1))
-                .expect("tool result should arrive");
+                .expect("tool result should arrive"),
+        );
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
@@ -1711,6 +1714,7 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
             HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
                 .handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())
                 .expect("supervised cleanup"),
+            HarnessEvent::ComponentIngressReady => unreachable!("wake expanded"),
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
     }

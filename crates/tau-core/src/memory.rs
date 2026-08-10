@@ -34,12 +34,40 @@ impl MemoryInbox {
 #[derive(Debug)]
 pub(crate) struct MemorySink {
     pub(crate) inbox: MemoryInbox,
+    /// Test-adapter frames held while the modeled connection catches up.
+    pending: Vec<RoutedFrame>,
+    /// Whether the test adapter is inside a replay barrier.
+    catch_up_paused: bool,
+}
+
+impl MemorySink {
+    /// Creates an empty in-memory sink for one shared inbox.
+    pub(crate) fn new(inbox: MemoryInbox) -> Self {
+        Self {
+            inbox,
+            pending: Vec::new(),
+            catch_up_paused: false,
+        }
+    }
 }
 
 impl ConnectionSink for MemorySink {
     fn send(&mut self, frame: RoutedFrame) -> Result<(), ConnectionSendError> {
-        self.inbox.frames.borrow_mut().push(frame);
+        if self.catch_up_paused {
+            self.pending.push(frame);
+        } else {
+            self.inbox.frames.borrow_mut().push(frame);
+        }
         Ok(())
+    }
+
+    fn begin_catch_up(&mut self) {
+        self.catch_up_paused = true;
+    }
+
+    fn finish_catch_up(&mut self) {
+        self.catch_up_paused = false;
+        self.inbox.frames.borrow_mut().append(&mut self.pending);
     }
 }
 
@@ -57,9 +85,7 @@ pub fn memory_connection(
             kind,
             origin: ConnectionOrigin::InMemory,
         },
-        Box::new(MemorySink {
-            inbox: inbox.clone(),
-        }),
+        Box::new(MemorySink::new(inbox.clone())),
     );
     (connection, inbox)
 }

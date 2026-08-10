@@ -18,7 +18,6 @@ pub(crate) struct SubscriptionSet {
     historical_selectors: Vec<EventSelector>,
     live_selectors: Vec<EventSelector>,
     catch_up_blocked: bool,
-    pending_live: Vec<RoutedFrame>,
 }
 
 impl SubscriptionSet {
@@ -34,9 +33,6 @@ impl SubscriptionSet {
         // time. Preserve them across blocked subscription replacement so a
         // catch-up resubscribe cannot retroactively drop committed delivery.
         self.catch_up_blocked = was_catch_up_blocked;
-        if !self.catch_up_blocked {
-            self.pending_live.clear();
-        }
     }
 
     pub(crate) fn matches(&self, message: &HarnessOutputMessage) -> bool {
@@ -57,13 +53,8 @@ impl SubscriptionSet {
         self.catch_up_blocked
     }
 
-    fn push_pending_live(&mut self, routed: RoutedFrame) {
-        self.pending_live.push(routed);
-    }
-
-    fn finish_catch_up(&mut self) -> Vec<RoutedFrame> {
+    fn finish_catch_up(&mut self) {
         self.catch_up_blocked = false;
-        std::mem::take(&mut self.pending_live)
     }
 }
 
@@ -144,6 +135,12 @@ impl EventBus {
         Self::default()
     }
 
+    /// Reserves a fresh connection identifier for transport setup that must
+    /// know the final identity before registration.
+    pub fn reserve_connection_id(&mut self) -> ConnectionId {
+        self.allocate_connection_id()
+    }
+
     /// Registers a connection and returns its assigned connection ID.
     pub fn connect(&mut self, connection: Connection) -> ConnectionId {
         let connection_id = connection
@@ -165,15 +162,18 @@ impl EventBus {
             subscriptions: SubscriptionSet::default(),
         };
 
-        self.connections.insert(connection_id.clone(), entry);
+        if let Some(mut replaced) = self.connections.insert(connection_id.clone(), entry) {
+            replaced.sink.retire();
+        }
         connection_id
     }
 
     /// Removes a connection from the bus and returns its metadata if present.
     pub fn disconnect(&mut self, connection_id: &ConnectionId) -> Option<ConnectionMetadata> {
-        self.connections
-            .remove(connection_id)
-            .map(|entry| entry.metadata)
+        self.connections.remove(connection_id).map(|mut entry| {
+            entry.sink.retire();
+            entry.metadata
+        })
     }
 
     /// Returns immutable metadata for one connection.
@@ -202,8 +202,8 @@ impl EventBus {
     /// used for publish-time live routing. If a connection is currently
     /// catch-up blocked and the replacement clears all historical
     /// selectors, the bus treats that as canceling the replay phase and
-    /// immediately releases the catch-up block, flushing any already-routed
-    /// pending live frames.
+    /// immediately releases the shared follower's catch-up barrier. Frames
+    /// already admitted retain their publication-time eligibility.
     pub fn set_subscriptions(
         &mut self,
         connection_id: &ConnectionId,
@@ -253,6 +253,7 @@ impl EventBus {
             }
         })?;
         entry.subscriptions.catch_up_blocked = true;
+        entry.sink.begin_catch_up();
         Ok(())
     }
 
@@ -275,7 +276,7 @@ impl EventBus {
             .map(|entry| entry.subscriptions.live_selectors())
     }
 
-    /// Releases live delivery for one connection and flushes queued frames.
+    /// Releases one connection's shared-follower catch-up barrier.
     pub fn finish_catch_up(
         &mut self,
         connection_id: &ConnectionId,
@@ -285,22 +286,9 @@ impl EventBus {
                 connection_id: connection_id.clone(),
             }
         })?;
-        let pending = entry.subscriptions.finish_catch_up();
-        let mut report = RouteReport::default();
-        for routed in pending {
-            if !entry.visibility_filter.allows(&routed) {
-                report.blocked_by_filter.push(connection_id.clone());
-                continue;
-            }
-            match entry.sink.send(routed) {
-                Ok(()) => report.delivered_to.push(connection_id.clone()),
-                Err(error) => report.failed_deliveries.push(DeliveryFailure {
-                    connection_id: connection_id.clone(),
-                    error,
-                }),
-            }
-        }
-        Ok(report)
+        entry.subscriptions.finish_catch_up();
+        entry.sink.finish_catch_up();
+        Ok(RouteReport::default())
     }
 
     /// Broadcasts one harness output message to subscribed and visible clients.
@@ -329,7 +317,8 @@ impl EventBus {
         let routed = RoutedFrame::new(source_id.cloned(), message);
         let mut report = RouteReport::default();
 
-        for (connection_id, entry) in &mut self.connections {
+        let mut eligible = Vec::new();
+        for (connection_id, entry) in &self.connections {
             if excluded_kinds.contains(&entry.metadata.kind) {
                 report.skipped_by_subscription.push(connection_id.clone());
                 continue;
@@ -338,24 +327,14 @@ impl EventBus {
                 report.skipped_by_subscription.push(connection_id.clone());
                 continue;
             }
-            if entry.subscriptions.is_catch_up_blocked() {
-                entry.subscriptions.push_pending_live(routed.clone());
-                report.delivered_to.push(connection_id.clone());
-                continue;
-            }
             if !entry.visibility_filter.allows(&routed) {
                 report.blocked_by_filter.push(connection_id.clone());
                 continue;
             }
 
-            match entry.sink.send(routed.clone()) {
-                Ok(()) => report.delivered_to.push(connection_id.clone()),
-                Err(error) => report.failed_deliveries.push(DeliveryFailure {
-                    connection_id: connection_id.clone(),
-                    error,
-                }),
-            }
+            eligible.push(connection_id.clone());
         }
+        self.deliver_eligible(routed, eligible, &mut report);
 
         report
     }
@@ -390,6 +369,90 @@ impl EventBus {
         }
 
         Ok(report)
+    }
+
+    /// Delivers one immutable routing decision through shared streams where
+    /// available, falling back to legacy per-connection sinks for tests and
+    /// embedders that have not opted into shared delivery.
+    fn deliver_eligible(
+        &mut self,
+        routed: RoutedFrame,
+        eligible: Vec<ConnectionId>,
+        report: &mut RouteReport,
+    ) {
+        let mut shared: HashMap<
+            crate::SharedDeliveryGroup,
+            Vec<(ConnectionId, crate::SharedDeliveryTarget)>,
+        > = HashMap::new();
+        let mut legacy = Vec::new();
+        for connection_id in eligible {
+            let target = self
+                .connections
+                .get(&connection_id)
+                .and_then(|entry| entry.sink.shared_delivery_target());
+            if let Some(target) = target {
+                shared
+                    .entry(target.group())
+                    .or_default()
+                    .push((connection_id, target));
+            } else {
+                legacy.push(connection_id);
+            }
+        }
+        for members in shared.into_values() {
+            let targets = members
+                .iter()
+                .map(|(_, target)| *target)
+                .collect::<Vec<_>>();
+            let first = members
+                .first()
+                .expect("shared delivery group must contain one member")
+                .0
+                .clone();
+            let result = self
+                .connections
+                .get_mut(&first)
+                .expect("eligible connection must remain registered")
+                .sink
+                .send_shared(routed.clone(), &targets);
+            match result {
+                Ok(admitted) => {
+                    for (connection_id, target) in members {
+                        if admitted.contains(&target) {
+                            report.delivered_to.push(connection_id);
+                        } else {
+                            report.failed_deliveries.push(DeliveryFailure {
+                                connection_id,
+                                error: crate::ConnectionSendError::new(
+                                    "shared consumer generation retired before admission",
+                                ),
+                            });
+                        }
+                    }
+                }
+                Err(error) => report.failed_deliveries.extend(members.into_iter().map(
+                    |(connection_id, _)| DeliveryFailure {
+                        connection_id,
+                        error: error.clone(),
+                    },
+                )),
+            }
+        }
+        for connection_id in legacy {
+            let result = self
+                .connections
+                .get_mut(&connection_id)
+                .expect("eligible connection must remain registered")
+                .sink
+                .send(routed.clone());
+            match result {
+                Ok(()) => report.delivered_to.push(connection_id),
+                Err(error) => report.failed_deliveries.push(DeliveryFailure {
+                    connection_id,
+                    error,
+                }),
+            }
+        }
     }
 
     fn allocate_connection_id(&mut self) -> ConnectionId {

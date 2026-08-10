@@ -84,7 +84,8 @@ use crate::dedup::{
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::{
-    ChannelSink, HarnessCommand, HarnessEvent, SUPERVISED_CLEANUP_GRACE, WriterCommand,
+    ChannelSink, ComponentIngress, ComponentIngressCapacity, ComponentIngressSender,
+    HarnessCommand, HarnessEvent, LiveConsumerHandle, SUPERVISED_CLEANUP_GRACE, SynchronousSink,
     spawn_reader_thread, spawn_writer_thread,
 };
 use crate::event_log::EventLog;
@@ -111,6 +112,11 @@ use crate::harness::extensions::StartupDeadline;
 
 /// Model-visible reminder to report meaningful work through the status tool.
 pub(crate) const STATUS_REMINDER: &str = "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible.";
+
+/// Diagnostic-only lag that indicates a component is pathologically behind.
+const LIVE_EGRESS_LAG_WARNING_POSITIONS: u64 = 10_000;
+/// Minimum interval between diagnostic-only live-egress lag warnings.
+const LIVE_EGRESS_LAG_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 
 use tau_config::secret_sources::SecretSources;
 
@@ -2162,6 +2168,10 @@ pub struct Harness {
     /// Receiver side of the central event channel. The main loop
     /// blocks on this and dispatches one `HarnessEvent` at a time.
     pub(crate) rx: Receiver<HarnessEvent>,
+    /// Producer side of the naturally backpressured component-ingress lane.
+    component_ingress_tx: ComponentIngressSender,
+    /// Harness-owned component-ingress slot, closed before producer joins.
+    component_ingress: ComponentIngress,
     /// Received event held while bounded overdue-deadline catch-up completes.
     pending_runtime_event: Option<HarnessEvent>,
     /// Deterministic post-receive clock cut for runtime scheduler tests.
@@ -2169,7 +2179,7 @@ pub struct Harness {
     runtime_event_receive_cut: Option<Instant>,
     /// Routes protocol events between connections (agent ↔ extensions
     /// ↔ socket clients). Owns connection state and per-connection
-    /// outgoing queues.
+    /// publication-time route metadata.
     pub(crate) bus: EventBus,
     /// Maps tool name → providing connection. Used to resolve
     /// `ToolRequest` into either a broadcast `ToolStarted`
@@ -2328,10 +2338,9 @@ pub struct Harness {
     creator_topology: AgentCreatorTopology,
     /// Runtime-only self and creator-subtree estimated-cost totals.
     cost_ledger: AgentCostLedger,
-    /// Writer channels for socket clients, keyed by connection ID.
-    /// Used to start follower threads for log-based replay + delivery.
+    /// Live-log consumer handles for socket clients, keyed by connection ID.
     pub(crate) client_writers:
-        std::collections::HashMap<tau_proto::ConnectionId, Sender<WriterCommand>>,
+        std::collections::HashMap<tau_proto::ConnectionId, LiveConsumerHandle>,
     /// Socket clients that completed the narrow external-message RPC hello.
     external_message_peers: HashSet<tau_proto::ConnectionId>,
     /// Pending outbound external messages keyed by logical message id.
@@ -2447,6 +2456,9 @@ pub struct Harness {
     /// Remaining long-wait materialization budget inside the active scheduler
     /// call, or `None` outside deadline processing.
     long_wait_materialization_budget: Option<usize>,
+    /// Last diagnostic-only warning about a pathologically lagging live
+    /// follower.
+    last_live_egress_lag_warning: Option<Instant>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Global harness state. Currently only tracks per-session init
@@ -2992,6 +3004,10 @@ struct HarnessBaseParts {
     tx: Sender<HarnessEvent>,
     /// Receiver side of the harness event channel.
     rx: Receiver<HarnessEvent>,
+    /// Producer side of the bounded component-ingress lane.
+    component_ingress_tx: ComponentIngressSender,
+    /// Harness-owned bounded component-ingress receiver.
+    component_ingress: ComponentIngress,
     /// Event bus for live connections and subscriptions.
     bus: EventBus,
     /// Runtime state directory for this harness.
@@ -3222,6 +3238,8 @@ impl Harness {
         Self {
             tx: parts.tx,
             rx: parts.rx,
+            component_ingress_tx: parts.component_ingress_tx,
+            component_ingress: parts.component_ingress,
             pending_runtime_event: None,
             #[cfg(test)]
             runtime_event_receive_cut: None,
@@ -3311,6 +3329,7 @@ impl Harness {
             agent_watch_provider_deliveries: HashMap::new(),
             pending_long_wait_notifications: VecDeque::new(),
             long_wait_materialization_budget: None,
+            last_live_egress_lag_warning: None,
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -3462,6 +3481,8 @@ impl Harness {
         };
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
         let (tx, rx) = mpsc::channel();
+        let (component_ingress, component_ingress_tx) =
+            ComponentIngress::new(tx.clone(), ComponentIngressCapacity::One);
         let bus = EventBus::new();
         // Lazy: only the eager session's tree is needed up front
         // (loaded below via `store.load_session`); other sessions
@@ -3484,8 +3505,13 @@ impl Harness {
 
         let mut extension_connects = Vec::new();
         // Provider
-        let provider_spawn =
-            spawn_in_process("provider", ClientKind::Provider, provider_runner, &tx)?;
+        let provider_spawn = spawn_in_process(
+            "provider",
+            ClientKind::Provider,
+            provider_runner,
+            &tx,
+            &component_ingress_tx,
+        )?;
         let provider_conn_id = provider_spawn.connection_id.clone();
         extension_connects.push(ExtensionConnectCommand {
             entry: ExtensionEntry {
@@ -3521,6 +3547,7 @@ impl Harness {
                 ClientKind::Tool,
                 move |reader, writer| (tool.runner)(reader, writer, project_root),
                 &tx,
+                &component_ingress_tx,
             )?;
             let conn_id = tool_spawn.connection_id.clone();
             extension_connects.push(ExtensionConnectCommand {
@@ -3611,6 +3638,8 @@ impl Harness {
         let mut harness = Self::from_base_parts(HarnessBaseParts {
             tx,
             rx,
+            component_ingress_tx,
+            component_ingress,
             bus,
             state_dir: state_dir.clone(),
             ignore_startup_environment: true,
@@ -4088,6 +4117,8 @@ impl Harness {
             let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
         }
         let (tx, rx) = mpsc::channel();
+        let (component_ingress, component_ingress_tx) =
+            ComponentIngress::new(tx.clone(), ComponentIngressCapacity::One);
         let bus = EventBus::new();
         let custom_prompts = parts
             .harness_settings
@@ -4101,6 +4132,8 @@ impl Harness {
         Ok(Self::from_base_parts(HarnessBaseParts {
             tx,
             rx,
+            component_ingress_tx,
+            component_ingress,
             bus,
             state_dir: parts.state_dir,
             ignore_startup_environment: parts.ignore_startup_environment,
@@ -4234,6 +4267,7 @@ impl Harness {
                 kind.clone(),
                 log_path,
                 &self.tx,
+                &self.component_ingress_tx,
                 &self.state_dir,
                 self.storage_mode.is_memory_only(),
                 self.provider_settings_snapshots
@@ -4347,6 +4381,9 @@ impl Harness {
                         Instant::now(),
                     )?;
                 }
+                HarnessEvent::ComponentIngressReady => {
+                    unreachable!("component ingress wakes expand before dispatch")
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
         }
@@ -4357,6 +4394,17 @@ impl Harness {
         started_at: Instant,
     ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
         self.recv_event_until(started_at + STARTUP_TIMEOUT)
+    }
+
+    /// Replaces a non-payload ingress wake with its bounded component payload.
+    fn expand_component_ingress_wake(&self, event: HarnessEvent) -> HarnessEvent {
+        if matches!(event, HarnessEvent::ComponentIngressReady) {
+            self.component_ingress
+                .take_ready()
+                .expect("component ingress wake must own one payload")
+        } else {
+            event
+        }
     }
 
     /// Receive one harness event without crossing `deadline`, while continuing
@@ -4380,7 +4428,7 @@ impl Harness {
                 })
                 .unwrap_or(remaining);
             match self.rx.recv_timeout(wait) {
-                Ok(event) => return Ok(event),
+                Ok(event) => return Ok(self.expand_component_ingress_wake(event)),
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if Instant::now() < deadline && self.next_runtime_deadline().is_some() =>
                 {
@@ -4743,6 +4791,13 @@ impl Harness {
         let name = entry.name.clone();
         let kind = entry.kind.clone();
 
+        let sink = ChannelSink::new(
+            &writer_tx,
+            path_std_sync::Arc::clone(&self.event_log),
+            self.tx.clone(),
+            connection_id.clone(),
+        )
+        .map_err(|error| HarnessError::Io(io::Error::other(error)))?;
         let connected_id = self.bus.connect(Connection::new(
             PendingConnectionMetadata {
                 id: Some(connection_id.clone()),
@@ -4750,7 +4805,7 @@ impl Harness {
                 kind,
                 origin,
             },
-            Box::new(ChannelSink { tx: writer_tx }),
+            Box::new(sink),
         ));
         debug_assert_eq!(connected_id, connection_id);
 
@@ -9075,6 +9130,9 @@ impl Harness {
                         Instant::now(),
                     )?;
                 }
+                HarnessEvent::ComponentIngressReady => {
+                    unreachable!("component ingress wakes expand before dispatch")
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
             if STARTUP_TIMEOUT <= started_at.elapsed() {
@@ -9132,7 +9190,7 @@ impl Harness {
                 .unwrap_or_else(|| Instant::now() + STARTUP_TIMEOUT);
             let harness_evt = if deadline <= Instant::now() {
                 match self.rx.try_recv() {
-                    Ok(event) => event,
+                    Ok(event) => self.expand_component_ingress_wake(event),
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
                         return self.handle_extensions_startup_timeout();
                     }
@@ -9180,6 +9238,9 @@ impl Harness {
                         &connection_id,
                         Instant::now(),
                     )?;
+                }
+                HarnessEvent::ComponentIngressReady => {
+                    unreachable!("component ingress wakes expand before dispatch")
                 }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
@@ -9423,7 +9484,7 @@ impl Harness {
         }
         if self.has_pending_long_wait_notifications() {
             return match self.rx.try_recv() {
-                Ok(event) => RuntimeEventWait::Event(event),
+                Ok(event) => RuntimeEventWait::Event(self.expand_component_ingress_wake(event)),
                 Err(mpsc::TryRecvError::Empty) => RuntimeEventWait::DeadlineElapsed,
                 Err(mpsc::TryRecvError::Disconnected) => RuntimeEventWait::Disconnected,
             };
@@ -9432,6 +9493,7 @@ impl Harness {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(timeout) {
                 Ok(event) => {
+                    let event = self.expand_component_ingress_wake(event);
                     self.pending_runtime_event = Some(event);
                     #[cfg(test)]
                     let now = self
@@ -9463,7 +9525,7 @@ impl Harness {
         } else {
             self.rx
                 .recv()
-                .map(RuntimeEventWait::Event)
+                .map(|event| RuntimeEventWait::Event(self.expand_component_ingress_wake(event)))
                 .unwrap_or(RuntimeEventWait::Disconnected)
         }
     }
@@ -9473,6 +9535,17 @@ impl Harness {
     }
 
     fn process_runtime_deadlines_at(&mut self, now: Instant) {
+        let max_live_lag = self.event_log.max_consumer_lag();
+        if LIVE_EGRESS_LAG_WARNING_POSITIONS <= max_live_lag
+            && self.last_live_egress_lag_warning.is_none_or(|last| {
+                LIVE_EGRESS_LAG_WARNING_INTERVAL <= now.saturating_duration_since(last)
+            })
+        {
+            self.last_live_egress_lag_warning = Some(now);
+            self.emit_info_important(&format!(
+                "a connected component is pathologically behind the live event stream ({max_live_lag} pending positions); delivery remains active and retention may grow"
+            ));
+        }
         debug_assert!(self.long_wait_materialization_budget.is_none());
         self.long_wait_materialization_budget =
             Some(subagents_tool::MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE);
@@ -9684,6 +9757,9 @@ impl Harness {
             HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => {
                 self.handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())?;
             }
+            HarnessEvent::ComponentIngressReady => {
+                unreachable!("component ingress wakes expand before dispatch")
+            }
             HarnessEvent::Command(command) => self.handle_harness_command(command)?,
         }
         self.take_pending_publish_error()
@@ -9799,20 +9875,28 @@ impl Harness {
         W: io::Write + Send + 'static,
     {
         let writer_tx = spawn_writer_thread(write, None);
-        let writer_tx_for_follower = writer_tx.clone();
-        let conn_id = self.bus.connect(Connection::new(
+        let conn_id = self.bus.reserve_connection_id();
+        let sink = ChannelSink::new(
+            &writer_tx,
+            path_std_sync::Arc::clone(&self.event_log),
+            self.tx.clone(),
+            conn_id.clone(),
+        )
+        .map_err(|error| HarnessError::Io(io::Error::other(error)))?;
+        let consumer = sink.handle();
+        let connected_id = self.bus.connect(Connection::new(
             PendingConnectionMetadata {
-                id: None,
+                id: Some(conn_id.clone()),
                 name: tau_proto::ExtensionName::parse("socket-ui")
                     .expect("socket UI name must satisfy the extension identifier grammar"),
                 kind: ClientKind::Ui,
                 origin,
             },
-            Box::new(ChannelSink { tx: writer_tx }),
+            Box::new(sink),
         ));
-        self.client_writers
-            .insert(conn_id.clone(), writer_tx_for_follower);
-        spawn_reader_thread(conn_id.clone(), read, self.tx.clone());
+        debug_assert_eq!(connected_id, conn_id);
+        self.client_writers.insert(conn_id.clone(), consumer);
+        spawn_reader_thread(conn_id.clone(), read, self.component_ingress_tx.clone());
         Ok(conn_id)
     }
 
@@ -9839,13 +9923,10 @@ impl Harness {
     ///
     /// An absent or already-closed writer has no remaining queue to drain.
     fn drain_client_writer(&self, client_id: &ConnectionId) {
-        let Some(writer) = self.client_writers.get(client_id) else {
+        let Some(consumer) = self.client_writers.get(client_id) else {
             return;
         };
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if writer.send(WriterCommand::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv();
-        }
+        consumer.flush();
     }
 
     // -----------------------------------------------------------------------
@@ -17975,6 +18056,7 @@ impl Harness {
             kind.clone(),
             log_path,
             &self.tx,
+            &self.component_ingress_tx,
             &self.state_dir,
             self.storage_mode.is_memory_only(),
             self.provider_settings_snapshots
@@ -29570,6 +29652,21 @@ fn duplicate_model_visible_tool_name(specs: &[tau_proto::ToolSpec]) -> Option<To
     })
 }
 
+/// Payload-free summary accumulated synchronously for one embedded interaction.
+#[derive(Default)]
+struct EmbeddedInteractionObservation {
+    /// Formatted progress emitted so far.
+    progress_messages: Vec<String>,
+    /// Provider tool calls observed in response output.
+    tool_calls: Vec<ToolCallItem>,
+    /// Byte-free tool results observed so far.
+    tool_results: Vec<ToolResult>,
+    /// Final assistant text when the user-originated turn closes.
+    final_text: Option<String>,
+    /// Whether the interaction reached its final user-originated response.
+    is_final: bool,
+}
+
 impl Harness {
     // -----------------------------------------------------------------------
     // Test helpers
@@ -29597,7 +29694,9 @@ impl Harness {
 
         let committed_observer_id = tau_proto::ConnectionId::parse("__embedded_committed_observer")
             .expect("embedded observer id must satisfy the connection identifier grammar");
-        let (observer_tx, observer_rx) = mpsc::channel();
+        let observations =
+            path_std_sync::Arc::new(Mutex::new(EmbeddedInteractionObservation::default()));
+        let sink_observations = path_std_sync::Arc::clone(&observations);
         self.bus.connect(Connection::new(
             PendingConnectionMetadata {
                 id: Some(committed_observer_id.clone()),
@@ -29606,7 +29705,34 @@ impl Harness {
                 kind: ClientKind::Core,
                 origin: ConnectionOrigin::InMemory,
             },
-            Box::new(ChannelSink { tx: observer_tx }),
+            Box::new(SynchronousSink::new(move |routed| {
+                let HarnessOutputMessage::Deliver(delivery) = routed.frame else {
+                    return;
+                };
+                let mut observations = sink_observations
+                    .lock()
+                    .expect("embedded observation mutex poisoned");
+                match delivery.event() {
+                    Event::ToolProgress(progress) => observations
+                        .progress_messages
+                        .push(format_tool_progress(progress)),
+                    Event::ProviderToolResult(result) => observations
+                        .tool_results
+                        .push(byte_free_embedded_tool_result(result)),
+                    Event::ProviderResponseFinished(response) => {
+                        record_embedded_tool_calls(
+                            &response.output_items,
+                            &mut observations.tool_calls,
+                        );
+                        observations.is_final =
+                            tool_calls_from_output_items(&response.output_items).is_empty()
+                                && response.originator.is_user();
+                        observations.final_text =
+                            assistant_text_from_output_items(&response.output_items);
+                    }
+                    _ => {}
+                }
+            })),
         ));
         if let Err(error) = self.bus.set_subscriptions(
             &committed_observer_id,
@@ -29621,45 +29747,24 @@ impl Harness {
             return Err(HarnessError::Route(error));
         }
         let started_at = Instant::now();
-        let mut progress_messages = Vec::new();
-        let mut tool_calls = Vec::new();
-        let mut tool_results = Vec::new();
         let result = 'interaction: loop {
             self.process_runtime_deadlines();
             if let Err(error) = self.take_pending_publish_error() {
                 break 'interaction Err(error);
             }
-            let mut final_text = None;
-            let mut is_final = false;
-            while let Ok(WriterCommand::Message(message)) = observer_rx.try_recv() {
-                if let HarnessOutputMessage::Deliver(delivery) = message {
-                    match delivery.event() {
-                        Event::ToolProgress(progress) => {
-                            progress_messages.push(format_tool_progress(progress));
-                        }
-                        Event::ProviderToolResult(result) => {
-                            tool_results.push(byte_free_embedded_tool_result(result));
-                        }
-                        Event::ProviderResponseFinished(response) => {
-                            record_embedded_tool_calls(&response.output_items, &mut tool_calls);
-                            is_final = tool_calls_from_output_items(&response.output_items)
-                                .is_empty()
-                                && response.originator.is_user();
-                            final_text = assistant_text_from_output_items(&response.output_items);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if is_final {
+            let mut observation = observations
+                .lock()
+                .expect("embedded observation mutex poisoned");
+            if observation.is_final {
                 break 'interaction Ok(InteractionOutcome {
                     lifecycle_messages: Vec::new(),
-                    progress_messages,
-                    tool_calls,
-                    tool_results,
-                    response: final_text.unwrap_or_default(),
+                    progress_messages: std::mem::take(&mut observation.progress_messages),
+                    tool_calls: std::mem::take(&mut observation.tool_calls),
+                    tool_results: std::mem::take(&mut observation.tool_results),
+                    response: observation.final_text.take().unwrap_or_default(),
                 });
             }
+            drop(observation);
             let remaining = RESPONSE_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
@@ -29672,7 +29777,7 @@ impl Harness {
                 })
                 .unwrap_or(remaining);
             let harness_evt = match self.rx.recv_timeout(wait) {
-                Ok(event) => event,
+                Ok(event) => self.expand_component_ingress_wake(event),
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if started_at.elapsed() < RESPONSE_TIMEOUT
                         && self.next_runtime_deadline().is_some() =>
@@ -29731,6 +29836,9 @@ impl Harness {
                     ) {
                         break 'interaction Err(error);
                     }
+                }
+                HarnessEvent::ComponentIngressReady => {
+                    unreachable!("component ingress wakes expand before dispatch")
                 }
                 HarnessEvent::Command(command) => {
                     if let Err(error) = self.handle_harness_command(command) {
@@ -29874,6 +29982,7 @@ impl Harness {
             .iter()
             .filter_map(|id| self.bus.disconnect(id).map(|_| id.clone()))
             .collect::<HashSet<_>>();
+        self.component_ingress.close();
 
         let order = self.extensions.order.clone();
         let mut watchdogs = Vec::new();
@@ -29920,6 +30029,7 @@ impl Harness {
             if let Some(handle) = entry.in_process_thread.take() {
                 match handle.join() {
                     Ok(Ok(())) => {}
+                    Ok(Err(error)) if shutdown_transport_closed(&error) => {}
                     Ok(Err(error)) if first_error.is_none() => {
                         first_error = Some(HarnessError::Participant(error));
                     }
@@ -29944,6 +30054,14 @@ impl Harness {
             .find(|e| e.name == name)
             .map(|e| &e.connection_id)
     }
+}
+
+/// Returns whether component-ingress closure caused an expected peer transport
+/// error while shutdown was already retiring every route.
+fn shutdown_transport_closed(error: &str) -> bool {
+    error.contains("Broken pipe")
+        || error.contains("writer thread is closed")
+        || error.contains("connection closed")
 }
 
 /// Record exact provider-requested calls for an isolated embedded interaction.

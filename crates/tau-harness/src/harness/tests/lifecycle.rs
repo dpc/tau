@@ -517,6 +517,7 @@ fn connect_supervised_test_process(
         kind.clone(),
         None,
         &h.tx,
+        &h.component_ingress_tx,
         &h.state_dir,
         h.storage_mode.is_memory_only(),
         &Default::default(),
@@ -576,9 +577,10 @@ fn drive_crashed_extension_cleanup(
             return connection_id.clone();
         }
 
-        let event =
+        let event = h.expand_component_ingress_wake(
             h.rx.recv_timeout(Duration::from_secs(1))
-                .expect("extension lifecycle event");
+                .expect("extension lifecycle event"),
+        );
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
@@ -594,6 +596,7 @@ fn drive_crashed_extension_cleanup(
             HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
                 .handle_supervised_writer_cleanup_complete_at(&connection_id, now)
                 .expect("supervised writer cleanup"),
+            HarnessEvent::ComponentIngressReady => unreachable!("wake expanded"),
             HarnessEvent::Command(command) => {
                 h.handle_harness_command(command).expect("harness command");
             }
@@ -3584,6 +3587,7 @@ fn required_pending_external_extension_deadline_survives_event_churn() {
         tau_proto::ClientKind::Tool,
         dormant_extension,
         &h.tx,
+        &h.component_ingress_tx,
     )
     .expect("spawn queued extension");
     let connection_id = spawned.connection_id.clone();
@@ -3685,6 +3689,7 @@ fn expired_optional_pending_extension_is_disabled_without_blocking_later_ready()
         tau_proto::ClientKind::Tool,
         None,
         &h.tx,
+        &h.component_ingress_tx,
         &h.state_dir,
         h.storage_mode.is_memory_only(),
         &Default::default(),
@@ -7291,9 +7296,10 @@ fn disconnected_tool_is_removed_cleanly() {
     // Drive event loop until the disconnect arrives.
     let started = Instant::now();
     loop {
-        let event =
+        let event = h.expand_component_ingress_wake(
             h.rx.recv_timeout(Duration::from_secs(2))
-                .expect("should get disconnect");
+                .expect("should get disconnect"),
+        );
         match event {
             HarnessEvent::Disconnected {
                 ref connection_id, ..
@@ -7433,6 +7439,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         tau_proto::ClientKind::Tool,
         eager_hello_extension,
         &h.tx,
+        &h.component_ingress_tx,
     )
     .expect("spawn late tool");
     let conn_id = spawned.connection_id.clone();
@@ -7465,16 +7472,18 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     assert!(h.bus.connection(&conn_id).is_none());
     assert!(!h.extensions.entries.contains_key(&conn_id));
 
-    let event =
+    let event = h.expand_component_ingress_wake(
         h.rx.recv_timeout(Duration::from_secs(1))
-            .expect("connect command should be first");
+            .expect("connect command should be first"),
+    );
     match event {
         HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         HarnessEvent::FromConnection { .. }
         | HarnessEvent::Disconnected { .. }
         | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_)
-        | HarnessEvent::SupervisedWriterCleanupComplete { .. } => {
+        | HarnessEvent::SupervisedWriterCleanupComplete { .. }
+        | HarnessEvent::ComponentIngressReady => {
             panic!("reader forwarded before connect command")
         }
     }
@@ -7487,9 +7496,10 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             .any(|m| m == "extension late-tool starting")
     );
 
-    let event =
+    let event = h.expand_component_ingress_wake(
         h.rx.recv_timeout(Duration::from_secs(1))
-            .expect("reader should forward after connect ack");
+            .expect("reader should forward after connect ack"),
+    );
     match event {
         HarnessEvent::FromConnection {
             connection_id,
@@ -7503,7 +7513,8 @@ fn extension_connect_command_installs_state_before_reader_ack() {
         | HarnessEvent::Disconnected { .. }
         | HarnessEvent::ReadFailed { .. }
         | HarnessEvent::NewClient(_)
-        | HarnessEvent::SupervisedWriterCleanupComplete { .. } => {
+        | HarnessEvent::SupervisedWriterCleanupComplete { .. }
+        | HarnessEvent::ComponentIngressReady => {
             panic!("unexpected harness event after connect ack")
         }
     }
@@ -8702,11 +8713,10 @@ fn nonreading_child_is_reaped_before_delayed_replacement() {
     let cleanup_at = disconnected_at + SUPERVISED_CLEANUP_GRACE;
     h.process_runtime_deadlines_at(cleanup_at);
     loop {
-        match h
-            .rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("cleanup-complete event")
-        {
+        let event =
+            h.rx.recv_timeout(Duration::from_secs(2))
+                .expect("cleanup-complete event");
+        match h.expand_component_ingress_wake(event) {
             HarnessEvent::SupervisedWriterCleanupComplete {
                 connection_id: completed,
             } if completed == connection_id => {
@@ -8714,7 +8724,7 @@ fn nonreading_child_is_reaped_before_delayed_replacement() {
                     .expect("join cleaned writer");
                 break;
             }
-            HarnessEvent::Disconnected { .. } => {}
+            HarnessEvent::Disconnected { .. } | HarnessEvent::ReadFailed { .. } => {}
             _ => panic!("unexpected event while waiting for cleanup completion"),
         }
     }
@@ -8777,24 +8787,10 @@ fn shutdown_reaps_nonreading_supervised_children_and_joins_writers() {
         assert!(!process_is_signalable(*child_pid));
     }
     assert!(h.extensions.supervised_writers.is_empty());
-    let expected = children
-        .into_iter()
-        .map(|(connection_id, _)| connection_id)
-        .collect::<HashSet<_>>();
-    let mut readers_finished = HashSet::new();
-    let reader_deadline = Instant::now() + Duration::from_secs(2);
-    while readers_finished.len() < expected.len() && Instant::now() < reader_deadline {
-        let remaining = reader_deadline.saturating_duration_since(Instant::now());
-        let Ok(event) = h.rx.recv_timeout(remaining) else {
-            break;
-        };
-        if let HarnessEvent::Disconnected { connection_id } = event
-            && expected.contains(&connection_id)
-        {
-            readers_finished.insert(connection_id);
-        }
-    }
-    assert_eq!(readers_finished, expected);
+    // Shutdown closes component ingress before joins. Reader lifecycle sends
+    // therefore complete without requiring the stopped event loop to drain
+    // one `Disconnected` payload per child.
+    drop(children);
 }
 
 #[test]
@@ -9035,7 +9031,11 @@ fn rejected_startup_handshake_flushes_disconnect_before_teardown() {
     );
     assert!(h.bus.connection(&client_id).is_none());
     assert!(!h.client_writers.contains_key(&client_id));
-    assert_eq!(completed_flushes.load(Ordering::Acquire), 2);
+    assert_eq!(
+        completed_flushes.load(Ordering::Acquire),
+        1,
+        "the cursor barrier observes the frame's mandatory delivery flush"
+    );
     let output = committed.lock().expect("committed output").clone();
     let mut reader = HarnessOutputReader::new(BufReader::new(output.as_slice()));
     let message = reader
@@ -9095,7 +9095,11 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
     assert!(exit_on_disconnect);
     assert!(h.bus.connection(&client_id).is_none());
     assert!(!h.client_writers.contains_key(&client_id));
-    assert_eq!(completed_flushes.load(Ordering::Acquire), 2);
+    assert_eq!(
+        completed_flushes.load(Ordering::Acquire),
+        1,
+        "the cursor barrier observes the frame's mandatory delivery flush"
+    );
     let output = committed.lock().expect("committed output").clone();
     let mut reader = HarnessOutputReader::new(BufReader::new(output.as_slice()));
     let message = reader
