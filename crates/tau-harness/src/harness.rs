@@ -158,11 +158,13 @@ use crate::provider_cache_residency::{
 use crate::secrets::{
     ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets_excluding,
 };
+use crate::session_init_deadline::{SessionInitDeadline, SessionInitProgressGeneration};
 use crate::settings::{
     Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind,
     load_harness_settings_or_warn, load_harness_settings_without_environment_or_warn,
 };
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
+use crate::turn::{PromptSubmission, TurnState};
 
 /// Returns the call identity carried by a canonical final tool terminal.
 fn canonical_tool_terminal_call_id(event: &Event) -> Option<&ToolCallId> {
@@ -219,8 +221,6 @@ struct PendingRenderedPreview {
     /// Absolute deadline for completing the context-ready lifecycle.
     deadline: Instant,
 }
-
-use crate::turn::{PromptSubmission, TurnState};
 
 /// Maximum wait for configured extensions to finish one preview agent context.
 const RENDERED_PREVIEW_CONTEXT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -2468,6 +2468,8 @@ pub struct Harness {
     /// in-flight prompts simultaneously and the agent extension
     /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) turn_state: TurnState,
+    /// Accepted current-generation progress from outstanding session providers.
+    session_init_progress_generation: SessionInitProgressGeneration,
     /// Producer for the append-only best-effort event debug log.
     pub(crate) debug_log: Option<DebugEventLog>,
     /// Whether the synchronous fault-injection writer observed uncertain
@@ -3333,6 +3335,7 @@ impl Harness {
             last_live_egress_lag_warning: None,
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
+            session_init_progress_generation: SessionInitProgressGeneration::default(),
             debug_log: None,
             debug_log_poisoned: false,
             interceptors: InterceptorRegistry::default(),
@@ -3709,8 +3712,8 @@ impl Harness {
         //    instead of bundling that feedback into the first agent response.
         //
         // 3. **Fail loudly at startup, not mid-first-turn.** If a provider hangs or the
-        //    discovery logic panics, the process hits `StartupTimeout` here rather than
-        //    appearing to accept the first prompt and then silently stalling.
+        //    discovery logic panics, the process hits `SessionInitTimeout` here rather
+        //    than appearing to accept the first prompt and then silently stalling.
         //
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
@@ -9111,18 +9114,38 @@ impl Harness {
     // -----------------------------------------------------------------------
 
     /// Drives the event loop until the in-flight session initialization
-    /// completes (turn state returns to `Idle`). Called at harness
-    /// startup after the eager `start_session_init` for the default
-    /// session — see that call site for the design rationale.
+    /// completes (turn state returns to `Idle`).
+    ///
+    /// The provider wait has a two-second idle deadline, renewed only by
+    /// accepted discovery or readiness from a current outstanding provider,
+    /// and a non-renewable thirty-second cap. Final readiness completes
+    /// synchronous harness finalization before deadline classification, so
+    /// success cannot become [`HarnessError::SessionInitTimeout`]
+    /// retroactively. See
+    /// `SPEC-session-discovery-declarations-and-readiness`.
     fn wait_for_session_init(&mut self) -> Result<(), HarnessError> {
         if self.turn_state.is_idle() {
             return Ok(());
         }
-        let started_at = Instant::now();
+        let deadline =
+            SessionInitDeadline::new(Instant::now(), self.session_init_progress_generation);
+        self.wait_for_session_init_with_deadline(deadline)
+    }
+
+    /// Drives the production session-init waiter with an explicit deadline.
+    ///
+    /// Tests inject already-expired boundaries without sleeping; production
+    /// uses [`SessionInitDeadline::new`] through
+    /// [`Self::wait_for_session_init`].
+    fn wait_for_session_init_with_deadline(
+        &mut self,
+        mut deadline: SessionInitDeadline,
+    ) -> Result<(), HarnessError> {
         while !self.turn_state.is_idle() {
             let harness_evt = self
-                .recv_startup_event(started_at)
-                .map_err(|_| HarnessError::StartupTimeout)?;
+                .recv_session_init_event_until(deadline.next_deadline())
+                .map_err(|_| HarnessError::SessionInitTimeout)?;
+            let received_at = Instant::now();
             self.log_event(&harness_evt);
             match harness_evt {
                 HarnessEvent::FromConnection {
@@ -9157,11 +9180,35 @@ impl Harness {
                 }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
-            if STARTUP_TIMEOUT <= started_at.elapsed() {
-                return Err(HarnessError::StartupTimeout);
+            let providers_outstanding = !self.turn_state.is_idle();
+            if !providers_outstanding {
+                return Ok(());
+            }
+            deadline.observe_progress(received_at, self.session_init_progress_generation);
+            if deadline.expired(Instant::now()) {
+                return Err(HarnessError::SessionInitTimeout);
             }
         }
         Ok(())
+    }
+
+    /// Receives queued provider readiness before classifying a reached
+    /// deadline.
+    ///
+    /// Runtime deadlines run first. The subsequent non-blocking cut gives a
+    /// final waiter already admitted to the central FIFO precedence at the
+    /// exact session deadline. When the FIFO is empty, ordinary
+    /// deadline-aware receive behavior remains unchanged.
+    fn recv_session_init_event_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
+        self.process_runtime_deadlines();
+        match self.rx.try_recv() {
+            Ok(event) => Ok(self.expand_component_ingress_wake(event)),
+            Err(mpsc::TryRecvError::Empty) => self.recv_event_until(deadline),
+            Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::RecvTimeoutError::Disconnected),
+        }
     }
 
     fn ensure_selected_role_available_after_required_skill_validation(
@@ -11127,6 +11174,7 @@ impl Harness {
             agents_files,
         );
         self.publish_session_skills_projection();
+        self.record_session_init_provider_progress(source_id);
     }
 
     fn apply_agent_discovery_snapshot(
@@ -22498,6 +22546,9 @@ impl Harness {
                 waiting_on,
             } => {
                 let removed = waiting_on.remove(&source_id);
+                if removed {
+                    self.session_init_progress_generation.advance();
+                }
                 if removed && waiting_on.is_empty() {
                     Some((session_id.clone(), *reason))
                 } else {
@@ -22510,6 +22561,18 @@ impl Harness {
             self.complete_session_init(session_id, reason)?;
         }
         Ok(())
+    }
+
+    /// Records accepted discovery from a provider still outstanding in the
+    /// current session-initialization generation.
+    fn record_session_init_provider_progress(&mut self, source_id: &tau_proto::ConnectionId) {
+        let is_outstanding = matches!(
+            &self.turn_state,
+            TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(source_id)
+        );
+        if is_outstanding {
+            self.session_init_progress_generation.advance();
+        }
     }
 
     fn maybe_complete_session_init_for_disconnect(

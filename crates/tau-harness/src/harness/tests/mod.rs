@@ -1840,6 +1840,7 @@ mod provider_execution_reports;
 mod quota;
 mod replay;
 mod retry;
+mod session_init;
 mod strict_compaction_provider;
 
 use strict_compaction_provider::{

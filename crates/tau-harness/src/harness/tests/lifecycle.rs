@@ -866,7 +866,12 @@ fn connect_handshaking_extension(
     sink
 }
 
-fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+/// Installs a configured Tool connection in the handshaking state and returns
+/// its routed-frame sink for tests that exercise pre-Ready activation.
+pub(super) fn connect_handshaking_tool(
+    h: &mut Harness,
+    conn_id: &str,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
     connect_handshaking_extension(h, conn_id, tau_proto::ClientKind::Tool)
 }
 

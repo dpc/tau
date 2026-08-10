@@ -44,6 +44,18 @@ selectors match `session.started`. Only matching
 snapshot declarations settle before readiness through the ordinary FIFO
 interception boundary.
 
+The harness bounds session initialization with a two-second idle deadline and a
+non-renewable thirty-second absolute deadline while registered providers remain
+outstanding. Only an accepted current-session, current-connection-generation
+snapshot or readiness event from an outstanding provider renews the idle
+deadline; activation-staged snapshots renew only after current admission and
+snapshot validation. Generic events, stale or wrong-session declarations, and
+traffic from providers no longer outstanding do not renew it. Final waiter
+removal takes precedence over deadline classification, and synchronous
+harness-owned finalization after that readiness cannot retroactively fail with a
+provider timeout. Expiry reports `SessionInitTimeout`, distinct from extension
+process `StartupTimeout`.
+
 Each live agent load carries a fresh mandatory `agent_initialization_id`. Its
 pending discovery state is seeded from the completed session baseline. Providers
 selected by `session.agent_loaded` may atomically replace their source in that

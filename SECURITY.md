@@ -29,6 +29,21 @@ For technical trust boundaries, start with [ARCH-external-message-boundary](spec
 
 ### Accepted configured-component availability risks
 
+Registered session-context providers may delay session initialization, but only
+within a two-second accepted-progress idle window and a non-renewable
+thirty-second absolute cap. Only accepted current-session/current-generation
+discovery or readiness from an outstanding provider renews the idle window;
+generic, stale, wrong-session, and non-outstanding traffic cannot. Final waiter
+removal and harness-owned synchronous finalization take precedence over timeout
+classification, while genuine expiry returns `SessionInitTimeout` rather than
+process `StartupTimeout`. Deterministic deadline and classification boundaries
+are covered in `crates/tau-harness/src/session_init_deadline/tests.rs` and
+`crates/tau-harness/src/error/tests.rs`; lifecycle tests cover admission and
+finalization wiring. Revisit these safeguards when changing waiter identity,
+admission filtering, event ordering, finalization, or timeout classification.
+The governing contract is
+[SPEC-session-discovery-declarations-and-readiness](specs/SPEC-session-discovery-declarations-and-readiness.md).
+
 A configured extension's process-local client writer retains detached outbound
 frames in one FIFO capped at 64 frames and 8 MiB of aggregate encoded data, with
 an independent 8-MiB limit per frame. This is an availability safeguard inside

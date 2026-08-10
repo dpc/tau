@@ -46,6 +46,7 @@ mod provider_cache_residency;
 mod provider_capture_writer;
 mod secrets;
 mod session_cleanup;
+mod session_init_deadline;
 mod settings;
 mod tool_turn;
 mod turn;

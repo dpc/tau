@@ -95,6 +95,8 @@ pub enum HarnessError {
     Route(RouteError),
     ToolRoute(ToolRouteError),
     StartupTimeout,
+    /// Registered context providers did not finish session initialization.
+    SessionInitTimeout,
     ResponseTimeout,
     ThreadJoin(String),
     Participant(String),
@@ -113,6 +115,9 @@ impl fmt::Display for HarnessError {
             Self::Route(source) => write!(f, "routing error: {source}"),
             Self::ToolRoute(source) => write!(f, "tool routing error: {source}"),
             Self::StartupTimeout => f.write_str("timed out waiting for extensions to start"),
+            Self::SessionInitTimeout => {
+                f.write_str("timed out waiting for session context providers to initialize")
+            }
             Self::ResponseTimeout => f.write_str("timed out waiting for agent response"),
             Self::ThreadJoin(name) => write!(f, "failed to join {name} thread cleanly"),
             Self::Participant(message) => write!(f, "participant error: {message}"),
@@ -172,3 +177,6 @@ impl From<ToolRouteError> for HarnessError {
         Self::ToolRoute(source)
     }
 }
+
+#[cfg(test)]
+mod tests;

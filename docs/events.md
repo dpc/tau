@@ -115,7 +115,12 @@ membership journal, not a transcript.
   Registered session context providers react with per-session setup and reply
   with `extension.session_context_ready`; per-agent context providers react to
   `session.agent_loaded` and reply with `extension.context_ready`. Interceptors
-  cannot drop or rewrite it.
+  cannot drop or rewrite it. Session initialization has a two-second idle
+  deadline renewed only by accepted current-generation discovery or readiness
+  from an outstanding registered provider, plus a non-renewable thirty-second
+  cap. Generic traffic does not renew either bound. Final readiness and
+  synchronous harness finalization take precedence over deadline classification;
+  actual expiry reports `SessionInitTimeout`, not process `StartupTimeout`.
 - **`session.shutdown`** — Must-pass immutable runtime lifecycle fact: the
   harness is leaving the current session, emitted before `session.started` for
   the next one. Extensions flush or drop per-session state. Interceptors cannot
