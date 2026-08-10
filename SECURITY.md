@@ -45,6 +45,16 @@ this accepted authority and availability risk when changing interception,
 pending-intercept resolution, deferred-publication ownership, or component
 lifecycle.
 
+Overall harness shutdown closes configured in-process extension transport first,
+then gives all such runners one shared finite grace to return on EOF. A runner
+still alive after that grace is left to a detached join-reaper, not
+force-cancelled; it can retain arbitrary resources and continue side effects
+until host-process exit. Normal Tau process exit reclaims those resources, but
+embedded or reusable hosts can accumulate detached runners across
+shutdown/restart cycles. Revisit this accepted configured-component availability
+risk when changing extension lifecycle, the shared cleanup grace, or
+embedding/reusable-host behavior.
+
 Supervised extension state isolation is defense in depth inside the configured
 same-user executable boundary, not hostile-code containment. `hidden` and
 `read_only` prevent ordinary discovery or mutation of unrelated Tau state while

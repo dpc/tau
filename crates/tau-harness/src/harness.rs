@@ -93,8 +93,8 @@ use crate::event_log::EventLog;
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::extension::spawn_in_process;
 use crate::extension::{
-    ExtensionConnectCommand, ExtensionEntry, ExtensionState, extension_stderr_log_path,
-    spawn_supervised,
+    ExtensionConnectCommand, ExtensionEntry, ExtensionState, InProcessJoinOutcome,
+    extension_stderr_log_path, spawn_supervised,
 };
 use crate::format::{format_tool_progress, render_entry_preview};
 use crate::frozen_agent_discovery::FrozenAgentDiscovery;
@@ -29977,14 +29977,24 @@ impl Harness {
     // Shutdown
     // -----------------------------------------------------------------------
 
-    /// Close every extension queue, arm all supervised watchdogs, then join
-    /// all.
+    /// Close every extension queue, arm supervised watchdogs, then finish or
+    /// detach in-process runners.
     ///
-    /// Cleanup watchdogs start before any join so direct children share one
-    /// grace window. Shutdown still joins every writer, watchdog, and
-    /// in-process extension after one fails, returning the first observed
-    /// error.
+    /// Every extension gets one shared cleanup window. Process-backed children
+    /// retain their existing signal-and-reap policy. In-process runners
+    /// normally observe transport closure and return; a runner still alive
+    /// after the grace is detached because Rust cannot safely force-cancel
+    /// its thread.
     pub(crate) fn shutdown(&mut self) -> Result<(), HarnessError> {
+        self.shutdown_with_in_process_grace(SUPERVISED_CLEANUP_GRACE)
+    }
+
+    /// Closes extension transport and waits through one shared in-process
+    /// shutdown grace before detaching stuck runners.
+    fn shutdown_with_in_process_grace(
+        &mut self,
+        in_process_cleanup_grace: Duration,
+    ) -> Result<(), HarnessError> {
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::Shutdown);
         self.extensions.restart_deadlines.clear();
         self.extensions.cleanup_deadlines.clear();
@@ -29998,8 +30008,29 @@ impl Harness {
             .filter_map(|id| self.bus.disconnect(id).map(|_| id.clone()))
             .collect::<HashSet<_>>();
         self.component_ingress.close();
+        let in_process_shutdown_deadline = Instant::now() + in_process_cleanup_grace;
 
         let order = self.extensions.order.clone();
+        let mut in_process_joins = HashMap::new();
+        for id in &order {
+            let Some(entry) = self.extensions.entries.get_mut(id) else {
+                continue;
+            };
+            if let Some(handle) = entry.in_process_thread.take() {
+                match handle.start_join() {
+                    Ok(join) => {
+                        in_process_joins.insert(id.clone(), join);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            extension = %entry.name,
+                            %error,
+                            "failed to start in-process runner join reaper; detaching the runner, which may retain resources until the host process exits"
+                        );
+                    }
+                }
+            }
+        }
         let mut watchdogs = Vec::new();
         for id in &order {
             if let Some(writer) = self.extensions.supervised_writers.get(id) {
@@ -30034,24 +30065,38 @@ impl Harness {
             }
         }
 
-        // Supervised watchdogs are armed before joining in-process peers, so one
-        // slow peer cannot serialize child cleanup deadlines.
+        // Every runner observes the same deadline established when transport
+        // closure began, so neither supervised cleanup nor another stuck
+        // in-process runner can extend the overall shutdown grace.
         for id in &order {
             let Some(entry) = self.extensions.entries.get_mut(id) else {
                 continue;
             };
             let name = entry.name.clone();
-            if let Some(handle) = entry.in_process_thread.take() {
-                match handle.join() {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) if shutdown_transport_closed(&error) => {}
-                    Ok(Err(error)) if first_error.is_none() => {
+            if let Some(join) = in_process_joins.remove(id) {
+                match join.wait_until(in_process_shutdown_deadline) {
+                    InProcessJoinOutcome::Completed => {}
+                    InProcessJoinOutcome::Failed(error) if shutdown_transport_closed(&error) => {}
+                    InProcessJoinOutcome::Failed(error) if first_error.is_none() => {
                         first_error = Some(HarnessError::Participant(error));
                     }
-                    Err(_) if first_error.is_none() => {
+                    InProcessJoinOutcome::Panicked if first_error.is_none() => {
                         first_error = Some(HarnessError::ThreadJoin(name.to_string()));
                     }
-                    Ok(Err(_)) | Err(_) => {}
+                    InProcessJoinOutcome::Failed(_) | InProcessJoinOutcome::Panicked => {}
+                    InProcessJoinOutcome::TimedOut => {
+                        tracing::warn!(
+                            extension = %name,
+                            grace_ms = in_process_cleanup_grace.as_millis(),
+                            "in-process extension runner did not stop after transport shutdown; detaching its shutdown reaper, so the runner may retain resources until the host process exits"
+                        );
+                    }
+                    InProcessJoinOutcome::ReaperLost => {
+                        tracing::warn!(
+                            extension = %name,
+                            "in-process extension runner join reaper stopped without reporting completion; detaching the runner, which may retain resources until the host process exits"
+                        );
+                    }
                 }
             }
             if connected_at_shutdown.contains(id) {

@@ -36,6 +36,28 @@ lifecycle fact. A disconnect handled before harness shutdown owns that fact;
 later shutdown joins/cleans the child without publishing a duplicate. A still
 connected child publishes its one exit fact during orderly shutdown.
 
+## Overall harness shutdown
+
+Overall harness shutdown first disconnects every extension transport and closes
+component ingress. In-process provider and tool runners normally observe that
+transport closure or EOF and return. The harness gives every in-process runner
+one shared finite cleanup grace beginning at transport closure, then joins only
+runners that have actually terminated. It transfers each runner handle to a
+detached background join-reaper, which reports a completed join without letting
+the runner's final Rust teardown block harness shutdown. A runner still alive
+when the shared deadline expires emits a warning and the harness drops its
+reaper result channel; the detached reaper retains the runner handle until it
+can join. Neither thread is force-cancelled because Rust provides no safe
+per-thread equivalent of process signals.
+
+A detached runner can continue work and retain arbitrary resources or side
+effects until host-process exit. Normal Tau process exit lets the OS reclaim
+those resources, but an embedded or reusable host can accumulate them across
+shutdown/restart cycles. Process-backed extensions keep their existing
+supervised process signal-and-reap policy. This shutdown-only fault containment
+does not change normal disconnect handling or make configured local extensions
+a hostile-process containment boundary.
+
 Extensions are less-trusted peers connected over the Tau protocol. They may
 publish ordinary events through `emit`, subscribe to committed events, register
 interceptors, provide tools/actions/context, and request extension-data file

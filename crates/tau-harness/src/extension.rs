@@ -5,8 +5,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_client::ProtocolIoMeter;
@@ -63,8 +64,8 @@ pub(crate) struct ExtensionEntry {
     pub(crate) respawn_allowed: bool,
     /// PID of supervised child process, or current process for in-process.
     pub(crate) pid: Option<u32>,
-    /// In-process extension thread handle (for join on shutdown).
-    pub(crate) in_process_thread: Option<JoinHandle<Result<(), String>>>,
+    /// In-process extension thread handle (for bounded join on shutdown).
+    pub(crate) in_process_thread: Option<InProcessThreadHandle>,
     /// Original config for supervised extensions. Present only for
     /// out-of-process children that the harness can respawn.
     pub(crate) supervised_config: Option<ExtensionConfig>,
@@ -108,7 +109,7 @@ pub(crate) struct InProcessSpawn {
     /// Writer channel to install in the bus from the harness loop.
     pub(crate) writer_tx: Sender<WriterCommand>,
     /// In-process extension thread handle to join during shutdown.
-    pub(crate) thread: JoinHandle<Result<(), String>>,
+    pub(crate) thread: InProcessThreadHandle,
     /// Ack that releases the reader after state installation completes.
     pub(crate) initialized_ack: ExtensionInitializedAck,
     /// Protocol frame byte/count counters shared by this extension connection.
@@ -129,6 +130,73 @@ pub(crate) struct SupervisedSpawn {
     pub(crate) writer: SupervisedWriterHandle,
     /// Protocol frame byte/count counters shared by this extension connection.
     pub(crate) protocol_io: ProtocolIoMeter,
+}
+
+/// In-process runner ownership for bounded shutdown joins.
+pub(crate) struct InProcessThreadHandle {
+    /// Runner thread that owns the extension's in-process work.
+    thread: JoinHandle<Result<(), String>>,
+}
+
+/// Result of trying to join an in-process runner during shutdown.
+pub(crate) enum InProcessJoinOutcome {
+    /// The runner returned successfully and was joined.
+    Completed,
+    /// The runner returned an extension error and was joined.
+    Failed(String),
+    /// The runner panicked and was joined.
+    Panicked,
+    /// The runner was still alive at the shutdown deadline and was detached.
+    TimedOut,
+    /// The detached reaper stopped before reporting whether it joined the
+    /// runner.
+    ReaperLost,
+}
+
+impl InProcessThreadHandle {
+    /// Moves the runner into a detached join reaper.
+    ///
+    /// The reaper proves a completed join without letting a runner's final
+    /// destructors block the harness shutdown thread. An error means that
+    /// creating the reaper dropped and detached the runner handle.
+    pub(crate) fn start_join(self) -> path_std_io::Result<InProcessThreadJoin> {
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let spawn = thread::Builder::new()
+            .name("tau-in-process-runner-join".to_owned())
+            .spawn(move || {
+                let outcome = match self.thread.join() {
+                    Ok(Ok(())) => InProcessJoinOutcome::Completed,
+                    Ok(Err(error)) => InProcessJoinOutcome::Failed(error),
+                    Err(_) => InProcessJoinOutcome::Panicked,
+                };
+                let _ = result_tx.send(outcome);
+            });
+        spawn.map(|_| InProcessThreadJoin { result: result_rx })
+    }
+}
+
+/// Detached join-reaper completion retained only until the shutdown deadline.
+pub(crate) struct InProcessThreadJoin {
+    /// Reaper result channel proving actual runner thread termination.
+    result: Receiver<InProcessJoinOutcome>,
+}
+
+impl InProcessThreadJoin {
+    /// Waits through `deadline` for a reaper to prove that the runner joined.
+    ///
+    /// Timeout drops this receiver and detaches shutdown management along with
+    /// its runner. Rust cannot safely force-cancel either thread, so they can
+    /// retain resources until their host process exits.
+    pub(crate) fn wait_until(self, deadline: Instant) -> InProcessJoinOutcome {
+        match self
+            .result
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(outcome) => outcome,
+            Err(mpsc::RecvTimeoutError::Timeout) => InProcessJoinOutcome::TimedOut,
+            Err(mpsc::RecvTimeoutError::Disconnected) => InProcessJoinOutcome::ReaperLost,
+        }
+    }
 }
 
 static NEXT_EXTENSION_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
@@ -171,7 +239,7 @@ where
     Ok(InProcessSpawn {
         connection_id,
         writer_tx,
-        thread,
+        thread: InProcessThreadHandle { thread },
         initialized_ack: initialized_tx,
         protocol_io,
     })

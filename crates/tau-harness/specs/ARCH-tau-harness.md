@@ -19,6 +19,16 @@ a partial frame, or no terminal reason. Generic stdio and pipe writers do not
 inherit this socket-specific cancellation guarantee and retain synchronous
 drain behavior where the harness requests a terminal drain.
 
+Overall harness shutdown closes every in-process extension transport and gives
+all runners one shared cleanup grace to return normally on EOF. A runner that
+ignores closure, deadlocks, or blocks on unrelated work is detached when that
+grace expires, rather than force-cancelled. Detachment lets shutdown return but
+can retain resources in embedded or reusable hosts. The harness moves a runner
+handle to detached join-reaper ownership, so it can record a completed join
+without blocking shutdown on final Rust teardown; process-backed extensions
+retain their separate supervised signal-and-reap cleanup. See
+[SPEC-tau-harness-extension-lifecycle](SPEC-tau-harness-extension-lifecycle.md#overall-harness-shutdown).
+
 Harness storage policy is immutable for one process. Durable mode owns normal
 session, agent, diagnostic, retention, and extension storage;
 session-ephemeral mode suppresses only session-owned artifacts; memory-only

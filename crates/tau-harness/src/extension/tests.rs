@@ -1,12 +1,122 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::os::unix::fs::PermissionsExt as _;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use tau_config::settings::{TauRuntimeSocketAccess, TauStateAccess};
 
 use super::*;
 use crate::event::{ComponentIngress as PathComponentIngress, ComponentIngressCapacity};
+
+/// A blocked destructor models work that begins after a runner returns but
+/// before its Rust thread has actually terminated.
+struct BlockingTeardown {
+    /// Test-controlled release for the blocked thread teardown.
+    release: mpsc::Receiver<()>,
+    /// Completion signal sent after the controlled teardown resumes.
+    exited: mpsc::Sender<()>,
+}
+
+thread_local! {
+    /// Teardown that runs after a runner function returned but before its
+    /// native thread can complete.
+    static BLOCKING_THREAD_LOCAL_TEARDOWN: RefCell<Option<BlockingTeardown>> = const { RefCell::new(None) };
+}
+
+impl Drop for BlockingTeardown {
+    fn drop(&mut self) {
+        let _ = self.release.recv();
+        let _ = self.exited.send(());
+    }
+}
+
+/// Releases every controlled teardown even if a test assertion panics.
+struct BlockingTeardownRelease {
+    /// Senders that unblock every controlled teardown.
+    releases: Vec<mpsc::Sender<()>>,
+    /// Completion receivers that prove the released threads left TLS teardown.
+    exited: Vec<mpsc::Receiver<()>>,
+}
+
+impl Drop for BlockingTeardownRelease {
+    fn drop(&mut self) {
+        for release in &self.releases {
+            let _ = release.send(());
+        }
+        for exited in &self.exited {
+            let _ = exited.recv_timeout(Duration::from_secs(1));
+        }
+    }
+}
+
+/// Bounded joins must detach threads that remain alive in post-run teardown,
+/// and multiple detached handles must consume one shared deadline rather than
+/// serializing the grace period.
+#[test]
+fn in_process_join_detaches_threads_blocked_in_teardown_at_shared_deadline() {
+    fn blocked_thread(
+        release: mpsc::Receiver<()>,
+        exited: mpsc::Sender<()>,
+        ready: mpsc::Sender<()>,
+    ) -> InProcessThreadHandle {
+        let thread = std::thread::spawn(move || {
+            BLOCKING_THREAD_LOCAL_TEARDOWN.with(|teardown| {
+                *teardown.borrow_mut() = Some(BlockingTeardown { release, exited });
+            });
+            let _ = ready.send(());
+            Ok(())
+        });
+        InProcessThreadHandle { thread }
+    }
+
+    let (first_release_tx, first_release_rx) = mpsc::channel();
+    let (first_exited_tx, first_exited_rx) = mpsc::channel();
+    let (first_ready_tx, first_ready_rx) = mpsc::channel();
+    let (second_release_tx, second_release_rx) = mpsc::channel();
+    let (second_exited_tx, second_exited_rx) = mpsc::channel();
+    let (second_ready_tx, second_ready_rx) = mpsc::channel();
+    let teardown_release = BlockingTeardownRelease {
+        releases: vec![first_release_tx, second_release_tx],
+        exited: vec![first_exited_rx, second_exited_rx],
+    };
+    let handles = vec![
+        blocked_thread(first_release_rx, first_exited_tx, first_ready_tx),
+        blocked_thread(second_release_rx, second_exited_tx, second_ready_tx),
+    ];
+    first_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first runner returned");
+    second_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second runner returned");
+
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let (outcomes_tx, outcomes_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .start_join()
+                    .expect("start detached join reaper")
+                    .wait_until(deadline)
+            })
+            .collect::<Vec<_>>();
+        let _ = outcomes_tx.send(outcomes);
+    });
+    let outcomes = match outcomes_rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(outcomes) => outcomes,
+        Err(error) => panic!("bounded join did not return: {error}"),
+    };
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, InProcessJoinOutcome::TimedOut))
+    );
+    drop(teardown_release);
+}
 
 /// Proves the persistent Provider mount source contains the exact retained
 /// Configure bytes and is read-only before namespace setup.

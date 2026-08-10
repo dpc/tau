@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{File, Permissions};
 use std::io as path_std_io;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,6 +30,33 @@ use crate::settings::{
     CoreMode, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,
 };
 use crate::{event_log as path_crate_event_log, settings as path_crate_settings};
+
+static STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE: AtomicBool = AtomicBool::new(false);
+static STUCK_PROVIDER_RELEASE: AtomicBool = AtomicBool::new(false);
+static STUCK_PROVIDER_EXITED: AtomicBool = AtomicBool::new(false);
+
+/// Releases a deliberately stuck provider if its shutdown test exits early.
+struct StuckProviderRelease {
+    /// Cancels the outer watchdog after normal bounded shutdown.
+    watchdog_cancel: mpsc::Sender<()>,
+    /// Watchdog that prevents a regressed unbounded join from hanging the
+    /// suite.
+    watchdog: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for StuckProviderRelease {
+    fn drop(&mut self) {
+        STUCK_PROVIDER_RELEASE.store(true, Ordering::SeqCst);
+        let _ = self.watchdog_cancel.send(());
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !STUCK_PROVIDER_EXITED.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
     tau_proto::SessionId::parse(value).expect("test session id")
@@ -8791,6 +8818,59 @@ fn shutdown_reaps_nonreading_supervised_children_and_joins_writers() {
     // therefore complete without requiring the stopped event loop to drain
     // one `Disconnected` payload per child.
     drop(children);
+}
+
+/// Overall shutdown must release harness transport resources even when an
+/// in-process runner observes EOF but then blocks until the test releases it.
+#[test]
+fn shutdown_detaches_stuck_in_process_runner_after_shared_grace() {
+    fn runner(reader: UnixStream, writer: UnixStream) -> Result<(), String> {
+        crate::harness::run_echo_provider(reader, writer).map_err(|error| error.to_string())?;
+        STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE.store(true, Ordering::SeqCst);
+        while !STUCK_PROVIDER_RELEASE.load(Ordering::SeqCst) {
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        STUCK_PROVIDER_EXITED.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE.store(false, Ordering::SeqCst);
+    STUCK_PROVIDER_RELEASE.store(false, Ordering::SeqCst);
+    STUCK_PROVIDER_EXITED.store(false, Ordering::SeqCst);
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    let mut h = Harness::new_with_provider(
+        &state_dir,
+        dirs,
+        runner,
+        Vec::new(),
+        "s1",
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::Durable,
+    )
+    .expect("start");
+    let (watchdog_cancel, watchdog_cancel_rx) = mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if watchdog_cancel_rx
+            .recv_timeout(Duration::from_secs(4))
+            .is_err()
+        {
+            STUCK_PROVIDER_RELEASE.store(true, Ordering::SeqCst);
+        }
+    });
+    let _release = StuckProviderRelease {
+        watchdog_cancel,
+        watchdog: Some(watchdog),
+    };
+
+    let started = Instant::now();
+    h.shutdown().expect("shutdown");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE.load(Ordering::SeqCst));
 }
 
 #[test]
