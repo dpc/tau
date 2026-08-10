@@ -32,6 +32,9 @@ pub(super) struct GatewaySupervisor {
     /// One-shot fixture signal requiring the typed successful-join token.
     #[cfg(test)]
     pub(super) post_join_observer: Mutex<Option<mpsc::Sender<()>>>,
+    /// Optional fixture gate held after the worker joins and before `goodbye`.
+    #[cfg(test)]
+    pub(super) post_join_gate: Mutex<Option<mpsc::Receiver<()>>>,
     /// Optional fixture gate held by the worker at its retirement boundary.
     #[cfg(test)]
     pub(super) retirement_gate: Mutex<Option<mpsc::Receiver<()>>>,
@@ -50,6 +53,8 @@ impl GatewaySupervisor {
             pre_join_observer: Mutex::new(None),
             #[cfg(test)]
             post_join_observer: Mutex::new(None),
+            #[cfg(test)]
+            post_join_gate: Mutex::new(None),
             #[cfg(test)]
             retirement_gate: Mutex::new(None),
             #[cfg(test)]
@@ -104,7 +109,8 @@ impl GatewaySupervisor {
         Ok(())
     }
 
-    /// Disconnect in-progress and published clients, then join the worker.
+    /// Disconnect in-progress clients, join the worker, then release the
+    /// published client's gateway lease.
     pub(super) fn stop(
         &self,
         state: &SharedState,
@@ -117,9 +123,6 @@ impl GatewaySupervisor {
             .take()
         {
             gateway.disconnect();
-        }
-        if let Some(gateway) = gateway_cell.lock().expect("gateway lock").take() {
-            gateway.goodbye();
         }
         state.notify_all();
         #[cfg(test)]
@@ -134,9 +137,15 @@ impl GatewaySupervisor {
         if let Some(worker) = self.worker.lock().expect("gateway supervisor lock").take() {
             let joined = join_gateway_worker(worker);
             #[cfg(test)]
-            self.observe_successful_join(joined);
+            {
+                self.observe_successful_join(joined);
+                self.wait_at_post_join_gate();
+            }
             #[cfg(not(test))]
             let _ = joined;
+        }
+        if let Some(gateway) = gateway_cell.lock().expect("gateway lock").take() {
+            gateway.goodbye();
         }
     }
 
@@ -154,6 +163,19 @@ impl GatewaySupervisor {
             .take()
         {
             let _ = observer.send(());
+        }
+    }
+
+    /// Wait for a fixture after joining and before releasing the gateway lease.
+    #[cfg(test)]
+    fn wait_at_post_join_gate(&self) {
+        if let Some(gate) = self
+            .post_join_gate
+            .lock()
+            .expect("gateway post-join gate lock")
+            .take()
+        {
+            let _ = gate.recv();
         }
     }
 }
@@ -422,11 +444,11 @@ impl GatewaySupervisorWorker {
                     }
                 }
             }
-            gateway.disconnect();
-            self.clear_connecting(&gateway);
             if !self.is_current() {
                 break;
             }
+            gateway.disconnect();
+            self.clear_connecting(&gateway);
             if !self.wait_for_retry(retry_delay) {
                 break;
             }

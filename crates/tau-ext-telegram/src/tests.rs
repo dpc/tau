@@ -1398,8 +1398,9 @@ fn stale_gateway_heartbeat_failure_does_not_clear_new_registration_state() {
     assert!(gateway_cell.lock().expect("gateway lock").is_none());
 }
 
-/// Clearing configuration must send `goodbye` and close the supervised socket
-/// so the old worker cannot retain gateway lease authority.
+/// Clearing configuration must retire the worker before sending `goodbye`, so
+/// the old worker cannot close the socket before the supervisor releases its
+/// gateway lease.
 #[test]
 fn gateway_client_config_error_sends_goodbye() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1407,6 +1408,7 @@ fn gateway_client_config_error_sends_goodbye() {
     let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
     let seen_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let seen_requests_thread = Arc::clone(&seen_requests);
+    let (goodbye_seen_tx, goodbye_seen_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
@@ -1417,10 +1419,12 @@ fn gateway_client_config_error_sends_goodbye() {
             if line.trim().is_empty() {
                 break;
             }
-            seen_requests_thread
-                .lock()
-                .expect("requests")
-                .push(serde_json::from_str(&line).expect("gateway request JSON"));
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("gateway request JSON");
+            if request["kind"] == "goodbye" {
+                goodbye_seen_tx.send(()).expect("signal goodbye");
+            }
+            seen_requests_thread.lock().expect("requests").push(request);
             writeln!(
                 stream,
                 "{}",
@@ -1438,10 +1442,32 @@ fn gateway_client_config_error_sends_goodbye() {
 
     let (tx, _rx) = mpsc::channel();
     let ext = test_extension(FakeClient::new(), tx);
+    let (post_join_tx, post_join_rx) = mpsc::channel();
+    *ext.gateway_supervisor
+        .post_join_observer
+        .lock()
+        .expect("post-join observer lock") = Some(post_join_tx);
+    let (goodbye_release_tx, goodbye_release_rx) = mpsc::channel();
+    *ext.gateway_supervisor
+        .post_join_gate
+        .lock()
+        .expect("post-join gate lock") = Some(goodbye_release_rx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     ext.wait_for_gateway_connection();
-    ext.clear_config_after_error();
+    std::thread::scope(|scope| {
+        let clear = scope.spawn(|| ext.clear_config_after_error());
+        post_join_rx.recv().expect("stop joined worker");
+        let goodbye_before_release = goodbye_seen_rx.try_recv();
+        goodbye_release_tx
+            .send(())
+            .expect("release goodbye after worker join");
+        clear.join().expect("clear configuration");
+        assert!(
+            matches!(goodbye_before_release, Err(mpsc::TryRecvError::Empty)),
+            "goodbye must wait until the worker retires"
+        );
+    });
     server.join().expect("fake gateway thread");
 
     let requests = seen_requests.lock().expect("requests");
