@@ -286,9 +286,25 @@ pub(crate) fn journal_position(file: &mut File) -> io::Result<CommittedJournalPo
 
 /// Enumerate journal-backed and legacy artifact rows using bounded repair.
 pub fn list_agent_entries(agents_dir: &Path) -> io::Result<Vec<AgentListEntry>> {
+    list_agent_entries_until(agents_dir, Instant::now() + MAX_REPAIR_TIME_PER_LIST)
+}
+
+/// Enumerate agent artifacts with an explicit bounded-repair deadline for
+/// tests.
+#[cfg(test)]
+pub(crate) fn list_agent_entries_until_for_test(
+    agents_dir: &Path,
+    repair_deadline: Instant,
+) -> io::Result<Vec<AgentListEntry>> {
+    list_agent_entries_until(agents_dir, repair_deadline)
+}
+
+fn list_agent_entries_until(
+    agents_dir: &Path,
+    repair_deadline: Instant,
+) -> io::Result<Vec<AgentListEntry>> {
     let mut entries = Vec::new();
     let mut remaining_repair_bytes = MAX_REPAIR_BYTES_PER_LIST;
-    let repair_deadline = Instant::now() + MAX_REPAIR_TIME_PER_LIST;
     if !agents_dir.exists() {
         return Ok(entries);
     }
@@ -544,10 +560,20 @@ fn try_bounded_full_rebuild(
     let lock = match open_and_try_lock(dir) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            return journal_entry(id, fallback_summary, AgentListStatus::Busy);
+            return full_rebuild_failure_entry(
+                id,
+                fallback_summary,
+                original_status,
+                AgentListStatus::Busy,
+            );
         }
         Err(_) => {
-            return journal_entry(id, fallback_summary, AgentListStatus::RepairFailed);
+            return full_rebuild_failure_entry(
+                id,
+                fallback_summary,
+                original_status,
+                AgentListStatus::RepairFailed,
+            );
         }
     };
     let result = (|| {
@@ -568,7 +594,7 @@ fn try_bounded_full_rebuild(
     match result {
         Ok(checkpoint) => journal_entry(id, Some(checkpoint.summary), AgentListStatus::Fresh),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            journal_entry(id, fallback_summary, original_status)
+            full_rebuild_failure_entry(id, fallback_summary, original_status, original_status)
         }
         Err(error) if error.kind() == io::ErrorKind::InvalidData => AgentListEntry {
             id,
@@ -576,7 +602,12 @@ fn try_bounded_full_rebuild(
             identity: AgentListIdentity::UnverifiedArtifact,
             status: AgentListStatus::RepairFailed,
         },
-        Err(_) => journal_entry(id, fallback_summary, AgentListStatus::RepairFailed),
+        Err(_) => full_rebuild_failure_entry(
+            id,
+            fallback_summary,
+            original_status,
+            AgentListStatus::RepairFailed,
+        ),
     }
 }
 
@@ -754,6 +785,32 @@ fn journal_entry(
         summary,
         identity: AgentListIdentity::JournalBacked,
         status,
+    }
+}
+
+fn unverified_entry(
+    id: AgentId,
+    summary: Option<AgentSummary>,
+    status: AgentListStatus,
+) -> AgentListEntry {
+    AgentListEntry {
+        id,
+        summary,
+        identity: AgentListIdentity::UnverifiedArtifact,
+        status,
+    }
+}
+
+fn full_rebuild_failure_entry(
+    id: AgentId,
+    summary: Option<AgentSummary>,
+    original_status: AgentListStatus,
+    status: AgentListStatus,
+) -> AgentListEntry {
+    if original_status == AgentListStatus::MissingSummary {
+        unverified_entry(id, summary, status)
+    } else {
+        journal_entry(id, summary, status)
     }
 }
 

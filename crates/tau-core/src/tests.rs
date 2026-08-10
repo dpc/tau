@@ -1,6 +1,8 @@
 use std::fs as path_std_fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use tau_proto::{
     AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptId, AgentPromptSubmitted,
     CborValue, ContextItem, Event, EventSelector, HarnessNotice, HarnessOutputMessage,
@@ -869,6 +871,189 @@ fn agent_checkpoint_rejects_creationless_identity() {
         assert!(!agents_dir.join("agent-1/meta.json").exists());
         let _ = std::fs::remove_dir_all(agents_dir);
     }
+}
+
+/// An expired foreground-repair budget must not promote an unvalidated journal
+/// artifact to a routable identity merely because the listing task was delayed.
+#[test]
+fn agent_checkpoint_expired_rebuild_remains_unverified() {
+    let agents_dir = temp_dir("agent-checkpoint-expired-rebuild");
+    let events_path = agents_dir.join("agent-1/events.cbor");
+    std::fs::create_dir_all(events_path.parent().expect("agent dir")).expect("agent dir");
+    std::fs::write(&events_path, []).expect("empty journal");
+
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() - Duration::from_secs(1),
+    )
+    .expect("list deadline-expired artifact");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].identity,
+        crate::AgentListIdentity::UnverifiedArtifact
+    );
+    assert_eq!(entries[0].status, crate::AgentListStatus::MissingSummary);
+    assert!(!agents_dir.join("agent-1/meta.json").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A writer holding an unvalidated journal lock must leave a missing-summary
+/// artifact unverified while exposing that listing could not repair it.
+#[test]
+fn agent_checkpoint_busy_missing_summary_remains_unverified() {
+    let agents_dir = temp_dir("agent-checkpoint-busy-rebuild");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("events.cbor"), []).expect("empty journal");
+    let lock = path_std_fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(agent_dir.join("lock"))
+        .expect("open lock");
+    lock.lock_exclusive().expect("hold writer lock");
+
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("list busy artifact");
+
+    FileExt::unlock(&lock).expect("release writer lock");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].identity,
+        crate::AgentListIdentity::UnverifiedArtifact
+    );
+    assert_eq!(entries[0].status, crate::AgentListStatus::Busy);
+    assert!(!agent_dir.join("meta.json").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A missing checkpoint over a journal exceeding the foreground repair budget
+/// must remain unverified without reading or allocating the journal payload.
+#[test]
+fn agent_checkpoint_budget_deferred_missing_summary_remains_unverified() {
+    let agents_dir = temp_dir("agent-checkpoint-budget-deferred-rebuild");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("events.cbor"), vec![0_u8; 300 * 1024])
+        .expect("over-budget journal");
+
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("list budget-deferred artifact");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].identity,
+        crate::AgentListIdentity::UnverifiedArtifact
+    );
+    assert_eq!(entries[0].status, crate::AgentListStatus::MissingSummary);
+    assert!(!agent_dir.join("meta.json").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A filesystem error during initial checkpoint reconstruction must not create
+/// journal-backed identity from a missing summary.
+#[test]
+fn agent_checkpoint_io_failed_missing_summary_remains_unverified() {
+    let agents_dir = temp_dir("agent-checkpoint-io-failed-rebuild");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(agent_dir.join("events.cbor")).expect("journal directory");
+
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("list I/O-failed artifact");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].identity,
+        crate::AgentListIdentity::UnverifiedArtifact
+    );
+    assert_eq!(entries[0].status, crate::AgentListStatus::RepairFailed);
+    assert!(!agent_dir.join("meta.json").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A complete matching creation record must promote a missing-summary journal
+/// only after full reconstruction writes its checkpoint.
+#[test]
+fn agent_checkpoint_matching_creation_rebuilds_as_journal_backed() {
+    let agents_dir = temp_dir("agent-checkpoint-matching-creation-rebuild");
+    let agent_dir = agents_dir.join("agent-1");
+    let events_path = agent_dir.join("events.cbor");
+    append_raw_cbor(
+        &events_path,
+        &PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+            seq: PersistedAgentEventSeq::new(0),
+            source: None,
+            event: Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+                agent_id: AgentId::parse("agent-1").expect("agent id"),
+                parent_agent: None,
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+            parent: AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("rebuild matching creation");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].identity, crate::AgentListIdentity::JournalBacked);
+    assert_eq!(entries[0].status, crate::AgentListStatus::Fresh);
+    assert!(agent_dir.join("meta.json").exists());
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A legacy sidecar retains its existing journal-backed deferred classification
+/// when the repair budget cannot scan its associated journal.
+#[test]
+fn agent_checkpoint_budget_deferred_legacy_summary_remains_journal_backed() {
+    let agents_dir = temp_dir("agent-checkpoint-legacy-budget-deferred-rebuild");
+    let agent_dir = agents_dir.join("agent-1");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(
+        agent_dir.join("meta.json"),
+        serde_json::to_vec(&crate::AgentMeta {
+            created_at: 1,
+            last_touched: 1,
+            last_user_interaction_time: 0,
+            display_name: None,
+            latest_user_prompt_preview: None,
+        })
+        .expect("encode legacy summary"),
+    )
+    .expect("write legacy summary");
+    std::fs::write(agent_dir.join("events.cbor"), vec![0_u8; 300 * 1024])
+        .expect("over-budget journal");
+
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("list legacy artifact");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].identity, crate::AgentListIdentity::JournalBacked);
+    assert_eq!(entries[0].status, crate::AgentListStatus::Legacy);
+    let _ = std::fs::remove_dir_all(agents_dir);
 }
 
 /// A corrupt checkpoint over a 65-record journal must stop at the foreground
