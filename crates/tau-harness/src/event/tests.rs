@@ -643,9 +643,12 @@ fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
     assert!(!process_exists(pid));
 }
 
-/// The writer thread should count only output frames it successfully encodes
-/// and flushes, so per-extension protocol stats reflect delivered harness
-/// traffic instead of merely queued frames.
+/// The writer thread must record an output frame only after a successful flush.
+///
+/// Reading the Unix stream proves that the peer can observe the frame, but it
+/// does not synchronize with the writer's subsequent meter mutation. A FIFO
+/// flush acknowledgement therefore establishes that the writer processed the
+/// preceding post-flush accounting before this test observes cumulative stats.
 #[test]
 fn writer_records_protocol_io_after_successful_flush() {
     let (reader_stream, writer_stream) = UnixStream::pair().expect("stream pair");
@@ -657,9 +660,15 @@ fn writer_records_protocol_io_after_successful_flush() {
         )),
     ))
     .expect("queue output");
+    let (flush_tx, flush_rx) = mpsc::channel();
+    tx.send(WriterCommand::Flush(flush_tx))
+        .expect("queue accounting barrier");
 
     let mut reader = tau_proto::HarnessOutputReader::new(BufReader::new(reader_stream));
     let _ = reader.read_message().expect("read output");
+    flush_rx
+        .recv()
+        .expect("writer processes accounting barrier");
 
     let stats = meter.cumulative_stats();
     let event_stats = stats.downlink.get("term.bell").expect("term bell stats");

@@ -351,10 +351,6 @@ pub(crate) enum WriterCommand {
     Message(HarnessOutputMessage),
     /// Flush all previously queued frames, then acknowledge completion.
     #[cfg(test)]
-    #[expect(
-        dead_code,
-        reason = "legacy writer tests exercise payload writes directly"
-    )]
     Flush(Sender<()>),
     /// Switches this writer permanently to cursor-followed shared delivery.
     Follow {
