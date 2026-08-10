@@ -17,8 +17,7 @@ use tau_proto::{
     ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 use tau_provider::retry_policy::{
-    RetryClass, RetryDecision, classify_error_code, parse_json_error_code, parse_json_reset_hint,
-    parse_retry_after,
+    RetryClass, RetryDecision, classify_error_code, parse_json_reset_hint, parse_retry_after,
 };
 use tau_provider::{
     StreamRepetitionGuard, StreamRepetitionKey,
@@ -193,6 +192,50 @@ struct StreamFailure {
     failure_kind: Option<tau_proto::ProviderFailureKind>,
 }
 
+/// Closed outcome for an HTTP status or structured provider error identifier.
+enum ErrorClassification {
+    /// The same prompt must not be retried.
+    Terminal(tau_proto::ProviderFailureKind),
+    /// The scheduler may retry according to the typed class.
+    Retry(RetryClass),
+}
+
+impl ErrorClassification {
+    fn from_http_error(status: u16, body: &str) -> Self {
+        Self::from_structured_identifiers(
+            canonical_error_identifiers(body).iter().map(String::as_str),
+        )
+        .unwrap_or_else(|| Self::from_numeric_status(status))
+    }
+
+    fn from_structured_identifiers<'identifier>(
+        identifiers: impl IntoIterator<Item = &'identifier str>,
+    ) -> Option<Self> {
+        let identifiers = identifiers.into_iter().collect::<Vec<_>>();
+        if identifiers.contains(&"context_length_exceeded") {
+            return Some(Self::Terminal(
+                tau_proto::ProviderFailureKind::ContextWindowExceeded,
+            ));
+        }
+        identifiers
+            .into_iter()
+            .map(classify_error_code)
+            .find(|class| *class != RetryClass::Unknown)
+            .map(Self::Retry)
+    }
+
+    fn from_numeric_status(status: u16) -> Self {
+        match status {
+            401 | 403 => Self::Retry(RetryClass::Auth),
+            408 | 425 => Self::Retry(RetryClass::Transport),
+            429 => Self::Retry(RetryClass::Throttle),
+            400..=499 => Self::Terminal(tau_proto::ProviderFailureKind::RequestRejected),
+            500..=599 => Self::Retry(RetryClass::Overload),
+            _ => Self::Retry(RetryClass::Unknown),
+        }
+    }
+}
+
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -270,47 +313,25 @@ fn outbound_retry_class(kind: tau_provider::OutboundErrorKind) -> RetryClass {
 
 /// Classifies provider-authored HTTP failures for retry cadence.
 ///
-/// Only canonical context rejection and deterministic status classes prove that
-/// replaying unchanged input is futile; arbitrary codes and prose remain hints.
+/// Exact accepted canonical identifiers override status, then the closed status
+/// table decides whether retrying unchanged input is permitted.
 fn retry_decision_for_http_error(
     status: u16,
     body: &str,
     header_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
-    let provider_code = parse_json_error_code(body);
-    if http_failure_kind(status, body).is_some() {
+    let ErrorClassification::Retry(class) = ErrorClassification::from_http_error(status, body)
+    else {
         return None;
-    }
-    let class = provider_code
-        .as_deref()
-        .map(classify_error_code)
-        .filter(|class| *class != RetryClass::Unknown)
-        .unwrap_or(match status {
-            408 | 425 => RetryClass::Transport,
-            429 => RetryClass::Throttle,
-            500..=599 => RetryClass::Overload,
-            401 | 403 => RetryClass::Auth,
-            _ => RetryClass::Unknown,
-        });
+    };
     let body_hint = parse_json_reset_hint(body, SystemTime::now());
     Some(RetryDecision::new(class).with_retry_after(header_hint.into_iter().chain(body_hint).max()))
 }
 
 fn http_failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailureKind> {
-    let identifiers = canonical_error_identifiers(body);
-    if identifiers
-        .iter()
-        .any(|code| code == "context_length_exceeded")
-    {
-        return Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
-    }
-    let known_transient = identifiers
-        .iter()
-        .any(|code| classify_error_code(code) != RetryClass::Unknown);
-    if !known_transient && matches!(status, 400 | 404 | 409 | 413 | 422) {
-        Some(tau_proto::ProviderFailureKind::RequestRejected)
-    } else {
-        None
+    match ErrorClassification::from_http_error(status, body) {
+        ErrorClassification::Terminal(failure_kind) => Some(failure_kind),
+        ErrorClassification::Retry(_) => None,
     }
 }
 
@@ -1839,37 +1860,24 @@ fn classify_stream_error(error: &serde_json::Map<String, serde_json::Value>) -> 
             .and_then(|metadata| metadata.get("error_type"))
             .and_then(serde_json::Value::as_str),
     ];
-    if identifiers
-        .into_iter()
-        .flatten()
-        .any(|identifier| identifier == "context_length_exceeded")
-    {
-        return StreamFailure {
+    let classification =
+        ErrorClassification::from_structured_identifiers(identifiers.into_iter().flatten())
+            .unwrap_or_else(|| {
+                error
+                    .get("code")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|status| u16::try_from(status).ok())
+                    .map_or(
+                        ErrorClassification::Retry(RetryClass::Unknown),
+                        ErrorClassification::from_numeric_status,
+                    )
+            });
+    match classification {
+        ErrorClassification::Terminal(failure_kind) => StreamFailure {
             retry: None,
-            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
-        };
-    }
-    if let Some(class) = identifiers
-        .into_iter()
-        .flatten()
-        .map(classify_error_code)
-        .find(|class| *class != RetryClass::Unknown)
-    {
-        return StreamFailure {
-            retry: Some(RetryDecision::new(class)),
-            failure_kind: None,
-        };
-    }
-    match error.get("code").and_then(serde_json::Value::as_u64) {
-        Some(400 | 404 | 409 | 413 | 422) => StreamFailure {
-            retry: None,
-            failure_kind: Some(tau_proto::ProviderFailureKind::RequestRejected),
+            failure_kind: Some(failure_kind),
         },
-        Some(401 | 403) => stream_retry(RetryClass::Auth),
-        Some(408 | 425) => stream_retry(RetryClass::Transport),
-        Some(429) => stream_retry(RetryClass::Throttle),
-        Some(500..=599) => stream_retry(RetryClass::Overload),
-        _ => stream_retry(RetryClass::Unknown),
+        ErrorClassification::Retry(class) => stream_retry(class),
     }
 }
 

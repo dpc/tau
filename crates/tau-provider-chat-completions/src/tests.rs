@@ -12,6 +12,31 @@ use scripted_tcp_server::ScriptedTcpServer;
 
 use super::*;
 
+#[derive(Clone, Copy)]
+enum NumericStatusExpectation {
+    Terminal,
+    Retry(RetryClass),
+}
+
+fn numeric_status_cases() -> impl Iterator<Item = (u16, NumericStatusExpectation)> {
+    (400..500)
+        .map(|status| {
+            let expected = match status {
+                401 | 403 => NumericStatusExpectation::Retry(RetryClass::Auth),
+                408 | 425 => NumericStatusExpectation::Retry(RetryClass::Transport),
+                429 => NumericStatusExpectation::Retry(RetryClass::Throttle),
+                _ => NumericStatusExpectation::Terminal,
+            };
+            (status, expected)
+        })
+        .chain([500, 503, 599].into_iter().map(|status| {
+            (
+                status,
+                NumericStatusExpectation::Retry(RetryClass::Overload),
+            )
+        }))
+}
+
 /// Provider usage preserves an explicitly reported all-zero record while
 /// retaining complete field absence as unavailable.
 #[test]
@@ -1507,21 +1532,41 @@ fn non_empty_end_turn_is_accepted() {
     assert!(ensure_non_empty_end_turn(state).is_ok());
 }
 
-/// Deterministic request statuses are terminal, but recursive echoes and prose
-/// never manufacture the more specific context-window category.
+/// Ensures the HTTP status table terminalizes every unauthorized 4xx while
+/// retaining each explicitly authorized retry status.
 #[test]
-fn deterministic_request_status_is_terminal_without_trusting_echoes() {
-    for body in [
-        r#"{"error":{"code":"unsupported_parameter"}}"#,
-        r#"{"error":{"message":"temporary upstream failure"},"echo":{"code":"unsupported_parameter"}}"#,
-        r#"{"error":{"message":"temporary (type=content_policy_violation)"}}"#,
-    ] {
-        assert_eq!(retry_decision_for_http_error(400, body, None), None);
-        assert!(
-            !canonical_error_identifiers(body)
-                .iter()
-                .any(|identifier| identifier == "context_length_exceeded")
-        );
+fn http_status_classification_is_closed() {
+    for (status, expected) in numeric_status_cases() {
+        let error = LlmError::HttpStatus(status, r#"{"error":{"code":"unknown"}}"#.to_owned());
+        match expected {
+            NumericStatusExpectation::Terminal => {
+                assert_eq!(
+                    error.retry_decision(),
+                    None,
+                    "HTTP {status} must terminalize"
+                );
+                assert_eq!(
+                    error.failure_kind(),
+                    Some(tau_proto::ProviderFailureKind::RequestRejected),
+                    "HTTP {status} must reject the unchanged request"
+                );
+            }
+            NumericStatusExpectation::Retry(class) => {
+                assert_eq!(
+                    error
+                        .retry_decision()
+                        .expect("authorized status must retry")
+                        .class,
+                    class,
+                    "HTTP {status} retry class"
+                );
+                assert_eq!(
+                    error.failure_kind(),
+                    None,
+                    "HTTP {status} must not terminalize"
+                );
+            }
+        }
     }
 }
 
@@ -1631,19 +1676,21 @@ fn repeated_reasoning_delta_aborts_stream_event() {
     assert!(matches!(result, Err(LlmError::RepetitionDetected(_))));
     assert!(state.output_items().is_empty());
 }
-/// OpenAI and OpenRouter canonical context errors are typed and terminal,
-/// independent of an outer scheduler's retry budget.
+/// Canonical context identifiers terminalize even when the HTTP status would
+/// otherwise request a throttled retry.
 #[test]
 fn canonical_context_error_bypasses_retry_scheduler() {
-    let error = LlmError::HttpStatus(
-        400,
-        r#"{"error":{"type":"invalid_request_error","code":"context_length_exceeded"}}"#.to_owned(),
-    );
-    assert_eq!(error.retry_decision(), None);
-    assert_eq!(
-        error.failure_kind(),
-        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
-    );
+    for body in [
+        r#"{"error":{"code":"context_length_exceeded","type":"rate_limit_exceeded"}}"#,
+        r#"{"error":{"code":"rate_limit_exceeded","type":"context_length_exceeded"}}"#,
+    ] {
+        let error = LlmError::HttpStatus(429, body.to_owned());
+        assert_eq!(error.retry_decision(), None);
+        assert_eq!(
+            error.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+        );
+    }
 }
 
 /// Ensures bounded raw HTTP bodies remain private classification/debug input
@@ -1664,37 +1711,91 @@ fn terminal_http_failure_redacts_provider_body() {
     assert_eq!(failure.message, "LLM error: provider returned HTTP 400");
 }
 
-/// Retry ownership remains unchanged for transient provider throttling.
+/// Ensures each exact approved identifier overrides deterministic status
+/// through every reviewed HTTP and streamed authority path.
 #[test]
-fn canonical_rate_limit_remains_retryable() {
-    let decision =
-        retry_decision_for_http_error(429, r#"{"error":{"code":"rate_limit_exceeded"}}"#, None)
-            .expect("rate limit remains retryable");
-    assert_eq!(decision.class, RetryClass::Throttle);
+fn approved_structured_identifiers_override_deterministic_status() {
+    for (identifier, expected) in [
+        ("usage_limit_reached", RetryClass::UsageWindow),
+        ("rate_limit_exceeded", RetryClass::Throttle),
+        ("quota_exceeded", RetryClass::Account),
+        ("billing_hard_limit_reached", RetryClass::Account),
+        ("insufficient_quota", RetryClass::Account),
+        ("usage_not_included", RetryClass::Account),
+        ("credits_exhausted", RetryClass::Account),
+        ("invalid_api_key", RetryClass::Auth),
+        ("authentication_error", RetryClass::Auth),
+        ("invalid_authentication", RetryClass::Auth),
+        ("token_expired", RetryClass::Auth),
+        ("unauthorized", RetryClass::Auth),
+        ("overloaded_error", RetryClass::Overload),
+        ("server_error", RetryClass::Overload),
+        ("upstream_timeout", RetryClass::Overload),
+    ] {
+        for field in ["code", "type"] {
+            let body = format!(r#"{{"error":{{"{field}":"{identifier}"}}}}"#);
+            let http = LlmError::HttpStatus(405, body);
+            assert_eq!(
+                http.retry_decision()
+                    .expect("approved canonical identifier must retry")
+                    .class,
+                expected,
+                "HTTP {field} identifier {identifier}"
+            );
+            assert_eq!(
+                http.failure_kind(),
+                None,
+                "HTTP {field} identifier {identifier}"
+            );
+        }
+
+        for (path, error) in [
+            ("code", serde_json::json!({"code": identifier})),
+            ("type", serde_json::json!({"code": 415, "type": identifier})),
+            (
+                "metadata.error_type",
+                serde_json::json!({
+                    "code": 415,
+                    "metadata": {"error_type": identifier}
+                }),
+            ),
+        ] {
+            let streamed = classify_stream_error(error.as_object().expect("streamed error object"));
+            assert_eq!(
+                streamed
+                    .retry
+                    .expect("approved streamed identifier must retry")
+                    .class,
+                expected,
+                "streamed {path} identifier {identifier}"
+            );
+            assert_eq!(
+                streamed.failure_kind, None,
+                "streamed {path} identifier {identifier}"
+            );
+        }
+    }
 }
 
-/// Status-only terminalization yields to canonical transient identifiers, but
-/// not to untrusted echoed fields.
+/// Ensures unreviewed recursive HTTP metadata and provider prose cannot turn a
+/// deterministic rejection into a retry.
 #[test]
-fn deterministic_status_transient_override_uses_only_error_envelope() {
-    assert!(
-        retry_decision_for_http_error(
-            400,
-            r#"{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded"}}"#,
-            None,
-        )
-        .is_some()
-    );
-    let echoed = r#"{"error":{"message":"rejected"},"echo":{"code":"rate_limit_exceeded"}}"#;
-    assert_eq!(retry_decision_for_http_error(400, echoed, None), None);
-    assert_eq!(
-        http_failure_kind(400, echoed),
-        Some(tau_proto::ProviderFailureKind::RequestRejected)
-    );
+fn deterministic_http_status_ignores_unreviewed_structured_paths_and_prose() {
+    for body in [
+        r#"{"error":{"metadata":{"error_type":"rate_limit_exceeded"}}}"#,
+        r#"{"error":{"message":"temporary upstream failure"},"echo":{"code":"rate_limit_exceeded"}}"#,
+        r#"{"error":{"message":"temporary (type=content_policy_violation)"}}"#,
+    ] {
+        assert_eq!(retry_decision_for_http_error(405, body, None), None);
+        assert_eq!(
+            http_failure_kind(405, body),
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
+        );
+    }
 }
 
-/// Ensures streamed provider failures remain typed backend failures and can
-/// never be converted into assistant transcript text.
+/// Ensures a reviewed streamed context identifier beats numeric throttling and
+/// never becomes assistant transcript text.
 #[test]
 fn streamed_context_error_is_typed_terminal_without_assistant_output() {
     let mut state = StreamState::new();
@@ -1702,7 +1803,7 @@ fn streamed_context_error_is_typed_terminal_without_assistant_output() {
         &mut state,
         &serde_json::json!({
             "error": {
-                "code": 400,
+                "code": 429,
                 "metadata": {"error_type": "context_length_exceeded"},
                 "message": "untrusted provider prose"
             }
@@ -1721,6 +1822,48 @@ fn streamed_context_error_is_typed_terminal_without_assistant_output() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+}
+
+/// Ensures every reviewed streamed context path takes precedence over a known
+/// retry identifier and numeric throttling where that status is representable.
+#[test]
+fn streamed_context_identifier_paths_bypass_retry_scheduler() {
+    for (path, error) in [
+        (
+            "code",
+            serde_json::json!({
+                "code": "context_length_exceeded",
+                "type": "rate_limit_exceeded"
+            }),
+        ),
+        (
+            "type",
+            serde_json::json!({
+                "code": 429,
+                "type": "context_length_exceeded",
+                "metadata": {"error_type": "rate_limit_exceeded"}
+            }),
+        ),
+        (
+            "metadata.error_type",
+            serde_json::json!({
+                "code": 429,
+                "type": "rate_limit_exceeded",
+                "metadata": {"error_type": "context_length_exceeded"}
+            }),
+        ),
+    ] {
+        let failure = classify_stream_error(error.as_object().expect("streamed error object"));
+        assert_eq!(
+            failure.retry, None,
+            "streamed {path} context must terminalize"
+        );
+        assert_eq!(
+            failure.failure_kind,
+            Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            "streamed {path} context must override retry signals"
+        );
+    }
 }
 
 /// Ensures only the reviewed streamed metadata path and exact identifiers can
@@ -1803,20 +1946,40 @@ fn malformed_non_null_stream_error_fails_closed_before_choices() {
     }
 }
 
-/// Ensures OpenRouter numeric overload codes retain their closed typed
-/// scheduler category rather than degrading to an unknown retry.
+/// Ensures streamed numeric statuses use the same closed table as HTTP
+/// responses, including 405 and 415 deterministic request rejections.
 #[test]
-fn streamed_numeric_overload_is_typed_retryable() {
-    for code in [500, 503, 599] {
-        let error = classify_stream_error(
-            serde_json::json!({"code": code, "message": "ignored"})
+fn streamed_numeric_status_classification_is_closed() {
+    for (status, expected) in numeric_status_cases() {
+        let failure = classify_stream_error(
+            serde_json::json!({"code": status, "message": "ignored"})
                 .as_object()
-                .expect("error object"),
+                .expect("streamed error object"),
         );
-        assert_eq!(
-            error.retry.expect("retryable overload").class,
-            RetryClass::Overload
-        );
+        match expected {
+            NumericStatusExpectation::Terminal => {
+                assert_eq!(failure.retry, None, "streamed {status} must terminalize");
+                assert_eq!(
+                    failure.failure_kind,
+                    Some(tau_proto::ProviderFailureKind::RequestRejected),
+                    "streamed {status} must reject the unchanged request"
+                );
+            }
+            NumericStatusExpectation::Retry(class) => {
+                assert_eq!(
+                    failure
+                        .retry
+                        .expect("authorized streamed status must retry")
+                        .class,
+                    class,
+                    "streamed {status} retry class"
+                );
+                assert_eq!(
+                    failure.failure_kind, None,
+                    "streamed {status} must not terminalize"
+                );
+            }
+        }
     }
 }
 
