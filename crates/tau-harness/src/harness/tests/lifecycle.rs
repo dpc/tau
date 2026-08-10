@@ -9006,6 +9006,7 @@ fn rejected_startup_handshake_flushes_disconnect_before_teardown() {
                 flushes: 0,
                 completed_flushes: Arc::clone(&completed_flushes),
             },
+            None,
             ConnectionOrigin::Socket,
         )
         .expect("accept startup client");
@@ -9067,6 +9068,7 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
                 flushes: 0,
                 completed_flushes: Arc::clone(&completed_flushes),
             },
+            None,
             ConnectionOrigin::Socket,
         )
         .expect("accept runtime client");
@@ -9130,6 +9132,7 @@ fn client_requested_disconnect_does_not_drain_stalled_writer() {
                 started: Some(started_tx),
                 release: release_rx,
             },
+            None,
             ConnectionOrigin::Socket,
         )
         .expect("accept runtime client");

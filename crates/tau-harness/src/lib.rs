@@ -23,6 +23,7 @@ pub const EXTENSION_DATA_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 mod agent;
 mod agent_cost_ledger;
 mod agent_creator_topology;
+mod client_writer_lifecycle;
 mod daemon;
 mod debug_log;
 mod dedup;

@@ -109,6 +109,36 @@ fn stalled_consumer_pins_until_explicit_retirement() {
     assert!(log.inner.lock().expect("log").retained.is_empty());
 }
 
+/// A terminal close must release replay pause, deliver only through its
+/// captured tail, and retire without retaining a later targeted frame.
+#[test]
+fn close_after_current_releases_pause_and_excludes_later_frames() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    let target = tau_core::SharedDeliveryTarget::new(log.group(), consumer);
+    log.set_catch_up_paused(consumer, true);
+    let _ = log.append_egress(routed_notice("before close"), &[target]);
+
+    log.close_consumer_after_current(consumer);
+    let _ = log.append_egress(routed_notice("after close"), &[target]);
+
+    let pending = log
+        .next_egress(consumer)
+        .expect("close releases pause for the captured frame");
+    assert_eq!(pending.seq.0, 0);
+    log.acknowledge_egress(consumer, &pending);
+    assert!(
+        log.next_egress(consumer).is_none(),
+        "the captured tail retires before the later targeted frame"
+    );
+    let inner = log.inner.lock().expect("log");
+    assert!(!inner.consumers.contains_key(&consumer));
+    assert!(
+        inner.retained.is_empty(),
+        "retirement releases the post-boundary target and continuity metadata"
+    );
+}
+
 /// A cursor stalled on an earlier targeted position may retain lightweight
 /// continuity metadata but must not pin a later payload after that payload's
 /// independent frozen target acknowledges it.

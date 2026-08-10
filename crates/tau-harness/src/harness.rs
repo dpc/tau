@@ -75,6 +75,7 @@ use crate::agent::{
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
+use crate::client_writer_lifecycle::{ClientWriterLifecycle, STARTUP_DISCONNECT_GRACE};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
@@ -85,8 +86,8 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSou
 use crate::error::HarnessError;
 use crate::event::{
     ChannelSink, ComponentIngress, ComponentIngressCapacity, ComponentIngressSender,
-    HarnessCommand, HarnessEvent, LiveConsumerHandle, SUPERVISED_CLEANUP_GRACE, SynchronousSink,
-    spawn_reader_thread, spawn_writer_thread,
+    HarnessCommand, HarnessEvent, SUPERVISED_CLEANUP_GRACE, SynchronousSink, spawn_reader_thread,
+    spawn_writer_thread,
 };
 use crate::event_log::EventLog;
 #[cfg(any(test, feature = "echo-agent"))]
@@ -2338,9 +2339,9 @@ pub struct Harness {
     creator_topology: AgentCreatorTopology,
     /// Runtime-only self and creator-subtree estimated-cost totals.
     cost_ledger: AgentCostLedger,
-    /// Live-log consumer handles for socket clients, keyed by connection ID.
+    /// Live-log cursor and transport lifecycle owners keyed by connection ID.
     pub(crate) client_writers:
-        std::collections::HashMap<tau_proto::ConnectionId, LiveConsumerHandle>,
+        std::collections::HashMap<tau_proto::ConnectionId, ClientWriterLifecycle>,
     /// Socket clients that completed the narrow external-message RPC hello.
     external_message_peers: HashSet<tau_proto::ConnectionId>,
     /// Pending outbound external messages keyed by logical message id.
@@ -9857,17 +9858,24 @@ impl Harness {
         stream: UnixStream,
     ) -> Result<ConnectionId, HarnessError> {
         let write_stream = stream.try_clone()?;
-        self.accept_client_io(stream, write_stream, ConnectionOrigin::Socket)
+        let shutdown_stream = stream.try_clone()?;
+        self.accept_client_io(
+            stream,
+            write_stream,
+            Some(shutdown_stream),
+            ConnectionOrigin::Socket,
+        )
     }
 
     pub(crate) fn accept_stdio_client(&mut self) -> Result<ConnectionId, HarnessError> {
-        self.accept_client_io(io::stdin(), io::stdout(), ConnectionOrigin::Socket)
+        self.accept_client_io(io::stdin(), io::stdout(), None, ConnectionOrigin::Socket)
     }
 
     fn accept_client_io<R, W>(
         &mut self,
         read: R,
         write: W,
+        socket_shutdown: Option<UnixStream>,
         origin: ConnectionOrigin,
     ) -> Result<ConnectionId, HarnessError>
     where
@@ -9895,7 +9903,11 @@ impl Harness {
             Box::new(sink),
         ));
         debug_assert_eq!(connected_id, conn_id);
-        self.client_writers.insert(conn_id.clone(), consumer);
+        let lifecycle = match socket_shutdown {
+            Some(stream) => ClientWriterLifecycle::socket(consumer, stream),
+            None => ClientWriterLifecycle::generic(consumer),
+        };
+        self.client_writers.insert(conn_id.clone(), lifecycle);
         spawn_reader_thread(conn_id.clone(), read, self.component_ingress_tx.clone());
         Ok(conn_id)
     }
@@ -9915,7 +9927,10 @@ impl Harness {
                 reason: Some(format!("harness startup failed: {error}")),
             }),
         );
-        self.drain_client_writer(client_id);
+        let Some(writer) = self.client_writers.remove(client_id) else {
+            return;
+        };
+        writer.close_after_current_for_startup(STARTUP_DISCONNECT_GRACE);
     }
 
     /// Waits until the connection writer processes every previously queued
@@ -9923,10 +9938,10 @@ impl Harness {
     ///
     /// An absent or already-closed writer has no remaining queue to drain.
     fn drain_client_writer(&self, client_id: &ConnectionId) {
-        let Some(consumer) = self.client_writers.get(client_id) else {
+        let Some(writer) = self.client_writers.get(client_id) else {
             return;
         };
-        consumer.flush();
+        writer.flush();
     }
 
     // -----------------------------------------------------------------------

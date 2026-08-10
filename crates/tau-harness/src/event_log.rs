@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use tau_proto::UnixMicros;
 #[cfg(test)]
@@ -112,6 +113,8 @@ struct ConsumerState {
     cursor: EgressPosition,
     /// Whether replay is still establishing the live-tail barrier.
     catch_up_paused: bool,
+    /// Tail after which the writer retires instead of waiting for more work.
+    close_after: Option<EgressPosition>,
 }
 
 /// One frame selected by a consumer without advancing its delivery cursor.
@@ -181,6 +184,7 @@ impl EventLog {
             ConsumerState {
                 cursor,
                 catch_up_paused: false,
+                close_after: None,
             },
         );
         consumer
@@ -226,6 +230,12 @@ impl EventLog {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
         loop {
             let state = *inner.consumers.get(&consumer)?;
+            if state.close_after == Some(state.cursor) {
+                Self::retire_consumer_locked(&mut inner, consumer);
+                drop(inner);
+                self.changed.notify_all();
+                return None;
+            }
             if state.catch_up_paused {
                 inner = self
                     .changed
@@ -312,19 +322,64 @@ impl EventLog {
         self.changed.notify_all();
     }
 
-    /// Retires a generation and releases every retention obligation it held.
+    /// Retires a generation unless terminal close ownership has been
+    /// transferred.
+    ///
+    /// Once close-after-current is active, dropping the bus sink must not race
+    /// the independent lifecycle owner and discard its terminal frame.
     pub(crate) fn retire_consumer(&self, consumer: tau_core::SharedConsumerId) {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
-        inner.consumers.remove(&consumer);
-        for position in &mut inner.retained {
-            position.pending_targets.remove(&consumer);
-            if position.pending_targets.is_empty() {
-                position.payload = None;
-            }
+        if inner
+            .consumers
+            .get(&consumer)
+            .is_some_and(|state| state.close_after.is_none())
+        {
+            Self::retire_consumer_locked(&mut inner, consumer);
         }
-        Self::prune_locked(&mut inner);
         drop(inner);
         self.changed.notify_all();
+    }
+
+    /// Retires a generation after its writer finishes or fails transport I/O.
+    pub(crate) fn retire_consumer_after_io(&self, consumer: tau_core::SharedConsumerId) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        Self::retire_consumer_locked(&mut inner, consumer);
+        drop(inner);
+        self.changed.notify_all();
+    }
+
+    /// Captures the current tail and asks the consumer to retire after reaching
+    /// it.
+    ///
+    /// Closing releases a replay pause because terminal connection teardown
+    /// must not remain parked behind semantic catch-up.
+    pub(crate) fn close_consumer_after_current(&self, consumer: tau_core::SharedConsumerId) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        let close_after = inner.next_egress_seq;
+        if let Some(state) = inner.consumers.get_mut(&consumer) {
+            state.close_after = Some(close_after);
+            state.catch_up_paused = false;
+        }
+        drop(inner);
+        self.changed.notify_all();
+    }
+
+    /// Waits at most `timeout` for a consumer generation to retire.
+    ///
+    /// Returns `true` when the generation no longer owns a cursor.
+    pub(crate) fn wait_for_consumer_retirement(
+        &self,
+        consumer: tau_core::SharedConsumerId,
+        timeout: Duration,
+    ) -> bool {
+        let inner = self.inner.lock().expect("event log mutex poisoned");
+        let (inner, _) = self
+            .changed
+            .wait_timeout_while(inner, timeout, |inner| {
+                inner.consumers.contains_key(&consumer)
+            })
+            .expect("event log mutex poisoned while waiting for retirement");
+        !inner.consumers.contains_key(&consumer)
     }
 
     /// Pauses or resumes a follower around semantic replay.
@@ -390,6 +445,18 @@ impl EventLog {
         {
             inner.retained.pop_front();
         }
+    }
+
+    /// Removes one consumer and releases every retained target it owned.
+    fn retire_consumer_locked(inner: &mut EventLogInner, consumer: tau_core::SharedConsumerId) {
+        inner.consumers.remove(&consumer);
+        for position in &mut inner.retained {
+            position.pending_targets.remove(&consumer);
+            if position.pending_targets.is_empty() {
+                position.payload = None;
+            }
+        }
+        Self::prune_locked(inner);
     }
 
     /// Reserves the next harness runtime event-log sequence.

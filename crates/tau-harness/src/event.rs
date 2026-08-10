@@ -396,6 +396,17 @@ impl LiveConsumerHandle {
     pub(crate) fn flush(&self) {
         self.log.flush_consumer(self.consumer);
     }
+
+    /// Requests retirement after every frame admitted through the current tail.
+    pub(crate) fn close_after_current(&self) {
+        self.log.close_consumer_after_current(self.consumer);
+    }
+
+    /// Waits for bounded retirement after a close-after-current request.
+    pub(crate) fn wait_for_retirement(&self, timeout: Duration) -> bool {
+        self.log
+            .wait_for_consumer_retirement(self.consumer, timeout)
+    }
 }
 
 impl ChannelSink {
@@ -883,7 +894,7 @@ fn spawn_writer_thread_inner(
                         }
                         log.acknowledge_egress(consumer, &pending);
                     }
-                    log.retire_consumer(consumer);
+                    log.retire_consumer_after_io(consumer);
                     if writer_failed {
                         let _ = failure_tx.send(HarnessEvent::ReadFailed {
                             connection_id,

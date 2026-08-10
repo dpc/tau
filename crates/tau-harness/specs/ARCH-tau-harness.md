@@ -10,6 +10,15 @@ tail until the replay-complete boundary. This architecture is governed by
 [GATE-runtime-live-event-log-cursors](../../../specs/GATE-runtime-live-event-log-cursors.md)
 and does not change semantic journals or protocol envelopes.
 
+Fatal startup teardown closes an initial Unix-socket client's cursor after the
+terminal `Disconnect` position. The harness gives the writer a finite grace to
+complete that frame, then shuts down an independently owned socket handle so
+blocked read or write I/O wakes and the cursor retires. Complete kernel-queued
+frames remain readable before EOF; a slow client may instead observe EOF, reset,
+a partial frame, or no terminal reason. Generic stdio and pipe writers do not
+inherit this socket-specific cancellation guarantee and retain synchronous
+drain behavior where the harness requests a terminal drain.
+
 Harness storage policy is immutable for one process. Durable mode owns normal
 session, agent, diagnostic, retention, and extension storage;
 session-ephemeral mode suppresses only session-owned artifacts; memory-only

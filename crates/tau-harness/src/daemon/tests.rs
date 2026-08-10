@@ -1,9 +1,9 @@
-use std::io::BufReader;
+use std::io::{BufReader, Read, Write};
 use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::process::Command as path_std_process_Command;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs, io as path_std_io, thread};
 
 use tau_config::settings::TauDirs;
@@ -444,6 +444,7 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
     );
 
     assert!(result.is_err());
+    drop(harness);
     let mut reader = PeerInputReader::new(BufReader::new(ui_end));
     let message = reader
         .read_message()
@@ -455,6 +456,103 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
     let reason = disconnect.reason.expect("disconnect reason");
     assert!(reason.contains("harness startup failed"));
     assert!(reason.contains("marker write failed"));
+    assert!(
+        reader.read_message().expect("read terminal EOF").is_none(),
+        "a complete queued Disconnect remains readable before socket EOF"
+    );
+}
+
+/// Ensures a fatal startup response cannot retain a writer, reader, cursor, and
+/// transport forever when the accepted Unix-socket client does not read.
+#[test]
+fn post_accept_startup_error_cancels_a_blocked_socket_writer() {
+    fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
+        crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let dirs = TauDirs {
+        config_dir: Some(td.path().join("config")),
+        state_dir: Some(td.path().join("runtime")),
+    };
+    let mut harness = Harness::new_with_provider(
+        &state_dir,
+        dirs,
+        echo_runner,
+        echo_tools(),
+        "s1",
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::Durable,
+    )
+    .expect("harness");
+    let (mut server_end, mut ui_end) = UnixStream::pair().expect("stream pair");
+
+    server_end
+        .set_nonblocking(true)
+        .expect("make fill writes nonblocking");
+    let fill = [0_u8; 8 * 1024];
+    loop {
+        match server_end.write(&fill) {
+            Ok(0) => panic!("socket fill made no progress"),
+            Ok(_) => {}
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("fill client receive queue: {error}"),
+        }
+    }
+    loop {
+        match server_end.write(&[0]) {
+            Ok(1) => {}
+            Ok(written) => panic!("single-byte socket fill wrote {written} bytes"),
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("exhaust final client receive-queue capacity: {error}"),
+        }
+    }
+    server_end
+        .set_nonblocking(false)
+        .expect("restore blocking writes");
+
+    let event_log = Arc::clone(&harness.event_log);
+    let baseline_consumers = event_log.consumer_count();
+    let client_id = harness.accept_client(server_end).expect("accept client");
+    assert_eq!(event_log.consumer_count(), baseline_consumers + 1);
+    let mut pre_accept_stream = None;
+    let started = Instant::now();
+    let result = notify_startup_error_after_accept::<(), _>(
+        Err(path_std_io::Error::other("blocked marker failure")),
+        &mut pre_accept_stream,
+        &mut harness,
+        Some(&client_id),
+    );
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "fatal startup handling must not wait for the blocked socket writer"
+    );
+    assert!(harness.client_writers.is_empty());
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while event_log.consumer_count() != baseline_consumers && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        event_log.consumer_count(),
+        baseline_consumers,
+        "socket shutdown must wake the writer and retire its live cursor"
+    );
+
+    ui_end
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("set bounded peer read");
+    let mut scratch = [0_u8; 16 * 1024];
+    loop {
+        match ui_end.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == path_std_io::ErrorKind::ConnectionReset => break,
+            Err(error) => panic!("shutdown transport must reach EOF or reset: {error}"),
+        }
+    }
 }
 
 /// A create rejection crosses only the initiating real socket and cannot leak
