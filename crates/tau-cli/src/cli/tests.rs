@@ -74,6 +74,7 @@ fn targeted_startup_keeps_root_option_placement() {
     assert!(Cli::try_parse_from(["tau", "resume", "--ephemeral"]).is_err());
     for option in [
         "--role=engineer",
+        "-r=engineer",
         "--profile=focused",
         "--harness-config=agents.default_role=engineer",
         "--enable-role=engineer",
@@ -89,4 +90,30 @@ fn targeted_startup_keeps_root_option_placement() {
             "{option} must remain root-only"
         );
     }
+}
+
+/// Ensures the reclaimed `-r` spelling selects the same root-owned role as
+/// `--role`, without changing the `resume` subcommand or allowing root options
+/// after it.
+#[test]
+fn short_role_option_matches_long_form_without_reclaiming_resume() {
+    let long = Cli::parse_from(["tau", "--role", "engineer", "resume"]);
+    let short = Cli::parse_from(["tau", "-r", "engineer", "resume"]);
+
+    assert_eq!(short.harness.role, long.harness.role);
+    assert!(matches!(
+        short.command,
+        Some(super::Command::Resume { session: None })
+    ));
+    assert!(Cli::try_parse_from(["tau", "resume", "-r", "engineer"]).is_err());
+    assert!(Cli::try_parse_from(["tau", "--role", "engineer", "-r", "reviewer"]).is_err());
+}
+
+/// Ensures root help advertises the short role spelling after `-r` stopped
+/// denoting the removed legacy resume flag.
+#[test]
+fn root_help_documents_short_role_option() {
+    let help = Cli::command().render_long_help().to_string();
+
+    assert!(help.contains("-r, --role <ROLE>"));
 }

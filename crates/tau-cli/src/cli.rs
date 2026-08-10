@@ -39,7 +39,7 @@ pub struct HarnessArgs {
     pub extension_overrides: ExtensionOverrideArgs,
 
     /// Select the startup/rendered role.
-    #[arg(long = "role")]
+    #[arg(short = 'r', long = "role")]
     pub role: Option<String>,
 
     /// Select a configuration profile before CLI overrides.
