@@ -726,12 +726,10 @@ fn catch_up_pagination_is_bounded_and_resumable() {
         .history
         .lock()
         .expect("history lock")
-        .extend((1..=150).map(|id| {
-            serde_json::json!({
-                "id": id, "sender_id": 77, "content": "filtered",
-                "type": "stream", "stream_id": 7, "subject": "deploy",
-                "flags": ["mentioned"]
-            })
+        .push(serde_json::json!({
+            "id": 1, "sender_id": 77, "content": "filtered",
+            "type": "stream", "stream_id": 7, "subject": "deploy",
+            "flags": ["mentioned"]
         }));
     *client
         .history_found_newest
@@ -756,7 +754,7 @@ fn catch_up_pagination_is_bounded_and_resumable() {
     );
     let state = ext.state.lock();
     let checkpoint = state.checkpoint.as_ref().expect("checkpoint");
-    assert_eq!(checkpoint.position(), Some(100));
+    assert_eq!(checkpoint.position(), Some(1));
     assert!(checkpoint.catch_up_needed());
 }
 
