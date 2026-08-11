@@ -117,9 +117,10 @@ Meta chords or `C-B` on terminal paths that preserve Shift.
 - `agent-pick` / `agent-pick-all` — invoke `fzf` directly over a bounded
   current-session agent snapshot. The active picker admits unconditional
   `active` agents and running `active_auto` agents; the all picker also admits
-   idle `active_auto` and explicitly suspended agents. Both preserve the
-   independent running/idle display column, show each canonical current
-   work-status phase and title, and revalidate the selected id.
+   idle `active_auto` and explicitly suspended agents. Both project current
+   work phase and running state as compact emoji, retain the task title, omit
+   lifecycle and role, and revalidate the selected id. See the linked picker
+   documentation for the exact legend.
   Cancel, failure, and stale selections preserve the current transcript and
   prompt draft. Selection alone preserves navigation mode; a later accepted
   visible prompt to that selected existing agent makes it `active`. See

@@ -73,16 +73,17 @@ subsequent navigation; complete harness stats, not the local prompt event, updat
 the CLI cache.
 
 Current CLI watched status rows come from the current-session semantic
-`WorkStatus` snapshot for each direct target. Absent status is unreported;
+`WorkStatus` snapshot for each direct target. Absent, unreported, and unknown
+status renders as `❓`; working, blocked, and done render as `🚀`, `⛔️`, and `✅`;
 unreported, working, blocked, and unknown remain visible, and done alone
 removes the row. The target's complete generic agent-stats runtime state controls
-activity decoration: Running renders direct activity, while Idle retains the
-status row without an activity marker. Before the first stats snapshot, active
+activity decoration: Running renders `💡`, while Idle renders `💤` and retains the
+status row. Before the first stats snapshot, active
 prompt tracking for the target is the compatibility/catch-up fallback.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
-direct target whose edge reports Running renders as `@id (display name) phase
-title running`, followed by existing tool/context telemetry. The stable id is primary;
+direct target whose edge reports Running renders as `@id (display name) phase-emoji
+title 💡`, followed by existing tool/context telemetry. The stable id is primary;
 the display name is optional persisted UI metadata; phase/title are the watched
 agent's own structured `WorkStatus` report. Under width pressure the display
 name yields before the title, while identity and phase retain their existing
@@ -101,7 +102,7 @@ their compatibility fallback contribution.
 
 Harness-authored watched-agent `WorkStatus` records are structured
 state rather than ordinary messages. Working, done, and blocked reports render
-as `▤ Status update from <sender>: <phase> (<reported task>)`, suppress their
+as `▤ Status update from <sender>: <phase-emoji> (<reported task>)`, suppress their
 empty compatibility body, and bypass `show-messages`.
 
 Harness-authored `WatchProviderStatus` and `WatchLongWait` records also render

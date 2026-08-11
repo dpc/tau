@@ -56,8 +56,10 @@ Watched-agent working, done, and blocked reports are structured status updates,
 not empty messages. They render as one line:
 
 ```text
-▤ Status update from <sender>: <phase> (<reported task>)
+▤ Status update from <sender>: <phase-emoji> (<reported task>)
 ```
+
+The phase emoji use the [agent-status legend](list-agents.md#attached-picker).
 
 `:set show-messages` modes are:
 

@@ -784,12 +784,13 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
 fn agent_fzf_output_parses_one_row() {
     assert_eq!(
         parse_agent_fzf_output(
-            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\tdisplay\n"
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\t🚀\ttitle\t💤\tdisplay\n"
+                .as_bytes()
                 .to_vec()
         )
         .expect("valid output"),
         Some(
-            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle"
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\t🚀\ttitle\t💤"
                 .to_owned()
         )
     );
@@ -812,9 +813,9 @@ fn agent_fzf_output_rejects_malformed_selection() {
 #[test]
 fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
     let rows = concat!(
-        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00/$.00\tworking\ttrace parser\n",
-        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1/$4.3\tblocked\tawait review\n",
-        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-/-\tunreported\t-\n",
+        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00/$.00\t🚀\ttrace parser\t💤\n",
+        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1/$4.3\t⛔️\tawait review\t💡\n",
+        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-/-\t❓\t-\t💤\n",
     );
     let formatted = format_agent_picker_rows(rows, 100).expect("valid picker rows");
     let formatted_rows = formatted.lines().collect::<Vec<_>>();
@@ -826,15 +827,21 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
         .collect::<Vec<_>>();
     assert_eq!(
         displays[0].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["agent-a", "working", "$.00/$.00"]
+        ["agent-a", "🚀", "💤"]
     );
     assert_eq!(
         displays[1].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["agent-longer", "blocked", "$2.1/$4.3"]
+        ["agent-longer", "⛔️", "💡"]
     );
     assert_eq!(
         displays[2].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["é", "unreported", "-/-"]
+        ["é", "❓", "💤"]
+    );
+    assert!(
+        displays
+            .iter()
+            .all(|display| !display.contains("live") && !display.contains("研究員")),
+        "picker presentation must omit lifecycle and role columns: {displays:?}"
     );
     for display in &displays {
         assert!(display_width(display) <= 96);
@@ -862,7 +869,7 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
 /// descriptive columns remain omitted without changing the source row.
 #[test]
 fn agent_picker_status_has_second_narrow_column_priority() {
-    let row = "agent-a\tlive\trunning\tactive\tdurable\tavailable\tengineer\t-\t1\tname\t$2.1\tworking\timplement picker\n";
+    let row = "agent-a\tlive\trunning\tactive\tdurable\tavailable\tengineer\t-\t1\tname\t$2.1\t🚀\timplement picker\t💡\n";
     let display = format_agent_picker_rows(row, 30)
         .expect("valid picker row")
         .trim_end()
@@ -872,7 +879,7 @@ fn agent_picker_status_has_second_narrow_column_priority() {
         .to_owned();
     assert_eq!(
         display.split_whitespace().collect::<Vec<_>>(),
-        ["agent-a", "working"]
+        ["agent-a", "🚀", "💡"]
     );
 }
 
@@ -881,7 +888,7 @@ fn agent_picker_status_has_second_narrow_column_priority() {
 #[test]
 fn agent_picker_rows_fit_narrow_and_long_values() {
     let rows = format!(
-        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\t$2.1\tworking\t{}\n",
+        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\t$2.1\t🚀\t{}\t💡\n",
         "agent-id-".repeat(20),
         "役割".repeat(30),
         "display-name-".repeat(20),
@@ -906,8 +913,8 @@ fn agent_picker_rows_fit_narrow_and_long_values() {
 #[test]
 fn agent_picker_practical_width_preserves_similar_agent_ids() {
     let rows = concat!(
-        "reviewer-security-a1\tlive\trunning\tactive\tdurable\tavailable\treviewer\t-\t1\tSecurity\t$1.2\tworking\treviewing trust boundary\n",
-        "reviewer-reliability-b2\tlive\trunning\tactive\tdurable\tavailable\treviewer\t-\t2\tReliability\t$1.3\tworking\treviewing retries\n",
+        "reviewer-security-a1\tlive\trunning\tactive\tdurable\tavailable\treviewer\t-\t1\tSecurity\t$1.2\t🚀\treviewing trust boundary\t💡\n",
+        "reviewer-reliability-b2\tlive\trunning\tactive\tdurable\tavailable\treviewer\t-\t2\tReliability\t$1.3\t🚀\treviewing retries\t💡\n",
     );
 
     for terminal_width in [50, 64] {
@@ -956,17 +963,17 @@ fn agent_fzf_command_uses_bounded_direct_process() {
 test "$#" -eq 6
 test "$1" = "--height=100%"
 test "$2" = "$(printf '%s\t' '--delimiter=')"
-test "$3" = "--with-nth=14"
+test "$3" = "--with-nth=15"
 test "$4" = "--no-multi"
 test "$5" = "--no-hscroll"
 test "$6" = "--prompt=agent> "
 cat >/dev/null
-printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\tdisplay\n'"#,
+printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\t🚀\ttitle\t💤\tdisplay\n'"#,
     );
 
     let selected = run_agent_fzf_command_with_ownership(
         program.as_os_str(),
-        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\tdisplay\n",
+        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\t🚀\ttitle\t💤\tdisplay\n",
         AGENT_PICKER_TIMEOUT,
         ProcessOwnership::ProcessGroup,
         || Ok(()),
@@ -976,7 +983,7 @@ printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/
     assert_eq!(
         selected.as_deref(),
         Some(
-            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle"
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\t🚀\ttitle\t💤"
         )
     );
 }
@@ -1107,7 +1114,7 @@ fn agent_picker_timeout_resumes_terminal_and_kills_descendants() {
     let error = term
         .pick_agent_row_with_command_and_terminal(
             program.as_os_str(),
-            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\tworking\ttitle\n",
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00/$.00\t🚀\ttitle\t💤\n",
             path_std_time::Duration::from_millis(100),
             ProcessOwnership::ProcessGroup,
             AgentPickerHooks {

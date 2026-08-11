@@ -51,19 +51,19 @@ const PROMPT_COMMAND_TIMEOUT: std::time::Duration = path_std_time::Duration::fro
 const AGENT_PICKER_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const AGENT_PICKER_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(5 * 60);
 // Keep the first ten fields synchronized with docs/list-agents.md#output. The
-// final three source fields are picker-only cost/work status; the presentation
-// field is removed after fzf returns the complete input row.
+// final four source fields are picker-only cost/work status/runtime; the
+// presentation field is removed after fzf returns the complete input row.
 const AGENT_PICKER_FZF_ARGS: &[&str] = &[
     "--height=100%",
     "--delimiter=\t",
-    "--with-nth=14",
+    "--with-nth=15",
     "--no-multi",
     "--no-hscroll",
     "--prompt=agent> ",
 ];
-const AGENT_PICKER_SOURCE_FIELDS: usize = 13;
+const AGENT_PICKER_SOURCE_FIELDS: usize = 14;
 
-const AGENT_PICKER_COLUMNS: [AgentPickerColumn; 8] = [
+const AGENT_PICKER_COLUMNS: [AgentPickerColumn; 6] = [
     AgentPickerColumn {
         source_field: 0,
         minimum_width: 16,
@@ -72,9 +72,15 @@ const AGENT_PICKER_COLUMNS: [AgentPickerColumn; 8] = [
     },
     AgentPickerColumn {
         source_field: 11,
-        minimum_width: 7,
-        preferred_width: 10,
-        max_width: 10,
+        minimum_width: 2,
+        preferred_width: 2,
+        max_width: 2,
+    },
+    AgentPickerColumn {
+        source_field: 13,
+        minimum_width: 2,
+        preferred_width: 2,
+        max_width: 2,
     },
     AgentPickerColumn {
         source_field: 10,
@@ -89,28 +95,10 @@ const AGENT_PICKER_COLUMNS: [AgentPickerColumn; 8] = [
         max_width: 40,
     },
     AgentPickerColumn {
-        source_field: 6,
-        minimum_width: 8,
-        preferred_width: 12,
-        max_width: 20,
-    },
-    AgentPickerColumn {
         source_field: 9,
         minimum_width: 10,
         preferred_width: 24,
         max_width: 40,
-    },
-    AgentPickerColumn {
-        source_field: 1,
-        minimum_width: 4,
-        preferred_width: 11,
-        max_width: 11,
-    },
-    AgentPickerColumn {
-        source_field: 2,
-        minimum_width: 4,
-        preferred_width: 7,
-        max_width: 7,
     },
 ];
 const AGENT_PICKER_COLUMN_GAP: &str = "  ";

@@ -1634,7 +1634,7 @@ pub(crate) fn watched_agent_tool_display(
         });
     }
     rendered.leading_segments.push(ToolLineSegment {
-        text: watched_agent_work_status_phase(work_status),
+        text: watched_agent_work_status_symbol(work_status),
         status: ToolStatus::Progress,
         no_leading_space: false,
     });
@@ -1646,17 +1646,30 @@ pub(crate) fn watched_agent_tool_display(
         });
     }
     match activity {
-        WatchedAgentActivity::Idle => {}
+        WatchedAgentActivity::Idle => {
+            rendered.leading_segments.push(ToolLineSegment {
+                text: crate::list_agents::runtime_state_symbol(tau_proto::AgentRuntimeState::Idle)
+                    .to_owned(),
+                status: ToolStatus::Info,
+                no_leading_space: false,
+            });
+        }
         WatchedAgentActivity::Running => {
             rendered.leading_segments.push(ToolLineSegment {
-                text: "running".to_owned(),
+                text: crate::list_agents::runtime_state_symbol(
+                    tau_proto::AgentRuntimeState::Running,
+                )
+                .to_owned(),
                 status: ToolStatus::Info,
                 no_leading_space: false,
             });
         }
         WatchedAgentActivity::Watching { witness } => {
             rendered.leading_segments.push(ToolLineSegment {
-                text: "watching".to_owned(),
+                text: format!(
+                    "{} watching",
+                    crate::list_agents::runtime_state_symbol(tau_proto::AgentRuntimeState::Idle)
+                ),
                 status: ToolStatus::Info,
                 no_leading_space: false,
             });
@@ -1674,22 +1687,10 @@ pub(crate) fn watched_agent_tool_display(
 }
 
 /// Returns the stable UI spelling for one self-reported agent work phase.
-fn watched_agent_work_status_phase(
+fn watched_agent_work_status_symbol(
     status: Option<&tau_proto::AgentWatchWorkStatusNotification>,
 ) -> String {
-    agent_work_status_phase(status.map(|status| status.phase)).to_owned()
-}
-
-/// Returns the stable UI spelling shared by selected- and watched-agent work
-/// status presentation.
-fn agent_work_status_phase(phase: Option<tau_proto::AgentWorkStatusPhase>) -> &'static str {
-    match phase {
-        None | Some(tau_proto::AgentWorkStatusPhase::Unreported) => "unreported",
-        Some(tau_proto::AgentWorkStatusPhase::Working) => "working",
-        Some(tau_proto::AgentWorkStatusPhase::Done) => "done",
-        Some(tau_proto::AgentWorkStatusPhase::Blocked) => "blocked",
-        Some(tau_proto::AgentWorkStatusPhase::Unknown) => "unknown",
-    }
+    crate::list_agents::work_status_symbol(status.map(|status| status.phase)).to_owned()
 }
 
 impl EventRenderer {
@@ -3706,7 +3707,7 @@ impl EventRenderer {
     fn selected_agent_work_status(&self, agent_id: &str) -> Option<(&'static str, Option<String>)> {
         let status = &self.agent_stats.get(agent_id)?.work_status;
         Some((
-            agent_work_status_phase(Some(status.phase())),
+            crate::list_agents::work_status_symbol(Some(status.phase())),
             status.title().map(tau_proto::visible_escape_metadata),
         ))
     }
@@ -5405,20 +5406,16 @@ impl EventRenderer {
             return None;
         };
         let status = message.watch_work_status.as_ref()?;
-        let phase = match status.phase {
-            tau_proto::AgentWorkStatusPhase::Unreported => "unreported",
-            tau_proto::AgentWorkStatusPhase::Working => "working",
-            tau_proto::AgentWorkStatusPhase::Done => "done",
-            tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
-            tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
-        };
+        let phase_symbol = crate::list_agents::work_status_symbol(Some(status.phase));
         let sender = self.agent_message_received_sender_label(message, use_local_names);
         let title = status
             .title
             .as_deref()
             .map(tau_proto::visible_escape_metadata)
             .unwrap_or_else(|| "no reported task".to_owned());
-        Some(format!("Status update from {sender}: {phase} ({title})"))
+        Some(format!(
+            "Status update from {sender}: {phase_symbol} ({title})"
+        ))
     }
 
     #[cfg(test)]

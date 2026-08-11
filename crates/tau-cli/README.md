@@ -59,7 +59,9 @@ renderer state. The C-b picker, `:pick-agent`, and C-j/C-k navigation ring use
 the effective-active rule: `active` agents remain eligible while idle, and
 `active-auto` agents are eligible only while running. `:pick-agent-all` instead
 lists every current live agent, including idle `active-auto` and explicitly
-suspended agents. Both pickers retain the independent running/idle column. The
+suspended agents. Both pickers render work status and current-turn state as
+compact emoji; lifecycle and role remain
+available from `tau agent list` but are omitted from picker presentation. The
 overview remains the input target for starting a new agent. The underlying
 picker actions remain configurable, and the all-agent action has no default
 key binding.

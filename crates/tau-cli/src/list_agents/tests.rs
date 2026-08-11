@@ -155,8 +155,8 @@ fn all_picker_includes_suspended_agents_and_preserves_runtime_column() {
     assert!(output.contains("auto-idle\tlive\tidle\tactive_auto\tdurable\tmissing\t"));
 }
 
-/// Picker rows append canonical cost and status facts without changing public
-/// roster fields or ordering.
+/// Picker rows append canonical cost, status, and running-state symbols without
+/// changing public roster fields or ordering.
 #[test]
 fn picker_rows_append_canonical_cost_and_status() {
     let zero = entry("zero", None, Some(1));
@@ -189,21 +189,30 @@ fn picker_rows_append_canonical_cost_and_status() {
     assert_eq!(
         extras,
         [
-            vec!["$.00/$.00", "unreported", "-"],
-            vec!["$2.1/$4.3", "working", r"verify \\ picker\\u{202E} rows"],
-            vec!["-/-", "unreported", "-"],
+            vec!["$.00/$.00", "❓", "-", "💤"],
+            vec!["$2.1/$4.3", "🚀", r"verify \\ picker\\u{202E} rows", "💤"],
+            vec!["-/-", "❓", "-", "💤"],
         ]
     );
 }
 
-/// Every closed canonical work-status phase maps to its stable picker spelling.
+/// Every closed canonical work-status phase maps to its stable compact symbol,
+/// with unknown conservatively sharing the unreported symbol.
 #[test]
-fn picker_work_status_phase_names_are_complete() {
+fn picker_work_status_symbols_are_complete() {
     use tau_proto::AgentWorkStatusPhase::{Blocked, Done, Unknown, Unreported, Working};
 
     assert_eq!(
-        [Unreported, Working, Done, Blocked, Unknown].map(work_status_phase_name),
-        ["unreported", "working", "done", "blocked", "unknown"]
+        [
+            None,
+            Some(Unreported),
+            Some(Working),
+            Some(Done),
+            Some(Blocked),
+            Some(Unknown)
+        ]
+        .map(work_status_symbol),
+        ["❓", "❓", "🚀", "✅", "⛔️", "❓"]
     );
 }
 

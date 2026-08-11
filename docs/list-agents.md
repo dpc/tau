@@ -56,23 +56,26 @@ running. `:pick-agent-all` opens it over all current live rows, including idle
 `active_auto` and explicitly suspended agents. The underlying `agent-pick` and
 `agent-pick-all` actions remain configurable; the all-agent action has no
 default key binding. This eligibility filter remains separate from the runtime
-column, which continues to show `running` or `idle` in both pickers.
+state shown in both pickers.
 
 `fzf` is optional and is started only when a picker command or configured
 binding action is used. Tau passes rows through stdin and invokes `fzf` directly
 rather than interpolating agent data into a shell command. The picker shows
-agent id, current work-status phase, self/inclusive creator-subtree estimated
-API cost, work-status
-title, role, display name, lifecycle, and runtime in space-padded,
-terminal-width-aware columns. Work status comes from the same fresh harness
-snapshot as roster membership and uses `unreported`, `working`, `done`,
-`blocked`, or `unknown`; an unreported title is `-`. The picker uses the latest
+agent id, work-status emoji, current-turn emoji, self/inclusive creator-subtree
+estimated API cost, work-status title, and display name in space-padded,
+terminal-width-aware columns. The compact legend is `🚀` working, `⛔️` blocked,
+`✅` done, and `❓` unreported or unknown; `💡` marks a running current turn
+and `💤` marks no current turn. Lifecycle and role remain available in the
+machine-facing roster but are omitted from the picker: picker membership is
+already restricted to live agents, and the stable agent id is its primary
+identity. Work status comes from the same fresh harness snapshot as roster
+membership; an unreported title is `-`. The picker uses the latest
 canonical per-agent cost pair processed by the renderer: known zero is
 `$.00/$.00`, known values independently use the compact status-line format,
 and an unavailable pair is `-/-`. Trailing columns are progressively omitted under width pressure,
-keeping identity before status and cost. Long values are truncated for display only; the
+keeping identity before status, current-turn state, and cost. Long values are truncated for display only; the
 selected stable id and original escaped picker row remain unchanged. This
-picker-only cost/phase/title projection does not change the ten-field
+picker-only cost/status/title/runtime projection does not change the ten-field
 `tau agent list` output.
 
 Canceling the picker, a missing `fzf`, malformed output, or a stale selection

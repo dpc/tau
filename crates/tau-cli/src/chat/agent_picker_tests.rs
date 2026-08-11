@@ -42,7 +42,7 @@ fn picker_orchestration_revalidates_with_initiating_category() {
         assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
         assert!(
             rows.lines()
-                .all(|row| row.ends_with("\t$.00/$2.1\tworking\tshipping picker status"))
+                .all(|row| row.ends_with("\t$.00/$2.1\t🚀\tshipping picker status\t💡"))
         );
         Ok(Some("auto\tlive\trunning\tactive_auto".to_owned()))
     };

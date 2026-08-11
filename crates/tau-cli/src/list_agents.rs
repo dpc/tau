@@ -233,18 +233,19 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
     format_rows_with(agents, |_| None)
 }
 
-/// Formats picker rows with canonical runtime cost and work status appended.
+/// Formats picker rows with canonical runtime cost, work status, and running
+/// state appended.
 pub(crate) fn format_picker_rows(
     agents: &[SessionAgentListEntry],
     cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<crate::estimated_cost::AgentCostSnapshot>,
 ) -> String {
     format_rows_with(agents, |agent| {
         let cost = crate::estimated_cost::format_snapshot(cost_for_agent(&agent.agent_id));
-        let (phase, title) = agent.work_status.as_ref().map_or_else(
-            || ("-".to_owned(), dash()),
+        let (status, title) = agent.work_status.as_ref().map_or_else(
+            || (work_status_symbol(None).to_owned(), dash()),
             |status| {
                 (
-                    work_status_phase_name(status.phase()).to_owned(),
+                    work_status_symbol(Some(status.phase())).to_owned(),
                     status
                         .title()
                         .map(tau_proto::visible_escape_metadata)
@@ -254,17 +255,30 @@ pub(crate) fn format_picker_rows(
                 )
             },
         );
-        Some(vec![cost, phase, title])
+        let running = lifecycle_runtime(agent.lifecycle)
+            .map(runtime_state_symbol)
+            .unwrap_or("-");
+        Some(vec![cost, status, title, running.to_owned()])
     })
 }
 
-fn work_status_phase_name(phase: tau_proto::AgentWorkStatusPhase) -> &'static str {
+/// Returns the compact human-facing symbol for one reported work phase.
+pub(crate) fn work_status_symbol(phase: Option<tau_proto::AgentWorkStatusPhase>) -> &'static str {
     match phase {
-        tau_proto::AgentWorkStatusPhase::Unreported => "unreported",
-        tau_proto::AgentWorkStatusPhase::Working => "working",
-        tau_proto::AgentWorkStatusPhase::Done => "done",
-        tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
-        tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
+        None
+        | Some(tau_proto::AgentWorkStatusPhase::Unreported)
+        | Some(tau_proto::AgentWorkStatusPhase::Unknown) => "❓",
+        Some(tau_proto::AgentWorkStatusPhase::Working) => "🚀",
+        Some(tau_proto::AgentWorkStatusPhase::Done) => "✅",
+        Some(tau_proto::AgentWorkStatusPhase::Blocked) => "⛔️",
+    }
+}
+
+/// Returns the compact human-facing symbol for current-turn state.
+pub(crate) fn runtime_state_symbol(state: tau_proto::AgentRuntimeState) -> &'static str {
+    match state {
+        tau_proto::AgentRuntimeState::Running => "💡",
+        tau_proto::AgentRuntimeState::Idle => "💤",
     }
 }
 

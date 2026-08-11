@@ -1108,10 +1108,10 @@ fn watch_work_status_renders_all_reportable_states() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name("worker", "implementation");
     renderer.show_messages = path_tau_config_settings::ShowMessages::None;
-    for (phase, label) in [
-        (tau_proto::AgentWorkStatusPhase::Working, "working"),
-        (tau_proto::AgentWorkStatusPhase::Done, "done"),
-        (tau_proto::AgentWorkStatusPhase::Blocked, "blocked"),
+    for (phase, label, symbol) in [
+        (tau_proto::AgentWorkStatusPhase::Working, "working", "🚀"),
+        (tau_proto::AgentWorkStatusPhase::Done, "done", "✅"),
+        (tau_proto::AgentWorkStatusPhase::Blocked, "blocked", "⛔️"),
     ] {
         let event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: tau_proto::AgentMessageId::parse(format!("status-{label}"))
@@ -1138,7 +1138,7 @@ fn watch_work_status_renders_all_reportable_states() {
         assert_eq!(
             block_text(&renderer.render_agent_message_block(&event)),
             format!(
-                "{}Status update from @worker (implementation): {label} ({label} task)",
+                "{}Status update from @worker (implementation): {symbol} ({label} task)",
                 crate::transcript_markers::STATUS_UPDATE
             )
         );
@@ -1226,7 +1226,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     );
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&renderer.message_history[0].event)),
-        "▤ Status update from @worker: working (implementation)"
+        "▤ Status update from @worker: 🚀 (implementation)"
     );
 }
 
