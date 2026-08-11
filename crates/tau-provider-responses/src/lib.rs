@@ -25,6 +25,10 @@ use tokio::runtime as path_tokio_runtime;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+/// Bounded route-specific notice for typed images omitted from text-only
+/// Responses function-call output.
+const IMAGE_OMISSION_MARKER: &str =
+    "[image omitted: Responses does not support native image tool output]";
 /// Maximum distinct provider output positions accepted in one bounded attempt.
 const MAX_OUTPUT_ITEMS: u32 = 1024;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1769,7 +1773,7 @@ fn lower_tool(tool: &ToolDefinition) -> Result<Value, Error> {
 }
 
 fn render_tool_result(result: &tau_proto::ToolResultItem) -> String {
-    match &result.status {
+    let mut text = match &result.status {
         ToolResultStatus::Success => result.output.render(),
         ToolResultStatus::Error { message } => {
             let mut output = result.output.clone();
@@ -1791,7 +1795,12 @@ fn render_tool_result(result: &tau_proto::ToolResultItem) -> String {
             body: String::new(),
         }
         .render(),
+    };
+    if !result.provider_content.is_empty() {
+        text.push('\n');
+        text.push_str(IMAGE_OMISSION_MARKER);
     }
+    text
 }
 
 fn cbor_to_json(value: &tau_proto::CborValue) -> Value {

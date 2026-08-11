@@ -11,6 +11,45 @@ use tungstenite::handshake::server::Request as WebSocketRequest;
 
 use super::*;
 
+/// Text-only Responses tool-result lowering retains textual output, marks
+/// omitted typed images, and never embeds their canonical bytes.
+#[test]
+fn responses_tool_result_marks_omitted_images_without_byte_egress() {
+    let image_bytes = b"responses-image-egress-sentinel";
+    let result = tau_proto::ToolResultItem {
+        presentation: Default::default(),
+        call_id: tau_proto::ToolCallId::new("image-call"),
+        tool_type: ToolType::Function,
+        status: ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+            "text remains".to_owned(),
+        )),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: image_bytes.to_vec().into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+    };
+    let lowered = lower_item(&ContextItem::ToolResult(result))
+        .expect("lower tool result")
+        .expect("function tool result is emitted");
+    let ResponsesInputItem::Json(lowered) = lowered else {
+        panic!("tool result must use JSON input");
+    };
+    assert_eq!(
+        lowered,
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "image-call",
+            "output": format!("text remains\n{IMAGE_OMISSION_MARKER}"),
+        })
+    );
+}
+
 /// Public Responses usage preserves OpenAI cache reads and writes as separate
 /// ordinary-request observations with unknown expiry confidence. This prevents
 /// counters from promoting observed reuse into a hard TTL or renewal guarantee.
