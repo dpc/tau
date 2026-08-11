@@ -360,9 +360,12 @@ pub(crate) struct ToolLineSegment {
 }
 
 /// Decomposed compact tool-block label, painted as themed spans:
-/// `<tool_name> <leading...> <mode> <args> <range> <suffix...>`.
+/// `<status_prefix> <tool_name> <leading...> <mode> <args> <range>
+/// <suffix...>`.
 #[derive(Clone)]
 pub(crate) struct ToolCallDisplay {
+    /// Optional atomic semantic status rendered before the stable identity.
+    pub(crate) status_prefix: Option<(String, ToolStatus)>,
     pub(crate) tool_name: String,
     pub(crate) tool_name_style: Option<&'static str>,
     /// Generic compact segments rendered directly after the stable identity.
@@ -448,6 +451,7 @@ fn tool_suffix(text: String, status: ToolStatus) -> ToolLineSegment {
 
 pub(crate) fn pending_tool_call_display(tool_name: &str) -> ToolCallDisplay {
     ToolCallDisplay {
+        status_prefix: None,
         tool_name: tool_name.to_owned(),
         tool_name_style: None,
         leading_segments: Vec::new(),
@@ -647,6 +651,7 @@ fn render_tool_use_state_inner(
         suffixes.push(tool_suffix(status_text, status_kind));
     }
     ToolCallDisplay {
+        status_prefix: None,
         tool_name: tool_name.to_owned(),
         tool_name_style: None,
         leading_segments: Vec::new(),
@@ -825,6 +830,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
         ));
     }
     ToolCallDisplay {
+        status_prefix: None,
         tool_name: "tools".to_owned(),
         tool_name_style: None,
         leading_segments: Vec::new(),
@@ -1020,6 +1026,13 @@ pub(crate) fn render_tool_block(
         resolve(theme, names::TOOL_OUTPUT),
         resolve(theme, names::TOOL_ARGS),
     ));
+    if let Some((text, status)) = &display.status_prefix {
+        line.push(
+            tool_suffix_element(*status).priority(),
+            left,
+            tool_line_text(theme, tool_status_style(*status), text.clone()),
+        );
+    }
     line.push_truncated(
         ToolLineElement::Identity.priority(),
         left,

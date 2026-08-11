@@ -1633,11 +1633,10 @@ pub(crate) fn watched_agent_tool_display(
             no_leading_space: false,
         });
     }
-    rendered.leading_segments.push(ToolLineSegment {
-        text: watched_agent_work_status_symbol(work_status),
-        status: ToolStatus::Progress,
-        no_leading_space: false,
-    });
+    rendered.status_prefix = Some((
+        watched_agent_work_status_symbol(work_status),
+        ToolStatus::Progress,
+    ));
     if let Some(title) = work_status.and_then(|status| status.title.as_deref()) {
         rendered.leading_segments.push(ToolLineSegment {
             text: tau_proto::visible_escape_metadata(title),

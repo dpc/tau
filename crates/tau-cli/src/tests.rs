@@ -5921,11 +5921,11 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         work_status: Default::default(),
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(90, "@engineer_1 ❓ 💡"));
+    assert!(!vt.screen_contains(90, "❓ @engineer_1 💡"));
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "@engineer_1 ❓ 💡"));
+    assert!(vt.screen_contains(90, "❓ @engineer_1 💡"));
     assert!(vt.screen_contains(90, "%1/2"));
 }
 
@@ -10595,7 +10595,7 @@ fn watched_agent_stats_redraws_status_row() {
         },
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@engineer_1 ❓ 💤"));
+    assert!(vt.screen_contains(100, "❓ @engineer_1 💤"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         model_params: Some(tau_proto::ModelParams::default()),
@@ -10629,12 +10629,12 @@ fn watched_agent_stats_redraws_status_row() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "@engineer_1 ❓ 💡"),
+        eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡"),
         "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "@engineer_1 ❓ 💡 %3/3"),
+        eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡 %3/3"),
         "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
@@ -10672,7 +10672,7 @@ fn watched_agent_stats_redraws_status_row() {
         eventually_screen_contains(
             &vt,
             100,
-            "@engineer_1 (worker display) 🚀 investigate session 💡 %3/3",
+            "🚀 @engineer_1 (worker display) investigate session 💡 %3/3",
         ),
         "the watched row should use the agent's own status title and display name: {:?}",
         vt.screen_text(100)
@@ -10693,14 +10693,17 @@ fn watched_agent_stats_redraws_status_row() {
         },
     ));
     assert!(
-        eventually_screen_contains(&vt, 100, "@engineer_1 (worker display) ❓ 💡"),
+        eventually_screen_contains(&vt, 100, "❓ @engineer_1 (worker display) 💡"),
         "a reloaded same-id row must not retain its former self-reported title: {:?}",
         vt.screen_text(100)
     );
     let reloaded_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.trim_start().starts_with("@engineer_1 (worker display)"))
+        .find(|row| {
+            row.trim_start()
+                .starts_with("❓ @engineer_1 (worker display)")
+        })
         .expect("reloaded watched row");
     assert!(!reloaded_row.contains("investigate session"));
     assert!(
@@ -10756,11 +10759,11 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     let screen = vt.screen_text(100);
     let first = screen
         .iter()
-        .position(|line| line.contains("@engineer_a ❓ 💡"))
+        .position(|line| line.contains("❓ @engineer_a 💡"))
         .expect("engineer_a running row");
     let second = screen
         .iter()
-        .position(|line| line.contains("@engineer_b ❓ 💡"))
+        .position(|line| line.contains("❓ @engineer_b 💡"))
         .expect("engineer_b running row");
     assert!(
         first < second,
@@ -10842,8 +10845,8 @@ fn mixed_live_activity_blocks_keep_category_and_internal_order() {
             "read_two 0s pending",
             "queued-one (queued)",
             "queued-two (queued)",
-            "@engineer_a ❓ 💤",
-            "@engineer_b ❓ 💤",
+            "❓ @engineer_a 💤",
+            "❓ @engineer_b 💤",
         ]
         .map(|needle| {
             screen
@@ -10913,7 +10916,7 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
             .unwrap_or_else(|| panic!("missing pending response in {screen:?}"));
         let watched = screen
             .iter()
-            .position(|line| line.contains("@engineer_1 ❓ 💤"))
+            .position(|line| line.contains("❓ @engineer_1 💤"))
             .unwrap_or_else(|| panic!("missing watched row in {screen:?}"));
         assert!(
             response < watched,
@@ -10953,7 +10956,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
         ));
     }
     sync(&handle);
-    assert!(vt.screen_contains(100, "@reviewer ❓ 💤"));
+    assert!(vt.screen_contains(100, "❓ @reviewer 💤"));
     assert!(
         !vt.screen_contains(100, "[worker] @worker"),
         "idle descendants must not be flattened into manager rows"
@@ -10975,7 +10978,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
 
     renderer.handle(&prompt_started("worker"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@reviewer ❓ 💤 watching -> @worker"));
+    assert!(vt.screen_contains(100, "❓ @reviewer 💤 watching -> @worker"));
     assert!(
         !vt.screen_contains(100, "[worker] @worker"),
         "recursive descendants must not be flattened into manager rows"
@@ -10983,7 +10986,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
 
     renderer.handle(&prompt_started("reviewer"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@reviewer ❓ 💡"));
+    assert!(vt.screen_contains(100, "❓ @reviewer 💡"));
     assert!(
         !vt.screen_contains(100, "@reviewer -> @worker"),
         "direct-running state must replace the transitive witness"
@@ -11050,7 +11053,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "@engineer_1 ❓ 💡 %13/13",
+        "❓ @engineer_1 💡 %13/13",
     ));
 
     renderer.switch_agent("other_1".to_owned());
@@ -11074,12 +11077,12 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
     let watching_rows: Vec<_> = vt
         .screen_text(100)
         .into_iter()
-        .filter(|row| row.contains("@engineer_1 ❓ 💡"))
+        .filter(|row| row.contains("❓ @engineer_1 💡"))
         .map(|row| row.trim_end().to_owned())
         .collect();
     assert_eq!(
         watching_rows,
-        vec!["@engineer_1 ❓ 💡 %42/42"],
+        vec!["❓ @engineer_1 💡 %42/42"],
         "watched-agent row should update in place after transcript restore: {:?}",
         vt.screen_text(100)
     );
@@ -11143,7 +11146,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "@engineer_1 ❓ 💡 %15/15",
+        "❓ @engineer_1 💡 %15/15",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -11173,7 +11176,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "@engineer_1 ❓ 💡 %15/15"),
+        vt.screen_contains(100, "❓ @engineer_1 💡 %15/15"),
         "outer runtime state should remain running after the inner response finishes: {:?}",
         vt.screen_text(100)
     );
@@ -11242,7 +11245,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
 
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "@engineer_1 ❓ 💤"),
+        vt.screen_contains(100, "❓ @engineer_1 💤"),
         "an absent status snapshot is canonically unreported"
     );
 
@@ -11253,11 +11256,11 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
     ));
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@engineer_1 ❓ 💡"));
+    assert!(vt.screen_contains(100, "❓ @engineer_1 💡"));
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@engineer_1 ❓ 💤"));
-    assert!(!vt.screen_contains(100, "@engineer_1 ❓ 💡"));
+    assert!(vt.screen_contains(100, "❓ @engineer_1 💤"));
+    assert!(!vt.screen_contains(100, "❓ @engineer_1 💡"));
 
     renderer.handle(&watch_status(
         "status-working",
@@ -11265,7 +11268,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         Some("implement fix"),
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@engineer_1 🚀 implement fix 💤"));
+    assert!(vt.screen_contains(100, "🚀 @engineer_1 implement fix 💤"));
 
     renderer.handle(&watch_status(
         "status-blocked",
@@ -11273,7 +11276,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         Some("await input"),
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@engineer_1 ⛔️ await input 💤"));
+    assert!(vt.screen_contains(100, "⛔️ @engineer_1 await input 💤"));
 
     renderer.handle(&watch_status(
         "status-unknown",
@@ -11281,7 +11284,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         None,
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "@engineer_1 ❓ 💤"));
+    assert!(vt.screen_contains(100, "❓ @engineer_1 💤"));
 
     renderer.handle(&watch_status(
         "status-done",
@@ -11337,7 +11340,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     ));
     sync(&handle);
 
-    assert!(eventually_screen_contains(&vt, 100, "@engineer_1 ❓ 💡",));
+    assert!(eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -11366,7 +11369,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "@engineer_1 ❓ 💤"),
+        vt.screen_contains(100, "❓ @engineer_1 💤"),
         "provider-fallback terminal should retain the watched status row: {:?}",
         vt.screen_text(100)
     );
@@ -11413,7 +11416,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     }));
     sync(&handle);
 
-    assert!(eventually_screen_contains(&vt, 100, "@engineer_1 ❓ 💡",));
+    assert!(eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -11442,7 +11445,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "@engineer_1 ❓ 💤"),
+        vt.screen_contains(100, "❓ @engineer_1 💤"),
         "terminal prompt id should clear activity but retain the status row: {:?}",
         vt.screen_text(100)
     );
@@ -11521,7 +11524,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "@engineer_1 ❓ 💤"),
+        vt.screen_contains(100, "❓ @engineer_1 💤"),
         "delayed start/create must retain, not reactivate, the status row: {:?}",
         vt.screen_text(100)
     );
@@ -13817,8 +13820,9 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
     );
 }
 
-/// Ensures watched-agent rows put stable identity first, then self-reported
-/// state and title, while preserving generic telemetry and truncation priority.
+/// Ensures watched-agent rows put self-reported status before stable identity
+/// and title while preserving generic telemetry, styling, and truncation
+/// priority.
 #[test]
 fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let theme = cli_test_theme();
@@ -13864,27 +13868,44 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         .iter()
         .map(|segment| segment.text.as_str())
         .collect();
-    assert_eq!(leading, vec!["(review)", "🚀", "review changes", "💡"]);
+    assert_eq!(
+        display
+            .status_prefix
+            .as_ref()
+            .map(|(text, _)| text.as_str()),
+        Some("🚀")
+    );
+    assert_eq!(leading, vec!["(review)", "review changes", "💡"]);
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["%2/3", "#133k/200k"]);
 
     let block = render_tool_block(&theme, &display);
     assert_eq!(
         priority_header_text(&block, 100),
-        "@engineer_1 (review) 🚀 review changes 💡 %2/3 #133k/200k"
+        "🚀 @engineer_1 (review) review changes 💡 %2/3 #133k/200k"
     );
-    let running = priority_header_cells(&block, 100)[0].clone();
+    let wide_cells = priority_header_cells(&block, 100);
+    let identity_start = wide_cells
+        .iter()
+        .position(|cell| cell.ch == '@')
+        .expect("stable identity span");
     assert_eq!(
-        running.style,
+        wide_cells[identity_start].style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
         "stable agent identity keeps the watched-agent style"
     );
-    let wide_cells = priority_header_cells(&block, 100);
-    let wide_text: String = wide_cells.iter().map(|cell| cell.ch).collect();
-    let display_name_start = wide_text.find("(review)").expect("display name span") + 1;
-    let phase_start = wide_text.find("🚀").expect("work phase span");
-    let title_start = wide_text
-        .rfind("review changes")
+    let display_name_start = wide_cells
+        .iter()
+        .position(|cell| cell.ch == '(')
+        .expect("display name span")
+        + 1;
+    let phase_start = wide_cells
+        .iter()
+        .position(|cell| cell.ch == '🚀')
+        .expect("work phase span");
+    let title_start = wide_cells
+        .iter()
+        .rposition(|cell| cell.ch == 'r')
         .expect("self-reported title span");
     assert_eq!(
         wide_cells[display_name_start].style,
@@ -13913,7 +13934,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     );
     let without_task_title = priority_header_text(&block, 19);
     assert!(
-        without_task_title.starts_with('@'),
+        without_task_title.starts_with("🚀 @"),
         "{without_task_title:?}"
     );
     assert!(without_task_title.contains("🚀"), "{without_task_title:?}");
@@ -13942,7 +13963,10 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(display.tool_name, "@engineer_1");
     assert_eq!(texts, vec!["-> @leaf", "%2/3", "#67%"]);
     let block = render_tool_block(&theme, &display);
-    let watching = priority_header_cells(&block, 100)[0].clone();
+    let watching = priority_header_cells(&block, 100)
+        .into_iter()
+        .find(|cell| cell.ch == '@')
+        .expect("stable identity cell");
     assert_eq!(
         watching.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)

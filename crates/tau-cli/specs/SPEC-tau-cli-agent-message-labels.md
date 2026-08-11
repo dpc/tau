@@ -82,8 +82,9 @@ status row. Before the first stats snapshot, active
 prompt tracking for the target is the compatibility/catch-up fallback.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
-direct target whose edge reports Running renders as `@id (display name) phase-emoji
-title 💡`, followed by existing tool/context telemetry. The stable id is primary;
+direct target whose edge reports Running renders as `phase-emoji @id (display name)
+title 💡`, followed by existing tool/context telemetry. The fixed-width phase emoji
+stays leftmost while the stable id remains the primary identity;
 the display name is optional persisted UI metadata; phase/title are the watched
 agent's own structured `WorkStatus` report. Under width pressure the display
 name yields before the title, while identity and phase retain their existing
