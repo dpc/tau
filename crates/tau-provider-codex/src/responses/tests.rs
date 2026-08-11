@@ -9,6 +9,7 @@ use tokio::sync as path_tokio_sync;
 use crate::{attempt_failure as path_crate_attempt_failure, common as path_crate_common};
 
 mod compatibility;
+mod output_index;
 
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, ImageContent, ImageDetail, ImageMediaType, MessageItem,

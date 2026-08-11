@@ -32,6 +32,8 @@ const MAX_PROVIDER_CASSETTE_EVENTS: usize = 1024;
 const MAX_PROVIDER_CASSETTE_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PROVIDER_CASSETTE_DELTA_MICROS: u64 = 300_000_000;
 const MAX_PROVIDER_CASSETTE_RAW_BYTES: usize = 768 * 1024;
+const MAX_OUTPUT_SLOT_GROWTH: usize = 1024;
+const INVALID_OUTPUT_INDEX: &str = "provider output index advances beyond the sparse-slot limit";
 const RESPONSES_LITE_HEADER: &str = "X-OpenAI-Internal-Codex-Responses-Lite";
 /// Default idle watchdog for live provider streaming turns.
 ///
@@ -880,8 +882,8 @@ pub fn apply_event(
 ///
 /// Returns `Ok(true)` when the event terminates the stream
 /// (`response.completed` / `response.done`), `Ok(false)` to keep reading, or an
-/// error when the server signaled a model-side failure that should be surfaced
-/// as [`LlmError`].
+/// error when the server signaled a model-side failure or an indexed event
+/// failed local validation or slot-capacity reservation.
 pub(super) fn apply_raw_json_event(
     state: &mut StreamState,
     data: &str,
@@ -930,54 +932,111 @@ fn apply_stream_update_event(
     event_type: &str,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    match event_type {
-        "response.output_text.delta" => apply_output_text_delta_event(state, event, on_update)?,
-        "response.output_text.done" => apply_output_text_done_event(state, event, on_update)?,
-        "response.reasoning_summary_text.delta" => {
-            apply_reasoning_summary_delta_event(state, event, on_update)?;
+    let Some(update) = IndexedStreamUpdate::from_event_type(event_type) else {
+        return Ok(false);
+    };
+    let output_index = prepare_output_index(state, event)?;
+    match update {
+        IndexedStreamUpdate::OutputTextDelta => {
+            apply_output_text_delta_event(state, event, output_index, on_update)?;
         }
-        "response.reasoning_summary_part.added" => apply_reasoning_summary_part_added(state, event),
-        "response.function_call_arguments.delta" => {
-            apply_tool_delta_event(state, event, tau_proto::ToolType::Function, on_update)?;
+        IndexedStreamUpdate::OutputTextDone => {
+            apply_output_text_done_event(state, event, output_index, on_update)?;
         }
-        "response.function_call_arguments.done" => apply_tool_done_event(
+        IndexedStreamUpdate::ReasoningSummaryTextDelta => {
+            apply_reasoning_summary_delta_event(state, event, output_index, on_update)?;
+        }
+        IndexedStreamUpdate::ReasoningSummaryPartAdded => {
+            apply_reasoning_summary_part_added(state, output_index);
+        }
+        IndexedStreamUpdate::FunctionCallArgumentsDelta => {
+            apply_tool_delta_event(
+                state,
+                event,
+                output_index,
+                tau_proto::ToolType::Function,
+                on_update,
+            )?;
+        }
+        IndexedStreamUpdate::FunctionCallArgumentsDone => apply_tool_done_event(
             state,
             event,
+            output_index,
             tau_proto::ToolType::Function,
             ToolInputField::Arguments,
             on_update,
         )?,
-        "response.custom_tool_call_input.delta" => {
-            apply_tool_delta_event(state, event, tau_proto::ToolType::Custom, on_update)?;
+        IndexedStreamUpdate::CustomToolCallInputDelta => {
+            apply_tool_delta_event(
+                state,
+                event,
+                output_index,
+                tau_proto::ToolType::Custom,
+                on_update,
+            )?;
         }
-        "response.custom_tool_call_input.done" => apply_tool_done_event(
+        IndexedStreamUpdate::CustomToolCallInputDone => apply_tool_done_event(
             state,
             event,
+            output_index,
             tau_proto::ToolType::Custom,
             ToolInputField::Input,
             on_update,
         )?,
-        "response.output_item.added" => {
+        IndexedStreamUpdate::OutputItemAdded => {
             apply_output_item_event(
                 state,
                 event,
+                output_index,
                 raw_item_json,
                 OutputItemEventKind::Added,
                 on_update,
             )?;
         }
-        "response.output_item.done" => {
+        IndexedStreamUpdate::OutputItemDone => {
             apply_output_item_event(
                 state,
                 event,
+                output_index,
                 raw_item_json,
                 OutputItemEventKind::Done,
                 on_update,
             )?;
         }
-        _ => return Ok(false),
     }
     Ok(true)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexedStreamUpdate {
+    OutputTextDelta,
+    OutputTextDone,
+    ReasoningSummaryTextDelta,
+    ReasoningSummaryPartAdded,
+    FunctionCallArgumentsDelta,
+    FunctionCallArgumentsDone,
+    CustomToolCallInputDelta,
+    CustomToolCallInputDone,
+    OutputItemAdded,
+    OutputItemDone,
+}
+
+impl IndexedStreamUpdate {
+    fn from_event_type(event_type: &str) -> Option<Self> {
+        match event_type {
+            "response.output_text.delta" => Some(Self::OutputTextDelta),
+            "response.output_text.done" => Some(Self::OutputTextDone),
+            "response.reasoning_summary_text.delta" => Some(Self::ReasoningSummaryTextDelta),
+            "response.reasoning_summary_part.added" => Some(Self::ReasoningSummaryPartAdded),
+            "response.function_call_arguments.delta" => Some(Self::FunctionCallArgumentsDelta),
+            "response.function_call_arguments.done" => Some(Self::FunctionCallArgumentsDone),
+            "response.custom_tool_call_input.delta" => Some(Self::CustomToolCallInputDelta),
+            "response.custom_tool_call_input.done" => Some(Self::CustomToolCallInputDone),
+            "response.output_item.added" => Some(Self::OutputItemAdded),
+            "response.output_item.done" => Some(Self::OutputItemDone),
+            _ => None,
+        }
+    }
 }
 
 fn raw_output_item_json(event_json: &str) -> Option<&str> {
@@ -1010,19 +1069,49 @@ enum ToolInputField {
     Input,
 }
 
-fn event_output_index(event: &serde_json::Value) -> usize {
-    event["output_index"].as_u64().unwrap_or(0) as usize
+fn parse_output_index(event: &serde_json::Value) -> Result<usize, LlmError> {
+    match event.get("output_index") {
+        None => Ok(0),
+        Some(output_index) => output_index
+            .as_u64()
+            .and_then(|output_index| usize::try_from(output_index).ok())
+            .filter(|output_index| u32::try_from(*output_index).is_ok())
+            .ok_or_else(invalid_output_index),
+    }
+}
+
+fn prepare_output_index(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+) -> Result<usize, LlmError> {
+    let output_index = parse_output_index(event)?;
+    let needed_len = output_index
+        .checked_add(1)
+        .ok_or_else(invalid_output_index)?;
+    let growth = needed_len.saturating_sub(state.output_items.len());
+    if MAX_OUTPUT_SLOT_GROWTH < growth {
+        return Err(invalid_output_index());
+    }
+    state
+        .output_items
+        .try_reserve(growth)
+        .map_err(|_| invalid_output_index())?;
+    Ok(output_index)
+}
+
+fn invalid_output_index() -> LlmError {
+    LlmError::InvalidResponse(INVALID_OUTPUT_INDEX.to_owned())
 }
 
 fn apply_output_text_delta_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    output_index: usize,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
     let Some(delta) = event["delta"].as_str() else {
         return Ok(());
     };
-    let output_index = event_output_index(event);
     state.check_message_delta(output_index, delta)?;
     state.append_message_delta_at(output_index, delta);
     on_update(state);
@@ -1032,12 +1121,12 @@ fn apply_output_text_delta_event(
 fn apply_output_text_done_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    output_index: usize,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
     let Some(text) = event["text"].as_str() else {
         return Ok(());
     };
-    let output_index = event_output_index(event);
     state.check_message_snapshot(output_index, text)?;
     state.set_message_text_at(output_index, text);
     on_update(state);
@@ -1047,35 +1136,34 @@ fn apply_output_text_done_event(
 fn apply_reasoning_summary_delta_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    output_index: usize,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
     let Some(delta) = event["delta"].as_str() else {
         return Ok(());
     };
-    let output_index = event_output_index(event);
     state.check_reasoning_delta(output_index, delta)?;
     state.append_reasoning_summary_delta_at(output_index, delta);
     on_update(state);
     Ok(())
 }
 
-fn apply_reasoning_summary_part_added(state: &mut StreamState, event: &serde_json::Value) {
+fn apply_reasoning_summary_part_added(state: &mut StreamState, output_index: usize) {
     // Each summary part is a separate paragraph. Insert a blank line between
     // parts so consecutive paragraphs are visually separated.
-    let output_index = event_output_index(event);
     state.start_reasoning_summary_part_at(output_index);
 }
 
 fn apply_tool_delta_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    output_index: usize,
     tool_type: tau_proto::ToolType,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
     let Some(delta) = event["delta"].as_str() else {
         return Ok(());
     };
-    let output_index = event_output_index(event);
     check_tool_delta(state, output_index, tool_type, delta)?;
     state
         .tool_call_at_mut(output_index, tool_type)
@@ -1088,6 +1176,7 @@ fn apply_tool_delta_event(
 fn apply_tool_done_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    output_index: usize,
     tool_type: tau_proto::ToolType,
     input_field: ToolInputField,
     on_update: &mut impl FnMut(&StreamState),
@@ -1095,7 +1184,6 @@ fn apply_tool_done_event(
     let Some(input) = tool_input_from_event(event, input_field) else {
         return Ok(());
     };
-    let output_index = event_output_index(event);
     check_tool_snapshot(state, output_index, tool_type, input)?;
     state
         .tool_call_at_mut(output_index, tool_type)
@@ -1140,6 +1228,7 @@ fn check_tool_snapshot(
 fn apply_output_item_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    output_index: usize,
     raw_item_json: Option<&str>,
     kind: OutputItemEventKind,
     on_update: &mut impl FnMut(&StreamState),
@@ -1147,7 +1236,6 @@ fn apply_output_item_event(
     let Some(item) = event.get("item") else {
         return Ok(());
     };
-    let output_index = event_output_index(event);
     let mut changed = apply_output_item_tool(state, item, output_index, kind)?;
     changed |= apply_output_item_message(state, item, raw_item_json, output_index, kind)?;
     changed |= apply_output_item_reasoning(state, item, raw_item_json, output_index, kind);
