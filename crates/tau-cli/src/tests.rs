@@ -10809,6 +10809,70 @@ fn mixed_live_activity_blocks_keep_category_and_internal_order() {
     }
 }
 
+/// A pending agent response must remain above watched-agent status rows whether
+/// the response or watch snapshot arrives first.
+#[test]
+fn pending_agent_response_stays_above_watched_agent_rows() {
+    for response_arrives_first in [true, false] {
+        let (_term, handle, vt) = setup(100, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.switch_agent("main".to_owned());
+
+        let render_response = |renderer: &mut EventRenderer| {
+            renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+                "sp-pending",
+                "s1",
+            )));
+            renderer.handle(&Event::ProviderResponseUpdated(
+                provider_response_delta_update(
+                    test_agent_prompt_id("sp-pending"),
+                    "pending agent response",
+                    None,
+                    tau_proto::PromptOriginator::User,
+                ),
+            ));
+        };
+        let render_watch = |renderer: &mut EventRenderer| {
+            renderer.handle(&Event::AgentWatchesUpdated(
+                tau_proto::AgentWatchesUpdated {
+                    session_id: test_session_id("s1"),
+                    watcher_id: agent_id("main"),
+                    watched_agent_ids: vec![agent_id("engineer_1")],
+                    changed_agent_id: Some(agent_id("engineer_1")),
+                    cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+                },
+            ));
+        };
+
+        if response_arrives_first {
+            render_response(&mut renderer);
+            render_watch(&mut renderer);
+        } else {
+            render_watch(&mut renderer);
+            render_response(&mut renderer);
+        }
+        sync(&handle);
+
+        let screen = vt.screen_text(100);
+        let response = screen
+            .iter()
+            .position(|line| line.contains("pending agent response"))
+            .unwrap_or_else(|| panic!("missing pending response in {screen:?}"));
+        let watched = screen
+            .iter()
+            .position(|line| line.contains("@engineer_1 unreported"))
+            .unwrap_or_else(|| panic!("missing watched row in {screen:?}"));
+        assert!(
+            response < watched,
+            "pending response should stay above watched rows: {screen:?}"
+        );
+    }
+}
+
 /// Direct watched rows must exist before any turn starts, remain a hierarchical
 /// projection while a descendant runs, and let a direct turn replace its
 /// witness.

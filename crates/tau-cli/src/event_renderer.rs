@@ -6398,8 +6398,9 @@ impl EventRenderer {
     }
 
     fn push_live_response_block(&self, block_id: tau_cli_term::BlockId) {
-        self.handle
-            .push_above_active_before_any(block_id, self.active_tool_anchor_ids());
+        let mut anchors = self.active_tool_anchor_ids();
+        anchors.extend(self.non_tool_activity_anchor_ids());
+        self.handle.push_above_active_before_any(block_id, anchors);
     }
 
     fn live_thinking_anchor_ids(&self, spid: &str) -> Vec<tau_cli_term::BlockId> {
