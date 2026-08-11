@@ -33,6 +33,7 @@ use tau_proto::{
 };
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use ureq::tls as path_ureq_tls;
 
@@ -146,6 +147,14 @@ const SOCKET_PING_INTERVAL: Duration = Duration::from_secs(10);
 const SOCKET_PONG_TIMEOUT: Duration = Duration::from_secs(40);
 const SOCKET_HEARTBEAT_TIMEOUT_ERROR: &str = "Slack websocket heartbeat timed out";
 const LATENCY_SCHEMA: &str = "slack_latency_v1";
+
+/// Return Slack-owned payload bounds for individual frames and complete
+/// messages.
+fn socket_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(MAX_SOCKET_FRAME_BYTES))
+        .max_message_size(Some(MAX_SOCKET_FRAME_BYTES))
+}
 
 /// Socket Mode heartbeat timing used to detect silently stale connections.
 #[derive(Clone, Copy)]
@@ -4332,9 +4341,13 @@ async fn socket_worker_once_with_heartbeat(
             ws_url
         }
     };
-    let (mut ws, _response) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .map_err(|_| "Slack websocket connection failed".to_owned())?;
+    let (mut ws, _response) = tokio_tungstenite::connect_async_with_config(
+        &ws_url,
+        Some(socket_websocket_config()),
+        false,
+    )
+    .await
+    .map_err(|_| "Slack websocket connection failed".to_owned())?;
     tracing::info!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     let connected_at = Instant::now();
     let mut hello_at = None;

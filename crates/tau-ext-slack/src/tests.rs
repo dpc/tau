@@ -13,6 +13,8 @@ use std::io::{Read, Write};
 use std::sync::{Condvar, Mutex};
 
 use tau_proto::{ContentPart, HarnessInputMessage, HarnessOutputMessage, ToolStarted};
+use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
 
 use super::reactions::{
     ReactionActionKind, ReactionApiError, ReactionAttemptDisposition, ReactionKey, ReactionOwner,
@@ -2023,6 +2025,162 @@ async fn shutdown_signal_wait_timeout_wakes_before_long_backoff() {
         .expect("backoff wait should wake promptly")
         .expect("backoff waiter should not panic");
     assert!(interrupted, "wait_timeout should report requested shutdown");
+}
+
+/// Drive one production Socket Mode worker from finite loopback server frames.
+async fn socket_worker_result_for_frames(
+    frames: Vec<Message>,
+) -> (
+    Result<WorkerOutcome, String>,
+    mpsc::Receiver<HarnessInputMessage>,
+) {
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        for frame in frames {
+            if ws.send(frame).await.is_err() {
+                return;
+            }
+        }
+        let _ = ws.send(Message::Close(None)).await;
+    });
+    let (output, receiver) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), output);
+    let result = socket_worker_once(
+        &ext,
+        &cfg(),
+        Some(WorkerStartup {
+            bot_user_id: "UBOT123".to_owned(),
+            installation_team_id: "T123".to_owned(),
+            socket_url,
+        }),
+        &AdmissionQueue::new(),
+        1,
+    )
+    .await;
+    server.await.expect("loopback websocket server");
+    (result, receiver)
+}
+
+/// Split one payload into two raw text frames to exercise production
+/// reassembly.
+fn fragmented_text_frames(payload: Vec<u8>) -> Vec<Message> {
+    let midpoint = payload.len() / 2;
+    vec![
+        Message::Frame(Frame::message(
+            payload[..midpoint].to_vec(),
+            OpCode::Data(Data::Text),
+            false,
+        )),
+        Message::Frame(Frame::message(
+            payload[midpoint..].to_vec(),
+            OpCode::Data(Data::Continue),
+            true,
+        )),
+    ]
+}
+
+/// Build one valid Socket Mode hello envelope padded to an exact byte length.
+fn padded_socket_hello(length: usize) -> String {
+    let hello = r#"{"type":"hello"}"#;
+    assert!(hello.len() <= length);
+    let mut frame = String::with_capacity(length);
+    frame.push_str(hello);
+    frame.extend(std::iter::repeat_n(' ', length - hello.len()));
+    frame
+}
+
+/// Tau owns its 256 KiB transport bound rather than accepting Tungstenite's
+/// larger defaults for either individual frames or reassembled messages.
+#[test]
+fn socket_websocket_config_caps_frames_and_messages_at_256_kibibytes() {
+    let config = socket_websocket_config();
+    assert_eq!(config.max_frame_size, Some(MAX_SOCKET_FRAME_BYTES));
+    assert_eq!(config.max_message_size, Some(MAX_SOCKET_FRAME_BYTES));
+}
+
+/// One raw text frame reaches the normal Socket Mode path at the exact limit,
+/// while byte 256 KiB + 1 fails before decoding and retires the connection.
+#[tokio::test]
+async fn socket_worker_caps_unfragmented_text_at_first_excess_byte() {
+    let (exact_result, exact_output) = socket_worker_result_for_frames(vec![Message::Text(
+        padded_socket_hello(MAX_SOCKET_FRAME_BYTES).into(),
+    )])
+    .await;
+    assert_eq!(
+        exact_result.expect("exact frame limit"),
+        WorkerOutcome::ReconnectNow
+    );
+    assert_no_ingress(&exact_output);
+
+    let (excess_result, excess_output) = socket_worker_result_for_frames(vec![Message::Text(
+        padded_socket_hello(MAX_SOCKET_FRAME_BYTES + 1).into(),
+    )])
+    .await;
+    assert_eq!(
+        excess_result.expect_err("first excess byte must retire the connection"),
+        "Slack websocket frame failed"
+    );
+    assert_no_ingress(&excess_output);
+}
+
+/// Raw fragmented text remains accepted at an exact 256 KiB aggregate, while
+/// the next byte fails during transport reassembly before Slack can decode it.
+#[tokio::test]
+async fn socket_worker_caps_fragmented_text_at_first_excess_byte() {
+    let (exact_result, exact_output) = socket_worker_result_for_frames(fragmented_text_frames(
+        padded_socket_hello(MAX_SOCKET_FRAME_BYTES).into_bytes(),
+    ))
+    .await;
+    assert_eq!(
+        exact_result.expect("exact complete-message limit"),
+        WorkerOutcome::ReconnectNow
+    );
+    assert_no_ingress(&exact_output);
+
+    let (excess_result, excess_output) = socket_worker_result_for_frames(fragmented_text_frames(
+        padded_socket_hello(MAX_SOCKET_FRAME_BYTES + 1).into_bytes(),
+    ))
+    .await;
+    assert_eq!(
+        excess_result.expect_err("first aggregate excess byte must retire the connection"),
+        "Slack websocket frame failed"
+    );
+    assert_no_ingress(&excess_output);
+}
+
+/// Binary messages share the production transport cap even though exact-size
+/// binary payloads remain ignored by Slack's application-level frame handler.
+#[tokio::test]
+async fn socket_worker_caps_binary_at_first_excess_byte() {
+    let (exact_result, exact_output) = socket_worker_result_for_frames(vec![Message::Binary(
+        vec![b'x'; MAX_SOCKET_FRAME_BYTES].into(),
+    )])
+    .await;
+    assert_eq!(
+        exact_result.expect("exact binary frame limit"),
+        WorkerOutcome::ReconnectNow
+    );
+    assert_no_ingress(&exact_output);
+
+    let (excess_result, excess_output) = socket_worker_result_for_frames(vec![Message::Binary(
+        vec![b'x'; MAX_SOCKET_FRAME_BYTES + 1].into(),
+    )])
+    .await;
+    assert_eq!(
+        excess_result.expect_err("first binary excess byte must retire the connection"),
+        "Slack websocket frame failed"
+    );
+    assert_no_ingress(&excess_output);
 }
 
 /// Ensures a Socket Mode worker blocked on websocket receive exits promptly

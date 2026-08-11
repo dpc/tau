@@ -155,7 +155,10 @@ seconds. An independent deadline reconnects 40 seconds after the latest Pong;
 other traffic does not refresh liveness, and blocked Ping/Pong/ACK writes remain
 preemptible by shutdown and the deadline. This prevents a half-open connection
 from silently disabling ingress indefinitely. The first startup or reconnect
-failure emits one bounded warning per process.
+failure emits one bounded warning per process. Tungstenite caps each Socket Mode
+frame and complete text or binary message at 256 KiB before decoding; equality is
+accepted, while the first excess byte drops the socket and uses the same bounded
+reconnect path.
 For latency troubleshooting, enable `TRACE` and inspect `slack_latency_v1`
 monotonic stage markers. They contain bounded classes and process-local ordinals,
 not Slack identifiers, message text, tokens, URLs, agent identities, or durable
