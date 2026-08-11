@@ -6,12 +6,23 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use tungstenite::protocol::frame::Frame;
+use tungstenite::protocol::frame::coding::{Data, OpCode};
 use tungstenite::{Message, handshake as path_tungstenite_handshake};
+
+use super::super::MAX_WS_EVENT_BYTES;
 
 /// Finite behavior for one localhost WebSocket connection.
 pub(super) enum ServerScript {
     /// Send each provider text frame after receiving one client request.
     Frames(Vec<String>),
+    /// Send one text message split across exactly two wire frames.
+    FragmentedText {
+        /// Initial non-final text-frame payload.
+        first: String,
+        /// Final continuation-frame payload.
+        second: String,
+    },
     /// Keep the upgraded connection quiet until the client disconnects.
     Silent,
 }
@@ -43,9 +54,11 @@ impl TestWsServer {
     /// Starts a loopback-only peer with one finite scripted response.
     pub(super) fn spawn(script: ServerScript) -> Self {
         if let ServerScript::Frames(frames) = &script {
-            assert!(frames.len() <= 16, "localhost provider frame bound");
+            assert!(frames.len() <= 65, "localhost provider frame bound");
             assert!(
-                frames.iter().all(|frame| frame.len() <= 64 * 1024),
+                frames
+                    .iter()
+                    .all(|frame| frame.len() <= MAX_WS_EVENT_BYTES + 1),
                 "localhost provider frame byte bound"
             );
         }
@@ -161,9 +174,25 @@ fn serve_one(
     match script {
         ServerScript::Frames(frames) => {
             for frame in frames {
-                socket
-                    .send(Message::Text(frame.into()))
-                    .expect("send provider frame");
+                if socket.send(Message::Text(frame.into())).is_err() {
+                    break;
+                }
+            }
+        }
+        ServerScript::FragmentedText { first, second } => {
+            if socket
+                .send(Message::Frame(Frame::message(
+                    first.into_bytes(),
+                    OpCode::Data(Data::Text),
+                    false,
+                )))
+                .is_ok()
+            {
+                let _ = socket.send(Message::Frame(Frame::message(
+                    second.into_bytes(),
+                    OpCode::Data(Data::Continue),
+                    true,
+                )));
             }
         }
         ServerScript::Silent => {

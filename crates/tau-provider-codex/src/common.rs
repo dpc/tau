@@ -486,6 +486,8 @@ pub struct StreamState {
     pub(crate) quota_observation: Option<crate::quota::RollingQuotaObservation>,
     /// Parser evidence work permitted for this response.
     pub(crate) provider_evidence_mode: crate::attempt_failure::ProviderEvidenceMode,
+    /// Exact logical retained-state bytes admitted by the live WebSocket owner.
+    retained_state_bytes: u64,
 }
 
 /// Provider token counters accumulated by one completed response.
@@ -649,6 +651,20 @@ impl Default for StreamState {
     }
 }
 
+fn add_len(current: u64, len: usize) -> u64 {
+    current.saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
+}
+
+fn add_optional_string(current: u64, value: Option<&String>) -> u64 {
+    value.map_or(current, |value| add_len(current, value.len()))
+}
+
+fn add_serialized<T: serde::Serialize>(current: u64, value: Option<&T>) -> u64 {
+    value.map_or(current, |value| {
+        serde_json::to_vec(value).map_or(u64::MAX, |value| add_len(current, value.len()))
+    })
+}
+
 impl StreamState {
     /// Construct an empty provider response accumulator.
     pub(crate) fn new() -> Self {
@@ -669,7 +685,40 @@ impl StreamState {
             repetition_guard: StreamRepetitionGuard::new(),
             quota_observation: None,
             provider_evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
+            retained_state_bytes: 0,
         }
+    }
+
+    /// Returns the logical bytes retained by provider semantic state.
+    ///
+    /// The measure charges every output slot at its inline Rust size and
+    /// charges each retained string or structured replay value at its
+    /// serialized byte size. It is an admission model rather than an
+    /// allocator-RSS estimate.
+    pub(crate) fn logical_retained_bytes(&self) -> u64 {
+        let slots = self
+            .output_items
+            .len()
+            .saturating_mul(std::mem::size_of::<OutputItemAccumulator>());
+        let mut bytes = u64::try_from(slots).unwrap_or(u64::MAX);
+        bytes = add_len(bytes, self.text.len());
+        bytes = add_optional_string(bytes, self.thinking.as_ref());
+        bytes = add_optional_string(bytes, self.response_id.as_ref());
+        bytes = add_serialized(bytes, self.provider_terminal_event.as_ref());
+        for item in &self.output_items {
+            bytes = bytes.saturating_add(output_item_retained_payload_bytes(item));
+        }
+        bytes
+    }
+
+    /// Returns the live owner's cached retained-state admission total.
+    pub(crate) fn admitted_retained_state_bytes(&self) -> u64 {
+        self.retained_state_bytes
+    }
+
+    /// Commits one preflighted retained-state admission total.
+    pub(crate) fn commit_retained_state_bytes(&mut self, bytes: u64) {
+        self.retained_state_bytes = bytes;
     }
 
     /// Returns the latest normalized quota observation on this turn.
@@ -891,9 +940,9 @@ impl StreamState {
     pub(crate) fn set_message_responses_raw_json_at(
         &mut self,
         output_index: usize,
-        raw_json: &str,
+        raw_json: Option<&str>,
     ) {
-        self.message_at_mut(output_index).responses_raw_json = Some(raw_json.to_owned());
+        self.message_at_mut(output_index).responses_raw_json = raw_json.map(str::to_owned);
     }
 
     pub(crate) fn tool_call_at_mut(
@@ -908,6 +957,7 @@ impl StreamState {
         ) {
             self.output_items[output_index] =
                 OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(tool_type));
+            self.refresh_text();
         }
         let OutputItemAccumulator::ToolCall(call) = &mut self.output_items[output_index] else {
             unreachable!("tool-call slot was just initialized");
@@ -916,11 +966,16 @@ impl StreamState {
         call
     }
 
-    pub(crate) fn set_reasoning_item_json_at(&mut self, output_index: usize, item: &str) {
-        if let Some(item) = opaque_item_from_json(item) {
-            self.ensure_output_len(output_index);
-            self.output_items[output_index] = OutputItemAccumulator::Reasoning(item);
-        }
+    pub(crate) fn set_reasoning_item_at(
+        &mut self,
+        output_index: usize,
+        item: &serde_json::Value,
+        raw_json: String,
+    ) {
+        self.ensure_output_len(output_index);
+        self.output_items[output_index] =
+            OutputItemAccumulator::Reasoning(opaque_item_from_value(item, raw_json));
+        self.refresh_text();
     }
 
     pub(crate) fn start_compaction_item_at(&mut self, output_index: usize) {
@@ -930,22 +985,33 @@ impl StreamState {
             OutputItemAccumulator::Compaction(_)
         ) {
             self.output_items[output_index] = OutputItemAccumulator::Compaction(None);
+            self.refresh_text();
         }
     }
 
-    pub(crate) fn set_compaction_item_json_at(&mut self, output_index: usize, item: &str) {
-        if let Some(item) = opaque_item_from_json(item) {
-            self.ensure_output_len(output_index);
-            self.output_items[output_index] = OutputItemAccumulator::Compaction(Some(item));
-        }
+    pub(crate) fn set_compaction_item_at(
+        &mut self,
+        output_index: usize,
+        item: &serde_json::Value,
+        raw_json: String,
+    ) {
+        self.ensure_output_len(output_index);
+        self.output_items[output_index] =
+            OutputItemAccumulator::Compaction(Some(opaque_item_from_value(item, raw_json)));
+        self.refresh_text();
     }
 
     /// Stores an unrecognized provider output item at its provider index.
-    pub(crate) fn set_unknown_provider_item_json_at(&mut self, output_index: usize, item: &str) {
-        if let Some(item) = opaque_item_from_json(item) {
-            self.ensure_output_len(output_index);
-            self.output_items[output_index] = OutputItemAccumulator::UnknownProviderItem(item);
-        }
+    pub(crate) fn set_unknown_provider_item_at(
+        &mut self,
+        output_index: usize,
+        item: &serde_json::Value,
+        raw_json: String,
+    ) {
+        self.ensure_output_len(output_index);
+        self.output_items[output_index] =
+            OutputItemAccumulator::UnknownProviderItem(opaque_item_from_value(item, raw_json));
+        self.refresh_text();
     }
 
     /// Appends displayable reasoning-summary text at the provider output index
@@ -1047,12 +1113,17 @@ impl StreamState {
             .saturating_add(bytes.try_into().unwrap_or(u64::MAX));
     }
 
+    /// Returns exact cumulative transport bytes, including discarded repair.
+    pub(crate) fn transport_response_bytes(&self) -> u64 {
+        self.transport_response_bytes
+    }
+
     /// Carries bytes from a discarded transport-repair attempt into this state.
     pub(crate) fn carry_transport_response_bytes(&mut self, bytes: u64) {
         self.transport_response_bytes = self.transport_response_bytes.saturating_add(bytes);
     }
 
-    fn refresh_text(&mut self) {
+    pub(crate) fn refresh_text(&mut self) {
         self.text.clear();
         for item in &self.output_items {
             if let OutputItemAccumulator::Message(message) = item {
@@ -1176,6 +1247,29 @@ impl StreamState {
     }
 }
 
+/// Returns logical retained bytes inside one output slot, excluding the slot.
+pub(crate) fn output_item_retained_payload_bytes(item: &OutputItemAccumulator) -> u64 {
+    match item {
+        OutputItemAccumulator::Empty | OutputItemAccumulator::Compaction(None) => 0,
+        OutputItemAccumulator::Message(message) => add_optional_string(
+            message.text.len() as u64,
+            message.responses_raw_json.as_ref(),
+        ),
+        OutputItemAccumulator::ToolCall(call) => {
+            let bytes = add_len(0, call.id.len());
+            let bytes = add_len(bytes, call.name.len());
+            let bytes = add_len(bytes, call.arguments_json.len());
+            add_serialized(bytes, Some(&call.responses_envelope))
+        }
+        OutputItemAccumulator::Reasoning(item)
+        | OutputItemAccumulator::Compaction(Some(item))
+        | OutputItemAccumulator::UnknownProviderItem(item) => {
+            let bytes = add_serialized(0, Some(&item.value));
+            add_optional_string(bytes, item.raw_json.as_ref())
+        }
+    }
+}
+
 pub fn assistant_text_item(text: impl Into<String>) -> ContextItem {
     assistant_text_item_with_phase(text.into(), None)
 }
@@ -1201,12 +1295,8 @@ pub fn assistant_text_item_with_phase_and_raw(
     })
 }
 
-fn opaque_item_from_json(item: &str) -> Option<OpaqueProviderItem> {
-    let value: serde_json::Value = serde_json::from_str(item).ok()?;
-    Some(OpaqueProviderItem::with_raw_json(
-        json_to_cbor(&value),
-        item.to_owned(),
-    ))
+fn opaque_item_from_value(item: &serde_json::Value, raw_json: String) -> OpaqueProviderItem {
+    OpaqueProviderItem::with_raw_json(json_to_cbor(item), raw_json)
 }
 
 /// Maps `Effort` to the wire string the OpenAI Responses /

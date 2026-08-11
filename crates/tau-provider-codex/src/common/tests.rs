@@ -201,10 +201,12 @@ fn timed_semantic_output_has_narrow_metric_categories() {
     assert!(custom.has_timed_semantic_output());
 
     let mut opaque = StreamState::new();
-    opaque.set_reasoning_item_json_at(
-        0,
-        r#"{"type":"reasoning","id":"reasoning-1","encrypted_content":"opaque"}"#,
-    );
+    let reasoning = serde_json::json!({
+        "type": "reasoning",
+        "id": "reasoning-1",
+        "encrypted_content": "opaque"
+    });
+    opaque.set_reasoning_item_at(0, &reasoning, reasoning.to_string());
     assert!(opaque.has_timed_semantic_output());
 }
 

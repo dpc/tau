@@ -1336,14 +1336,14 @@ fn is_stale_chain_error(error: &LlmError) -> bool {
 
 /// Closed decision for the sole in-attempt WebSocket repair budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecoveryDecision {
+pub(super) enum RecoveryDecision {
     /// Discard the dead cached socket and spend the one fresh-socket repair.
     Repair,
     /// Surface the outcome without replaying semantic work.
     Surface,
 }
 
-fn recovery_decision(error: &LlmError, semantic_progress: bool) -> RecoveryDecision {
+pub(super) fn recovery_decision(error: &LlmError, semantic_progress: bool) -> RecoveryDecision {
     if !semantic_progress && is_recoverable_ws_error(error) {
         RecoveryDecision::Repair
     } else {

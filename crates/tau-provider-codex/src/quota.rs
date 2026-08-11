@@ -280,7 +280,13 @@ struct WsWindow {
 /// empty, whitespace-only, or otherwise invalid values reject the observation
 /// and cannot fall through to a lower-precedence or default pool.
 pub fn parse_ws_event(body: &str) -> Option<RollingQuotaObservation> {
-    let event: WsQuotaEvent = serde_json::from_str(body).ok()?;
+    let event: serde_json::Value = serde_json::from_str(body).ok()?;
+    parse_ws_event_value(&event)
+}
+
+/// Parses one already-decoded `codex.rate_limits` WebSocket event.
+pub(crate) fn parse_ws_event_value(value: &serde_json::Value) -> Option<RollingQuotaObservation> {
+    let event: WsQuotaEvent = serde_json::from_value(value.clone()).ok()?;
     if event.kind != "codex.rate_limits" {
         return None;
     }

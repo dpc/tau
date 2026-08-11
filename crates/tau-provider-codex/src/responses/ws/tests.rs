@@ -4,6 +4,7 @@ use rustls::{crypto as path_rustls_crypto, pki_types as path_rustls_pki_types};
 use tungstenite::http as path_tungstenite_http;
 
 use crate::attempt_failure as path_crate_attempt_failure;
+use crate::common::OutputItemAccumulator;
 
 mod direct_target_canary;
 mod scripted_tcp_server;
@@ -113,13 +114,13 @@ fn warm_anchor_emits_ceiling_except_for_compaction() {
         config.model_id = "gpt-5.6-sol".to_owned();
         if compaction {
             inbound_tx
-                .send(InboundEvent::Event {
+                .send_blocking(InboundEvent::Event {
                     text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","summary":"old history","input_items":[]}}"#.to_owned().into(),
                 })
                 .expect("queue compaction");
         }
         inbound_tx
-            .send(InboundEvent::Event {
+            .send_blocking(InboundEvent::Event {
                 text: r#"{"type":"response.completed","response":{"id":"resp_next","usage":{"input_tokens":2500,"output_tokens":10,"input_tokens_details":{"cached_tokens":1536}}}}"#.to_owned().into(),
             })
             .expect("queue completion");
@@ -184,21 +185,46 @@ struct TestAbortWaker;
 
 impl TurnAbortWaker for TestAbortWaker {}
 
-fn test_ws_conn() -> (
-    WsConn,
-    std_mpsc::Sender<InboundEvent>,
-    UnboundedReceiver<WsCommand>,
-) {
+/// Synthetic abort source that becomes canceled after a fixed number of checks.
+struct AbortAfterChecks {
+    /// Number of initial negative cancellation checks.
+    remaining_false: usize,
+}
+
+impl TurnAbort for AbortAfterChecks {
+    fn is_aborted(&mut self) -> bool {
+        if self.remaining_false == 0 {
+            true
+        } else {
+            self.remaining_false -= 1;
+            false
+        }
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(TestAbortWaker)
+    }
+}
+
+fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
     let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
-    let (inbound_tx, inbound_rx) = std_mpsc::channel();
+    let (inbound_tx, inbound_rx) = mpsc::channel(16);
+    let inbound_control = Arc::new(InboundControl::new());
+    let inbound_sender = InboundSender {
+        tx: inbound_tx,
+        control: Arc::clone(&inbound_control),
+    };
     let runtime = ws_runtime::handle();
     let reader_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
     let writer_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
     (
         WsConn {
             outbound_tx,
-            inbound_tx: inbound_tx.clone(),
             inbound_rx,
+            inbound_control,
             reader_abort,
             writer_abort,
             opened_at: Instant::now(),
@@ -207,7 +233,7 @@ fn test_ws_conn() -> (
             prewarm_baseline: None,
             carried_response_bytes: 0,
         },
-        inbound_tx,
+        inbound_sender,
         _outbound_rx,
     )
 }
@@ -229,6 +255,53 @@ fn test_responses_config() -> ResponsesConfig {
         supports_compaction: true,
         supports_prompt_cache_key: true,
     }
+}
+
+fn padded_json(json: &str, len: usize) -> String {
+    assert!(json.len() <= len);
+    let mut padded = String::with_capacity(len);
+    padded.push_str(json);
+    padded.extend(std::iter::repeat_n(' ', len - json.len()));
+    padded
+}
+
+fn run_local_resource_script(script: ServerScript) -> (Result<WsTurnResult, LlmError>, bool, bool) {
+    let server = TestWsServer::spawn(script);
+    let mut config = test_responses_config();
+    config.base_url = server.base_url();
+    let fixture = PromptFixture::new();
+    let mut abort = NeverAbort;
+    let mut conn = WsConn::connect(
+        &config,
+        "thread-resource",
+        &crate::test_network_policy(),
+        &mut abort,
+    )
+    .expect("connect resource-test WebSocket");
+    let result = conn.run_turn(
+        &config,
+        "ap-resource",
+        &fixture.payload(),
+        None,
+        None,
+        &mut abort,
+        &mut |_| {},
+        &mut |_| {},
+    );
+    server.wait_for_request();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !(conn.reader_abort.is_finished() && conn.writer_abort.is_finished())
+        && Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    let retired = (
+        conn.reader_abort.is_finished(),
+        conn.writer_abort.is_finished(),
+    );
+    drop(conn);
+    server.join();
+    (result, retired.0, retired.1)
 }
 
 /// Ensures plain WebSocket traffic uses an HTTP proxy's absolute-form upgrade,
@@ -1301,7 +1374,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     let mut abort = NeverAbort;
 
     inbound_tx
-        .send(InboundEvent::Event {
+        .send_blocking(InboundEvent::Event {
             text: r#"{"type":"response.output_text.delta","delta":"hello"}"#.into(),
         })
         .expect("queue partial WS frame");
@@ -1343,7 +1416,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
     let mut abort = NeverAbort;
     for _ in 0..4 {
         inbound_tx
-            .send(InboundEvent::Event {
+            .send_blocking(InboundEvent::Event {
                 text: r#"{"type":"response.output_text.delta","delta":"x"}"#.into(),
             })
             .expect("queue nonterminal frame");
@@ -1382,12 +1455,9 @@ fn malformed_text_frame_counts_bytes_before_protocol_error() {
     let request = fixture.payload();
     let malformed = "{not-json";
     inbound_tx
-        .send(InboundEvent::FrameFailure(
-            path_crate_attempt_failure::FrameFailure::new(
-                path_crate_attempt_failure::FrameFailureKind::MalformedText,
-                malformed.len(),
-            ),
-        ))
+        .send_blocking(InboundEvent::Event {
+            text: malformed.into(),
+        })
         .expect("queue malformed frame");
     let mut observed_bytes = 0;
     let error = match conn.run_turn(
@@ -1405,6 +1475,523 @@ fn malformed_text_frame_counts_bytes_before_protocol_error() {
     };
     assert!(matches!(error.root_error(), LlmError::HttpStatus(0, _)));
     assert_eq!(observed_bytes, malformed.len() as u64);
+}
+
+/// Tau must own the exact one-MiB limits instead of inheriting tungstenite's
+/// larger dependency defaults.
+#[test]
+fn websocket_config_caps_frames_and_complete_messages_at_one_mibibyte() {
+    let config = websocket_config();
+    assert_eq!(config.max_frame_size, Some(1024 * 1024));
+    assert_eq!(config.max_message_size, Some(1024 * 1024));
+}
+
+/// A complete one-MiB text message assembled from smaller wire fragments is
+/// accepted by the production transport, while its first excess byte is
+/// terminal.
+#[test]
+fn production_fragmented_message_accepts_equality_and_retires_on_excess() {
+    let completion = r#"{"type":"response.completed","response":{"id":"fragmented"}}"#;
+    let exact = padded_json(completion, MAX_WS_EVENT_BYTES);
+    let midpoint = MAX_WS_EVENT_BYTES / 2;
+    let (result, _, _) = run_local_resource_script(ServerScript::FragmentedText {
+        first: exact[..midpoint].to_owned(),
+        second: exact[midpoint..].to_owned(),
+    });
+    result.expect("exact complete-message limit");
+
+    let excess = padded_json(completion, MAX_WS_EVENT_BYTES + 1);
+    let (result, reader_retired, writer_retired) =
+        run_local_resource_script(ServerScript::FragmentedText {
+            first: excess[..midpoint].to_owned(),
+            second: excess[midpoint..].to_owned(),
+        });
+    assert!(matches!(
+        result,
+        Err(LlmError::InvalidResponse(message)) if message == RESPONSE_RESOURCE_LIMIT_ERROR
+    ));
+    assert!(reader_retired && writer_retired);
+}
+
+/// One unfragmented frame exercises the independent production frame cap at
+/// exact equality and at the first excess byte.
+#[test]
+fn production_frame_accepts_equality_and_retires_on_excess() {
+    let completion = r#"{"type":"response.completed","response":{"id":"frame"}}"#;
+    run_local_resource_script(ServerScript::Frames(vec![padded_json(
+        completion,
+        MAX_WS_EVENT_BYTES,
+    )]))
+    .0
+    .expect("exact frame limit");
+    let (result, reader_retired, writer_retired) = run_local_resource_script(ServerScript::Frames(
+        vec![padded_json(completion, MAX_WS_EVENT_BYTES + 1)],
+    ));
+    assert!(matches!(
+        result,
+        Err(LlmError::InvalidResponse(message)) if message == RESPONSE_RESOURCE_LIMIT_ERROR
+    ));
+    assert!(reader_retired && writer_retired);
+}
+
+/// The production reader accepts exactly 64 MiB across a finite attempt and
+/// rejects byte 64 MiB + 1 before parsing, even under a queued frame flood.
+#[test]
+fn production_attempt_budget_accepts_equality_and_rejects_first_excess() {
+    let terminal = padded_json(
+        r#"{"type":"response.completed","response":{"id":"exact-attempt"}}"#,
+        MAX_WS_EVENT_BYTES,
+    );
+    let mut expected = String::new();
+    let mut exact = Vec::new();
+    for sequence in 0..63 {
+        let delta = format!("{sequence:02},");
+        expected.push_str(&delta);
+        exact.push(padded_json(
+            &serde_json::json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": delta,
+            })
+            .to_string(),
+            MAX_WS_EVENT_BYTES,
+        ));
+    }
+    exact.push(terminal);
+    let state = run_local_resource_script(ServerScript::Frames(exact))
+        .0
+        .expect("exact cumulative attempt limit")
+        .state;
+    assert_eq!(state.text, expected, "flood must not drop or reorder data");
+
+    let mut excess = vec![padded_json("{}", MAX_WS_EVENT_BYTES); 64];
+    excess.push("{}".to_owned());
+    let (result, reader_retired, writer_retired) =
+        run_local_resource_script(ServerScript::Frames(excess));
+    assert!(matches!(
+        result,
+        Err(LlmError::InvalidResponse(message)) if message == RESPONSE_RESOURCE_LIMIT_ERROR
+    ));
+    assert!(reader_retired && writer_retired);
+}
+
+/// Equality at the cumulative attempt limit is accepted, including carried
+/// repair bytes, while the first byte beyond it is rejected.
+#[test]
+fn cumulative_attempt_bytes_accept_exact_limit_and_reject_first_excess() {
+    assert_eq!(
+        checked_attempt_response_bytes(MAX_ATTEMPT_RESPONSE_BYTES - 1, 1),
+        Some(MAX_ATTEMPT_RESPONSE_BYTES)
+    );
+    assert_eq!(
+        checked_attempt_response_bytes(MAX_ATTEMPT_RESPONSE_BYTES, 1),
+        None
+    );
+    assert_eq!(
+        checked_attempt_response_bytes(MAX_ATTEMPT_RESPONSE_BYTES - 17, 17),
+        Some(MAX_ATTEMPT_RESPONSE_BYTES)
+    );
+}
+
+/// Bytes carried from a discarded transparent repair dispatch participate in
+/// the live turn-owner check at exact equality and first excess.
+#[test]
+fn carried_repair_bytes_share_the_production_attempt_budget() {
+    let completion = r#"{"type":"response.completed","response":{"id":"repair-budget"}}"#;
+    for excess in [false, true] {
+        let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+        let carried = MAX_ATTEMPT_RESPONSE_BYTES - completion.len() as u64 + u64::from(excess);
+        conn.carry_response_bytes(carried);
+        inbound_tx
+            .send_blocking(InboundEvent::Event {
+                text: completion.into(),
+            })
+            .expect("queue completion");
+        let config = test_responses_config();
+        let fixture = PromptFixture::new();
+        let result = conn.run_turn(
+            &config,
+            "ap-repair-budget",
+            &fixture.payload(),
+            None,
+            None,
+            &mut NeverAbort,
+            &mut |_| {},
+            &mut |_| {},
+        );
+        if excess {
+            assert!(matches!(
+                result,
+                Err(LlmError::InvalidResponse(message))
+                    if message == RESPONSE_RESOURCE_LIMIT_ERROR
+            ));
+        } else {
+            assert_eq!(
+                result
+                    .expect("exact carried-repair equality")
+                    .state
+                    .transport_response_bytes(),
+                MAX_ATTEMPT_RESPONSE_BYTES
+            );
+        }
+    }
+}
+
+/// Retained-state admission is transactional: equality commits the event, but
+/// the first excess returns the fixed error without mutating semantic state.
+#[test]
+fn retained_state_budget_accepts_equality_and_rejects_before_mutation() {
+    let event = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": "bounded text"
+    });
+    let mut admitted = StreamState::new();
+    apply_parsed_json_event(&mut admitted, &event, None, &mut |_| {})
+        .expect("measure admitted state");
+    let exact = admitted.logical_retained_bytes();
+
+    let mut equality = StreamState::new();
+    apply_ws_json_event_with_limit(&mut equality, &event, None, exact, &mut |_| {})
+        .expect("equality is accepted");
+    assert_eq!(equality.logical_retained_bytes(), exact);
+
+    let mut excess = StreamState::new();
+    let mut updates = 0;
+    let error =
+        apply_ws_json_event_with_limit(&mut excess, &event, None, exact - 1, &mut |_| updates += 1)
+            .expect_err("first excess is terminal");
+    assert!(matches!(
+        error,
+        LlmError::InvalidResponse(message) if message == RESPONSE_RESOURCE_LIMIT_ERROR
+    ));
+    assert!(
+        response_resource_limit_error().retry_decision().is_none(),
+        "resource excess must not enter logical retry"
+    );
+    assert_eq!(
+        super::super::pool::recovery_decision(&response_resource_limit_error(), false),
+        super::super::pool::RecoveryDecision::Surface,
+        "resource excess must not spend transparent repair"
+    );
+    assert_eq!(excess.logical_retained_bytes(), 0);
+    assert_eq!(updates, 0);
+}
+
+/// The production 64 MiB retained-state comparison accepts exact equality and
+/// rejects its first excess before changing live semantic output.
+#[test]
+fn production_retained_state_limit_accepts_equality_and_rejects_first_excess() {
+    let event = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": "x"
+    });
+    let growth = projected_retained_state_bytes(&StreamState::new(), &event, None)
+        .expect("project one-byte delta");
+    for excess in [false, true] {
+        let mut state = StreamState::new();
+        state.commit_retained_state_bytes(MAX_RETAINED_STATE_BYTES - growth + u64::from(excess));
+        let result = apply_ws_json_event(&mut state, &event, None, &mut |_| {});
+        if excess {
+            assert!(matches!(
+                result,
+                Err(LlmError::InvalidResponse(message))
+                    if message == RESPONSE_RESOURCE_LIMIT_ERROR
+            ));
+            assert!(state.output_items.is_empty());
+            assert!(state.text.is_empty());
+        } else {
+            result.expect("exact production retained-state equality");
+            assert_eq!(
+                state.admitted_retained_state_bytes(),
+                MAX_RETAINED_STATE_BYTES
+            );
+        }
+    }
+}
+
+/// A real socket stream reaches the production retained-state limit exactly;
+/// one additional semantic byte fails before mutation and retires both tasks.
+#[test]
+fn production_stream_reaches_exact_retained_limit_and_retires_on_excess() {
+    let response_id = "retained";
+    let terminal = serde_json::json!({
+        "type": "response.completed",
+        "response": {"id": response_id}
+    })
+    .to_string();
+    let fixed = std::mem::size_of::<crate::common::OutputItemAccumulator>() as u64
+        + serde_json::to_vec(
+            &serde_json::from_str::<serde_json::Value>(&terminal).expect("terminal value"),
+        )
+        .expect("terminal serialization")
+        .len() as u64
+        + response_id.len() as u64;
+    let remaining = MAX_RETAINED_STATE_BYTES - fixed;
+    assert_eq!(remaining % 2, 0, "fixture must admit exact duplicated text");
+    let exact_text = usize::try_from(remaining / 2).expect("test text fits usize");
+
+    let frames = |text_len: usize| {
+        let mut frames = Vec::new();
+        let mut remaining = text_len;
+        let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+        while remaining != 0 {
+            let chunk_len = remaining.min(MAX_WS_EVENT_BYTES - 128);
+            let mut chunk = String::with_capacity(chunk_len);
+            for _ in 0..chunk_len {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                chunk.push(char::from(b'a' + (random % 26) as u8));
+            }
+            frames.push(
+                serde_json::json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "delta": chunk,
+                })
+                .to_string(),
+            );
+            remaining -= chunk_len;
+        }
+        frames.push(terminal.clone());
+        frames
+    };
+
+    let exact = run_local_resource_script(ServerScript::Frames(frames(exact_text)))
+        .0
+        .expect("exact production retained-state limit")
+        .state;
+    assert_eq!(
+        exact.admitted_retained_state_bytes(),
+        MAX_RETAINED_STATE_BYTES
+    );
+
+    let (result, reader_retired, writer_retired) =
+        run_local_resource_script(ServerScript::Frames(frames(exact_text + 1)));
+    assert!(matches!(
+        result,
+        Err(LlmError::InvalidResponse(message)) if message == RESPONSE_RESOURCE_LIMIT_ERROR
+    ));
+    assert!(reader_retired && writer_retired);
+}
+
+/// Existing sparse-gap validation keeps precedence over the cumulative
+/// retained-state policy, even when state is already at the resource ceiling.
+#[test]
+fn sparse_reasoning_gap_precedes_retained_state_excess() {
+    let mut state = StreamState::new();
+    state.commit_retained_state_bytes(MAX_RETAINED_STATE_BYTES);
+    let event = serde_json::json!({
+        "type": "response.reasoning_summary_text.delta",
+        "output_index": super::super::MAX_OUTPUT_SLOT_GROWTH,
+        "delta": "would exceed retained state"
+    });
+    let error = apply_ws_json_event(&mut state, &event, None, &mut |_| {})
+        .expect_err("forbidden sparse reasoning gap");
+    assert!(matches!(
+        error,
+        LlmError::InvalidResponse(message) if message == super::super::INVALID_OUTPUT_INDEX
+    ));
+    assert!(state.thinking.is_none());
+}
+
+/// Incremental admission must exactly match the independently measured state
+/// across slots, assistant/reasoning/tool text, opaque raw replay, and terminal
+/// data without copying the full accumulator for each event.
+#[test]
+fn retained_state_accounting_covers_every_charged_field_family() {
+    let events = [
+        r#"{"type":"response.output_text.delta","output_index":0,"delta":"assistant"}"#,
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"same-slot","name":"shell"}}"#,
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"compaction"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","summary":"retained opaque"}}"#,
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"compaction"}}"#,
+        r#"{"type":"response.reasoning_summary_text.delta","output_index":1,"delta":"reasoning"}"#,
+        r#"{"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"path\":\"/tmp\"}"}"#,
+        r#"{"type":"response.output_item.done","output_index":3,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"sealed","summary":[]}}"#,
+        r#"{"type":"response.output_item.done","output_index":4,"item":{"type":"future_item","payload":{"keep":"opaque"}}}"#,
+        r#"{"type":"response.output_text.delta","output_index":5,"delta":"replace me"}"#,
+        r#"{"type":"response.function_call_arguments.delta","output_index":5,"delta":"{\"replacement\":true}"}"#,
+        r#"{"type":"response.completed","response":{"id":"terminal","usage":{"input_tokens":1,"output_tokens":2}}}"#,
+    ];
+    let mut state = StreamState::new();
+    for raw in events {
+        let event: serde_json::Value = serde_json::from_str(raw).expect("fixture event");
+        let exact =
+            projected_retained_state_bytes(&state, &event, super::super::raw_output_item_json(raw))
+                .expect("project retained state");
+        apply_ws_json_event_with_limit(
+            &mut state,
+            &event,
+            super::super::raw_output_item_json(raw),
+            exact,
+            &mut |_| {},
+        )
+        .expect("exact per-event admission");
+        assert_eq!(
+            state.admitted_retained_state_bytes(),
+            state.logical_retained_bytes(),
+            "accounting drift after {raw}"
+        );
+    }
+}
+
+/// An assistant done event without an extracted raw sidecar must clear and stop
+/// charging the older same-slot sidecar while retaining its semantic text.
+#[test]
+fn retained_state_accounting_matches_message_without_raw_sidecar() {
+    let event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "semantic only"}]
+        }
+    });
+    let mut state = StreamState::new();
+    let prior_raw = r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prior"}],"old_sidecar":true}"#;
+    let prior = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": serde_json::from_str::<serde_json::Value>(prior_raw).expect("prior item")
+    });
+    apply_ws_json_event_with_limit(
+        &mut state,
+        &prior,
+        Some(prior_raw),
+        MAX_RETAINED_STATE_BYTES,
+        &mut |_| {},
+    )
+    .expect("seed prior raw sidecar");
+    let exact =
+        projected_retained_state_bytes(&state, &event, None).expect("project message without raw");
+    apply_ws_json_event_with_limit(&mut state, &event, None, exact, &mut |_| {})
+        .expect("exact no-sidecar equality");
+    assert_eq!(
+        state.admitted_retained_state_bytes(),
+        state.logical_retained_bytes()
+    );
+    let Some(OutputItemAccumulator::Message(message)) = state.output_items.first() else {
+        panic!("assistant message output");
+    };
+    assert!(message.responses_raw_json.is_none());
+}
+
+/// The provider-data lane has exactly one queued event. Saturation reports
+/// backpressure, and retrying after one dequeue preserves both events' order.
+#[test]
+fn inbound_data_lane_backpressures_without_drop_or_reorder() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let control = Arc::new(InboundControl::new());
+    let sender = InboundSender {
+        tx,
+        control: Arc::clone(&control),
+    };
+    let first = InboundEvent::Event {
+        text: r#"{"sequence":1}"#.into(),
+    };
+    let second = InboundEvent::Event {
+        text: r#"{"sequence":2}"#.into(),
+    };
+    sender.tx.try_send(first).expect("sole queue slot");
+    let second = sender
+        .tx
+        .try_send(second)
+        .expect_err("second event is backpressured")
+        .into_inner();
+    let InboundEvent::Event { text: first } = rx.blocking_recv().expect("first event") else {
+        panic!("expected first text event");
+    };
+    sender.tx.try_send(second).expect("slot reopened");
+    let InboundEvent::Event { text: second } = rx.blocking_recv().expect("second event") else {
+        panic!("expected second text event");
+    };
+    assert_eq!(first.as_str(), r#"{"sequence":1}"#);
+    assert_eq!(second.as_str(), r#"{"sequence":2}"#);
+}
+
+/// Coalesced cancellation wins over writer failure and provider data without
+/// growing a FIFO of local controls.
+#[test]
+fn cancellation_control_has_priority_over_writer_failure() {
+    let control = InboundControl::new();
+    control.notify_writer_failure(
+        path_crate_attempt_failure::TransportFailureKind::WebSocketControlPing,
+    );
+    control.notify_abort();
+    assert!(matches!(control.take(), Some(InboundControlEvent::Abort)));
+    assert!(matches!(
+        control.take(),
+        Some(InboundControlEvent::WriterFailure(
+            path_crate_attempt_failure::TransportFailureKind::WebSocketControlPing
+        ))
+    ));
+    assert!(control.take().is_none(), "each coalesced fact drains once");
+}
+
+/// A local writer failure is read from the independent control path before an
+/// already queued provider completion can mutate or successfully end the turn.
+#[test]
+fn writer_failure_preempts_queued_provider_data() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.completed","response":{"id":"must-not-commit"}}"#.into(),
+        })
+        .expect("queue provider completion");
+    conn.inbound_control
+        .notify_writer_failure(path_crate_attempt_failure::TransportFailureKind::Send);
+    conn.inbound_control.notify_abort();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let mut updates = 0;
+    let error = match conn.run_turn(
+        &config,
+        "ap-writer-priority",
+        &fixture.payload(),
+        None,
+        None,
+        &mut NeverAbort,
+        &mut |_| {},
+        &mut |_| updates += 1,
+    ) {
+        Ok(_) => panic!("writer failure must preempt completion"),
+        Err(error) => error,
+    };
+    assert!(matches!(error.root_error(), LlmError::HttpStatus(0, _)));
+    assert_eq!(updates, 0);
+}
+
+/// Confirmed cancellation from the independent control path must beat provider
+/// data that was already waiting in the bounded lane.
+#[test]
+fn cancellation_preempts_queued_provider_data() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.completed","response":{"id":"must-not-commit"}}"#.into(),
+        })
+        .expect("queue provider completion");
+    conn.inbound_control.notify_abort();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let mut abort = AbortAfterChecks { remaining_false: 2 };
+    let mut updates = 0;
+    let result = conn.run_turn(
+        &config,
+        "ap-cancel-priority",
+        &fixture.payload(),
+        None,
+        None,
+        &mut abort,
+        &mut |_| {},
+        &mut |_| updates += 1,
+    );
+    assert!(matches!(result, Err(LlmError::Canceled)));
+    assert_eq!(updates, 0);
 }
 
 /// Quota parsing is mode-independent: standard and Lite WebSocket turns both
@@ -1429,7 +2016,7 @@ fn ws_turn_surfaces_nameless_default_quota_in_both_modes() {
             r#"{"type":"response.completed","response":{"id":"resp_quota"}}"#,
         ] {
             inbound_tx
-                .send(InboundEvent::Event { text: text.into() })
+                .send_blocking(InboundEvent::Event { text: text.into() })
                 .expect("queue WS fixture frame");
         }
 

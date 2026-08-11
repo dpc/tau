@@ -46,6 +46,19 @@ The writer sends a 25-second `websocket_control_ping` WebSocket control frame
 only to keep an idle transport path alive. It is not a Responses envelope, never
 starts inference, and cannot refresh a prompt cache.
 
+Tau caps each incoming WebSocket frame and complete text message at 1 MiB. The
+async reader forwards bounded raw text through one queued provider-event slot,
+so a faster upstream is backpressured without dropping or reordering events.
+The synchronous turn owner parses each event once. One finite attempt admits at
+most 64 MiB of cumulative received text, including a discarded transparent
+repair dispatch, and separately admits at most 64 MiB of logical retained
+semantic state. The retained-state model charges output slots and retained
+assistant, reasoning, tool, terminal-event, and opaque replay data before mutating the live
+state; it is not an allocator-RSS estimate or an output-item count. Equality at
+either budget is accepted. The first excess retires the socket and returns one
+fixed content-free terminal invalid-response error without spending repair or
+logical retry budget.
+
 The extension supplies opaque resolved credentials and startup-stable mode/model
 configuration to one `CodexRuntime`. Public backend outcomes are finite and
 typed: dispatch timing, cumulative transport bytes, semantic progress, success,
@@ -153,9 +166,11 @@ the harness owns all policy that maps them to tool alternatives.
 
 ## WebSocket turn cancellation
 
-The synchronous WebSocket turn loop receives transport events and cooperative
-abort wakes through one inbound queue. Pool checkout and connection setup share
-the same typed abort source. Exact observable behavior is specified by
+The synchronous WebSocket turn loop receives ordered provider data through its
+one-event lane. Cooperative abort and local writer failure use a separate,
+coalesced constant-size control wake path that preempts queued provider data.
+Pool checkout and connection setup share the same typed abort source. Exact
+observable behavior is specified by
 [SPEC-tau-provider-codex-cancellation](SPEC-tau-provider-codex-cancellation.md).
 
 ## Tool definitions

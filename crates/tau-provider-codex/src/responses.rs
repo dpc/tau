@@ -18,7 +18,8 @@ use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
 use crate::common::{
-    LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire, json_to_cbor,
+    LlmError, OutputItemAccumulator, PromptPayload, StreamState, cbor_to_json, effort_wire,
+    json_to_cbor, output_item_retained_payload_bytes,
 };
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
@@ -875,7 +876,7 @@ pub fn apply_event(
     event: &serde_json::Value,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    apply_event_with_raw_item(state, event, None, on_update)
+    apply_parsed_json_event(state, event, None, on_update)
 }
 
 /// Applies one raw upstream Responses event while preserving replay sidecars.
@@ -893,10 +894,11 @@ pub(super) fn apply_raw_json_event(
         Ok(v) => v,
         Err(_) => return Ok(false),
     };
-    apply_event_with_raw_item(state, &event, raw_output_item_json(data), on_update)
+    apply_parsed_json_event(state, &event, raw_output_item_json(data), on_update)
 }
 
-fn apply_event_with_raw_item(
+/// Applies one already-decoded event while preserving its raw item sidecar.
+pub(super) fn apply_parsed_json_event(
     state: &mut StreamState,
     event: &serde_json::Value,
     raw_item_json: Option<&str>,
@@ -923,6 +925,280 @@ fn apply_event_with_raw_item(
         "error" => Err(stream_error_event(event, state.provider_evidence_mode)),
         _ => Ok(false),
     }
+}
+
+/// Projects one parsed event's exact logical retained-state total without
+/// cloning the full response accumulator or mutating live state.
+pub(super) fn projected_retained_state_bytes(
+    state: &StreamState,
+    event: &serde_json::Value,
+    raw_item_json: Option<&str>,
+) -> Result<u64, LlmError> {
+    let event_type = event["type"].as_str().unwrap_or("");
+    if matches!(event_type, "response.completed" | "response.done") {
+        let mut candidate = StreamState::new();
+        candidate.provider_terminal_event = state.provider_terminal_event.clone();
+        candidate.response_id = state.response_id.clone();
+        let before = candidate.logical_retained_bytes();
+        apply_terminal_event(&mut candidate, event);
+        return Ok(state
+            .admitted_retained_state_bytes()
+            .saturating_sub(before)
+            .saturating_add(candidate.logical_retained_bytes()));
+    }
+    let output_index = IndexedStreamUpdate::from_event_type(event_type)
+        .map(|_| parse_output_index(event))
+        .transpose()?;
+    if let Some(output_index) = output_index {
+        validate_output_growth(state, output_index)?;
+    }
+    if event_type == "response.reasoning_summary_text.delta" {
+        return Ok(state
+            .admitted_retained_state_bytes()
+            .saturating_add(event["delta"].as_str().map_or(0, str::len) as u64));
+    }
+    if event_type == "response.reasoning_summary_part.added" {
+        let added = state.thinking.as_ref().map_or(0, |thinking| {
+            usize::from(!thinking.is_empty() && !thinking.ends_with("\n\n")) * 2
+        });
+        return Ok(state
+            .admitted_retained_state_bytes()
+            .saturating_add(added as u64));
+    }
+    let Some(output_index) = output_index else {
+        return Ok(state.admitted_retained_state_bytes());
+    };
+    if let Some(projected) = projected_text_or_tool_bytes(state, event, event_type, output_index) {
+        return Ok(projected);
+    }
+    Ok(projected_output_item_bytes(
+        state,
+        event,
+        raw_item_json,
+        event_type == "response.output_item.done",
+        output_index,
+    ))
+}
+
+fn projected_text_or_tool_bytes(
+    state: &StreamState,
+    event: &serde_json::Value,
+    event_type: &str,
+    output_index: usize,
+) -> Option<u64> {
+    let old_item = state.output_items.get(output_index);
+    let old_payload = old_item.map_or(0, output_item_retained_payload_bytes);
+    let slot_growth = output_index
+        .saturating_add(1)
+        .saturating_sub(state.output_items.len())
+        .saturating_mul(std::mem::size_of::<OutputItemAccumulator>()) as u64;
+    let old_message_len = match old_item {
+        Some(OutputItemAccumulator::Message(message)) => message.text.len(),
+        _ => 0,
+    };
+    let new_message_len = match event_type {
+        "response.output_text.delta" => {
+            old_message_len.checked_add(event["delta"].as_str()?.len())?
+        }
+        "response.output_text.done" => event["text"].as_str()?.len(),
+        _ => 0,
+    };
+    if matches!(
+        event_type,
+        "response.output_text.delta" | "response.output_text.done"
+    ) {
+        let retained_raw = match old_item {
+            Some(OutputItemAccumulator::Message(message)) => {
+                message.responses_raw_json.as_ref().map_or(0, String::len)
+            }
+            _ => 0,
+        };
+        let new_payload = new_message_len.saturating_add(retained_raw) as u64;
+        return Some(
+            state
+                .admitted_retained_state_bytes()
+                .saturating_sub(old_payload)
+                .saturating_sub(old_message_len as u64)
+                .saturating_add(new_payload)
+                .saturating_add(new_message_len as u64)
+                .saturating_add(slot_growth),
+        );
+    }
+
+    let input = match event_type {
+        "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
+            event["delta"].as_str()?
+        }
+        "response.function_call_arguments.done" => event["arguments"].as_str()?,
+        "response.custom_tool_call_input.done" => event["input"].as_str()?,
+        _ => return None,
+    };
+    let (old_arguments_len, retained_non_argument_payload) = match old_item {
+        Some(OutputItemAccumulator::ToolCall(call)) => {
+            let old_arguments_len = call.arguments_json.len() as u64;
+            (
+                old_arguments_len,
+                old_payload.saturating_sub(old_arguments_len),
+            )
+        }
+        _ => {
+            let empty_envelope = serde_json::to_vec(&ResponsesToolCallEnvelope::default())
+                .ok()?
+                .len() as u64;
+            (0, empty_envelope)
+        }
+    };
+    let new_arguments_len = if event_type.ends_with(".delta") {
+        old_arguments_len.checked_add(input.len() as u64)?
+    } else {
+        input.len() as u64
+    };
+    Some(
+        state
+            .admitted_retained_state_bytes()
+            .saturating_sub(old_payload)
+            .saturating_sub(old_message_len as u64)
+            .saturating_add(retained_non_argument_payload)
+            .saturating_add(new_arguments_len)
+            .saturating_add(slot_growth),
+    )
+}
+
+fn projected_output_item_bytes(
+    state: &StreamState,
+    event: &serde_json::Value,
+    raw_item_json: Option<&str>,
+    done: bool,
+    output_index: usize,
+) -> u64 {
+    let Some(item) = event.get("item") else {
+        return state.admitted_retained_state_bytes();
+    };
+    let old_item = state.output_items.get(output_index);
+    let old_payload = old_item.map_or(0, output_item_retained_payload_bytes);
+    let old_message_len = match old_item {
+        Some(OutputItemAccumulator::Message(message)) => message.text.len() as u64,
+        _ => 0,
+    };
+    let mut materializes = true;
+    let (new_payload, new_message_len) = match item["type"].as_str().unwrap_or("") {
+        "function_call" | "custom_tool_call" => {
+            let old_call = match old_item {
+                Some(OutputItemAccumulator::ToolCall(call)) => Some(call),
+                _ => None,
+            };
+            let id_len = item["call_id"]
+                .as_str()
+                .map_or_else(|| old_call.map_or(0, |call| call.id.len()), str::len);
+            let name_len = item["name"]
+                .as_str()
+                .map_or_else(|| old_call.map_or(0, |call| call.name.len()), str::len);
+            let old_arguments_len = old_call.map_or(0, |call| call.arguments_json.len());
+            let final_input = match item["type"].as_str() {
+                Some("function_call") => item["arguments"].as_str(),
+                _ => item["input"].as_str(),
+            };
+            let arguments_len = if old_arguments_len == 0 {
+                final_input.map_or(0, str::len)
+            } else {
+                old_arguments_len
+            };
+            let envelope_len = serde_json::to_vec(&responses_tool_call_envelope(item))
+                .map_or(u64::MAX, |value| {
+                    u64::try_from(value.len()).unwrap_or(u64::MAX)
+                });
+            (
+                (id_len as u64)
+                    .saturating_add(name_len as u64)
+                    .saturating_add(arguments_len as u64)
+                    .saturating_add(envelope_len),
+                0,
+            )
+        }
+        "message" if is_responses_assistant_message(item) => {
+            let old_message = match old_item {
+                Some(OutputItemAccumulator::Message(message)) => Some(message),
+                _ => None,
+            };
+            if old_message.is_none() && !done && parse_phase_from_item(item).is_none() {
+                materializes = false;
+            }
+            let text_len = if done {
+                message_text_from_output_item(item).map_or_else(
+                    || old_message.map_or(0, |message| message.text.len()),
+                    |text| text.len(),
+                )
+            } else {
+                old_message.map_or(0, |message| message.text.len())
+            };
+            let raw_len = if done {
+                raw_item_json.map_or(0, str::len)
+            } else {
+                old_message
+                    .and_then(|message| message.responses_raw_json.as_ref())
+                    .map_or(0, String::len)
+            };
+            ((text_len.saturating_add(raw_len)) as u64, text_len as u64)
+        }
+        "message" => {
+            materializes = false;
+            (old_payload, old_message_len)
+        }
+        "reasoning" if done && item["encrypted_content"].is_string() => {
+            (opaque_item_retained_bytes(item, raw_item_json), 0)
+        }
+        "reasoning" => {
+            materializes = false;
+            (old_payload, old_message_len)
+        }
+        "compaction" if done => (opaque_item_retained_bytes(item, raw_item_json), 0),
+        "compaction" => {
+            let retained = match old_item {
+                Some(OutputItemAccumulator::Compaction(_)) => old_payload,
+                _ => 0,
+            };
+            (retained, 0)
+        }
+        "" => {
+            materializes = false;
+            (old_payload, old_message_len)
+        }
+        _ if done => (opaque_item_retained_bytes(item, raw_item_json), 0),
+        _ => (old_payload, old_message_len),
+    };
+    if !materializes {
+        return state.admitted_retained_state_bytes();
+    }
+    let slot_growth = output_index
+        .saturating_add(1)
+        .saturating_sub(state.output_items.len())
+        .saturating_mul(std::mem::size_of::<OutputItemAccumulator>()) as u64;
+    state
+        .admitted_retained_state_bytes()
+        .saturating_sub(old_payload)
+        .saturating_sub(old_message_len)
+        .saturating_add(new_payload)
+        .saturating_add(new_message_len)
+        .saturating_add(slot_growth)
+}
+
+fn opaque_item_retained_bytes(item: &serde_json::Value, raw_item_json: Option<&str>) -> u64 {
+    let semantic_len = serde_json::to_vec(&json_to_cbor(item)).map_or(u64::MAX, |value| {
+        u64::try_from(value.len()).unwrap_or(u64::MAX)
+    });
+    let raw_len = raw_item_json.map_or_else(|| item.to_string().len(), str::len);
+    semantic_len.saturating_add(raw_len as u64)
+}
+
+fn validate_output_growth(state: &StreamState, output_index: usize) -> Result<(), LlmError> {
+    let needed_len = output_index
+        .checked_add(1)
+        .ok_or_else(invalid_output_index)?;
+    let growth = needed_len.saturating_sub(state.output_items.len());
+    if MAX_OUTPUT_SLOT_GROWTH < growth {
+        return Err(invalid_output_index());
+    }
+    Ok(())
 }
 
 fn apply_stream_update_event(
@@ -1343,9 +1619,7 @@ fn apply_output_item_message(
         state.check_message_snapshot(output_index, &text)?;
         state.set_message_text_at(output_index, &text);
     }
-    if kind.is_done()
-        && let Some(raw_item_json) = raw_item_json
-    {
+    if kind.is_done() {
         state.set_message_responses_raw_json_at(output_index, raw_item_json);
     }
     Ok(true)
@@ -1378,7 +1652,7 @@ fn apply_output_item_reasoning(
         && item["encrypted_content"].is_string()
     {
         let item_json = raw_or_canonical_item_json(raw_item_json, item);
-        state.set_reasoning_item_json_at(output_index, &item_json);
+        state.set_reasoning_item_at(output_index, item, item_json.into_owned());
         return true;
     }
     false
@@ -1398,7 +1672,7 @@ fn apply_output_item_compaction(
         OutputItemEventKind::Added => state.start_compaction_item_at(output_index),
         OutputItemEventKind::Done => {
             let item_json = raw_or_canonical_item_json(raw_item_json, item);
-            state.set_compaction_item_json_at(output_index, &item_json)
+            state.set_compaction_item_at(output_index, item, item_json.into_owned())
         }
     }
     true
@@ -1421,7 +1695,7 @@ fn apply_output_item_unknown(
         OutputItemEventKind::Added => state.reserve_output_item_at(output_index),
         OutputItemEventKind::Done => {
             let item_json = raw_or_canonical_item_json(raw_item_json, item);
-            state.set_unknown_provider_item_json_at(output_index, &item_json);
+            state.set_unknown_provider_item_at(output_index, item, item_json.into_owned());
         }
     }
     true

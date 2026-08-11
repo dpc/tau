@@ -3,7 +3,16 @@
 Parser and streaming changes use focused event, delta, snapshot, and golden-request
 tests. WebSocket changes cover pool identity, reservation and release, reconnect,
 transport-only `websocket_control_ping` control frames, idle timeout, typed
-cancellation, and abort wakeups without short polling.
+cancellation, and abort wakeups without short polling. Resource-policy
+regressions drive production localhost sockets through exact and first-excess
+1 MiB frame and fragmented complete-message boundaries, plus the exact and
+first-excess 64 MiB cumulative-attempt boundary. They assert task retirement,
+pre-parse fixed terminal classification, and exact retained-state accounting
+for slots, assistant/reasoning/tool text, terminal data, and opaque raw replay.
+The bounded-lane tests fill the sole provider-event slot, prove saturation
+backpressures rather than drops, then drain events in wire order.
+Control-priority tests queue provider data and prove coalesced cancellation and
+writer-failure wakes preempt it.
 
 Local peers join the production upgrade, request lowering, background tasks, frame
 parsing, and typed error mapping. They bind only loopback, use synthetic

@@ -46,6 +46,20 @@ The five-minute provider-frame idle watchdog begins only after a successful
 upgrade and request send; it is not the connection deadline. Revisit both bounds
 when upstream handshakes, proxy behavior, or cancellation ownership changes.
 
+Incoming provider data crosses the external-provider trust boundary. Tau owns
+1 MiB frame and complete-message limits, queues one complete raw event, and lets
+queue saturation backpressure the socket without loss or reordering. The turn
+owner parses each event once and enforces separate 64 MiB cumulative-attempt
+text and logical retained-state admission budgets. Discarded transparent-repair
+bytes remain charged. Equality is accepted; the first excess fails before
+semantic mutation with a fixed content-free terminal invalid-response error and
+retires the socket, so deterministic oversized work is neither repaired nor
+retried.
+
+Cancellation and local writer failure never join the provider-data FIFO. They
+share an independent coalesced constant-size wake state, and the turn owner
+checks that state before processing queued provider data.
+
 Best-effort prewarm runs as provider-supervised work rather than on the event
 loop. It has at most a 30-second upgrade plus a 30-second absolute response
 wait, observes cancel/shutdown/profile invalidation through the transport abort

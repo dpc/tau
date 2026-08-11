@@ -1,10 +1,16 @@
 # SPEC-tau-provider-codex-cancellation: Transport cancellation and deadlines
 
+## Record justification
+
+Cancellation spans the synchronous turn owner, async WebSocket tasks, connection and pool waits, and compact workers, so no single local artifact can own the contract coherently.
+
 ChatGPT/Codex Responses turns accept a typed local abort source that can both
-report cancellation and register a wake callback. WebSocket turn waits enqueue
-an abort-wake hint through the same inbound queue as transport events. Pool
-checkout and fresh connection waits register the same source. Every wake path
-rechecks the abort source; stale or coalesced hints do not cancel a turn.
+report cancellation and register a wake callback. Ordered provider data uses a
+one-event backpressured lane. Abort wakes and local writer failures use a
+separate coalesced constant-size control path, which the synchronous turn owner
+checks before queued provider data. Pool checkout and fresh connection waits
+register the same abort source. Every abort wake rechecks that source; a stale
+or coalesced hint does not impersonate cancellation.
 
 Confirmed local cancellation returns typed `LlmError::Canceled`. Remote HTTP 499,
 provider body text, and cancellation-looking prose remain remote retryable
