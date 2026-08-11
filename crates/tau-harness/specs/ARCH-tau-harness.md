@@ -155,11 +155,12 @@ This component implements the harness-owned parts of [SPEC-agent-watch](../../..
 The harness owns runtime-only semantic work status for each loaded agent and
 projects each current canonical phase/title through the complete transient
 agent-stats snapshot as well as validated reports durably to current watchers.
-Successful no-tool
-responses while Working remain durable assistant transcript entries but withhold
-watch, worker-result, and detach projections until their append commits and the
-bounded same-outer-turn challenge completes. Unsuccessful terminals instead
-invalidate Working to Unknown without a challenge.
+Successful no-tool responses while Working remain durable assistant transcript
+entries but withhold watch, worker-result, and detach projections. Each such
+candidate starts another challenge in the same outer turn, without a challenge
+budget, until the agent reports Done or Blocked. The first subsequent successful
+final projects only after its exact append commits. Unsuccessful terminals
+instead invalidate Working to Unknown without a challenge.
 
 ## Tool-surface and extension-instance ownership
 

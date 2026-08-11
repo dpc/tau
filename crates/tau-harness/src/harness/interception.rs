@@ -280,8 +280,6 @@ pub(crate) enum AgentPublishCompletion {
     /// Apply one gated-final disposition only after its durable append
     /// commits.
     GatedFinal {
-        /// Prompt identity of the durable candidate response.
-        agent_prompt_id: tau_proto::AgentPromptId,
         /// Selected transcript head that owned the provider response.
         batch_parent: tau_proto::AgentHead,
         /// Exact post-commit terminal or continuation behavior.

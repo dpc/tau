@@ -40,6 +40,34 @@ pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
             && call_id.len() <= 256
             && call_id == result_id => {}
         [
+            ScenarioTurnV1::StatusPolicyToolCall {
+                user_text: _,
+                order: _,
+                initial_status: call_status,
+                terminal_phase: call_phase,
+            },
+            ScenarioTurnV1::StatusPolicyToolResult {
+                initial_status: result_status,
+                terminal_phase: result_phase,
+            },
+            ScenarioTurnV1::WorkingFollowupToolResult {
+                initial_status: followup_status,
+                terminal_phase: followup_phase,
+            },
+            ScenarioTurnV1::WorkingFinalStatusCall {
+                terminal_phase: challenge_phase,
+            },
+            ScenarioTurnV1::TerminalStatusResult {
+                terminal_phase,
+                response: _,
+            },
+        ] if call_status == result_status
+            && result_status == followup_status
+            && call_phase == result_phase
+            && result_phase == followup_phase
+            && followup_phase == challenge_phase
+            && challenge_phase == terminal_phase => {}
+        [
             ScenarioTurnV1::Text {
                 user_text: _,
                 deltas: _,
@@ -52,7 +80,7 @@ pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
         }
         _ => {
             return Err(ClientError::handler(
-                "scenario grammar must be one text turn or one matching tool call/result pair",
+                "scenario grammar must be one text turn or one supported tool sequence",
             ));
         }
     }

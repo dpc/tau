@@ -178,7 +178,11 @@ failed session-metadata rebuild remains retryable across restart.
 `tau-e2e-tests` has an always-on `DeterministicFixture` that launches the
 test-only `tau-e2e-fake-provider` by exact path through normal extension
 supervision. Its strict inline `ScenarioV1` drives synthetic streaming and a
-real deterministic `tau-ext-test-dummy` tool continuation. `ScenarioV2` adds
+real deterministic `tau-ext-test-dummy` tool continuation. Its closed
+current-status sequence also installs the production `status` handler before the
+first prompt and checks both parallel orders, accepted/rejected Working, repeated
+work while Working, the Working-final challenge, and Done/Blocked release.
+`ScenarioV2` adds
 bounded exact-correlation lanes for typed failures, cancellation/timeout and
 same-agent post-cancel liveness,
 barriers, fatal disconnect, quiescent same-agent restore, and one closed
@@ -592,10 +596,12 @@ independently parsed JSONL items.
 ## Semantic agent-status coverage
 
 `tau-harness-tools` owns focused status argument validation. `tau-harness` owns
-WorkStatus transitions, effective-snapshot acknowledgement, policy revocation,
-post-append challenge, delegated completion/detach, append failure, and
-interception regressions. The deterministic provider restore lane owns exact
-production watch grammar, durable projection, and cold-replay oracles. Keep
+WorkStatus transitions, frozen status-capable tool-surface qualification,
+foreground reminder settlement, persistent Working state, post-append final
+challenge, delegated completion/detach, append failure, and interception
+regressions. The deterministic provider lane owns parallel accepted/rejected
+Working calls, repeated work, Done/Blocked release, exact production watch
+grammar, durable projection, and cold-replay oracles. Keep
 parser-only tests as focused validation supplements; add production-boundary
 regressions alongside each new handler or lifecycle integration.
 

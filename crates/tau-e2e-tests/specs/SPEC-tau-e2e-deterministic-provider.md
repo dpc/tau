@@ -57,6 +57,10 @@ its universal PTY Boot B preserves that exact extension/tool surface. The fake
 has no network,
 authentication, shell, evaluation, child-spawn, prompt-control, environment
 control, or arbitrary fixture-file behavior.
+The current-status policy scenario is another closed exception: one main role
+exposes only harness-owned `status` plus `restart_test_dummy`, installs the
+production built-in handler before its first prompt, and advertises parallel
+tool support only for that scenario.
 The separate peer-navigation PTY case starts with no agent, exposes no tools,
 and authorizes one exact external message through a fixture-owned same-process
 callback endpoint. Its sole provider action is a bounded hold used to inspect
@@ -113,6 +117,13 @@ only `enable: true`, requires the production name/type/schema, and accepts one
 correlated successful result whose exact sanitized text names the child and
 contains no subscription identity. No other harness-owned tool enters the
 grammar.
+
+V1's closed current-status sequence emits Working plus one dummy call in either
+provider order, optionally substitutes one rejected status state, validates the
+resulting reminder behavior, performs another Working-state tool round, attempts
+a final, and then requires Done or Blocked before the accepted final. The fake
+matches typed tool results/errors and exact reminder text; it cannot generalize
+to other status values, tools, or call sequences.
 
 S1 also adds one bounded `WatchNotifications` action containing one to four
 typed `Response` or `Prompt` records. Each provider prompt consumes and validates

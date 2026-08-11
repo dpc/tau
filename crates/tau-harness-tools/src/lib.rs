@@ -22,9 +22,8 @@ use status::parse_args as parse_status_args;
 use tau_harness::internal_tools::{InternalSkill, InternalSkillSource};
 use tau_harness::{AgentId, AgentToolCall, HarnessError, InternalToolHandler, InternalToolHost};
 use tau_proto::{
-    BackgroundSupport, CborValue, ContentPart, ContextItem, ContextRole, Event,
-    ProviderResponseFinished, StartAgentRequest, ToolCallId, ToolName, ToolResultKind, ToolSpec,
-    ToolStarted, ToolType, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus,
+    BackgroundSupport, CborValue, Event, StartAgentRequest, ToolCallId, ToolName, ToolResultKind,
+    ToolSpec, ToolStarted, ToolType, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 #[cfg(test)]
 use tau_proto::{PromptOriginator, ToolResult};
@@ -373,9 +372,6 @@ impl InternalToolHandler for BuiltinTools {
                 }
             }
             Event::StartAgentResult(result) => self.handle_start_agent_result(host, result),
-            Event::ProviderResponseFinished(response) => {
-                self.handle_agent_response_finished(host, response)
-            }
             Event::ToolCancelRequest(_) => Ok(()),
             Event::StartAgentAccepted(_) => Ok(()),
             _ => {
@@ -559,23 +555,6 @@ impl BuiltinTools {
                 );
             }
         }
-        Ok(())
-    }
-
-    fn handle_agent_response_finished(
-        &self,
-        host: &mut InternalToolHost<'_>,
-        response: &ProviderResponseFinished,
-    ) -> Result<(), HarnessError> {
-        let gated_final = host.is_gated_final_response(&response.agent_prompt_id);
-        let Some(message) = agent_watch_response_should_notify(response, gated_final) else {
-            return Ok(());
-        };
-        let sender_id = response.agent_id.to_string();
-        if !host.agent_watch_response_allowed(&sender_id) {
-            return Ok(());
-        }
-        self.notify_agent_watchers(host, &sender_id, message);
         Ok(())
     }
 
@@ -1799,22 +1778,6 @@ fn sanitized_display_agent_id(arguments: &CborValue) -> Option<String> {
         .map(tau_proto::AgentId::into_string)
 }
 
-fn agent_watch_response_should_notify(
-    response: &ProviderResponseFinished,
-    gated_final: bool,
-) -> Option<String> {
-    // Only interactive user turns produce per-turn watch responses. Side-agent
-    // provider turns are summarized through `StartAgentResult`, and internal
-    // steering/tool-completion turns must stay local to the watched agent.
-    if gated_final || !response.originator.is_user() || response.stop_reason.requests_tool_calls() {
-        return None;
-    }
-    if response.failure_kind.is_some() || response.error.is_some() {
-        return None;
-    }
-    agent_watch_notification_message(response)
-}
-
 fn start_agent_watch_notification_message(
     _agent_id: &str,
     result: &tau_proto::StartAgentResult,
@@ -1830,43 +1793,6 @@ fn start_agent_watch_notification_message(
         return Some("agent failed".to_owned());
     }
     (!result.text.trim().is_empty()).then(|| result.text.clone())
-}
-
-fn agent_watch_notification_message(response: &ProviderResponseFinished) -> Option<String> {
-    if let Some(kind) = response.failure_kind {
-        return Some(format!("provider failure: {kind:?}").to_lowercase());
-    }
-    if response.error.is_some() {
-        return Some("provider failure: unknown".to_owned());
-    }
-    assistant_text_from_output_items(&response.output_items)
-}
-
-fn assistant_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
-    let text = output_items
-        .iter()
-        .filter_map(assistant_text_from_context_item)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    (!text.trim().is_empty()).then_some(text)
-}
-
-fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
-    let ContextItem::Message(message) = item else {
-        return None;
-    };
-    if message.role != ContextRole::Assistant {
-        return None;
-    }
-    let text = message
-        .content
-        .iter()
-        .map(|part| match part {
-            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.trim().is_empty()).then_some(text)
 }
 
 #[derive(Debug)]

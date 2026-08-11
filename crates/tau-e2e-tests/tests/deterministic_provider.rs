@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
-    DeterministicFixture, ScenarioActionV2, ScenarioLaneV2, ScenarioV1, ScenarioV2,
+    DeterministicFixture, InitialStatusOutcome, ScenarioActionV2, ScenarioLaneV2, ScenarioV1,
+    ScenarioV2, StatusTerminalPhase, StatusToolOrder,
 };
 use tau_proto::{CborValue, Event, ProviderFailureKind, ToolResultKind};
 
@@ -68,6 +69,58 @@ fn deterministic_dummy_tool_round() -> Result<(), Box<dyn std::error::Error>> {
     let events = fixture.published_trace_events()?;
     assert_exact_extensions(&events, &["e2e-fake-provider", "e2e-test-dummy"]);
     assert_tool_provider_sequence(&events);
+    Ok(())
+}
+
+/// The real provider, status handler, and dummy tool preserve current-status
+/// policy in either parallel order: Working suppresses the tool-start reminder,
+/// blocks a final, and Done or Blocked releases that final.
+#[test]
+fn deterministic_current_status_policy_round() -> Result<(), Box<dyn std::error::Error>> {
+    for order in [StatusToolOrder::StatusFirst, StatusToolOrder::WorkFirst] {
+        for initial_status in [
+            InitialStatusOutcome::AcceptedWorking,
+            InitialStatusOutcome::Rejected,
+        ] {
+            for terminal_phase in [StatusTerminalPhase::Done, StatusTerminalPhase::Blocked] {
+                let prompt =
+                    format!("run current status policy in {order:?} order with {initial_status:?}");
+                let fixture = DeterministicFixture::new(
+                    "deterministic_current_status_policy_round",
+                    &ScenarioV1::status_policy_round_v1(
+                        &prompt,
+                        order,
+                        initial_status,
+                        terminal_phase,
+                    ),
+                    FAKE_PROVIDER,
+                    Some(DUMMY_TOOL.into()),
+                )?;
+                let outcome = fixture.run_turn(&prompt)?;
+                assert_eq!(outcome.response, "status policy completed");
+                assert_eq!(outcome.tool_calls.len(), 4);
+                assert_eq!(
+                    outcome.tool_results.len(),
+                    if initial_status == InitialStatusOutcome::AcceptedWorking {
+                        4
+                    } else {
+                        3
+                    }
+                );
+                assert_eq!(
+                    outcome.tool_results.iter().any(|result| {
+                        result.call_id.as_str() == "status-policy-working"
+                            && result.result
+                                == CborValue::Text(
+                                    "Status accepted: working — Exercise current status policy"
+                                        .to_owned(),
+                                )
+                    }),
+                    initial_status == InitialStatusOutcome::AcceptedWorking
+                );
+            }
+        }
+    }
     Ok(())
 }
 

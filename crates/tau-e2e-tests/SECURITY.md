@@ -123,6 +123,12 @@ ownership. Provider cursor and harness journal writes are not transactional, so
 crash-exact replay is explicitly outside this boundary. The fixture does not
 claim broad terminal rendering or universal packaging.
 
+The current-status scenario narrowly adds the production harness-owned `status`
+handler and parallel-call capability to the otherwise dummy-only embedded
+fixture. Its closed grammar permits only fixed Working, invalid, Done, and
+Blocked reports plus fixed no-side-effect dummy calls. It adds no network,
+shell, arbitrary tool, or provider authority.
+
 The local-summary-compaction acceptance actions are the fake's sole
 standalone-compaction opt-in: all other scenarios continue publishing that
 capability as false. They accept only a nonempty harness-owned compact

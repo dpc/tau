@@ -535,6 +535,24 @@ pub fn run_embedded_message_with_options(
     message: &str,
     options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
+    run_embedded_message_with_options_and_internal_tools(
+        state_dir,
+        session_id,
+        message,
+        options,
+        Vec::new(),
+    )
+}
+
+/// Runs one embedded interaction with harness-process tool handlers installed
+/// before the first agent and prompt are created.
+pub fn run_embedded_message_with_options_and_internal_tools(
+    state_dir: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+    options: EmbeddedOptions,
+    internal_tool_handlers: crate::InternalToolHandlers,
+) -> Result<InteractionOutcome, HarnessError> {
     let state_dir = state_dir.into();
     let explicit_dirs = options.dirs.is_some();
     let dirs = options
@@ -571,6 +589,7 @@ pub fn run_embedded_message_with_options(
             HarnessStorageMode::Durable,
         )
     }?;
+    harness.install_internal_tool_handlers(internal_tool_handlers);
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {

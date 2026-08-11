@@ -764,28 +764,6 @@ impl<'a> InternalToolHost<'a> {
             .agent_watch_provider_status_summary(watched_agent_id)
     }
 
-    /// Return whether the current generation may fan out a final watch
-    /// response.
-    ///
-    /// Generations caused only by watch notifications are suppressed to prevent
-    /// watch-derived activity from cascading along chains. Ordinary input
-    /// promotes the generation before completion and restores normal
-    /// response fanout. Missing or terminating watched endpoints are denied
-    /// so a parked final response cannot cross the unload boundary.
-    pub fn agent_watch_response_allowed(&self, watched_agent_id: &str) -> bool {
-        self.harness
-            .agent_routes
-            .get(watched_agent_id)
-            .and_then(|cid| self.harness.agents.get(cid))
-            .is_some_and(|agent| !agent.terminating && !agent.lifecycle_notification_only_turn)
-    }
-
-    /// Return whether the committing publication owns any gated-final
-    /// disposition for this exact prompt.
-    pub fn is_gated_final_response(&self, prompt_id: &tau_proto::AgentPromptId) -> bool {
-        self.harness.committing_gated_final(prompt_id)
-    }
-
     /// Prune a stale watch relationship after notification delivery failed.
     pub fn prune_agent_watch(&mut self, watcher_id: &str, watched_agent_id: &str) {
         self.harness.prune_agent_watch(watcher_id, watched_agent_id);

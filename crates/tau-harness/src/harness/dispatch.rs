@@ -138,12 +138,6 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let mut prompt = prompt.into();
-        let acknowledgement_activation = matches!(
-            prompt.activation_kind(),
-            tau_proto::ActivationKind::VisibleUser
-                | tau_proto::ActivationKind::AgentMessage
-                | tau_proto::ActivationKind::ExternalMessage
-        );
         if self
             .agents
             .get(agent_id)
@@ -185,9 +179,6 @@ impl Harness {
         }
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.lifecycle_notification_only_turn = false;
-        }
-        if acknowledgement_activation && let Some(activation) = prompt.activation_observation {
-            self.join_task_status_activation(agent_id, activation);
         }
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);

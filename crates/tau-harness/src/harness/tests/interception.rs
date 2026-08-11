@@ -81,16 +81,22 @@ fn clear_interception_fixture_models(h: &mut Harness) {
     h.set_provider_models(&crate::test_connection_id(&provider_id), Vec::new());
 }
 
-/// A start-status challenged final cannot be dropped after interception; its
-/// reminder starts only after the candidate commits.
+/// A Working-gated final cannot be dropped after interception; its reminder
+/// starts only after the candidate commits.
 #[test]
-fn challenged_start_status_final_drop_is_overridden_until_post_commit() {
+fn challenged_working_final_drop_is_overridden_until_post_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
-    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "intercepted final".to_owned(),
+        )
+        .expect("valid Working report"),
+    )
+    .expect("accept Working");
     let prompt_id =
         tau_proto::AgentPromptId::parse("working-final-drop").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
@@ -296,6 +302,86 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     h.shutdown().expect("shutdown");
 }
 
+/// A watched ordinary final projects no response before its exact durable
+/// append commits, including while interception parks it and when that append
+/// fails.
+#[test]
+fn ordinary_final_append_failure_does_not_project_watch_response() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = echo_harness(&state_dir).expect("harness");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    finish_test_agent_context_wait(&mut h, &watcher_id);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("ordinary-final-append").expect("known-safe prompt id");
+    seed_agent_thinking(&mut h, &watched_cid, prompt_id.as_str());
+    h.prompt_agents
+        .insert(prompt_id.clone(), watched_cid.clone());
+    let interceptor = connect_test_tool(&mut h, "ordinary-final-append-owner");
+    h.handle_extension_event(
+        "ordinary-final-append-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt_id,
+        watched_id.clone(),
+        "must await commit",
+    ))
+    .expect("park ordinary final");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let watch_response_count = |h: &Harness| {
+        session_agent_message_received_events(h)
+            .iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchResponse
+                    && message.sender_id == watched_id
+                    && message.recipient_id == watcher_id
+            })
+            .count()
+    };
+    assert_eq!(watch_response_count(&h), 0, "parked final must not fan out");
+
+    let journal_path = state_dir
+        .join("agents")
+        .join(watched_id.as_str())
+        .join("events.cbor");
+    let backup_path = journal_path.with_extension("cbor.ordinary-final-backup");
+    std::fs::rename(&journal_path, &backup_path).expect("park journal");
+    std::fs::create_dir(&journal_path).expect("reject append");
+    h.handle_extension_event(
+        "ordinary-final-append-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(parked))),
+        })),
+    )
+    .expect("release into append failure");
+    assert_eq!(
+        watch_response_count(&h),
+        0,
+        "append failure must not fan out"
+    );
+
+    std::fs::remove_dir(&journal_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
+    h.shutdown().expect("shutdown");
+}
+
 /// A canonical-submission append failure occurs after create admission, so it
 /// must terminate the correlated initial prompt instead of retracting creation
 /// or leaving the one-shot client waiting.
@@ -383,8 +469,6 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
     let make_completion = |batch_parent, suffix: &str| AgentPublishCompletion::GatedFinal {
-        agent_prompt_id: tau_proto::AgentPromptId::parse(format!("retained-{suffix}"))
-            .expect("known-safe prompt id"),
         batch_parent,
         disposition: GatedFinalDisposition::Challenge {
             title: "exact parent".to_owned(),

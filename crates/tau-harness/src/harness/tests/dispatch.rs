@@ -138,7 +138,6 @@ fn failed_initial_manifest_prevents_session_diagnostic_creation() {
 fn durable_message_wake_extends_session_retention() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid]
         .agent_id
@@ -4063,6 +4062,7 @@ fn shown_tool_failure_examples_are_session_and_agent_scoped() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     h.shown_tool_failure_examples.insert((
         cid.clone(),
@@ -23462,36 +23462,6 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
-    h.report_agent_work_status(
-        &side_cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Working,
-            "delegated final".to_owned(),
-        )
-        .expect("valid delegated report"),
-    )
-    .expect("delegated Working");
-    h.agents
-        .get_mut(&side_cid)
-        .expect("side agent")
-        .work_status
-        .record_final_challenge();
-    h.agents
-        .get_mut(&side_cid)
-        .expect("side agent")
-        .work_status
-        .record_final_challenge();
-    let final_interceptor = connect_test_tool(&mut h, "delegated-final-interceptor");
-    h.handle_extension_event(
-        "delegated-final-interceptor",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register delegated final interceptor");
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -23537,57 +23507,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         provider_response_id: None,
         ws_pool_delta: None,
     })
-    .expect("side final parked");
-
-    let (parked_final, _) = intercepted_payload(&final_interceptor);
-    assert!(
-        delegate_events
-            .lock()
-            .expect("delegate events")
-            .iter()
-            .all(|routed| !matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::StartAgentResult(result)) if result.query_id == "q1"
-            )),
-        "parked final must not complete delegated work"
-    );
-    assert!(matches!(
-        h.agents[&side_cid].originator,
-        tau_proto::PromptOriginator::Extension { .. }
-    ));
-    let journal_path = sp
-        .join("agents")
-        .join(side_agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.delegated-final-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park side journal");
-    std::fs::create_dir(&journal_path).expect("reject side append");
-    h.handle_extension_event(
-        "delegated-final-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(Some(Box::new(parked_final))),
-        })),
-    )
-    .expect("release delegated final into append failure");
-    assert!(h.pending_agent_publish_completions.contains_key(&side_cid));
-    assert!(matches!(
-        h.agents[&side_cid].originator,
-        tau_proto::PromptOriginator::Extension { .. }
-    ));
-    assert!(
-        delegate_events
-            .lock()
-            .expect("delegate events")
-            .iter()
-            .all(|routed| !matches!(
-                peel_inner_event(&routed.frame),
-                Some(Event::StartAgentResult(result)) if result.query_id == "q1"
-            )),
-        "append failure must not complete delegated work"
-    );
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore side journal");
-    h.retry_pending_agent_publish_completion(&side_cid);
+    .expect("finish side agent");
 
     assert!(matches!(h.turn_state, TurnState::Idle));
     assert!(
@@ -23848,7 +23768,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         // Deliberately persist only the terminal provider fact. This models the
         // crash cut before handle_finished_response_side_conversation can return
         // StartAgentResult and call complete_finished_side_conversation.
-        h.publish_finished_response_for_agent(&worker_cid, None, &terminal, None);
+        h.publish_finished_response_for_agent(&worker_cid, None, &terminal, None, false);
         assert!(matches!(
             h.agents[&worker_cid].originator,
             tau_proto::PromptOriginator::Extension { .. }
@@ -28799,10 +28719,10 @@ fn agent_stats_snapshots_publish_work_status_transitions_and_replay() {
     h.shutdown().expect("shutdown");
 }
 
-/// The production response handler durably challenges exactly two ordinary
-/// finals, then accepts one Unknown terminal with one harness-owned response.
+/// The production response handler challenges every successful final while
+/// Working and releases exactly one candidate only after Done.
 #[test]
-fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
+fn working_final_gate_requires_terminal_status_without_exhaustion() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -28816,11 +28736,11 @@ fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
         .expect("valid work status report"),
     )
     .expect("working");
-    h.agents.get_mut(&cid).expect("agent").turn_generation = 7;
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    finish_test_agent_context_wait(&mut h, &watcher_id);
     h.set_agent_watch(
         watcher_id.as_str(),
         agent_id.as_str(),
@@ -28828,13 +28748,8 @@ fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
-    let first = test_agent_prompt_id("status-final-0");
-    seed_agent_thinking(&mut h, &cid, first.as_str());
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    h.prompt_agents.insert(first.clone(), cid.clone());
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish gate".to_owned()))
+        .expect("dispatch production user prompt");
     let outer_generation = h.agents[&cid].turn_generation;
     for index in 0..3 {
         let prompt_id = match &h.agents[&cid].turn_state {
@@ -28847,41 +28762,65 @@ fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
             &format!("candidate {index}"),
         ))
         .expect("finish candidate");
-        let responses = session_agent_message_received_events(&h)
-            .into_iter()
-            .filter(|message| {
-                message.kind == tau_proto::AgentMessageKind::WatchResponse
-                    && message.sender_id == agent_id
-                    && message.recipient_id == watcher_id
-            })
-            .count();
-        assert_eq!(
-            responses,
-            usize::from(index == 2),
-            "only the accepted committed candidate releases one watch response"
+        assert!(
+            session_agent_message_received_events(&h)
+                .iter()
+                .all(|message| {
+                    message.kind != tau_proto::AgentMessageKind::WatchResponse
+                        || message.sender_id != agent_id
+                        || message.recipient_id != watcher_id
+                }),
+            "Working candidate {index} must not reach its watcher"
         );
+        assert!(matches!(
+            h.agents[&cid].turn_state,
+            AgentTurnState::AgentThinking { .. }
+        ));
     }
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "finish gate".to_owned(),
+        )
+        .expect("valid Done report"),
+    )
+    .expect("accept Done");
+    let final_prompt_id = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("Done continuation lacks an active prompt: {state:?}"),
+    };
+    assert!(
+        !h.agents[&cid].lifecycle_notification_only_turn,
+        "Working challenge continuation remains an ordinary outer turn"
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &final_prompt_id,
+        agent_id.clone(),
+        "accepted after Done",
+    ))
+    .expect("finish after Done");
     let agent = h.agents.get(&cid).expect("agent");
     assert_eq!(
         agent.work_status.phase(),
-        tau_proto::AgentWorkStatusPhase::Unknown
+        tau_proto::AgentWorkStatusPhase::Done
+    );
+    let watch_responses = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchResponse
+                && message.sender_id == agent_id
+                && message.recipient_id == watcher_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        watch_responses.len(),
+        1,
+        "Done releases exactly one later final response to the watcher"
     );
     assert_eq!(
-        session_agent_message_received_events(&h)
-            .into_iter()
-            .filter(|message| {
-                message.kind == tau_proto::AgentMessageKind::WatchWorkStatus
-                    && message.sender_id == agent_id
-                    && message.recipient_id == watcher_id
-                    && message.watch_work_status.as_ref().is_some_and(|status| {
-                        !status.initial
-                            && status.phase == tau_proto::AgentWorkStatusPhase::Unknown
-                            && status.title.as_deref() == Some("finish gate")
-                    })
-            })
-            .count(),
-        1,
-        "the exhausted Working-final guard reports its actionable fallback"
+        watch_responses[0].message, "accepted after Done",
+        "challenged candidate text must remain permanently withheld"
     );
     assert_eq!(agent.turn_generation, outer_generation);
     assert!(matches!(agent.turn_state, AgentTurnState::Idle));
@@ -28890,161 +28829,29 @@ fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
             .iter()
             .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
             .count(),
-        3
+        4
     );
     h.shutdown().expect("shutdown");
 }
 
-/// The production final path withholds one status-less candidate, carries the
-/// exact challenge into the same outer turn, and accepts a later final only
-/// after an accepted status report.
+/// Repeated Working finals from a tool-backed delegate project neither a
+/// delegated result nor detachment; Done releases exactly one result and then
+/// detaches the child.
 #[test]
-fn start_status_final_gate_accepts_after_late_status() {
+fn delegated_working_final_projects_only_after_done() {
     let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let first = test_agent_prompt_id("start-status-final");
-    seed_agent_thinking(&mut h, &cid, first.as_str());
-    h.agents.get_mut(&cid).expect("agent").turn_generation = 7;
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    h.prompt_agents.insert(first.clone(), cid.clone());
-    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-
-    h.handle_provider_response_finished(provider_text_response(
-        &first,
-        agent_id.clone(),
-        "premature final",
-    ))
-    .expect("challenge premature final");
-    let challenged_prompt = match &h.agents[&cid].turn_state {
-        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("challenge did not dispatch: {state:?}"),
-    };
-    let rendered = serde_json::to_string(&read_prompt_created(&h, &challenged_prompt).context)
-        .expect("context");
-    assert!(rendered.contains(STATUS_REMINDER));
-
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Working,
-            "reported before final".to_owned(),
-        )
-        .expect("valid status"),
-    )
-    .expect("accepted late status");
-    h.handle_provider_response_finished(provider_text_response(
-        &challenged_prompt,
-        agent_id.clone(),
-        "working-gated final",
-    ))
-    .expect("challenge final through subsequent Working gate");
-    let working_prompt = match &h.agents[&cid].turn_state {
-        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("Working challenge did not dispatch: {state:?}"),
-    };
-    let rendered =
-        serde_json::to_string(&read_prompt_created(&h, &working_prompt).context).expect("context");
-    assert!(rendered.contains("Your `status` is set to `working`"));
-
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "reported before final".to_owned(),
-        )
-        .expect("valid done status"),
-    )
-    .expect("finish persistent Working status");
-    h.handle_provider_response_finished(provider_text_response(
-        &working_prompt,
-        agent_id,
-        "accepted final",
-    ))
-    .expect("accept final after both gates");
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
-    h.shutdown().expect("shutdown");
-}
-
-/// Repeating a successful final after the sole start-status challenge ends the
-/// turn as a harness-policy failure instead of accepting or looping.
-#[test]
-fn start_status_final_gate_fails_after_repeated_refusal() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let first = test_agent_prompt_id("start-status-refusal");
-    seed_agent_thinking(&mut h, &cid, first.as_str());
-    h.agents.get_mut(&cid).expect("agent").turn_generation = 7;
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    h.prompt_agents.insert(first.clone(), cid.clone());
-    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-
-    h.handle_provider_response_finished(provider_text_response(
-        &first,
-        agent_id.clone(),
-        "first refusal",
-    ))
-    .expect("challenge first refusal");
-    let challenged_prompt = match &h.agents[&cid].turn_state {
-        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("challenge did not dispatch: {state:?}"),
-    };
-    h.handle_provider_response_finished(provider_text_response(
-        &challenged_prompt,
-        agent_id,
-        "second refusal",
-    ))
-    .expect("fail second refusal");
-
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
-    assert_eq!(
-        event_log_events(&h)
-            .iter()
-            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
-            .count(),
-        2
-    );
-    assert!(event_log_events(&h).iter().any(|event| {
-        matches!(event, Event::HarnessNotice(notice)
-            if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
-                && notice.message.contains("harness policy failure"))
-    }));
-    h.shutdown().expect("shutdown");
-}
-
-/// A delegated activation that repeats a status-less final returns an explicit
-/// correlated failure and unloads the child instead of leaving its owner open.
-#[test]
-fn delegated_start_status_refusal_returns_failure_and_closes_child() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
-    let frames = connect_test_tool(&mut h, "conn-status-refusal");
+    let frames = connect_test_tool(&mut h, "conn-working-final");
     let parent_cid = ensure_test_user_agent(&mut h);
     h.tool_agents
-        .insert("parent-agent-start".into(), parent_cid.clone());
+        .insert("parent-agent-start".into(), parent_cid);
     h.handle_start_agent_request(
-        &crate::test_connection_id("conn-status-refusal"),
+        &crate::test_connection_id("conn-working-final"),
         StartAgentRequest {
             trusted_internal_spans: Vec::new(),
             parent_agent: None,
-            query_id: "q-status-refusal".to_owned(),
+            query_id: "q-working-final".to_owned(),
             instruction: "Perform delegated work.".to_owned(),
             role: None,
             input_stats: tau_proto::ToolUseStats::default(),
@@ -29053,109 +28860,89 @@ fn delegated_start_status_refusal_returns_failure_and_closes_child() {
         },
     )
     .expect("start delegated agent");
-    let child_cid = ext_query_cid(&h, "q-status-refusal").expect("delegated child");
-    let first = h
+    let child_cid = ext_query_cid(&h, "q-working-final").expect("delegated child");
+    let child_agent_id = durable_agent_id_for_conversation(&h, &child_cid);
+    h.report_agent_work_status(
+        &child_cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "delegated final".to_owned(),
+        )
+        .expect("valid Working report"),
+    )
+    .expect("accept Working");
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name("conn-working-final"),
+        query_id: "q-working-final".to_owned(),
+    };
+
+    for index in 0..3 {
+        let prompt_id = h
+            .prompt_agents
+            .iter()
+            .find_map(|(prompt_id, prompt_cid)| {
+                (prompt_cid == &child_cid).then(|| prompt_id.clone())
+            })
+            .expect("delegated prompt");
+        let mut response = provider_text_response(
+            &prompt_id,
+            child_agent_id.clone(),
+            &format!("candidate {index}"),
+        );
+        response.originator = originator.clone();
+        h.handle_provider_response_finished(response)
+            .expect("challenge delegated Working final");
+        assert!(matches!(
+            h.agents[&child_cid].turn_state,
+            AgentTurnState::AgentThinking { .. }
+        ));
+        assert!(h.agents[&child_cid].parent_tool_call_id.is_some());
+        assert!(frames.lock().expect("frames").iter().all(|routed| {
+            !matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::StartAgentResult(result)) if result.query_id == "q-working-final"
+            )
+        }));
+    }
+
+    h.report_agent_work_status(
+        &child_cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "delegated final".to_owned(),
+        )
+        .expect("valid Done report"),
+    )
+    .expect("accept Done");
+    let final_prompt_id = h
         .prompt_agents
         .iter()
         .find_map(|(prompt_id, prompt_cid)| (prompt_cid == &child_cid).then(|| prompt_id.clone()))
-        .expect("delegated prompt");
-    let child_agent_id = durable_agent_id_for_conversation(&h, &child_cid);
-    let status = &mut h.agents.get_mut(&child_cid).expect("child").work_status;
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-    let originator = tau_proto::PromptOriginator::Extension {
-        name: crate::test_extension_name("conn-status-refusal"),
-        query_id: "q-status-refusal".to_owned(),
-    };
+        .expect("post-Done delegated prompt");
+    let mut response =
+        provider_text_response(&final_prompt_id, child_agent_id.clone(), "delegated answer");
+    response.originator = originator;
+    h.handle_provider_response_finished(response)
+        .expect("finish delegated work after Done");
 
-    let mut first_response =
-        provider_text_response(&first, child_agent_id.clone(), "first refusal");
-    first_response.originator = originator.clone();
-    h.handle_provider_response_finished(first_response)
-        .expect("challenge delegated refusal");
-    let challenged = match &h.agents[&child_cid].turn_state {
-        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("delegated challenge did not dispatch: {state:?}"),
-    };
-    let mut second_response =
-        provider_text_response(&challenged, child_agent_id.clone(), "second refusal");
-    second_response.originator = originator;
-    h.handle_provider_response_finished(second_response)
-        .expect("fail delegated refusal");
-
-    let child = h
-        .agents
-        .get(&child_cid)
-        .expect("detached child remains loaded");
-    assert!(child.parent_tool_call_id.is_none());
-    assert!(child.parent_agent_id.is_none());
-    assert!(matches!(child.turn_state, AgentTurnState::Idle));
-    assert!(h.session_loaded_agents.contains(&child_agent_id));
-    let result = frames
+    let results = frames
         .lock()
         .expect("frames")
         .iter()
-        .find_map(|routed| match peel_inner_event(&routed.frame) {
-            Some(Event::StartAgentResult(result)) if result.query_id == "q-status-refusal" => {
+        .filter_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q-working-final" => {
                 Some(result.clone())
             }
             _ => None,
         })
-        .expect("correlated policy failure");
-    assert!(result.text.is_empty());
-    assert_eq!(
-        result.error.as_deref(),
-        Some("harness policy failure: required `status` call was not accepted")
-    );
-    h.shutdown().expect("shutdown");
-}
-
-/// A persistent peer entrypoint uses ordinary policy-failure cleanup even
-/// though its prompt originator is an extension.
-#[test]
-fn peer_entrypoint_start_status_refusal_retains_endpoint() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let originator = tau_proto::PromptOriginator::Extension {
-        name: crate::test_extension_name("peer-entrypoint"),
-        query_id: "peer-status-refusal".to_owned(),
-    };
-    let first = test_agent_prompt_id("peer-status-refusal");
-    seed_agent_thinking(&mut h, &cid, first.as_str());
-    h.prompt_agents.insert(first.clone(), cid.clone());
-    {
-        let agent = h.agents.get_mut(&cid).expect("peer endpoint");
-        agent.peer_entrypoint_endpoint = true;
-        agent.originator = originator.clone();
-        agent
-            .work_status
-            .begin_task_activation(tau_proto::ObservationId::random());
-        agent.work_status.record_task_work();
-    }
-
-    let mut first_response = provider_text_response(&first, agent_id.clone(), "first refusal");
-    first_response.originator = originator.clone();
-    h.handle_provider_response_finished(first_response)
-        .expect("challenge peer refusal");
-    let challenged = match &h.agents[&cid].turn_state {
-        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("peer challenge did not dispatch: {state:?}"),
-    };
-    let mut second_response = provider_text_response(&challenged, agent_id, "second refusal");
-    second_response.originator = originator;
-    h.handle_provider_response_finished(second_response)
-        .expect("fail peer refusal");
-
-    assert!(h.agents.contains_key(&cid));
-    assert!(h.agents[&cid].peer_entrypoint_endpoint);
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::StartAgentResult(result) if result.query_id == "peer-status-refusal"
-    )));
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].text, "delegated answer");
+    let child = &h.agents[&child_cid];
+    assert!(child.parent_tool_call_id.is_none());
+    assert!(child.parent_agent_id.is_none());
+    assert!(matches!(child.turn_state, AgentTurnState::Idle));
+    assert!(h.session_loaded_agents.contains(&child_agent_id));
     h.shutdown().expect("shutdown");
 }
 
@@ -29261,231 +29048,89 @@ fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
     h.shutdown().expect("shutdown");
 }
 
-/// Reminder rendering and lifecycle decisions are exact, one-shot, and reset
-/// only by a genuinely fresh activation.
+/// Reminder rendering names the required current phase directly.
 #[test]
-fn start_status_reminder_is_activation_scoped_and_one_shot() {
+fn substantive_tool_reminder_uses_approved_wording() {
     assert_eq!(
         STATUS_REMINDER,
-        "When you start working on a task, call `status` to report what you're doing. Batch it with other tool calls when possible."
+        "Set your status to `working` before continuing substantive tool work. Batch the `status` call with other tool calls when possible."
     );
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+}
 
-    assert!(!status.mark_start_reminder_delivered());
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    assert!(!status.mark_start_reminder_delivered());
-    status.record_task_work();
-    assert!(status.mark_start_reminder_delivered());
-    assert!(!status.mark_start_reminder_delivered());
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    assert!(!status.mark_start_reminder_delivered());
-    status.record_task_work();
-    assert!(status.mark_start_reminder_delivered());
+/// Settling substantive work while nonworking queues one reminder, while an
+/// accepted Working report suppresses it.
+#[test]
+fn foreground_settlement_follows_current_working_status() {
+    for working in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        if working {
+            h.report_agent_work_status(
+                &cid,
+                crate::WorkStatusReport::new(
+                    tau_proto::AgentWorkStatusPhase::Working,
+                    "already working".to_owned(),
+                )
+                .expect("valid Working report"),
+            )
+            .expect("accept Working");
+        }
+        h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .record_substantive_tool_admission();
+        h.queue_working_reminder_if_needed(&cid);
+        assert_eq!(
+            h.agents[&cid]
+                .pending_prompts
+                .iter()
+                .filter(|prompt| prompt.text == STATUS_REMINDER)
+                .count(),
+            usize::from(!working)
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Cancelling a substantive nonworking round retires its reminder obligation,
+/// so a later exempt round cannot inherit it.
+#[test]
+fn cancelled_tool_round_does_not_leak_working_reminder() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .record_substantive_tool_admission();
+
+    h.finalize_cancelled_tool_turn(&cid);
+    h.queue_working_reminder_if_needed(&cid);
+
+    assert!(h.agents[&cid].pending_prompts.is_empty());
     h.shutdown().expect("shutdown");
 }
 
-/// Settling the first production foreground round after admitted task work
-/// renders the exact reminder once in the next provider continuation.
+/// An activating background-completion prompt remains subject to the ordinary
+/// substantive-tool reminder policy.
 #[test]
-fn qualifying_foreground_settlement_renders_exact_one_shot_reminder() {
+fn background_completion_substantive_tool_admission_records_working_reminder() {
     let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::ToolsRunning {
-        remaining_calls: vec!["qualifying-call".into()],
-    };
-
-    h.maybe_complete_agent_turn_for(&cid, "qualifying-call");
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::activating_background_completion("background work ready".to_owned()),
+    )
+    .expect("dispatch activating background completion");
     let prompt_id = match &h.agents[&cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("reminder continuation did not dispatch: {state:?}"),
+        state => panic!("background completion did not activate: {state:?}"),
     };
-    let rendered =
-        serde_json::to_string(&read_prompt_created(&h, &prompt_id).context).expect("context");
-    assert_eq!(rendered.matches(STATUS_REMINDER).count(), 1);
-    h.shutdown().expect("shutdown");
-}
-
-/// Completing an old foreground round cannot arm or deliver the reminder for a
-/// newly queued addressed activation.
-#[test]
-fn queued_addressed_work_does_not_inherit_old_tool_reminder() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .begin_task_activation(tau_proto::ObservationId::random());
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "old activation acknowledged".to_owned(),
-        )
-        .expect("valid old status"),
-    )
-    .expect("accept old status");
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::ToolsRunning {
-        remaining_calls: vec!["old-call".into()],
-    };
-
-    let mut prompt = PendingPrompt::human_ui("queued addressed work".to_owned());
-    h.ensure_prompt_activation_observed(&cid, &mut prompt);
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .pending_prompts
-        .push_back(prompt);
-    h.maybe_complete_agent_turn_for(&cid, "old-call");
-
-    let queued_prompt_id = match &h.agents[&cid].turn_state {
-        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("queued addressed prompt did not dispatch: {state:?}"),
-    };
-    let rendered = serde_json::to_string(&read_prompt_created(&h, &queued_prompt_id).context)
-        .expect("context");
-    assert!(!rendered.contains(STATUS_REMINDER));
-
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .record_task_work();
-    assert_eq!(
-        h.agents[&cid].work_status.decide_start_status_final(true),
-        Some(crate::agent::StartStatusFinalDecision::Challenge),
-        "queued activation must own its fresh work before tool admission"
-    );
-    h.queue_start_status_reminder_if_needed(&cid);
-    assert_eq!(
-        h.agents[&cid]
-            .pending_prompts
-            .iter()
-            .filter(|prompt| prompt.text == STATUS_REMINDER)
-            .count(),
-        1,
-        "fresh activation must receive its own one-shot reminder"
-    );
-    h.shutdown().expect("shutdown");
-}
-
-/// A selected ordinary message wake transfers start-status ownership after the
-/// old round settles and before the successor can admit task work.
-#[test]
-fn queued_message_wake_owns_fresh_start_status_lifecycle() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .begin_task_activation(tau_proto::ObservationId::random());
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "old message activation acknowledged".to_owned(),
-        )
-        .expect("valid old status"),
-    )
-    .expect("accept old status");
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::ToolsRunning {
-        remaining_calls: vec!["old-message-call".into()],
-    };
-    let delivered = h.handle_external_agent_message_request_without_auth_for_test(
-        tau_proto::ExternalAgentMessageRequest {
-            request_id: "fresh-message-wake".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("fresh-message-wake").expect("message id"),
-            capability: "test-only".to_owned(),
-            sender_session_id: test_session_id("sender-session"),
-            sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: h.current_session_id.clone(),
-            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
-                &recipient_id,
-            )),
-            kind: tau_proto::AgentMessageKind::Message,
-            message: "fresh ordinary work".to_owned(),
-        },
-    );
-    assert_eq!(delivered.error, None);
-
-    h.maybe_complete_agent_turn_for(&cid, "old-message-call");
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .record_task_work();
-    assert_eq!(
-        h.agents[&cid].work_status.decide_start_status_final(true),
-        Some(crate::agent::StartStatusFinalDecision::Challenge)
-    );
-    h.queue_start_status_reminder_if_needed(&cid);
-    assert_eq!(
-        h.agents[&cid]
-            .pending_prompts
-            .iter()
-            .filter(|prompt| prompt.text == STATUS_REMINDER)
-            .count(),
-        1
-    );
-    h.shutdown().expect("shutdown");
-}
-
-/// The production dispatch boundary counts only accepted non-lifecycle calls
-/// from a status-capable frozen tool surface, and accepted parallel status
-/// suppresses enforcement independently of admission order.
-#[test]
-fn start_status_task_work_is_recorded_at_tool_admission() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let cid = ensure_test_user_agent(&mut h);
-    let skill_call = |id: &str| AgentToolCall {
-        call_ref: None,
-        id: id.into(),
-        name: ToolName::new("skill"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("query".to_owned()),
-            CborValue::Text("dpc".to_owned()),
-        )]),
-    };
-
-    let unavailable_prompt = test_agent_prompt_id("status-unavailable-admission");
-    h.prompt_tool_specs.insert(
-        unavailable_prompt.clone(),
-        vec![shared_test_tool_spec("skill")],
-    );
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .begin_task_activation(tau_proto::ObservationId::random());
-    let unavailable_call = skill_call("status-unavailable-work");
-    h.prompt_tool_call_prompts
-        .insert(unavailable_call.id.clone(), unavailable_prompt);
-    h.execute_agent_tool_call(&cid, &unavailable_call)
-        .expect("accepted status-unavailable skill");
-    assert_eq!(
-        h.agents[&cid].work_status.decide_start_status_final(true),
-        None
-    );
-
-    let prompt_id = test_agent_prompt_id("status-admission");
     h.prompt_tool_specs.insert(
         prompt_id.clone(),
         vec![
@@ -29493,72 +29138,202 @@ fn start_status_task_work_is_recorded_at_tool_admission() {
             shared_test_tool_spec("skill"),
         ],
     );
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .begin_task_activation(tau_proto::ObservationId::random());
-    let call = skill_call("accepted-task-work");
+    let call = AgentToolCall {
+        call_ref: None,
+        id: "background-substantive-work".into(),
+        name: ToolName::new("skill"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text("dpc".to_owned()),
+        )]),
+    };
     h.prompt_tool_call_prompts
         .insert(call.id.clone(), prompt_id);
+
     h.execute_agent_tool_call(&cid, &call)
-        .expect("accepted skill call");
-    assert_eq!(
-        h.agents[&cid].work_status.decide_start_status_final(true),
-        Some(crate::agent::StartStatusFinalDecision::Challenge)
+        .expect("admit background substantive work");
+
+    assert!(
+        h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .take_working_reminder(),
+        "activating background substantive work must request Working"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Test-only internal status handler that rejects every admitted call.
+struct RejectingStatusTool;
+
+impl crate::InternalToolHandler for RejectingStatusTool {
+    fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
+        vec![shared_test_tool_spec("status")]
+    }
+
+    fn handles(&self, internal_tool_name: &ToolName) -> bool {
+        internal_tool_name.as_str() == "status"
+    }
+
+    fn handle_event(
+        &self,
+        host: &mut crate::InternalToolHost<'_>,
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let Event::ToolStarted(started) = event else {
+            return Ok(());
+        };
+        let Some(owner) = host.agent_owned_internal_started_call(started) else {
+            return Ok(());
+        };
+        host.finish_tool_with_error(
+            owner.conversation_id(),
+            owner.call().id.clone(),
+            owner.visible_tool_name().clone(),
+            owner.call().tool_type,
+            "invalid status state".to_owned(),
+            None,
+        );
+        Ok(())
+    }
+}
+
+/// The production dispatch boundary records only admitted substantive calls
+/// from a frozen status-capable tool surface.
+#[test]
+fn working_reminder_is_recorded_at_substantive_tool_admission() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let unavailable_prompt = test_agent_prompt_id("working-reminder-status-unavailable");
+    h.prompt_tool_specs.insert(
+        unavailable_prompt.clone(),
+        vec![shared_test_tool_spec("skill")],
+    );
+    let unavailable_surface_call = AgentToolCall {
+        call_ref: None,
+        id: "status-unavailable-work".into(),
+        name: ToolName::new("skill"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text("dpc".to_owned()),
+        )]),
+    };
+    h.prompt_tool_call_prompts
+        .insert(unavailable_surface_call.id.clone(), unavailable_prompt);
+    h.execute_agent_tool_call(&cid, &unavailable_surface_call)
+        .expect("accept status-unavailable skill");
+    assert!(
+        !h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .take_working_reminder()
     );
 
-    let parallel_prompt = test_agent_prompt_id("parallel-status-admission");
+    let prompt_id = test_agent_prompt_id("working-reminder-admission");
     h.prompt_tool_specs.insert(
-        parallel_prompt.clone(),
+        prompt_id.clone(),
         vec![
             shared_test_tool_spec("status"),
             shared_test_tool_spec("skill"),
         ],
     );
-    h.agents
-        .get_mut(&cid)
-        .expect("agent")
-        .work_status
-        .begin_task_activation(tau_proto::ObservationId::random());
-    let parallel_work = skill_call("parallel-task-work");
-    h.prompt_tool_call_prompts
-        .insert(parallel_work.id.clone(), parallel_prompt.clone());
-    h.execute_agent_tool_call(&cid, &parallel_work)
-        .expect("accepted parallel skill");
-    let parallel_status = AgentToolCall {
+    let call = AgentToolCall {
         call_ref: None,
-        id: "parallel-status".into(),
+        id: "accepted-task-work".into(),
+        name: ToolName::new("skill"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text("dpc".to_owned()),
+        )]),
+    };
+    h.prompt_tool_call_prompts
+        .insert(call.id.clone(), prompt_id.clone());
+    h.execute_agent_tool_call(&cid, &call)
+        .expect("accept substantive skill call");
+    assert!(
+        h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .take_working_reminder()
+    );
+
+    let wait = AgentToolCall {
+        call_ref: None,
+        id: "lifecycle-wait".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+    h.prompt_tool_call_prompts
+        .insert(wait.id.clone(), prompt_id.clone());
+    h.execute_agent_tool_call(&cid, &wait)
+        .expect("accept lifecycle wait");
+    assert!(
+        !h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .take_working_reminder()
+    );
+
+    let unavailable = AgentToolCall {
+        id: "rejected-task-work".into(),
+        name: ToolName::new("unknown_tool"),
+        ..call
+    };
+    h.prompt_tool_call_prompts
+        .insert(unavailable.id.clone(), prompt_id);
+    h.execute_agent_tool_call(&cid, &unavailable)
+        .expect("reject unknown call in band");
+    assert!(
+        !h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .take_working_reminder()
+    );
+
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(RejectingStatusTool)]);
+    let rejected_status_prompt = test_agent_prompt_id("working-reminder-rejected-status");
+    h.prompt_tool_specs.insert(
+        rejected_status_prompt.clone(),
+        vec![shared_test_tool_spec("status")],
+    );
+    let rejected_status = AgentToolCall {
+        call_ref: None,
+        id: "rejected-status-only".into(),
         name: ToolName::new("status"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![
             (
                 CborValue::Text("state".to_owned()),
-                CborValue::Text("done".to_owned()),
+                CborValue::Text("invalid".to_owned()),
             ),
             (
                 CborValue::Text("task_name".to_owned()),
-                CborValue::Text("parallel status admission".to_owned()),
+                CborValue::Text("Rejected status-only round".to_owned()),
             ),
         ]),
     };
     h.prompt_tool_call_prompts
-        .insert(parallel_status.id.clone(), parallel_prompt);
-    h.execute_agent_tool_call(&cid, &parallel_status)
-        .expect("accepted parallel status");
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "parallel status admission".to_owned(),
-        )
-        .expect("valid accepted status"),
-    )
-    .expect("apply accepted parallel status");
-    assert_eq!(
-        h.agents[&cid].work_status.decide_start_status_final(true),
-        None,
-        "accepted status suppresses regardless of parallel admission order"
+        .insert(rejected_status.id.clone(), rejected_status_prompt);
+    h.execute_agent_tool_call(&cid, &rejected_status)
+        .expect("settle rejected status-only call");
+    h.queue_working_reminder_if_needed(&cid);
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != STATUS_REMINDER),
+        "a rejected status-only round must not queue a Working reminder"
     );
     h.shutdown().expect("shutdown");
 }
@@ -29599,23 +29374,44 @@ fn isolated_watch_notification_does_not_request_status_acknowledgement() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let prompt_id = test_agent_prompt_id("isolated-watch-status");
-    h.prompt_tool_specs
-        .insert(prompt_id.clone(), vec![shared_test_tool_spec("status")]);
+    h.prompt_tool_specs.insert(
+        prompt_id.clone(),
+        vec![
+            shared_test_tool_spec("status"),
+            shared_test_tool_spec("skill"),
+        ],
+    );
     h.prompt_tool_call_prompts
         .insert("isolated-watch-call".into(), prompt_id);
     h.agents
         .get_mut(&cid)
         .expect("agent")
         .lifecycle_notification_only_turn = true;
-    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
+    h.execute_agent_tool_call(
+        &cid,
+        &AgentToolCall {
+            call_ref: None,
+            id: "isolated-watch-call".into(),
+            name: ToolName::new("skill"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("query".to_owned()),
+                CborValue::Text("dpc".to_owned()),
+            )]),
+        },
+    )
+    .expect("admit isolated substantive call");
 
-    h.queue_start_status_reminder_if_needed(&cid);
+    h.queue_working_reminder_if_needed(&cid);
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .lifecycle_notification_only_turn = false;
+    h.queue_working_reminder_if_needed(&cid);
 
     assert!(
         h.agents[&cid].pending_prompts.is_empty(),
-        "isolated watched-agent progress must not demand a status acknowledgement"
+        "isolated watched-agent progress must not demand Working status"
     );
     h.shutdown().expect("shutdown");
 }

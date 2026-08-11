@@ -4,7 +4,9 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options};
+use tau_harness::{
+    EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options_and_internal_tools,
+};
 use tempfile::TempDir;
 
 use crate::{ScenarioV1, ScenarioV2, sanitize_name};
@@ -50,6 +52,15 @@ enum FixtureMode {
     SessionRestoreMixed,
 }
 
+/// Closed configured-tool surface for one fixture.
+#[derive(Default)]
+struct FixtureToolSurface {
+    /// Optional exact deterministic dummy-tool binary.
+    dummy_tool_bin: Option<PathBuf>,
+    /// Whether the role exposes the harness-owned status tool.
+    status_policy: bool,
+}
+
 impl DeterministicFixture {
     /// Creates a fixture using exact Cargo-built subprocess paths.
     ///
@@ -72,7 +83,10 @@ impl DeterministicFixture {
             scenario.turns.len(),
             1,
             fake_provider_bin,
-            dummy_tool_bin,
+            FixtureToolSurface {
+                dummy_tool_bin,
+                status_policy: scenario.uses_status_policy(),
+            },
             FixtureMode::Standard,
         )
     }
@@ -95,7 +109,7 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            None,
+            FixtureToolSurface::default(),
             FixtureMode::Standard,
         )
     }
@@ -118,7 +132,7 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            None,
+            FixtureToolSurface::default(),
             FixtureMode::SessionRestore,
         )
     }
@@ -142,7 +156,7 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            None,
+            FixtureToolSurface::default(),
             FixtureMode::SessionRestoreWatch,
         )
     }
@@ -166,7 +180,7 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            None,
+            FixtureToolSurface::default(),
             FixtureMode::SessionRestoreMultipleWorkers,
         )
     }
@@ -190,7 +204,10 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            Some(dummy_tool_bin.as_ref().to_path_buf()),
+            FixtureToolSurface {
+                dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                status_policy: false,
+            },
             FixtureMode::SessionRestoreInterruptedTool,
         )
     }
@@ -214,7 +231,10 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            Some(dummy_tool_bin.as_ref().to_path_buf()),
+            FixtureToolSurface {
+                dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                status_policy: false,
+            },
             FixtureMode::SessionRestoreMixed,
         )
     }
@@ -232,7 +252,7 @@ impl DeterministicFixture {
             expected_actions,
             scenario.lanes.len(),
             fake_provider_bin,
-            None,
+            FixtureToolSurface::default(),
             FixtureMode::CoreShell,
         )
     }
@@ -243,10 +263,14 @@ impl DeterministicFixture {
         expected_actions: usize,
         expected_lanes: usize,
         fake_provider_bin: impl AsRef<Path>,
-        dummy_tool_bin: Option<PathBuf>,
+        tool_surface: FixtureToolSurface,
         mode: FixtureMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let core_shell_enabled = mode == FixtureMode::CoreShell;
+        let FixtureToolSurface {
+            dummy_tool_bin,
+            status_policy,
+        } = tool_surface;
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
         let config_dir = root.join("config");
@@ -332,7 +356,11 @@ impl DeterministicFixture {
                     },
                 }),
             );
-            serde_json::json!(["restart_test_dummy"])
+            if status_policy {
+                serde_json::json!(["status", "restart_test_dummy"])
+            } else {
+                serde_json::json!(["restart_test_dummy"])
+            }
         } else {
             serde_json::json!([])
         };
@@ -512,7 +540,7 @@ impl DeterministicFixture {
                     .expect("dummy extension name must satisfy the extension identifier grammar"),
             );
         }
-        let result = run_embedded_message_with_options(
+        let result = run_embedded_message_with_options_and_internal_tools(
             &self.harness_state_dir,
             "deterministic-e2e-session",
             prompt,
@@ -524,6 +552,7 @@ impl DeterministicFixture {
                 .ignore_startup_environment(true)
                 .allowed_extensions(allowed_extensions)
                 .build(),
+            tau_harness_tools::builtin_handlers(),
         );
         match result {
             Ok(outcome) => match self.assert_consumed() {

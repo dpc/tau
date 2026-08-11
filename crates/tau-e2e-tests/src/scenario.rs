@@ -326,6 +326,86 @@ pub enum ScenarioTurnV1 {
         /// Complete final assistant response.
         response: String,
     },
+    /// Request Working status and substantive dummy work in one parallel batch.
+    StatusPolicyToolCall {
+        /// Exact final user-authored text.
+        user_text: String,
+        /// Exact provider output order.
+        order: StatusToolOrder,
+        /// Whether the initial Working call is accepted or rejected.
+        initial_status: InitialStatusOutcome,
+        /// Phase used to release the later Working-final challenge.
+        terminal_phase: StatusTerminalPhase,
+    },
+    /// Accept both successful parallel results and request more work while
+    /// Working.
+    StatusPolicyToolResult {
+        /// Whether the initial Working call is accepted or rejected.
+        initial_status: InitialStatusOutcome,
+        /// Phase used to release the Working-final challenge.
+        terminal_phase: StatusTerminalPhase,
+    },
+    /// Accept later substantive work without a repeated start reminder, then
+    /// attempt a final while Working.
+    WorkingFollowupToolResult {
+        /// Whether this continuation carries follow-up work or recovery status.
+        initial_status: InitialStatusOutcome,
+        /// Phase used to release the Working-final challenge.
+        terminal_phase: StatusTerminalPhase,
+    },
+    /// Match the Working-final challenge and request its terminal status.
+    WorkingFinalStatusCall {
+        /// Phase used to release the Working-final challenge.
+        terminal_phase: StatusTerminalPhase,
+    },
+    /// Accept the terminal status result and complete normally.
+    TerminalStatusResult {
+        /// Exact accepted terminal phase.
+        terminal_phase: StatusTerminalPhase,
+        /// Complete final assistant response.
+        response: String,
+    },
+}
+
+/// Closed provider order for status plus substantive work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusToolOrder {
+    /// Emit Working status before substantive work.
+    StatusFirst,
+    /// Emit substantive work before Working status.
+    WorkFirst,
+}
+
+/// Closed initial status-call outcome for policy coverage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialStatusOutcome {
+    /// A valid accepted Working report.
+    AcceptedWorking,
+    /// A well-formed call whose state value is rejected.
+    Rejected,
+}
+
+/// Closed phase that permits a Working outer turn to finish.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusTerminalPhase {
+    /// Finish with Done.
+    Done,
+    /// Finish with Blocked.
+    Blocked,
+}
+
+impl StatusTerminalPhase {
+    /// Return the model-visible status argument.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Blocked => "blocked",
+        }
+    }
 }
 
 impl ScenarioV1 {
@@ -369,5 +449,49 @@ impl ScenarioV1 {
                 },
             ],
         }
+    }
+
+    /// Creates the complete current-status policy path: parallel Working plus
+    /// work, challenged final, terminal transition, and accepted final.
+    #[must_use]
+    pub fn status_policy_round_v1(
+        user_text: impl Into<String>,
+        order: StatusToolOrder,
+        initial_status: InitialStatusOutcome,
+        terminal_phase: StatusTerminalPhase,
+    ) -> Self {
+        Self {
+            version: 0,
+            name: "status_policy_round_v1".to_owned(),
+            turns: vec![
+                ScenarioTurnV1::StatusPolicyToolCall {
+                    user_text: user_text.into(),
+                    order,
+                    initial_status,
+                    terminal_phase,
+                },
+                ScenarioTurnV1::StatusPolicyToolResult {
+                    initial_status,
+                    terminal_phase,
+                },
+                ScenarioTurnV1::WorkingFollowupToolResult {
+                    initial_status,
+                    terminal_phase,
+                },
+                ScenarioTurnV1::WorkingFinalStatusCall { terminal_phase },
+                ScenarioTurnV1::TerminalStatusResult {
+                    terminal_phase,
+                    response: "status policy completed".to_owned(),
+                },
+            ],
+        }
+    }
+
+    /// Return whether this scenario requires status and parallel tool calls.
+    #[must_use]
+    pub fn uses_status_policy(&self) -> bool {
+        self.turns
+            .iter()
+            .any(|turn| matches!(turn, ScenarioTurnV1::StatusPolicyToolCall { .. }))
     }
 }

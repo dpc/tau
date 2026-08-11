@@ -379,11 +379,19 @@ without one, the remaining compact backlog schedules another immediate cycle.
 Only the model-owned, policy-authorized `status` call may mutate its calling
 agent. Configured extensions cannot invoke it directly or select a target agent.
 The harness validates the closed phase and canonical 160-byte, single-line title
-at both tool and durable boundaries. A challenged successful response becomes
-watchable or completes delegated work only after its semantic append and bounded
-challenge lifecycle; append failure, interception rejection, unload, and session
-rollover release that runtime ownership. Revisit these invariants whenever
-internal-tool ownership, response interception, or agent teardown changes.
+at both tool and durable boundaries. A challenged successful response remains
+permanently withheld from watch, delegated-result, and detach projection even
+though its semantic append remains in the transcript; post-commit handling only
+queues guidance. After an accepted Done or Blocked transition, a distinct later
+successful final may project and complete the outer turn, but only after its own
+exact append commits. Successful finals have no challenge budget: a provider that
+repeatedly refuses to leave Working can keep the outer turn alive indefinitely.
+Done, Blocked, an unsuccessful terminal that invalidates Working to Unknown,
+unload, and session rollover release that runtime ownership; append failure and
+interception rejection cannot project a challenged candidate. Work-status state
+tests, harness gated-final/interception tests, and the deterministic current-status
+provider scenario cover these boundaries. Revisit them whenever internal-tool
+ownership, response interception, final projection, or agent teardown changes.
 
 ## Prompt capability authority
 

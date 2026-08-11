@@ -23,119 +23,105 @@ fn report_validation_rejects_non_model_phases_and_titles() {
     }
 }
 
-/// Task work, accepted status, final refusal, and fresh activations keep
-/// independent activation-scoped lifecycle state.
+/// Direct substantive admission while nonworking creates one reminder
+/// obligation for the current foreground round.
 #[test]
-fn start_status_lifecycle_is_scoped_to_genuine_activations() {
+fn substantive_nonworking_tool_admission_requests_a_reminder() {
     let mut status = WorkStatus::default();
-    assert!(!status.mark_start_reminder_delivered());
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-    assert!(status.mark_start_reminder_delivered());
-    assert!(!status.mark_start_reminder_delivered());
-    assert_eq!(
-        status.decide_start_status_final(true),
-        Some(StartStatusFinalDecision::Challenge)
-    );
-    status.record_start_status_final_challenge();
-    assert_eq!(
-        status.decide_start_status_final(true),
-        Some(StartStatusFinalDecision::Fail)
-    );
-    assert!(report(
-        &mut status,
-        AgentWorkStatusPhase::Working,
-        "first title"
-    ));
-    assert_eq!(status.decide_start_status_final(true), None);
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    assert!(!status.mark_start_reminder_delivered());
-    status.record_task_work();
-    assert!(status.mark_start_reminder_delivered());
-    status.retire_task_activation();
-    assert_eq!(status.decide_start_status_final(true), None);
+    assert!(!status.take_working_reminder());
+    status.record_substantive_tool_admission();
+    assert!(status.take_working_reminder());
+    assert!(!status.take_working_reminder());
 }
 
-/// No-tool and lifecycle-only activations stay exempt, while accepted status
-/// suppresses work admitted before or after it in the same parallel round.
+/// An accepted Working report suppresses the current round's reminder in either
+/// parallel order, including an unchanged accepted report.
 #[test]
-fn start_status_exemptions_and_parallel_suppression_are_order_independent() {
+fn parallel_working_report_suppresses_reminder_in_either_order() {
     let mut status = WorkStatus::default();
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    assert_eq!(status.decide_start_status_final(true), None);
-
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Working,
         "parallel status first"
     ));
-    status.record_task_work();
-    assert!(!status.mark_start_reminder_delivered());
-    assert_eq!(status.decide_start_status_final(true), None);
+    status.record_substantive_tool_admission();
+    assert!(!status.take_working_reminder());
 
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Done,
+        "between rounds"
+    ));
+    status.record_substantive_tool_admission();
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Working,
         "parallel status last"
     ));
-    assert!(!status.mark_start_reminder_delivered());
-    assert_eq!(status.decide_start_status_final(true), None);
+    assert!(!status.take_working_reminder());
+
+    status.record_substantive_tool_admission();
+    assert!(!report(
+        &mut status,
+        AgentWorkStatusPhase::Working,
+        "parallel status last"
+    ));
+    assert!(!status.take_working_reminder());
 }
 
-/// Qualifying work without an accepted status receives one reminder and the
-/// bounded final refusal sequence.
+/// Working persists across later inputs without per-activation acknowledgement;
+/// Done and Blocked require a fresh Working transition before later tool work.
 #[test]
-fn missing_accepted_status_keeps_start_status_enforcement() {
+fn current_phase_alone_controls_later_tool_reminders() {
     let mut status = WorkStatus::default();
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-    assert!(status.mark_start_reminder_delivered());
-    assert_eq!(
-        status.decide_start_status_final(true),
-        Some(StartStatusFinalDecision::Challenge)
-    );
-    status.record_start_status_final_challenge();
-    assert_eq!(
-        status.decide_start_status_final(true),
-        Some(StartStatusFinalDecision::Fail)
-    );
-    assert_eq!(status.decide_start_status_final(false), None);
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Working,
+        "persistent work"
+    ));
+    for _ in 0..3 {
+        status.record_substantive_tool_admission();
+        assert!(!status.take_working_reminder());
+    }
+    for phase in [AgentWorkStatusPhase::Done, AgentWorkStatusPhase::Blocked] {
+        assert!(report(&mut status, phase, "not currently working"));
+        status.record_substantive_tool_admission();
+        assert!(status.take_working_reminder());
+    }
 }
 
-/// A status report rejected by release-effective validation never mutates the
-/// activation gate or suppresses its reminder.
+/// Rejected status input cannot clear a reminder obligation created by
+/// substantive nonworking work.
 #[test]
-fn rejected_status_report_cannot_suppress_start_status_enforcement() {
+fn rejected_status_report_does_not_suppress_working_reminder() {
     let mut status = WorkStatus::default();
-    status.begin_task_activation(tau_proto::ObservationId::random());
-    status.record_task_work();
-    let rejected = WorkStatusReport::new(AgentWorkStatusPhase::Unreported, "invalid".to_owned());
-    assert!(rejected.is_err());
-    assert!(status.mark_start_reminder_delivered());
-    assert_eq!(
-        status.decide_start_status_final(true),
-        Some(StartStatusFinalDecision::Challenge)
-    );
+    status.record_substantive_tool_admission();
+    assert!(WorkStatusReport::new(AgentWorkStatusPhase::Unreported, "invalid".to_owned()).is_err());
+    assert!(status.take_working_reminder());
 }
 
-/// Queued addressed work cannot take ownership until the active foreground
-/// round has made its own reminder decision.
+/// Every successful final remains challenged while Working; only Done or
+/// Blocked disables the gate, while an unsuccessful terminal invalidates it.
 #[test]
-fn queued_activation_promotes_only_after_old_round_settles() {
+fn working_final_gate_has_no_challenge_budget() {
     let mut status = WorkStatus::default();
-    let old = tau_proto::ObservationId::random();
-    let new = tau_proto::ObservationId::random();
-    status.begin_task_activation(old);
-    status.record_task_work();
-    status.join_task_activation(new);
-    assert!(status.mark_start_reminder_delivered());
-
-    status.promote_pending_task_activation();
-    assert!(!status.mark_start_reminder_delivered());
-    status.record_task_work();
-    assert!(status.mark_start_reminder_delivered());
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Working,
+        "must finish explicitly"
+    ));
+    for _ in 0..4 {
+        assert_eq!(
+            status.decide_final(true),
+            Some(WorkingFinalDecision::Challenge)
+        );
+    }
+    assert_eq!(
+        status.decide_final(false),
+        Some(WorkingFinalDecision::AcceptUnknown)
+    );
+    assert!(status.invalidate_working());
+    assert_eq!(status.decide_final(true), None);
 }
 
 /// Done and Blocked disable the Working final gate without changing the runtime

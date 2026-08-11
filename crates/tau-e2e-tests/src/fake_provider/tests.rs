@@ -25,7 +25,7 @@ fn tau_internal_fixture_envelope_escapes_its_exact_close() {
 #[test]
 fn anthropic_cache_policy_fixtures_are_exact_and_non_dispatchable() {
     fn fixture(ttl_seconds: u64, cache_write_micro_usd: u64) -> ProviderModelInfo {
-        let mut model = model_snapshot(false)
+        let mut model = model_snapshot(FakeModelCapabilities::default())
             .models
             .into_iter()
             .next()
@@ -127,7 +127,7 @@ fn anthropic_cache_policy_fixtures_are_exact_and_non_dispatchable() {
         );
         assert_eq!(first_break_even_read(model), break_even_reads);
         assert!(
-            model_snapshot(false)
+            model_snapshot(FakeModelCapabilities::default())
                 .models
                 .iter()
                 .all(|published| published.id != model.id),
@@ -154,7 +154,11 @@ fn standalone_compaction_capability_requires_a_dedicated_action() {
     for scenario in [&v1, &ordinary_v2] {
         assert!(!scenario.enables_standalone_compaction());
         assert!(
-            !model_snapshot(scenario.enables_standalone_compaction()).models[0]
+            !model_snapshot(FakeModelCapabilities {
+                standalone_compaction: scenario.enables_standalone_compaction(),
+                ..FakeModelCapabilities::default()
+            })
+            .models[0]
                 .supports_standalone_compaction
         );
     }
@@ -178,7 +182,11 @@ fn standalone_compaction_capability_requires_a_dedicated_action() {
         ));
         assert!(scenario.enables_standalone_compaction());
         assert!(
-            model_snapshot(scenario.enables_standalone_compaction()).models[0]
+            model_snapshot(FakeModelCapabilities {
+                standalone_compaction: scenario.enables_standalone_compaction(),
+                ..FakeModelCapabilities::default()
+            })
+            .models[0]
                 .supports_standalone_compaction
         );
     }

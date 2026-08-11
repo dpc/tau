@@ -7,13 +7,6 @@ use tau_proto::{ConnectionId, ProviderResponseFinished};
 /// Publication-local post-commit behavior for one gated final candidate.
 #[derive(Clone)]
 pub(crate) enum GatedFinalDisposition {
-    /// Require an accepted start-status report before accepting a final.
-    StartStatusChallenge,
-    /// Terminate after the agent repeats a final without the required report.
-    StartStatusFailure {
-        /// Complete response-time state needed for correlated failure cleanup.
-        terminal: Box<CommittedGatedFinal>,
-    },
     /// Queue the next same-outer-turn reminder after the candidate commits.
     Challenge {
         /// Canonical work title captured with the candidate.

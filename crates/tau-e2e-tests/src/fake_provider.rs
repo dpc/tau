@@ -26,13 +26,15 @@ use tau_proto::{
 use validation::{validate_v1, validate_v2};
 
 use crate::scenario::{
-    AgentWatchResultExpectationV2, FAKE_MODEL_ID, ScenarioActionV2, ScenarioTurnV1, ScenarioV1,
-    ScenarioV2, WatchNotificationV2,
+    AgentWatchResultExpectationV2, FAKE_MODEL_ID, InitialStatusOutcome, ScenarioActionV2,
+    ScenarioTurnV1, ScenarioV1, ScenarioV2, StatusTerminalPhase, StatusToolOrder,
+    WatchNotificationV2,
 };
 
 const MAX_TURNS: usize = 8;
 const MAX_SCENARIO_BYTES: usize = 16 * 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
+const STATUS_REMINDER: &str = "Set your status to `working` before continuing substantive tool work. Batch the `status` call with other tool calls when possible.";
 const MAX_DELTAS: usize = 8;
 const MAX_AGENT_START_PAIRS: usize = 2;
 
@@ -78,6 +80,11 @@ enum ScenarioConfig {
 }
 
 impl ScenarioConfig {
+    /// Return whether this scenario emits parallel tool calls.
+    fn supports_parallel_tool_calls(&self) -> bool {
+        matches!(self, Self::V1(scenario) if scenario.uses_status_policy())
+    }
+
     /// Returns whether the closed scenario explicitly exercises standalone
     /// compaction, the fake's sole opt-in capability expansion.
     fn enables_standalone_compaction(&self) -> bool {
@@ -328,6 +335,8 @@ impl TauExtension for FakeProvider {
                 let restored = cx.config.scenario.restore_state(checkpoint.as_deref())?;
                 let supports_standalone_compaction =
                     cx.config.scenario.enables_standalone_compaction();
+                let supports_parallel_tool_calls =
+                    cx.config.scenario.supports_parallel_tool_calls();
                 cx.state.scenario = Some(cx.config.scenario);
                 cx.state.lane_cursors = restored.cursors;
                 cx.state.agent_lanes = restored.agent_lanes;
@@ -336,7 +345,10 @@ impl TauExtension for FakeProvider {
                 cx.state.trace = Some(Arc::new(Mutex::new(trace)));
                 cx.handle
                     .emit_transient(Event::ProviderModelsDeclared(model_snapshot(
-                        supports_standalone_compaction,
+                        FakeModelCapabilities {
+                            standalone_compaction: supports_standalone_compaction,
+                            parallel_tool_calls: supports_parallel_tool_calls,
+                        },
                     )))?;
                 Ok(())
             })
@@ -390,7 +402,16 @@ impl FakeConfig {
     }
 }
 
-fn model_snapshot(supports_standalone_compaction: bool) -> ProviderModelsDeclared {
+/// Closed optional model capabilities derived from the configured scenario.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FakeModelCapabilities {
+    /// Whether standalone compaction prompts are accepted.
+    standalone_compaction: bool,
+    /// Whether one provider response may contain parallel calls.
+    parallel_tool_calls: bool,
+}
+
+fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared {
     ProviderModelsDeclared {
         models: vec![ProviderModelInfo {
             id: FAKE_MODEL_ID.into(),
@@ -399,14 +420,14 @@ fn model_snapshot(supports_standalone_compaction: bool) -> ProviderModelsDeclare
             supported_tool_types: vec![ToolType::Function],
             input_modalities: vec![InputModality::Text],
             tool_result_modalities: Vec::new(),
-            supports_parallel_tool_calls: false,
+            supports_parallel_tool_calls: capabilities.parallel_tool_calls,
             default_affinity: 0,
             context_window: 16_384,
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Low],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
-            supports_standalone_compaction,
+            supports_standalone_compaction: capabilities.standalone_compaction,
             standalone_compaction_threshold: None,
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Default::default(),
@@ -421,7 +442,7 @@ fn model_snapshot(supports_standalone_compaction: bool) -> ProviderModelsDeclare
 impl FakeState {
     /// Returns the child owned by the parent's most recently consumed start.
     fn current_child_agent(
-        &self,
+        &mut self,
         parent_agent_id: &tau_proto::AgentId,
     ) -> Option<&tau_proto::AgentId> {
         self.child_agents
@@ -886,6 +907,180 @@ impl FakeState {
         }
     }
 
+    fn status_policy_tool_call(
+        &mut self,
+        index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        user_text: &str,
+        order: StatusToolOrder,
+        initial_status: InitialStatusOutcome,
+    ) -> ClientResult<Event> {
+        self.require_human_ui_user_text(index, prompt, user_text)?;
+        let tool_names = prompt
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        if tool_names.len() != 2
+            || !tool_names.contains(&"status")
+            || !tool_names.contains(&tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME)
+        {
+            return Err(self.mismatch(
+                index,
+                &format!("status-policy tool snapshot mismatch: {tool_names:?}"),
+            ));
+        }
+        let status = status_call(
+            "status-policy-working",
+            match initial_status {
+                InitialStatusOutcome::AcceptedWorking => "working",
+                InitialStatusOutcome::Rejected => "invalid",
+            },
+            "Exercise current status policy",
+        );
+        let work = ContextItem::ToolCall(ToolCallItem {
+            call_id: "status-policy-work".into(),
+            name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some("{}".to_owned()),
+            responses_envelope: None,
+        });
+        let output_items = match order {
+            StatusToolOrder::StatusFirst => vec![status, work],
+            StatusToolOrder::WorkFirst => vec![work, status],
+        };
+        Ok(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            output_items,
+            ProviderStopReason::ToolCalls,
+        )))
+    }
+
+    fn status_policy_tool_result(
+        &mut self,
+        index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        initial_status: InitialStatusOutcome,
+    ) -> ClientResult<Event> {
+        require_tool_result(prompt, "status-policy-work", "restart succeeded")
+            .map_err(|message| self.mismatch(index, message))?;
+        match initial_status {
+            InitialStatusOutcome::AcceptedWorking => {
+                require_tool_result(
+                    prompt,
+                    "status-policy-working",
+                    "Status accepted: working — Exercise current status policy",
+                )
+                .map_err(|message| self.mismatch(index, message))?;
+                if prompt_contains_text(prompt, STATUS_REMINDER) {
+                    return Err(self.mismatch(index, "Working received a start reminder"));
+                }
+            }
+            InitialStatusOutcome::Rejected => {
+                require_tool_error(prompt, "status-policy-working")
+                    .map_err(|message| self.mismatch(index, message))?;
+                if !prompt_contains_text(prompt, STATUS_REMINDER) {
+                    return Err(self.mismatch(index, "rejected status suppressed reminder"));
+                }
+            }
+        }
+        let continuation = match initial_status {
+            InitialStatusOutcome::AcceptedWorking => ContextItem::ToolCall(ToolCallItem {
+                call_id: "status-policy-followup-work".into(),
+                name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),
+                tool_type: ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: Some("{}".to_owned()),
+                responses_envelope: None,
+            }),
+            InitialStatusOutcome::Rejected => status_call(
+                "status-policy-recovery-working",
+                "working",
+                "Exercise current status policy",
+            ),
+        };
+        Ok(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            vec![continuation],
+            ProviderStopReason::ToolCalls,
+        )))
+    }
+
+    fn working_followup_tool_result(
+        &mut self,
+        index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        initial_status: InitialStatusOutcome,
+    ) -> ClientResult<Event> {
+        match initial_status {
+            InitialStatusOutcome::AcceptedWorking => {
+                require_tool_result(prompt, "status-policy-followup-work", "restart succeeded")
+            }
+            InitialStatusOutcome::Rejected => require_tool_result(
+                prompt,
+                "status-policy-recovery-working",
+                "Status accepted: working — Exercise current status policy",
+            ),
+        }
+        .map_err(|message| self.mismatch(index, message))?;
+        let expected_reminders = match initial_status {
+            InitialStatusOutcome::AcceptedWorking => 0,
+            InitialStatusOutcome::Rejected => 1,
+        };
+        if prompt_text_occurrences(prompt, STATUS_REMINDER) != expected_reminders {
+            return Err(self.mismatch(index, "Working reminder count changed"));
+        }
+        Ok(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            vec![assistant_message(
+                "premature final while Working".to_owned(),
+            )],
+            ProviderStopReason::EndTurn,
+        )))
+    }
+
+    fn working_final_status_call(
+        &mut self,
+        index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        terminal_phase: StatusTerminalPhase,
+    ) -> ClientResult<Event> {
+        let expected = "Your `status` is set to `working` on \"Exercise current status policy\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.";
+        if !prompt_contains_text(prompt, expected) {
+            return Err(self.mismatch(index, "Working final challenge is absent"));
+        }
+        Ok(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            vec![status_call(
+                "status-policy-terminal",
+                terminal_phase.as_str(),
+                "Exercise current status policy",
+            )],
+            ProviderStopReason::ToolCalls,
+        )))
+    }
+
+    fn terminal_status_result(
+        &mut self,
+        index: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        terminal_phase: StatusTerminalPhase,
+        response: String,
+    ) -> ClientResult<Event> {
+        let expected = format!(
+            "Status accepted: {} — Exercise current status policy",
+            terminal_phase.as_str()
+        );
+        require_tool_result(prompt, "status-policy-terminal", &expected)
+            .map_err(|message| self.mismatch(index, message))?;
+        Ok(Event::ProviderResponseFinishedReported(finished(
+            prompt,
+            vec![assistant_message(response)],
+            ProviderStopReason::EndTurn,
+        )))
+    }
+
     fn handle_prompt(
         &mut self,
         prompt: &tau_proto::AgentPromptCreated,
@@ -1013,6 +1208,27 @@ impl FakeState {
                     ProviderStopReason::EndTurn,
                 ))
             }
+            ScenarioTurnV1::StatusPolicyToolCall {
+                user_text,
+                order,
+                initial_status,
+                terminal_phase: _,
+            } => self.status_policy_tool_call(index, prompt, &user_text, order, initial_status)?,
+            ScenarioTurnV1::StatusPolicyToolResult {
+                initial_status,
+                terminal_phase: _,
+            } => self.status_policy_tool_result(index, prompt, initial_status)?,
+            ScenarioTurnV1::WorkingFollowupToolResult {
+                initial_status,
+                terminal_phase: _,
+            } => self.working_followup_tool_result(index, prompt, initial_status)?,
+            ScenarioTurnV1::WorkingFinalStatusCall { terminal_phase } => {
+                self.working_final_status_call(index, prompt, terminal_phase)?
+            }
+            ScenarioTurnV1::TerminalStatusResult {
+                terminal_phase,
+                response,
+            } => self.terminal_status_result(index, prompt, terminal_phase, response)?,
         };
         self.next_turn += 1;
         self.trace(&format!(
@@ -2006,6 +2222,98 @@ fn assistant_message(text: String) -> ContextItem {
         phase: None,
         responses_raw_json: None,
     })
+}
+
+/// Build one deterministic status call.
+fn status_call(call_id: &str, state: &str, task_name: &str) -> ContextItem {
+    ContextItem::ToolCall(ToolCallItem {
+        call_id: call_id.into(),
+        name: ToolName::new("status"),
+        tool_type: ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("state".to_owned()),
+                CborValue::Text(state.to_owned()),
+            ),
+            (
+                CborValue::Text("task_name".to_owned()),
+                CborValue::Text(task_name.to_owned()),
+            ),
+        ]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })
+}
+
+/// Require one exact successful tool result in the current prompt.
+fn require_tool_result(
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: &str,
+    body: &str,
+) -> Result<(), &'static str> {
+    let matches = prompt
+        .context
+        .flatten_iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .filter(|result| {
+            result.call_id.as_str() == call_id
+                && result.status == tau_proto::ToolResultStatus::Success
+                && result.output.body == body
+        })
+        .count();
+    (matches == 1)
+        .then_some(())
+        .ok_or("successful tool result mismatch")
+}
+
+/// Require one rejected tool result without accepting its diagnostic as status.
+fn require_tool_error(
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: &str,
+) -> Result<(), &'static str> {
+    let matches = prompt
+        .context
+        .flatten_iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .filter(|result| {
+            result.call_id.as_str() == call_id
+                && matches!(result.status, tau_proto::ToolResultStatus::Error { .. })
+        })
+        .count();
+    (matches == 1)
+        .then_some(())
+        .ok_or("rejected tool result mismatch")
+}
+
+/// Return whether typed prompt text contains one policy substring.
+fn prompt_contains_text(prompt: &tau_proto::AgentPromptCreated, expected: &str) -> bool {
+    0 < prompt_text_occurrences(prompt, expected)
+}
+
+/// Count typed prompt text items containing one policy substring.
+fn prompt_text_occurrences(prompt: &tau_proto::AgentPromptCreated, expected: &str) -> usize {
+    prompt
+        .context
+        .flatten_iter()
+        .map(|item| match item {
+            ContextItem::Message(message) => message
+                .content
+                .iter()
+                .filter(|part| match part {
+                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
+                        text.contains(expected)
+                    }
+                })
+                .count(),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn finished(

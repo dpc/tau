@@ -4,8 +4,6 @@ use std::time::{Duration, Instant};
 
 use tau_proto::AgentWorkStatusPhase;
 
-/// Maximum number of committed successful finals challenged per Working epoch.
-const MAX_FINAL_REMINDERS: u8 = 2;
 /// First whole-minute threshold for long-wait watcher notifications.
 const FIRST_WAIT_THRESHOLD_MINUTES: u32 = 15;
 
@@ -98,15 +96,6 @@ pub(crate) enum WorkingFinalDecision {
     AcceptUnknown,
 }
 
-/// Harness action for a successful final that violates start-status policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StartStatusFinalDecision {
-    /// Withhold the candidate and continue once with the status reminder.
-    Challenge,
-    /// End the turn as an explicit policy failure after repeated refusal.
-    Fail,
-}
-
 /// Runtime-only self-reported work state for one loaded agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkStatus {
@@ -116,20 +105,9 @@ pub(crate) struct WorkStatus {
     title: Option<String>,
     /// Runtime-local generation incremented by a new working epoch.
     epoch: u64,
-    /// Ordinary activation currently owning start-status enforcement.
-    task_activation: Option<tau_proto::ObservationId>,
-    /// Addressed activation queued while the current tool round still runs.
-    pending_task_activation: Option<tau_proto::ObservationId>,
-    /// Whether this activation admitted non-lifecycle task work.
-    task_work_seen: bool,
-    /// Whether this activation accepted a status report.
-    start_status_seen: bool,
-    /// Whether this activation already received its routine reminder.
-    start_reminder_delivered: bool,
-    /// Whether the final candidate was challenged for missing start status.
-    start_final_challenge_sent: bool,
-    /// Number of committed nominal final responses challenged in this epoch.
-    final_reminders_sent: u8,
+    /// Whether the current foreground tool round began substantive work before
+    /// an accepted Working report.
+    working_reminder_pending: bool,
     /// Wait duration completed during the current Working epoch.
     completed_wait: Duration,
     /// Monotonic start of the current union-of-waits interval.
@@ -147,13 +125,7 @@ impl Default for WorkStatus {
             phase: AgentWorkStatusPhase::Unreported,
             title: None,
             epoch: 0,
-            task_activation: None,
-            pending_task_activation: None,
-            task_work_seen: false,
-            start_status_seen: false,
-            start_reminder_delivered: false,
-            start_final_challenge_sent: false,
-            final_reminders_sent: 0,
+            working_reminder_pending: false,
             completed_wait: Duration::ZERO,
             wait_started_at: None,
             next_wait_threshold_minutes: Some(FIRST_WAIT_THRESHOLD_MINUTES),
@@ -188,15 +160,14 @@ impl WorkStatus {
     ) -> bool {
         let WorkStatusReport { phase, title } = report;
         if self.phase == phase && self.title.as_deref() == Some(title.as_str()) {
-            self.start_status_seen = self.task_activation.is_some();
             if phase == AgentWorkStatusPhase::Working {
+                self.working_reminder_pending = false;
                 self.synchronize_wait_at(wait_installed, now);
             }
             return false;
         }
         if phase == AgentWorkStatusPhase::Working && self.phase != AgentWorkStatusPhase::Working {
             self.epoch = self.epoch.saturating_add(1);
-            self.final_reminders_sent = 0;
             self.completed_wait = Duration::ZERO;
             self.wait_started_at = wait_installed.then_some(now);
             self.next_wait_threshold_minutes = Some(FIRST_WAIT_THRESHOLD_MINUTES);
@@ -207,7 +178,9 @@ impl WorkStatus {
         }
         self.phase = phase;
         self.title = Some(title);
-        self.start_status_seen = self.task_activation.is_some();
+        if phase == AgentWorkStatusPhase::Working {
+            self.working_reminder_pending = false;
+        }
         true
     }
 
@@ -338,96 +311,32 @@ impl WorkStatus {
         if self.phase != AgentWorkStatusPhase::Working {
             return None;
         }
-        if !successful || MAX_FINAL_REMINDERS <= self.final_reminders_sent {
+        if !successful {
             return Some(WorkingFinalDecision::AcceptUnknown);
         }
         Some(WorkingFinalDecision::Challenge)
     }
 
-    /// Start a fresh task-work lifecycle for one dispatched ordinary
-    /// activation.
-    pub(crate) fn begin_task_activation(&mut self, activation: tau_proto::ObservationId) {
-        if self.task_activation != Some(activation) {
-            self.task_activation = Some(activation);
-            self.pending_task_activation = None;
-            self.task_work_seen = false;
-            self.start_status_seen = false;
-            self.start_reminder_delivered = false;
-            self.start_final_challenge_sent = false;
+    /// Record admitted substantive tool work while the current status is not
+    /// Working.
+    pub(crate) fn record_substantive_tool_admission(&mut self) {
+        if self.phase != AgentWorkStatusPhase::Working {
+            self.working_reminder_pending = true;
         }
     }
 
-    /// Join addressed input to a task activation already being formed.
-    pub(crate) fn join_task_activation(&mut self, activation: tau_proto::ObservationId) {
-        if self.task_activation.is_none() {
-            self.begin_task_activation(activation);
-        } else if self.task_activation != Some(activation) && self.pending_task_activation.is_none()
-        {
-            self.pending_task_activation = Some(activation);
-        }
+    /// Consume the current foreground round's reminder obligation.
+    pub(crate) fn take_working_reminder(&mut self) -> bool {
+        std::mem::take(&mut self.working_reminder_pending)
     }
 
-    /// Promote queued addressed work after the preceding foreground round
-    /// settles.
-    pub(crate) fn promote_pending_task_activation(&mut self) {
-        if let Some(activation) = self.pending_task_activation.take() {
-            self.begin_task_activation(activation);
-        }
+    /// Discard a reminder obligation when its foreground round is suppressed or
+    /// cancelled.
+    pub(crate) fn clear_working_reminder(&mut self) {
+        self.working_reminder_pending = false;
     }
 
-    /// Retire task-work enforcement when its outer turn settles.
-    pub(crate) fn retire_task_activation(&mut self) {
-        self.task_activation = None;
-        self.pending_task_activation = None;
-        self.task_work_seen = false;
-        self.start_status_seen = false;
-        self.start_reminder_delivered = false;
-        self.start_final_challenge_sent = false;
-    }
-
-    /// Record one admitted non-lifecycle tool request for this activation.
-    pub(crate) fn record_task_work(&mut self) {
-        if self.task_activation.is_some() {
-            self.task_work_seen = true;
-        }
-    }
-
-    /// Mark the routine start-status reminder as delivered when required.
-    pub(crate) fn mark_start_reminder_delivered(&mut self) -> bool {
-        if !self.task_work_seen || self.start_status_seen || self.start_reminder_delivered {
-            return false;
-        }
-        self.start_reminder_delivered = true;
-        true
-    }
-
-    /// Decide whether a successful final violates start-status policy.
-    pub(crate) fn decide_start_status_final(
-        &self,
-        successful: bool,
-    ) -> Option<StartStatusFinalDecision> {
-        if !successful || !self.task_work_seen || self.start_status_seen {
-            return None;
-        }
-        if !self.start_final_challenge_sent {
-            Some(StartStatusFinalDecision::Challenge)
-        } else {
-            Some(StartStatusFinalDecision::Fail)
-        }
-    }
-
-    /// Record the sole final challenge allowed by start-status policy.
-    pub(crate) fn record_start_status_final_challenge(&mut self) {
-        self.start_final_challenge_sent = true;
-    }
-
-    /// Record one committed challenged response.
-    pub(crate) fn record_final_challenge(&mut self) {
-        self.final_reminders_sent = self.final_reminders_sent.saturating_add(1);
-    }
-
-    /// Invalidate Working after an unsuccessful terminal or exhausted challenge
-    /// budget.
+    /// Invalidate Working after an unsuccessful terminal.
     pub(crate) fn invalidate_working(&mut self) -> bool {
         if self.phase != AgentWorkStatusPhase::Working {
             return false;
