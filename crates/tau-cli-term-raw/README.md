@@ -101,7 +101,7 @@ The layout from top to bottom:
 ```
 history          ← oldest, scrolls into scrollback first
 above_active     ← live blocks (streaming responses, in-flight thinking)
-above_sticky     ← pinned blocks (model status chip, queued user prompt)
+above_sticky     ← pinned blocks (model status chip)
 input area       ← capped prompt viewport + optional hidden-row indicator
 suggestions      ← completion menu
 below            ← anything below suggestions
@@ -117,6 +117,7 @@ their own semantic sub-order inside it. The chat UI uses:
 
 ```
 thinking → compaction → streaming response → active tool summary/tool calls
+→ queued prompts → watched engineers
 ```
 
 Use `TermHandle::push_above_active_before_any` when inserting a live block that

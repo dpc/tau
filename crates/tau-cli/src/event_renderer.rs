@@ -427,9 +427,11 @@ pub(crate) struct EventRenderer {
     /// as a normal or queued prompt. Used to replace only the matching
     /// echo when the harness reports that prompt as queued.
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
-    /// Queued user-message blocks (in above_sticky zone).
-    /// When `AgentPromptStarted` fires for a dequeued prompt,
-    /// the first entry is popped and moved back to history.
+    /// Queued user-message blocks in lifecycle FIFO order.
+    ///
+    /// Visible entries live in the active region after tool calls and before
+    /// watched engineers. When `AgentPromptStarted` fires for a dequeued
+    /// prompt, the first entry is popped and moved back to history.
     queued_user_blocks: VecDeque<QueuedUserBlock>,
     /// Correlated prompts already submitted after leaving the runtime queue.
     /// Their later pre-materialization failure cannot consume newer queue work.
@@ -2230,6 +2232,26 @@ impl EventRenderer {
                 .push_above_active_before_any(block_id, later_blocks);
         }
         self.handle.redraw();
+    }
+
+    /// Returns queued-prompt blocks in their existing queue order.
+    fn queued_prompt_anchor_ids(&self) -> Vec<tau_cli_term::BlockId> {
+        self.queued_user_blocks
+            .iter()
+            .filter_map(|queued| queued.id)
+            .collect()
+    }
+
+    /// Returns watched-agent blocks that belong below queued prompts.
+    fn watched_agent_anchor_ids(&self) -> Vec<tau_cli_term::BlockId> {
+        self.watched_agent_blocks.values().copied().collect()
+    }
+
+    /// Returns the non-tool live activity blocks that follow active tool calls.
+    fn non_tool_activity_anchor_ids(&self) -> Vec<tau_cli_term::BlockId> {
+        let mut anchors = self.queued_prompt_anchor_ids();
+        anchors.extend(self.watched_agent_anchor_ids());
+        anchors
     }
 
     /// Returns whether a direct watched-agent row remains visible for its
@@ -5863,7 +5885,8 @@ impl EventRenderer {
             &queued.text,
         ));
         let queued_id = self.handle.new_block("user-prompt-queued", block);
-        self.handle.push_above_sticky(queued_id);
+        self.handle
+            .push_above_active_before_any(queued_id, self.watched_agent_anchor_ids());
         self.handle.redraw();
         self.queued_user_blocks.push_back(QueuedUserBlock {
             id: Some(queued_id),
@@ -5880,7 +5903,6 @@ impl EventRenderer {
             && let Some(queued) = self.queued_user_blocks.remove(index)
             && let Some(queued_id) = queued.id
         {
-            self.handle.remove_above_sticky(queued_id);
             self.handle.remove_block(queued_id);
         }
         self.handle
@@ -5896,7 +5918,6 @@ impl EventRenderer {
             && let Some(queued) = self.queued_user_blocks.pop_front()
             && let Some(queued_id) = queued.id
         {
-            self.handle.remove_above_sticky(queued_id);
             self.handle.remove_block(queued_id);
         }
         self.agent_activity.clear_optimistic_submissions();
@@ -6765,7 +6786,8 @@ impl EventRenderer {
             format!("tool-call-live:{}:{}", started.tool_name, started.call_id),
             live_block,
         );
-        self.handle.push_above_active(live_id);
+        self.handle
+            .push_above_active_before_any(live_id, self.non_tool_activity_anchor_ids());
         let state = self.tool_calls.entry(call_id).or_insert_with(|| {
             let history_id = self.handle.new_block(
                 format!(
@@ -7707,7 +7729,6 @@ impl EventRenderer {
                     && let Some(queued) = self.queued_user_blocks.pop_front()
                     && let Some(queued_id) = queued.id
                 {
-                    self.handle.remove_above_sticky(queued_id);
                     self.handle.remove_block(queued_id);
                 }
                 self.agent_activity.clear_optimistic_submissions();

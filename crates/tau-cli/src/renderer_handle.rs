@@ -128,24 +128,6 @@ impl RendererHandle {
         }
     }
 
-    /// Appends a block above the current target's sticky region.
-    pub(crate) fn push_above_sticky(&self, id: tau_cli_term::BlockId) {
-        if let Some(output) = &self.detached {
-            output.lock().expect(MUTEX_POISONED).push_above_sticky(id);
-        } else {
-            self.terminal.push_above_sticky(id);
-        }
-    }
-
-    /// Removes a block from the current target's sticky-region ordering.
-    pub(crate) fn remove_above_sticky(&self, id: tau_cli_term::BlockId) {
-        if let Some(output) = &self.detached {
-            output.lock().expect(MUTEX_POISONED).remove_above_sticky(id);
-        } else {
-            self.terminal.remove_above_sticky(id);
-        }
-    }
-
     /// Appends a block below the current target's active region.
     pub(crate) fn push_below(&self, id: tau_cli_term::BlockId) {
         if let Some(output) = &self.detached {

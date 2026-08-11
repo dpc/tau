@@ -10660,6 +10660,96 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     );
 }
 
+/// Active tools, queued prompts, and watched engineers must keep their category
+/// order regardless of whether tools or watches arrive first. This prevents a
+/// later update from moving a lower-priority activity row above user work.
+#[test]
+fn mixed_live_activity_blocks_keep_category_and_internal_order() {
+    for tools_arrive_first in [true, false] {
+        let (_term, handle, vt) = setup(100, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.switch_agent("parent_1".to_owned());
+
+        let render_tools = |renderer: &mut EventRenderer| {
+            for call_id in ["read_one", "read_two"] {
+                renderer.handle(&Event::ToolStarted(tau_proto::ToolStarted {
+                    call_id: call_id.into(),
+                    tool_name: tau_proto::ToolName::new(call_id),
+                    arguments: CborValue::Null,
+                    agent_id: agent_id("parent_1"),
+                    originator: tau_proto::PromptOriginator::User,
+                }));
+            }
+        };
+        let render_watches = |renderer: &mut EventRenderer| {
+            renderer.handle(&Event::AgentWatchesUpdated(
+                tau_proto::AgentWatchesUpdated {
+                    session_id: test_session_id("s1"),
+                    watcher_id: agent_id("parent_1"),
+                    watched_agent_ids: vec![agent_id("engineer_b"), agent_id("engineer_a")],
+                    changed_agent_id: None,
+                    cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+                },
+            ));
+        };
+
+        if tools_arrive_first {
+            render_tools(&mut renderer);
+        } else {
+            render_watches(&mut renderer);
+        }
+        for text in ["queued-one", "queued-two"] {
+            renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+                text: text.to_owned(),
+                agent_id: agent_id("parent_1"),
+                message_class: tau_proto::PromptMessageClass::User,
+            }));
+        }
+        if tools_arrive_first {
+            render_watches(&mut renderer);
+        } else {
+            render_tools(&mut renderer);
+        }
+
+        // Refresh from a differently ordered update to exercise both reordering
+        // existing watched rows and the mixed-category anchor placement.
+        renderer.handle(&Event::AgentWatchesUpdated(
+            tau_proto::AgentWatchesUpdated {
+                session_id: test_session_id("s1"),
+                watcher_id: agent_id("parent_1"),
+                watched_agent_ids: vec![agent_id("engineer_a"), agent_id("engineer_b")],
+                changed_agent_id: Some(agent_id("engineer_a")),
+                cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+            },
+        ));
+        sync(&handle);
+
+        let screen = vt.screen_text(100);
+        let positions = [
+            "read_one 0s pending",
+            "read_two 0s pending",
+            "queued-one (queued)",
+            "queued-two (queued)",
+            "@engineer_a unreported",
+            "@engineer_b unreported",
+        ]
+        .map(|needle| {
+            screen
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing `{needle}` in {screen:?}"))
+        });
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "expected tools, queued prompts, then sorted watched engineers: {screen:?}"
+        );
+    }
+}
+
 /// Direct watched rows must exist before any turn starts, remain a hierarchical
 /// projection while a descendant runs, and let a direct turn replace its
 /// witness.
