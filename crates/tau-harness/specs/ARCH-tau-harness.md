@@ -380,6 +380,14 @@ See
 
 ## Daemon and provider reliability boundaries
 
+Harness startup accepts one complete normalized `HarnessSettings` snapshot before
+any configured process launch. Extension resolution, provider and secret inputs,
+roles, tool policy, retention, and prompt settings derive from that snapshot, and
+runtime baseline lookups retain it instead of rereading configuration. Missing
+optional user configuration remains a valid built-in snapshot; an existing
+unreadable or invalid layer fails startup with context. This is not a live-reload
+mechanism: an already-running harness keeps its accepted snapshot.
+
 `ServeOptions` has opt-in hermetic-test controls that bypass ambient startup
 override transports and require an exact resolved extension-name set before any
 configured child is spawned. Defaults preserve normal daemon configuration.

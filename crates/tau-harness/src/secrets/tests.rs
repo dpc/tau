@@ -1,11 +1,13 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tau_config::settings::{ExtensionSecretEntry, TauRuntimeSocketAccess, TauStateAccess};
+use tau_config::settings::{
+    ExtensionSecretEntry, HarnessSettings, TauRuntimeSocketAccess, TauStateAccess,
+};
 use tempfile::TempDir;
 
 use super::*;
-use crate::settings::{Config, CoreConfig, CoreMode, ExtensionConfig};
+use crate::settings::{Config, ExtensionConfig};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -16,9 +18,6 @@ fn config_with_secret(optional: bool) -> Config {
         ExtensionSecretEntry { optional },
     );
     Config {
-        core: CoreConfig {
-            mode: CoreMode::Embedded,
-        },
         extensions: BTreeMap::from([(
             "std-email".to_owned(),
             ExtensionConfig {
@@ -38,6 +37,7 @@ fn config_with_secret(optional: bool) -> Config {
             },
         )]),
         extension_startup_diagnostics: Vec::new(),
+        harness_settings: HarnessSettings::built_in(),
     }
 }
 

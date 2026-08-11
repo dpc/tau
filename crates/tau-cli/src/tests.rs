@@ -36,6 +36,55 @@ use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_t
 use super::tool_render::format_context_token_count;
 use super::{cli as path_super_cli, transcript_markers};
 
+/// Ensures only commands that launch a harness or render from harness settings
+/// validate a fresh snapshot. Attach and local/IPC inspection must remain
+/// usable after an already-running daemon's source configuration becomes
+/// invalid.
+#[test]
+fn harness_settings_validation_is_limited_to_config_consumers() {
+    let run_args = || path_super_cli::RunArgs {
+        config: None,
+        prompt_stdin: false,
+        ephemeral: false,
+    };
+    assert!(!super::consumes_harness_settings(
+        &super::DispatchCommand::Startup {
+            args: run_args(),
+            mode: super::StartupMode::Attach(None),
+        }
+    ));
+    assert!(super::consumes_harness_settings(
+        &super::DispatchCommand::Startup {
+            args: run_args(),
+            mode: super::StartupMode::New,
+        }
+    ));
+    assert!(super::consumes_harness_settings(
+        &super::DispatchCommand::Startup {
+            args: run_args(),
+            mode: super::StartupMode::Resume(None),
+        }
+    ));
+    assert!(!super::consumes_harness_settings(
+        &super::DispatchCommand::Other(path_super_cli::Command::Session {
+            command: path_super_cli::SessionCommand::List(Default::default()),
+        })
+    ));
+    assert!(!super::consumes_harness_settings(
+        &super::DispatchCommand::Other(path_super_cli::Command::Dev {
+            command: path_super_cli::DevCommand::Send {
+                session_id: "s1".to_owned(),
+                line: vec!["hello".to_owned()],
+            },
+        })
+    ));
+    assert!(super::consumes_harness_settings(
+        &super::DispatchCommand::Other(path_super_cli::Command::Dev {
+            command: path_super_cli::DevCommand::PrintSystemPrompt,
+        })
+    ));
+}
+
 /// Dynamic action IDs use the bounded ASCII short-ID producer shape accepted by
 /// the protocol type.
 #[test]

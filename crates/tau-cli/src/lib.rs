@@ -635,6 +635,30 @@ enum DispatchCommand {
     Other(cli::Command),
 }
 
+/// Whether dispatch must accept a fresh effective harness settings snapshot.
+///
+/// Commands that only inspect local state or connect to an existing daemon must
+/// remain usable when configuration changes after that daemon's accepted
+/// startup.
+fn consumes_harness_settings(command: &DispatchCommand) -> bool {
+    match command {
+        DispatchCommand::Startup {
+            mode: StartupMode::Attach(_),
+            ..
+        } => false,
+        DispatchCommand::Startup { .. } => true,
+        DispatchCommand::Other(cli::Command::Dev {
+            command:
+                cli::DevCommand::DumpInitialPrompt { .. }
+                | cli::DevCommand::PrintPrompt { .. }
+                | cli::DevCommand::PrintSystemPrompt
+                | cli::DevCommand::PrintTools,
+        }) => true,
+        DispatchCommand::Other(cli::Command::Component { name, .. }) => name == "harness",
+        _ => false,
+    }
+}
+
 pub struct Component {
     /// Name accepted by the `tau component <name>` dispatcher.
     pub name: &'static str,
@@ -820,16 +844,23 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             return dev_tmux::run(command);
         }
 
-        let selected_profile = tau_config::settings::selected_profile(harness.profile.as_deref())
+        let consumes_harness_settings = consumes_harness_settings(&command);
+        let selected_profile = if consumes_harness_settings {
+            tau_config::settings::selected_profile(harness.profile.as_deref())
+                .map_err(|error| CliError::Participant(error.to_string()))?
+        } else {
+            None
+        };
+        if consumes_harness_settings {
+            tau_harness::validate_cli_overrides_with_profile(
+                selected_profile.as_ref(),
+                &role_cli_overrides,
+                &extension_cli_overrides,
+                &harness_config_overrides,
+            )
             .map_err(|error| CliError::Participant(error.to_string()))?;
-        tau_harness::validate_cli_overrides_with_profile(
-            selected_profile.as_ref(),
-            &role_cli_overrides,
-            &extension_cli_overrides,
-            &harness_config_overrides,
-        )
-        .map_err(|error| CliError::Participant(error.to_string()))?;
-        if reads_extension_environment {
+        }
+        if reads_extension_environment && consumes_harness_settings {
             tau_harness::validate_extension_environment_and_cli_overrides_with_profile(
                 selected_profile.as_ref(),
                 &environment_extension_names,

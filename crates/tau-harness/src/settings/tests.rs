@@ -232,6 +232,35 @@ fn resolve_config_in_uses_supplied_config_dir() {
     );
 }
 
+/// Ensures one accepted settings snapshot remains the authority for extension
+/// resolution and runtime baselines even if the source file changes afterward.
+#[test]
+fn resolved_config_retains_one_coherent_settings_snapshot() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = tempdir.path().join("harness.yaml");
+    std::fs::write(
+        &config_path,
+        "session_retention_days: 37\nextensions:\n  core-shell:\n    enable: false\n",
+    )
+    .expect("write valid harness config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+
+    let accepted =
+        resolve_config_in_without_environment(&dirs).expect("accept coherent startup snapshot");
+    std::fs::write(&config_path, "extensions: [malformed\n")
+        .expect("replace source after acceptance");
+
+    assert_eq!(accepted.harness_settings.session_retention_days, 37);
+    assert!(!accepted.extensions.contains_key("core-shell"));
+    assert!(
+        resolve_config_in_without_environment(&dirs).is_err(),
+        "a new startup must reject the now-malformed source"
+    );
+}
+
 /// Ensures deterministic direct-harness startup uses the configured fallback
 /// profile through its no-environment settings loader.
 #[test]
@@ -254,8 +283,8 @@ profiles:
         state_dir: None,
     };
 
-    let (settings, error) = load_harness_settings_without_environment_or_warn(&dirs);
-    assert!(error.is_none());
+    let settings =
+        load_harness_settings_without_environment(&dirs).expect("load configured fallback");
     assert_eq!(settings.extensions["core-shell"].enable, Some(false));
 
     let config = resolve_config_in_without_environment(&dirs).expect("resolve configured fallback");
@@ -511,7 +540,7 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
         path_tau_config_settings::TauStateAccess::ReadOnly
     );
 
-    let mut config = config_from_resolved_extensions(resolved.clone());
+    let mut config = config_from_resolved_extensions(resolved.clone(), HarnessSettings::built_in());
     append_tau_state_access_diagnostics(&mut config, &settings, None);
     assert_eq!(config.extension_startup_diagnostics.len(), 1);
     let shell = config
@@ -531,7 +560,7 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
     let resolved =
         resolve_extensions_with_environment_and_cli_overrides(&settings, builtins(), &[], &[])
             .expect("global recovery policy resolves");
-    let mut config = config_from_resolved_extensions(resolved.clone());
+    let mut config = config_from_resolved_extensions(resolved.clone(), HarnessSettings::built_in());
     append_tau_state_access_diagnostics(&mut config, &settings, None);
     let provider = config
         .extension_startup_diagnostics
@@ -558,7 +587,7 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
             .all(|extension| extension.tau_state_access
                 == path_tau_config_settings::TauStateAccess::ReadOnly)
     );
-    let mut forced_config = config_from_resolved_extensions(forced);
+    let mut forced_config = config_from_resolved_extensions(forced, HarnessSettings::built_in());
     append_tau_state_access_diagnostics(
         &mut forced_config,
         &settings,
@@ -644,6 +673,31 @@ fn malformed_private_extension_transport_is_fatal() {
             ])))
             .expect_err("non-UTF-8 must fail");
         assert!(error.to_string().contains(EXTENSION_CLI_OVERRIDES_ENV));
+    }
+}
+
+/// Ensures both settings-bearing private override transports reject malformed
+/// JSON and non-Unicode input while identifying the responsible variable.
+#[test]
+fn malformed_private_settings_override_transports_are_fatal() {
+    for variable in [ROLE_CLI_OVERRIDES_ENV, HARNESS_CONFIG_CLI_OVERRIDES_ENV] {
+        let error = parse_startup_override_transport::<serde_json::Value>(
+            variable,
+            Some("not-json".into()),
+        )
+        .expect_err("malformed JSON must fail");
+        assert!(error.to_string().contains(variable));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let error = parse_startup_override_transport::<serde_json::Value>(
+                variable,
+                Some(path_std_ffi::OsString::from_vec(vec![0xff])),
+            )
+            .expect_err("non-UTF-8 must fail");
+            assert!(error.to_string().contains(variable));
+        }
     }
 }
 

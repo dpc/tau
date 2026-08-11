@@ -1,7 +1,7 @@
 //! Loading and resolving harness/extension configuration on startup.
 //!
-//! Owns the resolved-configuration types ([`Config`], [`CoreConfig`],
-//! [`CoreMode`], [`ExtensionConfig`]), the built-in extension list, and
+//! Owns the resolved-configuration types ([`Config`], [`ExtensionConfig`]),
+//! the built-in extension list, and
 //! the resolver that merges the user's
 //! [`tau_config::settings::HarnessSettings`] on top of the built-ins. The wire
 //! schema for `harness.yaml` lives in `tau-config`; this module turns that
@@ -21,16 +21,27 @@ use tau_config::settings::{
 const TEST_DUMMY_EXTENSION_NAME: &str = "test-dummy";
 
 /// The resolved harness configuration handed to the daemon.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Config {
-    /// Core harness runtime settings.
-    pub core: CoreConfig,
     /// Enabled extensions that should be spawned unless skipped later by
     /// secrets.
     pub extensions: BTreeMap<String, ExtensionConfig>,
     /// Mandatory startup diagnostics for optional extensions skipped during
     /// configuration or for every non-hidden Tau-state policy.
     pub extension_startup_diagnostics: Vec<ExtensionStartupDiagnostic>,
+    /// Complete accepted harness settings from which this launch configuration
+    /// was resolved.
+    pub(crate) harness_settings: HarnessSettings,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            extensions: BTreeMap::new(),
+            extension_startup_diagnostics: Vec::new(),
+            harness_settings: HarnessSettings::built_in(),
+        }
+    }
 }
 
 /// Replayable startup diagnostic for an extension startup decision.
@@ -77,27 +88,6 @@ impl TauStateAccessSource {
             Self::EnvironmentForce => "process-wide TAU_EXTENSION_TAU_STATE_ACCESS",
         }
     }
-}
-
-/// Resolved core configuration values.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CoreConfig {
-    pub mode: CoreMode,
-}
-
-impl Default for CoreConfig {
-    fn default() -> Self {
-        Self {
-            mode: CoreMode::Embedded,
-        }
-    }
-}
-
-/// Minimal runtime mode selection for the harness.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CoreMode {
-    Embedded,
-    Daemon,
 }
 
 /// One configured extension process, after merging built-in defaults
@@ -626,101 +616,61 @@ fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::V
     }
 }
 
-/// Load `harness.yaml`, falling back to defaults on parse error and
-/// writing a warning to stderr. Returns the parse error too so the
-/// harness can surface it in the UI without re-parsing the same file
-/// from scratch.
-///
-/// Without the warning a malformed file silently disables every
-/// user-configured extension and the only symptom is "my extension
-/// isn't running" with no clue why.
 pub const ROLE_CLI_OVERRIDES_ENV: &str = "TAU_ROLE_CLI_OVERRIDES";
 pub const EXTENSION_CLI_OVERRIDES_ENV: &str = "TAU_EXTENSION_CLI_OVERRIDES";
 pub const HARNESS_CONFIG_CLI_OVERRIDES_ENV: &str = "TAU_HARNESS_CONFIG_OVERRIDES";
 pub const STARTUP_ROLE_ENV: &str = "TAU_STARTUP_ROLE";
 
-pub(crate) fn load_harness_settings_or_warn(
+/// Load and normalize one complete effective settings snapshot under normal
+/// startup environment and CLI transport policy.
+pub(crate) fn load_harness_settings(
     dirs: &tau_config::settings::TauDirs,
-) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
-    let role_overrides = role_cli_overrides_from_env();
-    let harness_config_overrides = harness_config_overrides_from_env().unwrap_or_default();
-    let profile = match tau_config::settings::selected_profile_in(dirs, None) {
-        Ok(profile) => profile,
-        Err(error) => {
-            eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
-            return (
-                apply_startup_role_override(HarnessSettings::built_in()),
-                Some(error),
-            );
-        }
-    };
-    load_harness_settings_with_overrides_or_warn(
+) -> Result<HarnessSettings, Box<dyn std::error::Error>> {
+    let role_overrides = role_cli_overrides_from_env()?;
+    let harness_config_overrides = harness_config_overrides_from_env()?;
+    let profile = tau_config::settings::selected_profile_in(dirs, None)?;
+    load_harness_settings_with_overrides(
         dirs,
         profile.as_ref(),
         &role_overrides,
         &harness_config_overrides,
         true,
     )
+    .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
 }
 
 /// Load harness settings without consulting any startup environment transport.
 ///
-/// This preserves config-file loading and warning behavior for hermetic daemon
-/// fixtures while excluding role, harness-config, and startup-role overrides.
-/// The optional error is returned alongside built-in fallback settings exactly
-/// like [`load_harness_settings_or_warn`].
-pub(crate) fn load_harness_settings_without_environment_or_warn(
+/// This preserves config-file loading for hermetic daemon fixtures while
+/// excluding role, harness-config, and startup-role overrides.
+pub(crate) fn load_harness_settings_without_environment(
     dirs: &tau_config::settings::TauDirs,
-) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
-    let profile = match tau_config::settings::default_profile_in(dirs) {
-        Ok(profile) => profile,
-        Err(error) => {
-            eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
-            return (HarnessSettings::built_in(), Some(error));
-        }
-    };
-    load_harness_settings_with_overrides_or_warn(dirs, profile.as_ref(), &[], &[], false)
+) -> Result<HarnessSettings, tau_config::settings::SettingsError> {
+    let profile = tau_config::settings::default_profile_in(dirs)?;
+    load_harness_settings_with_overrides(dirs, profile.as_ref(), &[], &[], false)
 }
 
-fn load_harness_settings_with_overrides_or_warn(
+fn load_harness_settings_with_overrides(
     dirs: &tau_config::settings::TauDirs,
     profile: Option<&ProfileName>,
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
     apply_startup_environment: bool,
-) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
-    let result = (|| {
-        if let Some(profile) = profile {
-            validate_profile_extension_targets(dirs, profile)?;
-        }
-        tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
-            dirs,
-            profile,
-            role_overrides,
-            harness_config_overrides,
-        )
-    })();
-    match result {
-        Ok(settings) => (
-            if apply_startup_environment {
-                apply_startup_role_override(settings)
-            } else {
-                settings
-            },
-            None,
-        ),
-        Err(error) => {
-            eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
-            (
-                if apply_startup_environment {
-                    apply_startup_role_override(HarnessSettings::built_in())
-                } else {
-                    HarnessSettings::built_in()
-                },
-                Some(error),
-            )
-        }
+) -> Result<HarnessSettings, tau_config::settings::SettingsError> {
+    if let Some(profile) = profile {
+        validate_profile_extension_targets(dirs, profile)?;
     }
+    let settings = tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
+        dirs,
+        profile,
+        role_overrides,
+        harness_config_overrides,
+    )?;
+    Ok(if apply_startup_environment {
+        apply_startup_role_override(settings)
+    } else {
+        settings
+    })
 }
 
 /// Rejects profile extension typos before their enablement patches enter
@@ -764,19 +714,38 @@ fn apply_startup_role_override(mut settings: HarnessSettings) -> HarnessSettings
     settings
 }
 
-fn role_cli_overrides_from_env() -> Vec<RoleCliOverride> {
-    std::env::var(ROLE_CLI_OVERRIDES_ENV)
-        .ok()
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default()
+fn role_cli_overrides_from_env() -> Result<Vec<RoleCliOverride>, Box<dyn std::error::Error>> {
+    parse_startup_override_transport(
+        ROLE_CLI_OVERRIDES_ENV,
+        std::env::var_os(ROLE_CLI_OVERRIDES_ENV),
+    )
 }
 
-fn harness_config_overrides_from_env() -> Result<Vec<HarnessConfigCliOverride>, serde_json::Error> {
-    std::env::var(HARNESS_CONFIG_CLI_OVERRIDES_ENV)
-        .ok()
-        .map(|value| serde_json::from_str(&value))
-        .transpose()
-        .map(|overrides| overrides.unwrap_or_default())
+fn harness_config_overrides_from_env()
+-> Result<Vec<HarnessConfigCliOverride>, Box<dyn std::error::Error>> {
+    parse_startup_override_transport(
+        HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+        std::env::var_os(HARNESS_CONFIG_CLI_OVERRIDES_ENV),
+    )
+}
+
+/// Parse one harness-owned JSON startup transport without treating malformed
+/// or non-Unicode values as an absent override.
+fn parse_startup_override_transport<T>(
+    variable: &'static str,
+    value: Option<std::ffi::OsString>,
+) -> Result<Vec<T>, Box<dyn std::error::Error>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| format!("{variable} internal transport must be valid UTF-8 JSON"))?;
+    serde_json::from_str(&value)
+        .map_err(|error| format!("malformed {variable} internal transport: {error}").into())
 }
 
 pub(crate) fn parse_extension_cli_overrides_transport(
@@ -885,25 +854,24 @@ pub(crate) fn built_in_extension_defs() -> &'static [BuiltInExtensionDef] {
 }
 
 #[must_use]
-pub fn default_config() -> Config {
+pub(crate) fn default_config() -> Config {
     // `resolve_extensions` is fallible only for enabled required entries with
     // invalid command slots. The built-in settings have no user entries or
     // overrides, and the hard-coded `builtin_extensions()` list resolves to
     // non-empty commands, so the failure path is unreachable.
-    let extensions = match resolve_extensions(&HarnessSettings::built_in(), builtin_extensions()) {
+    let harness_settings = HarnessSettings::built_in();
+    let extensions = match resolve_extensions(&harness_settings, builtin_extensions()) {
         Ok(extensions) => extensions,
         Err(err) => unreachable!("built-in extensions resolve cleanly: {err}"),
     };
 
     Config {
-        core: CoreConfig {
-            mode: CoreMode::Embedded,
-        },
         extensions: extensions
             .into_iter()
             .map(|extension| (extension.name.clone(), extension))
             .collect(),
         extension_startup_diagnostics: Vec::new(),
+        harness_settings,
     }
 }
 
@@ -988,40 +956,14 @@ fn load_settings_for_cli_overrides_in(
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<HarnessSettings, Box<dyn std::error::Error>> {
-    if let Some(profile) = profile {
-        validate_profile_extension_targets(dirs, profile)?;
-    }
-    match tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
+    load_harness_settings_with_overrides(
         dirs,
         profile,
         role_overrides,
         harness_config_overrides,
-    ) {
-        Ok(settings) => Ok(apply_startup_role_override(settings)),
-        Err(
-            error @ (path_tau_config_settings::SettingsError::UnknownRoleCliOverride(_)
-            | path_tau_config_settings::SettingsError::UnknownProfile(_)),
-        ) => Err(Box::new(error)),
-        Err(error) => {
-            if !harness_config_overrides.is_empty() {
-                eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
-                let fallback_dirs = tau_config::settings::TauDirs {
-                    config_dir: None,
-                    state_dir: dirs.state_dir.clone(),
-                };
-                return tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
-                    &fallback_dirs,
-                    profile,
-                    role_overrides,
-                    harness_config_overrides,
-                )
-                .map(apply_startup_role_override)
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>);
-            }
-            eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
-            Ok(apply_startup_role_override(HarnessSettings::built_in()))
-        }
-    }
+        true,
+    )
+    .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
 }
 
 pub(crate) fn resolve_config(
@@ -1050,14 +992,17 @@ pub(crate) fn resolve_config_in(
 pub(crate) fn resolve_config_in_without_environment(
     dirs: &tau_config::settings::TauDirs,
 ) -> Result<Config, Box<dyn std::error::Error>> {
-    let settings = tau_config::settings::load_harness_settings_in(dirs)?;
+    let settings = load_harness_settings_without_environment(dirs)?;
     let resolved_extensions = resolve_extensions_with_environment_and_cli_overrides(
         &settings,
         builtin_extensions(),
         &[],
         &[],
     )?;
-    Ok(config_from_resolved_extensions(resolved_extensions))
+    Ok(config_from_resolved_extensions(
+        resolved_extensions,
+        settings,
+    ))
 }
 
 fn resolve_config_in_with_extension_cli_overrides(
@@ -1065,20 +1010,7 @@ fn resolve_config_in_with_extension_cli_overrides(
     extension_overrides: &[ExtensionCliOverride],
 ) -> Result<Config, Box<dyn std::error::Error>> {
     // Extensions live in `harness.yaml` under `extensions: { ... }`.
-    // We start from the built-in provider + tools defaults and apply the
-    // user's overrides on top; a malformed harness.yaml falls back
-    // to defaults rather than failing the whole startup, but we warn
-    // on stderr so the user can see why their config is being
-    // ignored.
-    let role_overrides = role_cli_overrides_from_env();
-    let harness_config_overrides = harness_config_overrides_from_env()?;
-    let profile = tau_config::settings::selected_profile_in(dirs, None)?;
-    let settings = load_settings_for_cli_overrides_in(
-        dirs,
-        profile.as_ref(),
-        &role_overrides,
-        &harness_config_overrides,
-    )?;
+    let settings = load_harness_settings(dirs)?;
     let environment_names = tau_config::settings::parse_enable_extensions_env(std::env::var_os(
         tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV,
     ))?;
@@ -1093,7 +1025,7 @@ fn resolve_config_in_with_extension_cli_overrides(
         std::env::var_os(tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV),
     )?;
     apply_tau_state_access_force(&mut resolved_extensions, tau_state_access_force);
-    let mut config = config_from_resolved_extensions(resolved_extensions);
+    let mut config = config_from_resolved_extensions(resolved_extensions, settings.clone());
     append_tau_state_access_diagnostics(&mut config, &settings, tau_state_access_force);
     Ok(config)
 }
@@ -1147,11 +1079,11 @@ fn append_tau_state_access_diagnostics(
     }
 }
 
-fn config_from_resolved_extensions(resolved_extensions: ResolvedExtensions) -> Config {
+fn config_from_resolved_extensions(
+    resolved_extensions: ResolvedExtensions,
+    harness_settings: HarnessSettings,
+) -> Config {
     Config {
-        core: CoreConfig {
-            mode: CoreMode::Embedded,
-        },
         extensions: resolved_extensions
             .extensions
             .into_iter()
@@ -1166,6 +1098,7 @@ fn config_from_resolved_extensions(resolved_extensions: ResolvedExtensions) -> C
                 kind: ExtensionStartupDiagnosticKind::OptionalSkip,
             })
             .collect(),
+        harness_settings,
     }
 }
 

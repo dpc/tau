@@ -27,6 +27,24 @@ Tau is early-stage software, but security issues are important. Please report su
 
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
 
+### Harness configuration authority selection
+
+Before launching any configured process, Tau accepts one normalized effective
+`HarnessSettings` snapshot. Missing optional user configuration leaves the
+built-in layer valid, while an existing unreadable or invalid layer and malformed
+private override transport fail startup with context instead of selecting
+built-in fallback authority. Extension launch, provider and secret inputs, roles,
+tool policy, retention, prompts, and runtime baselines derive from that snapshot.
+An already-running harness retains it and does not hot-reload or partially reread
+settings. This authority-selection invariant does not change the trusted
+same-user extension threat model.
+
+See
+[`ARCH-tau-config`](crates/tau-config/specs/ARCH-tau-config.md) and
+[`ARCH-tau-harness`](crates/tau-harness/specs/ARCH-tau-harness.md).
+Revisit this invariant when changing loader fallback or error semantics, snapshot
+plumbing, configured-process launch ordering, or runtime settings lookups.
+
 ### Accepted configured-component availability risks
 
 Registered session-context providers may delay session initialization, but only

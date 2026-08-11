@@ -159,10 +159,7 @@ use crate::secrets::{
     ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets_excluding,
 };
 use crate::session_init_deadline::{SessionInitDeadline, SessionInitProgressGeneration};
-use crate::settings::{
-    Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind,
-    load_harness_settings_or_warn, load_harness_settings_without_environment_or_warn,
-};
+use crate::settings::{Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind};
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 use crate::turn::{PromptSubmission, TurnState};
 
@@ -2000,7 +1997,8 @@ pub(crate) struct HarnessStartupInputs {
     /// Harness-owned tool handlers whose names must be reserved before
     /// extensions.
     pub(crate) internal_tool_handlers: InternalToolHandlers,
-    /// Whether startup and runtime settings ignore environment transports.
+    /// Whether startup ignores environment override and secret-source
+    /// transports.
     pub(crate) ignore_startup_environment: bool,
     /// Absolute canonical project root captured for this harness startup.
     pub(crate) project_root: PathBuf,
@@ -2055,8 +2053,8 @@ impl HarnessSessionLaunch {
 struct HarnessConstructionInputs {
     /// Initial session reason and persistence policy.
     launch: HarnessSessionLaunch,
-    /// Whether startup and runtime settings ignore environment transports.
-    ignore_startup_environment: bool,
+    /// Whether startup suppresses environment-backed secret sources.
+    ignore_secret_source_environment: bool,
     /// Absolute canonical project root captured for this harness startup.
     project_root: PathBuf,
 }
@@ -2195,8 +2193,8 @@ pub struct Harness {
     pub(crate) state_dir: PathBuf,
     /// Provider settings captured under instance lifecycle locks before spawn.
     provider_settings_snapshots: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
-    /// Whether runtime settings reloads ignore startup environment transports.
-    ignore_startup_environment: bool,
+    /// Complete accepted startup settings retained as the runtime baseline.
+    accepted_harness_settings: tau_config::settings::HarnessSettings,
     /// Session membership store. Owns the folded loaded-agent set for each
     /// session id, either from the durable membership journal at
     /// `<state_dir>/sessions/<session_id>/events.cbor` or from the live
@@ -2690,8 +2688,6 @@ pub struct Harness {
     pending_start_agent_requests: VecDeque<PendingStartAgentRequest>,
     /// State for harness-owned delegate/wait tools.
     pub(crate) subagents: SubagentToolState,
-    /// Directory layout (config + state) the harness reads and writes.
-    pub(crate) dirs: tau_config::settings::TauDirs,
 }
 
 #[cfg(any(test, feature = "echo-agent"))]
@@ -3012,8 +3008,8 @@ struct HarnessBaseParts {
     bus: EventBus,
     /// Runtime state directory for this harness.
     state_dir: PathBuf,
-    /// Whether harness settings ignore startup environment transports.
-    ignore_startup_environment: bool,
+    /// Complete accepted startup settings retained as the runtime baseline.
+    harness_settings: tau_config::settings::HarnessSettings,
     /// Session membership store, with the eager session already loaded.
     store: SessionStore,
     /// Per-agent transcript store.
@@ -3053,8 +3049,6 @@ struct HarnessBaseParts {
     agent_display_name_template: Option<String>,
     /// Loaded system prompt templates keyed by template name.
     system_prompt_templates: HashMap<String, String>,
-    /// Resolved Tau config/state directories.
-    dirs: tau_config::settings::TauDirs,
 }
 
 struct ConfiguredHarnessStartup {
@@ -3063,8 +3057,6 @@ struct ConfiguredHarnessStartup {
     /// Secrets and optional-extension skip state resolved before extension
     /// spawn.
     extension_secrets: ResolvedExtensionSecrets,
-    /// Non-fatal harness settings parse error to surface after clients attach.
-    harness_settings_error: Option<tau_config::settings::SettingsError>,
     /// Missing configured startup role warning to surface after clients attach.
     missing_default_role: Option<MissingDefaultRole>,
     /// Timestamp used for startup tracing.
@@ -3105,8 +3097,6 @@ struct StartupHarnessParts {
     harness_settings: tau_config::settings::HarnessSettings,
     /// Startup role selection state.
     roles: StartupRoles,
-    /// Whether harness settings ignore startup environment transports.
-    ignore_startup_environment: bool,
     /// Absolute canonical project root captured for this harness startup.
     project_root: PathBuf,
 }
@@ -3201,21 +3191,6 @@ fn ui_shell_provider_ids(
 }
 
 impl Harness {
-    /// Reload harness settings under the startup environment policy retained by
-    /// this harness instance.
-    pub(super) fn load_effective_harness_settings(
-        &self,
-    ) -> (
-        tau_config::settings::HarnessSettings,
-        Option<tau_config::settings::SettingsError>,
-    ) {
-        if self.ignore_startup_environment {
-            load_harness_settings_without_environment_or_warn(&self.dirs)
-        } else {
-            load_harness_settings_or_warn(&self.dirs)
-        }
-    }
-
     /// Enables the test-only echo tool explicitly for every configured role.
     #[cfg(any(test, feature = "echo-agent"))]
     pub(crate) fn enable_echo_tool_for_tests(&mut self) {
@@ -3249,7 +3224,7 @@ impl Harness {
             internal_tool_handlers: Vec::new(),
             state_dir: parts.state_dir,
             provider_settings_snapshots: BTreeMap::new(),
-            ignore_startup_environment: parts.ignore_startup_environment,
+            accepted_harness_settings: parts.harness_settings,
             store: parts.store,
             agent_store: parts.agent_store,
             storage_mode: parts.storage_mode,
@@ -3414,7 +3389,6 @@ impl Harness {
             subagents: SubagentToolState::with_input_wait_timeout_bounds(
                 parts.input_wait_timeout_bounds,
             ),
-            dirs: parts.dirs,
         }
     }
 
@@ -3463,6 +3437,8 @@ impl Harness {
         .validate()?;
         let storage_mode = launch.storage_mode;
         let state_dir = state_dir.into();
+        let harness_settings = crate::settings::load_harness_settings_without_environment(&dirs)
+            .map_err(|error| HarnessError::Participant(error.to_string()))?;
         let project_root = if storage_mode.is_memory_only() {
             if state_dir.is_dir() {
                 state_dir.canonicalize()?
@@ -3577,8 +3553,6 @@ impl Harness {
             });
         }
 
-        let (harness_settings, harness_settings_error) =
-            load_harness_settings_without_environment_or_warn(&dirs);
         let system_prompt_templates = load_system_prompt_templates(dirs.config_dir.as_deref());
         let LoadedRoles {
             roles: available_roles,
@@ -3642,7 +3616,7 @@ impl Harness {
             component_ingress,
             bus,
             state_dir: state_dir.clone(),
-            ignore_startup_environment: true,
+            harness_settings: harness_settings.clone(),
             store,
             agent_store,
             storage_mode,
@@ -3664,7 +3638,6 @@ impl Harness {
             agent_id_template: harness_settings.agent_id_template.clone(),
             agent_display_name_template: harness_settings.agent_display_name_template.clone(),
             system_prompt_templates,
-            dirs,
         });
 
         if storage_mode.is_durable() {
@@ -3688,7 +3661,6 @@ impl Harness {
         harness.register_harness_tools();
         harness.publish_delegate_roles_context();
         harness.check_config_exists();
-        harness.emit_startup_settings_errors(harness_settings_error);
         harness.emit_missing_default_role(missing_default_role);
 
         // Eager session init for the default session. INTENTIONAL —
@@ -3755,8 +3727,8 @@ impl Harness {
         .map(|(harness, _)| harness)
     }
 
-    /// Creates a configured harness while ignoring startup environment
-    /// transports for both config resolution and harness settings.
+    /// Creates a harness from configuration resolved without startup
+    /// environment transports and suppresses environment-backed secret sources.
     pub(crate) fn from_config_without_startup_environment(
         config: &Config,
         state_dir: impl Into<PathBuf>,
@@ -3831,7 +3803,7 @@ impl Harness {
             eager_session_id,
             HarnessConstructionInputs {
                 launch,
-                ignore_startup_environment,
+                ignore_secret_source_environment: ignore_startup_environment,
                 project_root,
             },
         )?;
@@ -3867,7 +3839,6 @@ impl Harness {
         harness.publish_delegate_roles_context();
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "harness tools registered");
         harness.check_config_exists();
-        harness.emit_startup_settings_errors(startup.harness_settings_error);
         harness.emit_missing_default_role(startup.missing_default_role);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "config checks complete");
 
@@ -3900,21 +3871,19 @@ impl Harness {
     ) -> Result<(Self, ConfiguredHarnessStartup), HarnessError> {
         let startup_started_at = Instant::now();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
-        let (harness, missing_default_role, extension_secrets, harness_settings_error) =
-            Self::open_configured_harness(
-                config,
-                state_dir,
-                sessions_dir.clone(),
-                dirs,
-                eager_session_id,
-                construction,
-            )?;
+        let (harness, missing_default_role, extension_secrets) = Self::open_configured_harness(
+            config,
+            state_dir,
+            sessions_dir.clone(),
+            dirs,
+            eager_session_id,
+            construction,
+        )?;
         Ok((
             harness,
             ConfiguredHarnessStartup {
                 sessions_dir,
                 extension_secrets,
-                harness_settings_error,
                 missing_default_role,
                 started_at: startup_started_at,
             },
@@ -3938,18 +3907,10 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         construction: HarnessConstructionInputs,
-    ) -> Result<
-        (
-            Self,
-            Option<MissingDefaultRole>,
-            ResolvedExtensionSecrets,
-            Option<tau_config::settings::SettingsError>,
-        ),
-        HarnessError,
-    > {
+    ) -> Result<(Self, Option<MissingDefaultRole>, ResolvedExtensionSecrets), HarnessError> {
         let HarnessConstructionInputs {
             launch,
-            ignore_startup_environment,
+            ignore_secret_source_environment,
             project_root,
         } = construction;
         let startup_started_at = Instant::now();
@@ -3957,7 +3918,7 @@ impl Harness {
         let (store, agent_store) =
             Self::open_startup_stores(&state_dir, &sessions_dir, launch.storage_mode)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
-        let secret_sources = if ignore_startup_environment {
+        let secret_sources = if ignore_secret_source_environment {
             Default::default()
         } else {
             load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?
@@ -3991,12 +3952,7 @@ impl Harness {
         extension_secrets
             .skipped_extensions
             .extend(provider_skipped_extensions);
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
-        let (harness_settings, harness_settings_error) = if ignore_startup_environment {
-            load_harness_settings_without_environment_or_warn(&dirs)
-        } else {
-            load_harness_settings_or_warn(&dirs)
-        };
+        let harness_settings = config.harness_settings.clone();
         let roles = Self::load_startup_roles(&harness_settings)?;
         let missing_default_role = roles.missing_default_role.clone();
         let session_retention = harness_settings.session_retention();
@@ -4012,7 +3968,6 @@ impl Harness {
             launch,
             harness_settings,
             roles,
-            ignore_startup_environment,
             project_root,
         })?;
         harness.provider_settings_snapshots = provider_settings_snapshots;
@@ -4047,12 +4002,7 @@ impl Harness {
             storage_mode.session_persistence(),
             vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
         );
-        Ok((
-            harness,
-            missing_default_role,
-            extension_secrets,
-            harness_settings_error,
-        ))
+        Ok((harness, missing_default_role, extension_secrets))
     }
 
     fn open_startup_stores(
@@ -4136,7 +4086,7 @@ impl Harness {
             component_ingress,
             bus,
             state_dir: parts.state_dir,
-            ignore_startup_environment: parts.ignore_startup_environment,
+            harness_settings: parts.harness_settings.clone(),
             store: parts.store,
             agent_store: parts.agent_store,
             storage_mode: parts.launch.storage_mode,
@@ -4159,7 +4109,6 @@ impl Harness {
             agent_id_template: parts.harness_settings.agent_id_template.clone(),
             agent_display_name_template: parts.harness_settings.agent_display_name_template.clone(),
             system_prompt_templates: load_system_prompt_templates(parts.dirs.config_dir.as_deref()),
-            dirs: parts.dirs,
         }))
     }
 
@@ -15891,8 +15840,7 @@ impl Harness {
         let was_selected = self.selected_role == role_name;
         let previous_override = self.role_overrides.remove(&role_name);
         let configured_role = self
-            .load_effective_harness_settings()
-            .0
+            .accepted_harness_settings
             .roles
             .get(&role_name)
             .cloned();
@@ -18423,30 +18371,6 @@ impl Harness {
         }
     }
 
-    /// Surface settings-file parse errors captured during the initial
-    /// load as mandatory warning `HarnessNotice`s. The loaders already fell
-    /// back to defaults and wrote a short stderr line, but stderr is
-    /// hidden once the TUI takes over the terminal — without this the
-    /// user's only symptom is "my extensions vanished" / "my roles changed"
-    /// with no clue why.
-    ///
-    /// Taking the error as a parameter (instead of re-parsing the file
-    /// here) keeps startup to a single parse and avoids a race where the
-    /// user fixes the file between the two reads.
-    ///
-    /// `cli.json5` is intentionally not handled here: the CLI fails
-    /// fast on a malformed `cli.json5` before the harness ever
-    /// spawns, so there's no "silently fell back to defaults" case
-    /// to surface.
-    fn emit_startup_settings_errors(
-        &mut self,
-        harness_settings_error: Option<tau_config::settings::SettingsError>,
-    ) {
-        if let Some(error) = harness_settings_error {
-            self.emit_info_important(&format!("harness.yaml failed to parse — ignored.\n{error}"));
-        }
-    }
-
     fn emit_missing_default_role(&mut self, missing: Option<MissingDefaultRole>) {
         if let Some(MissingDefaultRole {
             requested,
@@ -20849,13 +20773,12 @@ impl Harness {
             }
             _ => None,
         };
-        let (live_settings, _) = self.load_effective_harness_settings();
         self.publish_event(
             None,
             Event::HarnessRoleSelected(HarnessRoleSelected {
                 baseline_params: selected_model.as_ref().map(|model| {
                     baseline_params_for_selection(
-                        &live_settings,
+                        &self.accepted_harness_settings,
                         &self.provider_model_info,
                         &self.selected_role,
                         model,

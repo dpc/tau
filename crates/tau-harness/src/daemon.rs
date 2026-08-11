@@ -865,38 +865,6 @@ pub fn run_daemon_with_echo(
     result
 }
 
-/// Runs a foreground daemon using extensions from configuration.
-pub fn run_daemon_with_config(
-    config: &Config,
-    socket_path: impl Into<PathBuf>,
-    state_dir: impl Into<PathBuf>,
-    eager_session_id: &str,
-    options: ServeOptions,
-) -> Result<(), HarnessError> {
-    validate_pre_resolved_serve_options(&options, config)?;
-    let socket_path = socket_path.into();
-    let state_dir = state_dir.into();
-    let listener_handle = open_listener(&socket_path)?;
-    let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(
-        config,
-        state_dir,
-        dirs,
-        eager_session_id,
-        session_start_reason(options.session_status),
-        options.storage_mode,
-    )?;
-
-    let tx = harness.tx.clone();
-    let forwarder = listener_handle.spawn_forwarder(tx)?;
-
-    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
-    let _ = harness.shutdown();
-    drop(forwarder);
-    drop(listener_handle);
-    result
-}
-
 /// Sends one user message to a running daemon and returns progress
 /// plus the final response.
 ///
@@ -1331,45 +1299,6 @@ fn next_render_request_id(prefix: &str) -> String {
         prefix,
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-/// Runs the harness daemon with runtime directory management.
-pub fn run_harness_daemon(
-    project_root: &Path,
-    config: &Config,
-    eager_session_id: &str,
-    options: ServeOptions,
-) -> Result<(), HarnessError> {
-    run_harness_daemon_with_internal_tools(
-        project_root,
-        config,
-        eager_session_id,
-        options,
-        Vec::new(),
-    )
-}
-
-/// Runs the harness daemon with injected internal tool handlers.
-pub fn run_harness_daemon_with_internal_tools(
-    project_root: &Path,
-    config: &Config,
-    eager_session_id: &str,
-    options: ServeOptions,
-    internal_tool_handlers: crate::InternalToolHandlers,
-) -> Result<(), HarnessError> {
-    let runtime_instance_id = runtime_dir::HarnessInstanceId::mint();
-    run_harness_daemon_with_internal_tools_and_initial_client(
-        project_root,
-        config,
-        eager_session_id,
-        options,
-        internal_tool_handlers,
-        RuntimeHarnessLaunch {
-            runtime_instance_id,
-            initial_client: None,
-            initial_client_error_stream: None,
-        },
     )
 }
 

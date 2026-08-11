@@ -318,6 +318,14 @@ Values are parsed as YAML. Quote a value when a string could otherwise be
 interpreted as a boolean, number, `null`, list, or map. These startup settings
 cannot be applied when merely attaching to an existing harness.
 
+Tau validates and normalizes every startup layer before launching configured
+processes. A missing optional user file keeps the built-in layer, but an existing
+unreadable or malformed file, conflicting alias, invalid target, or malformed
+override stops startup with its source context. One accepted snapshot supplies
+extension commands, provider and secret inputs, roles, tool policy, retention,
+and prompt settings for that process; Tau does not reread individual settings or
+silently replace them with built-ins while the harness runs.
+
 Service and container launchers can additively enable configured extensions
 with a comma-separated, case-sensitive list:
 

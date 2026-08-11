@@ -66,7 +66,10 @@ suggests `tau attach SESSION`.
 
 ## Foreground daemon APIs
 
-The harness crate also exposes foreground daemon helpers such as `run_daemon`, `run_daemon_with_config`, and test-only echo variants. These APIs take an explicit socket path from the caller.
+The harness crate exposes the config-resolving `run_daemon` foreground helper
+and test-only echo variants. These APIs take an explicit socket path from the
+caller; pre-resolved configuration is internal so extension launch and runtime
+policy cannot carry different settings snapshots.
 
 Foreground daemon APIs bind the provided path directly unless socket activation provides a listener.
 

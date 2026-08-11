@@ -8,12 +8,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tau_config::secret_sources::SecretSources;
-use tau_config::settings::{BuiltinComponentIdentity, TauRuntimeSocketAccess, TauStateAccess};
+use tau_config::settings::{
+    BuiltinComponentIdentity, HarnessSettings, TauRuntimeSocketAccess, TauStateAccess,
+};
 
 use super::*;
 use crate::agent::{Agent, PendingPrompt};
 use crate::agent_creator_topology::RecordCreatorOutcome;
 use crate::event::SUPERVISED_CLEANUP_GRACE;
+use crate::event_log as path_crate_event_log;
 use crate::extension::{
     ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process, spawn_supervised,
 };
@@ -26,14 +29,50 @@ use crate::harness::{
     prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
     tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
 };
-use crate::settings::{
-    CoreMode, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,
-};
-use crate::{event_log as path_crate_event_log, settings as path_crate_settings};
+use crate::settings::{ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource};
 
 static STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE: AtomicBool = AtomicBool::new(false);
 static STUCK_PROVIDER_RELEASE: AtomicBool = AtomicBool::new(false);
 static STUCK_PROVIDER_EXITED: AtomicBool = AtomicBool::new(false);
+static INVALID_CONFIG_PROVIDER_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Ensures malformed startup settings fail before even an injected provider
+/// process starts, preventing built-in or configured fallback authority.
+#[test]
+fn malformed_settings_start_no_provider_process() {
+    fn provider_must_not_start(_: UnixStream, _: UnixStream) -> Result<(), String> {
+        INVALID_CONFIG_PROVIDER_STARTS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    INVALID_CONFIG_PROVIDER_STARTS.store(0, Ordering::SeqCst);
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_dir = tempdir.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    std::fs::write(config_dir.join("harness.yaml"), "extensions: [malformed\n")
+        .expect("write malformed config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(tempdir.path().join("runtime")),
+    };
+
+    let result = Harness::new_with_provider(
+        tempdir.path().join("state"),
+        dirs,
+        provider_must_not_start,
+        Vec::new(),
+        "invalid-config",
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::Durable,
+    );
+
+    assert!(result.is_err(), "malformed settings must fail startup");
+    assert_eq!(
+        INVALID_CONFIG_PROVIDER_STARTS.load(Ordering::SeqCst),
+        0,
+        "startup must validate settings before launching a provider"
+    );
+}
 
 /// Releases a deliberately stuck provider if its shutdown test exits early.
 struct StuckProviderRelease {
@@ -929,9 +968,6 @@ fn builtin_provider_startup_config(
     source_declaration: Option<tau_config::settings::ExtensionSecretEntry>,
 ) -> crate::settings::Config {
     crate::settings::Config {
-        core: crate::settings::CoreConfig {
-            mode: CoreMode::Embedded,
-        },
         extensions: BTreeMap::from([(
             "provider-work".to_owned(),
             crate::settings::ExtensionConfig {
@@ -953,6 +989,7 @@ fn builtin_provider_startup_config(
             },
         )]),
         extension_startup_diagnostics: Vec::new(),
+        harness_settings: HarnessSettings::built_in(),
     }
 }
 
@@ -3356,9 +3393,6 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     let extension_name = "optional-spawn-failure".to_owned();
     let command = format!("/definitely/not/a/{}-trailing-secret", "y".repeat(300));
     let config = crate::settings::Config {
-        core: crate::settings::CoreConfig {
-            mode: path_crate_settings::CoreMode::Embedded,
-        },
         extensions: BTreeMap::from([(
             extension_name.clone(),
             crate::settings::ExtensionConfig {
@@ -3378,6 +3412,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
             },
         )]),
         extension_startup_diagnostics: Vec::new(),
+        harness_settings: HarnessSettings::built_in(),
     };
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
 

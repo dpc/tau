@@ -821,11 +821,11 @@ impl Harness {
         if selector_matches_event(selectors, &roles_event) {
             self.send_catch_up_event(client_id, None, roles_event);
         }
-        let (harness_settings, _) = self.load_effective_harness_settings();
+        let harness_settings = &self.accepted_harness_settings;
         let selected_event = Event::HarnessRoleSelected(HarnessRoleSelected {
             baseline_params: self.selected_model.as_ref().map(|model| {
                 baseline_params_for_selection(
-                    &harness_settings,
+                    harness_settings,
                     &self.provider_model_info,
                     &self.selected_role,
                     model,

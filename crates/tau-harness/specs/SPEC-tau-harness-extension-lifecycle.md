@@ -299,9 +299,10 @@ config, public environment named enables, then ordered CLI overrides.
 
 Deterministic embedded and daemon acceptance may explicitly bypass all ambient
 startup environment and CLI compatibility transports and require an exact
-resolved extension-name allowlist before spawn. Runtime settings reload retains
-that environment-free policy. Normal interactive and default daemon startup use
-the ordered pipeline above.
+resolved extension-name allowlist before spawn. Both hermetic and normal startup
+retain their single accepted effective settings snapshot for runtime baseline
+lookups; neither mode rereads settings or performs live reload. Normal interactive
+and default daemon startup use the ordered pipeline above.
 
 ## Environment enablement boundary
 

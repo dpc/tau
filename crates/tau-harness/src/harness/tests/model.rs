@@ -1858,11 +1858,10 @@ fn role_without_verbosity_picks_low_when_supported() {
     );
 }
 
-/// A malformed `harness.yaml` must surface in the UI as a mandatory warning
-/// `HarnessNotice`. Without this, the only symptom of a borked file is that
-/// user-configured extensions or roles vanish.
+/// A malformed `harness.yaml` must reject startup with source context instead
+/// of constructing a fallback harness whose extensions or roles differ.
 #[test]
-fn borked_harness_yaml_emits_mandatory_warning_notice() {
+fn borked_harness_yaml_rejects_startup_with_context() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -1879,13 +1878,101 @@ fn borked_harness_yaml_emits_mandatory_warning_notice() {
     )
     .expect("write borked harness");
 
-    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    let message = find_mandatory_warning_notice(&h, "harness.yaml")
-        .expect("expected mandatory warning HarnessNotice about harness.yaml");
+    let error = match echo_harness_with_dirs("s1", state_dir, dirs) {
+        Ok(_) => panic!("malformed harness settings must reject startup"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
     assert!(
-        message.contains("failed to parse"),
-        "message should explain what happened, got: {message}"
+        message.contains("harness.yaml") && message.contains("failed to parse"),
+        "error should identify the malformed source, got: {message}"
     );
+}
+
+/// Ensures a running harness keeps its accepted role and model baselines after
+/// the source becomes invalid, including role reset, live publication, and
+/// late-subscriber catch-up paths.
+#[test]
+fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let config_path = config_dir.join("harness.yaml");
+    std::fs::write(
+        &config_path,
+        "agents:\n  effort: low\n  service_tier: flex\n",
+    )
+    .expect("write valid config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+    let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start harness");
+    let role = h.selected_role.clone();
+    std::fs::write(&config_path, "agents: [malformed\n").expect("invalidate source after startup");
+
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role: role.clone(),
+        action: tau_proto::UiRoleUpdateAction::SetEffort {
+            effort: Some(Effort::High),
+        },
+    })
+    .expect("apply runtime role override");
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role: role.clone(),
+        action: tau_proto::UiRoleUpdateAction::Delete,
+    })
+    .expect("reset role to accepted startup baseline");
+    assert_eq!(h.available_roles[&role].effort, Some(Effort::Low));
+
+    h.publish_current_model_state();
+    let mut sequence = path_crate_event_log::EventLogSeq::new(0);
+    let mut live = None;
+    while let Some(entry) = h.event_log.get_next_from(sequence) {
+        sequence = entry.seq.next();
+        if let Event::HarnessRoleSelected(selected) = entry.event {
+            live = Some(selected);
+        }
+    }
+    let live = live.expect("live selected-role publication");
+    assert_eq!(
+        live.baseline_params
+            .as_ref()
+            .and_then(|params| params.service_tier),
+        Some(tau_proto::ServiceTier::Flex)
+    );
+
+    let sink = connect_test_client(&mut h, "snapshot-catch-up", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "snapshot-catch-up",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::HARNESS_ROLE_SELECTED,
+            )],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe for selected-role catch-up");
+    let replay_baseline = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery) if delivery.replay => match &*delivery.event {
+                Event::HarnessRoleSelected(selected) => selected
+                    .baseline_params
+                    .as_ref()
+                    .and_then(|params| params.service_tier),
+                _ => None,
+            },
+            _ => None,
+        })
+        .next_back()
+        .expect("catch-up selected-role publication");
+    assert_eq!(replay_baseline, tau_proto::ServiceTier::Flex);
+    h.shutdown().expect("shutdown");
 }
 
 /// Disabling every role is a configuration error: startup must fail clearly
