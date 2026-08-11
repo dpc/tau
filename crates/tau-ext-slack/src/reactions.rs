@@ -162,10 +162,64 @@ pub(super) struct ReactionReservation {
     pub(super) unowned_add: bool,
 }
 
+/// Frozen authority and reservation carried from Slack I/O through confirmed
+/// terminal submission.
+struct PreparedReaction {
+    /// Configuration frozen before the remote attempt.
+    cfg: RuntimeConfig,
+    /// Exact retained target used by the remote attempt.
+    target: ReactionTarget,
+    /// Semantic reaction tuple reserved by this call.
+    key: ReactionKey,
+    /// Target reference presented by the caller.
+    message_ref: MessageFactId,
+    /// Configuration generation at preparation.
+    generation: u64,
+    /// Reaction lifecycle epoch at preparation.
+    epoch: u64,
+    /// Exact in-flight reservation token.
+    reservation: u64,
+    /// Whether the caller already owned this tuple before the attempt.
+    owned_before: bool,
+}
+
+impl PreparedReaction {
+    /// Return whether this completion retains its exact reservation, target,
+    /// configuration, and lifecycle authority.
+    fn is_current(&self, state: &State, invoke: &ToolStarted) -> bool {
+        state.config_generation == self.generation
+            && state.reactions.epoch == self.epoch
+            && state
+                .reactions
+                .in_flight
+                .get(&self.key)
+                .is_some_and(|current| current.token == self.reservation)
+            && state.config.as_ref().is_some_and(|current_cfg| {
+                state
+                    .reactions
+                    .targets
+                    .get(&self.message_ref)
+                    .is_some_and(|current_target| {
+                        current_target == &self.target
+                            && current_target.agent_id == invoke.agent_id
+                            && reaction_target_authorized(state, current_cfg, current_target)
+                    })
+            })
+    }
+}
+
+/// Reaction state-machine output before generic tool dispatch.
+enum ReactionExecution {
+    /// Generic dispatch still owes this terminal.
+    Pending(Event),
+    /// Reaction completion already submitted this terminal synchronously.
+    Submitted(Event),
+}
+
 /// Terminal disposition retained for same-process tool-call replay.
 #[derive(Clone)]
 pub(super) enum ReactionAttemptDisposition {
-    /// Authorized call is currently awaiting Slack.
+    /// Authorized call awaits Slack or confirmed terminal output.
     InFlight,
     /// Structured successful result.
     Success(CborValue),
@@ -194,7 +248,7 @@ pub(super) struct ReactionState {
     pub(super) target_order: VecDeque<MessageFactId>,
     /// Locally owned bot reactions.
     pub(super) owners: HashMap<ReactionKey, ReactionOwner>,
-    /// Reaction tuples reserved during Slack I/O.
+    /// Reaction tuples reserved through Slack I/O and terminal confirmation.
     pub(super) in_flight: HashMap<ReactionKey, ReactionReservation>,
     /// Monotonic token preventing late calls from clearing newer reservations.
     pub(super) next_reservation: u64,
@@ -368,7 +422,7 @@ impl ReactionState {
             })
     }
 
-    /// Return whether an identical call is already awaiting Slack I/O.
+    /// Return whether an identical call is awaiting Slack or confirmed output.
     pub(super) fn identical_call_in_flight(&self, invoke: &ToolStarted) -> bool {
         self.attempts.get(&invoke.call_id).is_some_and(|attempt| {
             attempt.agent_id == invoke.agent_id
@@ -428,18 +482,45 @@ pub(super) fn react_tool_spec() -> ToolSpec {
 }
 
 impl Extension {
-    /// Execute one separately authorized, exact-reference Slack reaction call.
-    pub(super) fn handle_react(&self, invoke: ToolStarted) -> Event {
+    /// Execute one separately authorized Slack reaction.
+    ///
+    /// Fresh remote successes synchronously write and flush their terminal
+    /// result. Output failure retires the complete Slack session before return.
+    pub(super) fn handle_react(&self, invoke: ToolStarted) -> ToolTerminalSubmission {
+        match self.execute_react(invoke) {
+            ReactionExecution::Pending(event) => ToolTerminalSubmission::pending(event),
+            ReactionExecution::Submitted(event) => {
+                drop(event);
+                ToolTerminalSubmission::Confirmed
+            }
+        }
+    }
+
+    /// Return only the reaction event for direct state-machine tests.
+    #[cfg(test)]
+    pub(super) fn handle_react_event(&self, invoke: ToolStarted) -> Event {
+        match self.execute_react(invoke) {
+            ReactionExecution::Pending(event) | ReactionExecution::Submitted(event) => event,
+        }
+    }
+
+    /// Execute the reaction state machine and classify terminal ownership.
+    fn execute_react(&self, invoke: ToolStarted) -> ReactionExecution {
+        macro_rules! pending {
+            ($event:expr) => {
+                return ReactionExecution::Pending($event)
+            };
+        }
         {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(attempt) = state.reactions.attempts.get(&invoke.call_id) {
                 if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
-                    return tool_error(
+                    pending!(tool_error(
                         invoke,
                         "slack_react call id was replayed with conflicting arguments".to_owned(),
-                    );
+                    ));
                 }
-                return match &attempt.disposition {
+                pending!(match &attempt.disposition {
                     ReactionAttemptDisposition::InFlight => reaction_coalesced(invoke),
                     ReactionAttemptDisposition::Success(result) => {
                         structured_tool_result(invoke, result.clone())
@@ -447,7 +528,7 @@ impl Extension {
                     ReactionAttemptDisposition::Error(message) => {
                         tool_error(invoke, message.clone())
                     }
-                };
+                });
             }
         }
         let parsed = (|| {
@@ -467,7 +548,7 @@ impl Extension {
         })();
         let (message_ref, emoji, action) = match parsed {
             Ok(parsed) => parsed,
-            Err(message) => return self.finish_reaction_error(invoke, message),
+            Err(message) => pending!(self.finish_reaction_error(invoke, message)),
         };
         let prepared = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -475,50 +556,53 @@ impl Extension {
                 || self.shutdown.is_requested()
                 || !state.session_active
             {
-                return self.finish_reaction_error_locked(
+                pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
+                ));
             }
             let Some(cfg) = state.config.clone() else {
-                return self.finish_reaction_error_locked(
+                pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
+                ));
             };
             let Some(target) = state.reactions.targets.get(&message_ref).cloned() else {
-                return self.finish_reaction_error_locked(
+                pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
+                ));
             };
             if target.agent_id != invoke.agent_id
                 || !reaction_target_authorized(&state, &cfg, &target)
             {
-                return self.finish_reaction_error_locked(
+                pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
-                );
+                ));
             }
             if let Some(attempt) = state.reactions.attempts.get(&invoke.call_id) {
                 if attempt.agent_id == invoke.agent_id && attempt.arguments == invoke.arguments {
-                    return reaction_coalesced(invoke);
+                    pending!(reaction_coalesced(invoke));
                 }
-                return tool_error(
+                pending!(tool_error(
                     invoke,
                     "slack_react call id was replayed with conflicting arguments".to_owned(),
-                );
+                ));
             }
             if state.reactions.attempts.len() >= ATTEMPT_LIMIT
                 && state.reactions.attempts.values().all(|attempt| {
                     matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
                 })
             {
-                return tool_error(invoke, "Slack reaction attempt capacity is full".to_owned());
+                pending!(tool_error(
+                    invoke,
+                    "Slack reaction attempt capacity is full".to_owned(),
+                ));
             }
             let key = ReactionKey {
                 channel_id: target.conversation.channel_id.clone(),
@@ -526,11 +610,11 @@ impl Extension {
                 emoji: emoji.clone(),
             };
             if state.reactions.in_flight.contains_key(&key) {
-                return self.finish_reaction_error_locked(
+                pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
                     "Slack reaction is already in progress".to_owned(),
-                );
+                ));
             }
             let owner_agent = state
                 .reactions
@@ -544,11 +628,11 @@ impl Extension {
                         .as_ref()
                         .is_some_and(|owner| owner != &invoke.agent_id)
                     {
-                        return self.finish_reaction_error_locked(
+                        pending!(self.finish_reaction_error_locked(
                             &mut state,
                             invoke,
                             "Slack reaction is owned by another agent".to_owned(),
-                        );
+                        ));
                     }
                     if owner_agent.is_none()
                         && state.reactions.owners.len()
@@ -560,20 +644,20 @@ impl Extension {
                                 .count()
                             >= OWNERSHIP_LIMIT
                     {
-                        return self.finish_reaction_error_locked(
+                        pending!(self.finish_reaction_error_locked(
                             &mut state,
                             invoke,
                             "Slack reaction ownership capacity is full".to_owned(),
-                        );
+                        ));
                     }
                 }
                 ReactionActionKind::Remove => {
                     if !owned_before {
-                        return self.finish_reaction_error_locked(
+                        pending!(self.finish_reaction_error_locked(
                             &mut state,
                             invoke,
                             "Slack reaction is not owned by this agent".to_owned(),
-                        );
+                        ));
                     }
                 }
             }
@@ -594,107 +678,131 @@ impl Extension {
                     .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight)
             );
             state.config_frozen = true;
-            (
+            PreparedReaction {
                 cfg,
                 target,
                 key,
-                state.config_generation,
-                state.reactions.epoch,
+                message_ref,
+                generation: state.config_generation,
+                epoch: state.reactions.epoch,
                 reservation,
                 owned_before,
-            )
+            }
         };
-        let (cfg, target, key, generation, epoch, reservation, owned_before) = prepared;
         let outcome = self.reaction_client.react(
-            &cfg,
+            &prepared.cfg,
             action,
-            &target.conversation.channel_id,
-            &target.message_ts,
+            &prepared.target.conversation.channel_id,
+            &prepared.target.message_ts,
             &emoji,
         );
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let reservation_matches = state
-            .reactions
-            .in_flight
-            .get(&key)
-            .is_some_and(|current| current.token == reservation);
-        if reservation_matches {
-            state.reactions.in_flight.remove(&key);
-        }
-        let current = state.config_generation == generation
-            && state.reactions.epoch == epoch
-            && reservation_matches
-            && state.config.as_ref().is_some_and(|current_cfg| {
-                state
+        let submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let current = prepared.is_current(&state, &invoke);
+            if !current {
+                if state
                     .reactions
-                    .targets
-                    .get(&message_ref)
-                    .is_some_and(|current_target| {
-                        current_target == &target
-                            && current_target.agent_id == invoke.agent_id
-                            && reaction_target_authorized(&state, current_cfg, current_target)
+                    .in_flight
+                    .get(&prepared.key)
+                    .is_some_and(|current| current.token == prepared.reservation)
+                {
+                    state.reactions.in_flight.remove(&prepared.key);
+                }
+                drop(submission);
+                let message =
+                    "Slack message reference is unknown, stale, or unauthorized".to_owned();
+                if state
+                    .reactions
+                    .attempts
+                    .get(&invoke.call_id)
+                    .is_some_and(|attempt| {
+                        attempt.agent_id == invoke.agent_id
+                            && attempt.arguments == invoke.arguments
+                            && matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
                     })
-            });
-        if !current {
-            let message = "Slack message reference is unknown, stale, or unauthorized".to_owned();
-            if state
-                .reactions
-                .attempts
-                .get(&invoke.call_id)
-                .is_some_and(|attempt| {
-                    attempt.agent_id == invoke.agent_id
-                        && attempt.arguments == invoke.arguments
-                        && matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
-                })
-            {
-                return self.finish_reaction_error_locked(&mut state, invoke, message);
+                {
+                    pending!(self.finish_reaction_error_locked(&mut state, invoke, message));
+                }
+                pending!(tool_error(invoke, message));
             }
-            return tool_error(invoke, message);
+            let successful_remote_outcome = match (&action, &outcome) {
+                (ReactionActionKind::Add, Ok(()))
+                | (ReactionActionKind::Add, Err(ReactionApiError::AlreadyReacted))
+                    if prepared.owned_before =>
+                {
+                    true
+                }
+                (ReactionActionKind::Remove, Ok(()))
+                | (ReactionActionKind::Remove, Err(ReactionApiError::NoReaction))
+                    if prepared.owned_before =>
+                {
+                    true
+                }
+                (ReactionActionKind::Add, Ok(())) => true,
+                _ => false,
+            };
+            if !successful_remote_outcome {
+                state.reactions.in_flight.remove(&prepared.key);
+                let message =
+                    reaction_error_message(outcome.err(), action, current, prepared.owned_before);
+                drop(submission);
+                pending!(self.finish_reaction_error_locked(&mut state, invoke, message));
+            }
         }
-        let success = match (action, outcome) {
-            (ReactionActionKind::Add, Ok(())) if current => {
-                state.reactions.owners.insert(
-                    key,
-                    ReactionOwner {
-                        agent_id: invoke.agent_id.clone(),
-                        message_ref: message_ref.clone(),
-                    },
-                );
-                true
-            }
-            (ReactionActionKind::Add, Err(ReactionApiError::AlreadyReacted))
-                if current && owned_before =>
-            {
-                true
-            }
-            (ReactionActionKind::Remove, Ok(()))
-            | (ReactionActionKind::Remove, Err(ReactionApiError::NoReaction))
-                if current && owned_before =>
-            {
-                state.reactions.owners.remove(&key);
-                true
-            }
-            (_, outcome) => {
-                let message = reaction_error_message(outcome.err(), action, current, owned_before);
-                return self.finish_reaction_error_locked(&mut state, invoke, message);
-            }
-        };
-        debug_assert!(success);
         let result = CborValue::Map(vec![
             example_field("status", example_text("ok")),
             example_field("action", example_text(action.as_str())),
             example_field("emoji", example_text(&emoji)),
         ]);
-        if !state
-            .reactions
-            .remember_attempt(&invoke, ReactionAttemptDisposition::Success(result.clone()))
-        {
-            return tool_error(
-                invoke,
-                "slack_react call id was replayed with conflicting arguments".to_owned(),
-            );
+        let Event::ToolResult(tool_result) = structured_tool_result(invoke.clone(), result.clone())
+        else {
+            unreachable!("structured reaction result is terminal success");
+        };
+        let result_sent = self
+            .output
+            .report_tool_result_confirmed(tool_result.clone());
+        if !result_sent {
+            self.output_failed.store(true, Ordering::Release);
         }
-        structured_tool_result(invoke, result)
+        #[cfg(test)]
+        if result_sent {
+            run_blocking_test_hook(&self.test_hooks.reaction_result_boundary);
+        }
+        if result_sent {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if prepared.is_current(&state, &invoke) {
+                match action {
+                    ReactionActionKind::Add if !prepared.owned_before => {
+                        state.reactions.owners.insert(
+                            prepared.key.clone(),
+                            ReactionOwner {
+                                agent_id: invoke.agent_id.clone(),
+                                message_ref: prepared.message_ref.clone(),
+                            },
+                        );
+                    }
+                    ReactionActionKind::Remove => {
+                        state.reactions.owners.remove(&prepared.key);
+                    }
+                    ReactionActionKind::Add => {}
+                }
+                state.reactions.in_flight.remove(&prepared.key);
+                debug_assert!(
+                    state
+                        .reactions
+                        .remember_attempt(&invoke, ReactionAttemptDisposition::Success(result))
+                );
+            }
+        }
+        drop(submission);
+        if !result_sent {
+            self.retire_after_output_failure();
+        }
+        ReactionExecution::Submitted(Event::ToolResult(tool_result))
     }
 
     /// Store and return one terminal reaction error after acquiring state.

@@ -170,8 +170,10 @@ fact references from canonically confirmed incoming reports or successful
 `slack_send` results.
 Targets, same-agent reaction ownership, in-flight reservations, and tool-call
 attempts are bounded runtime state. Adds establish ownership only after
-unambiguous Slack success; removes require that ownership. Ambiguous effects are
-not adopted.
+unambiguous Slack success and confirmed local result write/flush; removes
+require that ownership and clear it only after the same boundary. Output
+failure retains no reaction authority and retires the whole Slack session
+without retry or compensation. Ambiguous effects are not adopted.
 
 The focused reactions module owns target authority, ownership, reservations,
 attempt replay, capacity/pinning, tool execution, and typed reaction HTTP

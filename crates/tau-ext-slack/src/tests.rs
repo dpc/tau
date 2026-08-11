@@ -10,7 +10,7 @@ use tokio::{net as path_tokio_net, sync as path_tokio_sync, time as path_tokio_t
 mod send_delivery_tests;
 
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use tau_proto::{ContentPart, HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 
@@ -124,6 +124,10 @@ struct FakeClient {
     reactions: Mutex<Vec<RecordedReaction>>,
     /// Scripted typed reaction outcomes.
     reaction_results: Mutex<VecDeque<Result<(), ReactionApiError>>>,
+    /// Set after one reaction call reaches its typed remote outcome.
+    reaction_completed: Arc<AtomicBool>,
+    /// Optional one-shot event-driven completion signal.
+    reaction_completion_signal: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl FakeClient {
@@ -135,6 +139,8 @@ impl FakeClient {
             identity_count: Mutex::new(0),
             reactions: Mutex::new(Vec::new()),
             reaction_results: Mutex::new(VecDeque::new()),
+            reaction_completed: Arc::new(AtomicBool::new(false)),
+            reaction_completion_signal: Mutex::new(None),
         })
     }
 
@@ -228,11 +234,22 @@ impl ReactionClient for FakeClient {
             message_ts: message_ts.to_owned(),
             emoji: emoji.to_owned(),
         });
-        self.reaction_results
+        let result = self
+            .reaction_results
             .lock()
             .expect("lock")
             .pop_front()
-            .unwrap_or(Ok(()))
+            .unwrap_or(Ok(()));
+        self.reaction_completed.store(true, Ordering::Release);
+        if let Some(signal) = self
+            .reaction_completion_signal
+            .lock()
+            .expect("reaction completion signal")
+            .take()
+        {
+            signal.send(()).expect("signal reaction completion");
+        }
+        result
     }
 }
 
@@ -1803,7 +1820,7 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
 
     let reacting = Arc::clone(&ext);
     let reaction = std::thread::spawn(move || {
-        reacting.handle_react(tool(
+        reacting.handle_react_event(tool(
             REACT_TOOL_NAME,
             "agent-a",
             tau_proto::json_to_cbor(
@@ -1877,7 +1894,7 @@ fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
         .expect("writer failure latched under gate");
     assert!(ext.output_failed.load(Ordering::Acquire));
     assert!(matches!(
-        ext.handle_react(tool(
+        ext.handle_react_event(tool(
             REACT_TOOL_NAME,
             "agent-a",
             tau_proto::json_to_cbor(
@@ -2681,6 +2698,205 @@ fn install_source_reaction_target(ext: &Extension, message_ref: &str) {
     ));
 }
 
+/// Shared runtime handles retained when the real tau-client runner returns an
+/// output error instead of its extension state.
+struct ReactionRunnerProbe {
+    /// Reaction and lifecycle state.
+    state: Arc<Mutex<State>>,
+    /// Fatal output latch.
+    output_failed: Arc<AtomicBool>,
+    /// Whole-extension shutdown signal.
+    shutdown: Arc<ShutdownSignal>,
+}
+
+/// Minimal runner declaration that drives production reaction completion
+/// through a real [`ClientHandle`] without unrelated Slack startup behavior.
+struct ReactionRunnerExtension {
+    /// Records whether detached progress actually exhausted its bounded FIFO.
+    overloaded: Arc<AtomicBool>,
+}
+
+impl TauExtension for ReactionRunnerExtension {
+    type State = Extension;
+
+    fn name(&self) -> &'static str {
+        "slack-reaction-writer-test"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        let overloaded = self.overloaded;
+        let mut spam = react_tool_spec();
+        spam.name = tau_proto::ToolName::new("spam");
+        builder
+            .configure_raw(|_| Ok(()))
+            .tool(spam, move |cx| {
+                let invoke = cx.invoke();
+                let progress = ToolProgress {
+                    call_id: invoke.call_id.clone(),
+                    tool_name: invoke.tool_name.clone(),
+                    message: Some("fill detached output".to_owned()),
+                    progress: None,
+                    display: None,
+                };
+                if matches!(
+                    cx.handle().report_tool_progress_detached(progress),
+                    Err(ClientError::Overloaded)
+                ) {
+                    overloaded.store(true, Ordering::Release);
+                }
+                Ok(())
+            })
+            .tool(react_tool_spec(), |cx| {
+                cx.state
+                    .dispatch_scoped_tool(cx.local_tool_name(), cx.invoke().clone());
+                Ok(())
+            })
+            .ready_message("ready");
+    }
+}
+
+/// Writer that fails the first flush after Slack returns a reaction outcome.
+struct ReactionFlushFailureWriter {
+    /// Remote-completion signal set by the fake reaction API.
+    reaction_completed: Arc<AtomicBool>,
+}
+
+impl Write for ReactionFlushFailureWriter {
+    fn write(&mut self, buffer: &[u8]) -> path_std_io::Result<usize> {
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        if self.reaction_completed.swap(false, Ordering::AcqRel) {
+            return Err(path_std_io::Error::other(
+                "forced reaction terminal flush failure",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Writer that blocks on the first detached spam frame so the test can fill
+/// tau-client's real bounded detached FIFO.
+struct ReactionOverloadWriter {
+    /// Gate released after the runner observes actual overload.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Announces the first blocked spam write.
+    entered: mpsc::Sender<()>,
+    /// Prevents repeated announcements after release.
+    announced: bool,
+    /// Number of frames containing the spam tool name; the first is startup
+    /// registration and the second is detached progress.
+    spam_frames: usize,
+}
+
+impl Write for ReactionOverloadWriter {
+    fn write(&mut self, buffer: &[u8]) -> path_std_io::Result<usize> {
+        if buffer.windows(4).any(|window| window == b"spam") {
+            self.spam_frames += 1;
+            if !self.announced && 2 <= self.spam_frames {
+                self.announced = true;
+                self.entered.send(()).expect("announce blocked writer");
+                let (lock, condvar) = &*self.gate;
+                let mut blocked = lock.lock().expect("writer gate");
+                while *blocked {
+                    blocked = condvar.wait(blocked).expect("wait writer gate");
+                }
+            }
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Run one reaction against the actual tau-client writer and retain state even
+/// when that writer returns an error.
+fn run_reaction_writer_fixture(
+    writer: impl Write + Send + 'static,
+    client: Arc<FakeClient>,
+    action: ReactionActionKind,
+    spam_count: usize,
+    overloaded: Arc<AtomicBool>,
+    probe_slot: Arc<Mutex<Option<ReactionRunnerProbe>>>,
+) -> Result<(), String> {
+    let message_ref = "slack-message:test-c123-writer";
+    let mut input = Vec::new();
+    let mut input_writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    input_writer
+        .write_message(&valid_config_message())
+        .expect("write config");
+    for index in 0..spam_count {
+        input_writer
+            .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+                tool_call(
+                    "spam",
+                    "agent-a",
+                    &format!("spam-{index}"),
+                    CborValue::Map(Vec::new()),
+                ),
+            )))
+            .expect("write spam invocation");
+    }
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+            tool_call(
+                REACT_TOOL_NAME,
+                "agent-a",
+                "writer-reaction",
+                reaction_args(
+                    message_ref,
+                    "eyes",
+                    match action {
+                        ReactionActionKind::Add => "add",
+                        ReactionActionKind::Remove => "remove",
+                    },
+                ),
+            ),
+        )))
+        .expect("write reaction invocation");
+    input_writer.flush().expect("flush protocol input");
+
+    let runner_client = Arc::clone(&client);
+    tau_client::TauExtensionRunner::new(ReactionRunnerExtension { overloaded })
+        .run_detached_writer_with_state(path_std_io::Cursor::new(input), writer, move |handle| {
+            let ext =
+                Extension::new_with_reaction_client(runner_client.clone(), runner_client, handle);
+            ext.apply_config(cfg()).expect("fixture config");
+            {
+                let mut state = ext.state.lock().expect("state");
+                state.bot_user_id = Some("UBOT123".to_owned());
+                state.installation_team_id = Some("T123".to_owned());
+                state.instance_name = Some(test_extension_name("std-slack"));
+            }
+            register_agent(&ext, "agent-a");
+            install_source_reaction_target(&ext, message_ref);
+            if action == ReactionActionKind::Remove {
+                ext.state.lock().expect("state").reactions.owners.insert(
+                    ReactionKey {
+                        channel_id: "C123".to_owned(),
+                        message_ts: "1.0".to_owned(),
+                        emoji: "eyes".to_owned(),
+                    },
+                    ReactionOwner {
+                        agent_id: agent_id("agent-a"),
+                        message_ref: MessageFactId::new(message_ref),
+                    },
+                );
+            }
+            *probe_slot.lock().expect("probe") = Some(ReactionRunnerProbe {
+                state: Arc::clone(&ext.state),
+                output_failed: Arc::clone(&ext.output_failed),
+                shutdown: Arc::clone(&ext.shutdown),
+            });
+            ext
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Ownership capacity rejects a new unowned add before Slack I/O.
 #[test]
 fn reaction_ownership_capacity_is_enforced_before_io() {
@@ -2704,7 +2920,7 @@ fn reaction_ownership_capacity_is_enforced_before_io() {
         }
     }
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "capacity-add",
@@ -2926,10 +3142,10 @@ fn reaction_target_ownership_and_replay_are_enforced() {
         reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
     assert!(matches!(
-        ext.handle_react(add.clone()),
+        ext.handle_react_event(add.clone()),
         Event::ToolResult(_)
     ));
-    assert!(matches!(ext.handle_react(add), Event::ToolResult(_)));
+    assert!(matches!(ext.handle_react_event(add), Event::ToolResult(_)));
     assert_eq!(
         client.reactions.lock().expect("lock").as_slice(),
         &[RecordedReaction {
@@ -2941,7 +3157,7 @@ fn reaction_target_ownership_and_replay_are_enforced() {
     );
 
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-b",
             "react-other",
@@ -2951,7 +3167,7 @@ fn reaction_target_ownership_and_replay_are_enforced() {
     ));
     assert_eq!(client.reactions.lock().expect("lock").len(), 1);
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "react-remove",
@@ -2961,6 +3177,341 @@ fn reaction_target_ownership_and_replay_are_enforced() {
     ));
     assert_eq!(client.reactions.lock().expect("lock").len(), 2);
     assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
+}
+
+/// A confirmed same-call replay still emits its retained terminal through
+/// ordinary dispatch, while never repeating Slack I/O.
+#[test]
+fn reaction_success_replay_reports_retained_terminal_once() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    let message_ref = "slack-message:test-c123-replay-report";
+    install_source_reaction_target(&ext, message_ref);
+    let invoke = tool_call(
+        REACT_TOOL_NAME,
+        "agent-a",
+        "reaction-replay-report",
+        reaction_args(message_ref, "eyes", "add"),
+    );
+
+    ext.dispatch_scoped_tool(&tau_proto::ToolName::new(REACT_TOOL_NAME), invoke.clone());
+    let first = rx
+        .try_iter()
+        .filter(|message| {
+            matches!(
+                message,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
+            )
+        })
+        .count();
+    ext.dispatch_scoped_tool(&tau_proto::ToolName::new(REACT_TOOL_NAME), invoke);
+    let replayed = rx
+        .try_iter()
+        .filter(|message| {
+            matches!(
+                message,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
+            )
+        })
+        .count();
+
+    assert_eq!(first, 1);
+    assert_eq!(replayed, 1);
+    assert_eq!(client.reactions.lock().expect("reactions").len(), 1);
+}
+
+/// A real tau-client write and flush must finish before reaction ownership and
+/// same-call success replay become final.
+#[test]
+fn reaction_success_commits_only_after_actual_writer_confirmation() {
+    let client = FakeClient::new();
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let overloaded = Arc::new(AtomicBool::new(false));
+    let probe_slot = Arc::new(Mutex::new(None));
+    run_reaction_writer_fixture(
+        output,
+        Arc::clone(&client),
+        ReactionActionKind::Add,
+        0,
+        overloaded,
+        Arc::clone(&probe_slot),
+    )
+    .expect("reaction writer run");
+
+    assert_eq!(client.reactions.lock().expect("reactions").len(), 1);
+    let probe = probe_slot.lock().expect("probe");
+    let probe = probe.as_ref().expect("installed probe");
+    let state = probe.state.lock().expect("state");
+    assert_eq!(state.reactions.owners.len(), 1);
+    assert!(
+        state
+            .reactions
+            .attempts
+            .values()
+            .any(|attempt| matches!(attempt.disposition, ReactionAttemptDisposition::Success(_)))
+    );
+    drop(state);
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
+    let frames = std::iter::from_fn(|| reader.read_message().transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode output");
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(), Event::ToolResultReported(result)
+                        if result.tool_name.as_str() == REACT_TOOL_NAME)
+            ))
+            .count(),
+        1
+    );
+}
+
+/// Actual add/remove terminal flush failure retires the whole Slack session,
+/// preserves no reaction authority, and never issues compensation.
+#[test]
+fn reaction_writer_failure_retires_add_and_remove_without_compensation() {
+    for action in [ReactionActionKind::Add, ReactionActionKind::Remove] {
+        let client = FakeClient::new();
+        let probe_slot = Arc::new(Mutex::new(None));
+        let result = run_reaction_writer_fixture(
+            ReactionFlushFailureWriter {
+                reaction_completed: Arc::clone(&client.reaction_completed),
+            },
+            Arc::clone(&client),
+            action,
+            0,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&probe_slot),
+        );
+        assert!(result.is_err(), "{action:?} writer must fail");
+        assert_eq!(
+            client.reactions.lock().expect("reactions").len(),
+            1,
+            "{action:?} must not retry or compensate"
+        );
+        let probe = probe_slot.lock().expect("probe");
+        let probe = probe.as_ref().expect("installed probe");
+        assert!(probe.output_failed.load(Ordering::Acquire));
+        assert!(probe.shutdown.is_requested());
+        let state = probe.state.lock().expect("state");
+        assert!(!state.session_active);
+        assert!(state.reactions.targets.is_empty());
+        assert!(state.reactions.owners.is_empty());
+        assert!(state.reactions.in_flight.is_empty());
+        assert!(state.reactions.attempts.is_empty());
+    }
+}
+
+/// Saturating tau-client's actual detached FIFO must not drop a successful
+/// reaction terminal: confirmed output waits for the writer and then commits.
+#[test]
+fn reaction_confirmation_survives_actual_detached_output_overload() {
+    let client = FakeClient::new();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    *client
+        .reaction_completion_signal
+        .lock()
+        .expect("reaction completion signal") = Some(completed_tx);
+    let overloaded = Arc::new(AtomicBool::new(false));
+    let probe_slot = Arc::new(Mutex::new(None));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let writer = ReactionOverloadWriter {
+        gate: Arc::clone(&gate),
+        entered: entered_tx,
+        announced: false,
+        spam_frames: 0,
+    };
+    let running_client = Arc::clone(&client);
+    let running_overloaded = Arc::clone(&overloaded);
+    let running_probe = Arc::clone(&probe_slot);
+    let runner = std::thread::spawn(move || {
+        run_reaction_writer_fixture(
+            writer,
+            running_client,
+            ReactionActionKind::Add,
+            96,
+            running_overloaded,
+            running_probe,
+        )
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer blocked on detached progress");
+    completed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("reaction reached remote completion");
+    assert!(
+        overloaded.load(Ordering::Acquire),
+        "fixture must hit the real detached FIFO bound"
+    );
+    let (lock, condvar) = &*gate;
+    *lock.lock().expect("writer gate") = false;
+    condvar.notify_all();
+    runner
+        .join()
+        .expect("runner thread")
+        .expect("confirmed reaction after overload");
+
+    let probe = probe_slot.lock().expect("probe");
+    let state = probe.as_ref().expect("probe").state.lock().expect("state");
+    assert_eq!(state.reactions.owners.len(), 1);
+    assert!(
+        state
+            .reactions
+            .attempts
+            .values()
+            .any(|attempt| matches!(attempt.disposition, ReactionAttemptDisposition::Success(_)))
+    );
+}
+
+/// Agent unload racing the post-flush boundary waits on the shared gate: state
+/// remains provisional at the boundary, then unload clears the committed owner.
+#[test]
+fn reaction_result_boundary_serializes_lifecycle_without_restoring_authority() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    let message_ref = "slack-message:test-c123-race";
+    install_source_reaction_target(&ext, message_ref);
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks
+        .reaction_result_boundary
+        .lock()
+        .expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
+    *ext.test_hooks.lifecycle_gate_attempt.lock().expect("hook") = Some(lifecycle_tx);
+    let ext = Arc::new(ext);
+    let reacting = Arc::clone(&ext);
+    let reaction = std::thread::spawn(move || {
+        reacting.handle_react_event(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "reaction-race",
+            reaction_args(message_ref, "eyes", "add"),
+        ))
+    });
+    reached_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("confirmed output boundary");
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(state.reactions.owners.is_empty());
+        assert!(
+            state
+                .reactions
+                .attempts
+                .values()
+                .any(|attempt| matches!(attempt.disposition, ReactionAttemptDisposition::InFlight))
+        );
+    }
+    let unloading = Arc::clone(&ext);
+    let unload = std::thread::spawn(move || unloading.unload_agent(&agent_id("agent-a")));
+    lifecycle_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("lifecycle waiting for gate");
+    release_tx.send(()).expect("release result boundary");
+    assert!(matches!(
+        reaction.join().expect("reaction"),
+        Event::ToolResult(_)
+    ));
+    unload.join().expect("unload");
+    assert_eq!(client.reactions.lock().expect("reactions").len(), 1);
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(1))
+            .expect("reported reaction result"),
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
+    ));
+    let state = ext.state.lock().expect("state");
+    assert!(state.reactions.targets.is_empty());
+    assert!(state.reactions.owners.is_empty());
+    assert!(state.reactions.attempts.is_empty());
+}
+
+/// A successful remove keeps its existing owner and provisional replay through
+/// the confirmed-output boundary, then clears ownership and commits Success.
+#[test]
+fn reaction_remove_remains_provisional_until_result_confirmation() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    let message_ref = "slack-message:test-c123-remove-boundary";
+    install_source_reaction_target(&ext, message_ref);
+    let key = ReactionKey {
+        channel_id: "C123".to_owned(),
+        message_ts: "1.0".to_owned(),
+        emoji: "eyes".to_owned(),
+    };
+    ext.state.lock().expect("state").reactions.owners.insert(
+        key.clone(),
+        ReactionOwner {
+            agent_id: agent_id("agent-a"),
+            message_ref: MessageFactId::new(message_ref),
+        },
+    );
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks
+        .reaction_result_boundary
+        .lock()
+        .expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let ext = Arc::new(ext);
+    let removing = Arc::clone(&ext);
+    let removal = std::thread::spawn(move || {
+        removing.handle_react_event(tool_call(
+            REACT_TOOL_NAME,
+            "agent-a",
+            "reaction-remove-boundary",
+            reaction_args(message_ref, "eyes", "remove"),
+        ))
+    });
+    reached_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("confirmed output boundary");
+    {
+        let state = ext.state.lock().expect("state");
+        assert!(state.reactions.owners.contains_key(&key));
+        assert!(
+            state
+                .reactions
+                .attempts
+                .values()
+                .any(|attempt| matches!(attempt.disposition, ReactionAttemptDisposition::InFlight))
+        );
+    }
+    release_tx.send(()).expect("release result boundary");
+    assert!(matches!(
+        removal.join().expect("removal"),
+        Event::ToolResult(_)
+    ));
+    assert_eq!(client.reactions.lock().expect("reactions").len(), 1);
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(1))
+            .expect("reported removal result"),
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
+    ));
+    let state = ext.state.lock().expect("state");
+    assert!(!state.reactions.owners.contains_key(&key));
+    assert!(
+        state
+            .reactions
+            .attempts
+            .values()
+            .any(|attempt| matches!(attempt.disposition, ReactionAttemptDisposition::Success(_)))
+    );
 }
 
 /// Slack idempotency outcomes never adopt an unowned shared-bot reaction, while
@@ -2973,7 +3524,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
 
     client.push_reaction_result(Err(ReactionApiError::AlreadyReacted));
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "already",
@@ -2985,7 +3536,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
 
     client.push_reaction_result(Ok(()));
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "add-ok",
@@ -2995,7 +3546,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
     ));
     client.push_reaction_result(Err(ReactionApiError::NoReaction));
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "remove-missing",
@@ -3007,7 +3558,7 @@ fn reaction_idempotency_errors_respect_local_ownership() {
 
     client.push_reaction_result(Err(ReactionApiError::OutcomeUnknown));
     assert!(matches!(
-        ext.handle_react(tool_call(
+        ext.handle_react_event(tool_call(
             REACT_TOOL_NAME,
             "agent-a",
             "ambiguous-add",
@@ -3040,7 +3591,7 @@ fn reaction_validation_and_ambiguous_failure_are_fail_closed() {
     .enumerate()
     {
         assert!(matches!(
-            ext.handle_react(tool_call(
+            ext.handle_react_event(tool_call(
                 REACT_TOOL_NAME,
                 "agent-a",
                 &format!("invalid-{index}"),

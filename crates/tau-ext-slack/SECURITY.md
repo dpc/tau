@@ -70,8 +70,12 @@ native-id cache has no restart or cross-agent guarantee.
 action (`slack:react`). It accepts only exact locally retained Tau-issued refs,
 never native Slack IDs or aliases, and revalidates live source/config authority.
 Adds establish bounded same-agent runtime ownership only after unambiguous
-success; removes require that ownership. Ambiguous effects are never adopted,
-and lifecycle clearing may leave remote residue rather than risk cross-agent or
-cross-session removal. The optional surface requires only `reactions:write` and
-does not add listing/discovery. Slack members, administrators, Slack Connect,
-and workflows can observe or act on bot reactions.
+success and confirmed local result write/flush; removes require that ownership
+and clear it only after the same boundary. Failed output retires the whole Slack
+session and retains no reaction authority. It never retries or compensates a
+possibly completed Slack effect, so lifecycle clearing may leave remote residue
+rather than risk cross-agent or cross-session removal. Local flush is not a
+harness commit acknowledgement. The optional surface requires only
+`reactions:write` and does not add listing/discovery. Slack members,
+administrators, Slack Connect, and workflows can observe or act on bot
+reactions.

@@ -1486,8 +1486,8 @@ impl Output {
 
 struct Extension {
     state: Arc<Mutex<State>>,
-    /// Shared sent/delete confirmed-submission and lifecycle/fatal-output
-    /// retirement barrier.
+    /// Shared sent/delete/reaction confirmed-submission and
+    /// lifecycle/fatal-output retirement barrier.
     output_submission_gate: Arc<Mutex<()>>,
     /// Slack transport, identity, and message-posting operations.
     client: Arc<dyn SlackClient>,
@@ -1508,6 +1508,21 @@ struct Extension {
     test_hooks: Arc<ExtensionTestHooks>,
 }
 
+/// Whether dispatch still owes the local protocol writer one tool terminal.
+enum ToolTerminalSubmission {
+    /// Dispatch must submit this ordinary terminal or progress event.
+    Pending(Box<Event>),
+    /// The handler already confirmed this terminal through the protocol writer.
+    Confirmed,
+}
+
+impl ToolTerminalSubmission {
+    /// Wrap one event that still needs ordinary dispatch submission.
+    fn pending(event: Event) -> Self {
+        Self::Pending(Box::new(event))
+    }
+}
+
 /// One test-only boundary that announces arrival and waits for explicit
 /// release.
 #[cfg(test)]
@@ -1518,7 +1533,7 @@ struct BlockingTestHook {
     release: mpsc::Receiver<()>,
 }
 
-/// Test-only hooks for writer failure and delete-submission races.
+/// Test-only hooks for writer, ingress, reaction, and lifecycle races.
 #[cfg(test)]
 #[derive(Default)]
 struct ExtensionTestHooks {
@@ -1533,6 +1548,8 @@ struct ExtensionTestHooks {
     lifecycle_gate_attempt: Mutex<Option<mpsc::Sender<()>>>,
     /// Runs after the sent report write and before typed-result submission.
     sent_report_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Runs after a reaction result flush and before local ownership commits.
+    reaction_result_boundary: Mutex<Option<BlockingTestHook>>,
     /// Runs after the failure latch is set but before submission-gate release.
     output_failure_boundary: Mutex<Option<BlockingTestHook>>,
     /// Runs immediately before deletion acquires the submission gate.
@@ -1766,26 +1783,39 @@ impl Extension {
                 ..Default::default()
             }),
         });
-        let event = match local_tool_name.as_str() {
-            REGISTER_TOOL_NAME => Some(self.handle_register(invoke)),
-            CONVERSATIONS_TOOL_NAME => Some(self.handle_conversations(invoke)),
-            SEND_TOOL_NAME => self.handle_send(invoke),
-            REACT_TOOL_NAME => {
-                if self.identical_reaction_call_in_flight(&invoke) {
-                    None
-                } else {
-                    Some(self.handle_react(invoke))
-                }
-            }
-            _ => Some(tool_error(invoke, "unknown slack tool".to_owned())),
+        let terminal = match local_tool_name.as_str() {
+            REGISTER_TOOL_NAME => Some(ToolTerminalSubmission::pending(
+                self.handle_register(invoke),
+            )),
+            CONVERSATIONS_TOOL_NAME => Some(ToolTerminalSubmission::pending(
+                self.handle_conversations(invoke),
+            )),
+            SEND_TOOL_NAME => self
+                .handle_send(invoke)
+                .map(ToolTerminalSubmission::pending),
+            REACT_TOOL_NAME => self.dispatch_reaction(invoke),
+            _ => Some(ToolTerminalSubmission::pending(tool_error(
+                invoke,
+                "unknown slack tool".to_owned(),
+            ))),
         };
-        if let Some(event) = event {
+        if let Some(ToolTerminalSubmission::Pending(event)) = terminal {
+            let event = *event;
             if let Event::ToolProgressReported(progress) = event {
                 self.output.report_tool_progress(progress);
             } else {
                 self.output.report_tool_terminal(event);
             }
         }
+    }
+
+    /// Execute one reaction and identify whether its returned terminal still
+    /// needs protocol submission.
+    fn dispatch_reaction(&self, invoke: ToolStarted) -> Option<ToolTerminalSubmission> {
+        if self.identical_reaction_call_in_flight(&invoke) {
+            return None;
+        }
+        Some(self.handle_react(invoke))
     }
 
     /// Coalesce an identical concurrent delivery onto its original reaction

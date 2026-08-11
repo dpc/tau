@@ -1,5 +1,9 @@
 # SPEC-tau-ext-slack-agent-reactions: Agent-authored Slack reactions
 
+## Record justification
+
+This contract spans reaction state, tool dispatch and protocol output, and Slack session lifecycle retirement, so no single implementation area can own it coherently.
+
 Reaction refs are at most 128 bytes. Emoji use a 1–64-character lowercase ASCII
 base of letters, digits, `_+-`, with an optional exact `::skin-tone-[2-6]` suffix.
 Only add/remove operations exist; strict parsing rejects unknown fields.
@@ -30,5 +34,11 @@ adds reserve ownership capacity; exhaustion rejects before I/O. Slack HTTP is
 bounded to 30 seconds. There is no sleep or automatic retry. `Retry-After` is
 strictly parsed and clamped for a closed typed error; diagnostics contain no raw
 body, token, native ID, or text. Config freezes immediately before the first
-authorized API attempt. Writer failure activates nothing, and stable
-same-process replay does not repost or rewrite; there is no crash guarantee.
+authorized API attempt. A remotely successful operation keeps its reservation,
+ownership, and replay disposition provisional until the successful tool result
+is written and flushed locally under the lifecycle/output gate. Only then does
+an add establish ownership, a remove clear ownership, and replay become
+`Success`. Writer failure or output admission failure establishes no new
+reaction authority, retires the whole Slack session, and never retries or
+compensates Slack. Stable same-process replay does not repost; local write/flush
+is not a harness commit acknowledgement, and there is no crash guarantee.

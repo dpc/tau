@@ -33,6 +33,9 @@ broadcast, and sink-delivery mechanics.
 
 Reaction coverage includes separate authorization, strict arguments, ownership
 and idempotency, ambiguous effects, deletion, late completion, target/owner/
-attempt capacity, and exact HTTP wire behavior. Mention coverage includes every
+attempt capacity, exact HTTP wire behavior, actual writer success/failure and
+detached-output overload, and add/remove provisional state through confirmed
+output and lifecycle races. These races use causal channels and barriers;
+timeouts only bound deadlocks. Mention coverage includes every
 entity/code-span negative, leading-removal and normalization behavior, exact
 register/unregister JSON, and literal `@slack_bridge` egress.

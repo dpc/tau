@@ -179,6 +179,10 @@ list, toggle, or discovery.
 Removal is limited to same-agent reactions unambiguously added in the current
 runtime. Add `reactions:write`, reinstall the app, and keep the bot a member of
 target conversations. Whole Slack-group grants now include this surface.
+Slack success commits local add/remove ownership only after the successful tool
+result is written and flushed locally. Writer failure retires the whole Slack
+session without retrying or compensating the remote reaction; local flush is
+not a harness commit acknowledgement.
 The CLI renders inbound reaction action, exact actor U/W plus bounded
 display/configured alias, and the exact custom/skin-tone name; it performs no
 Unicode emoji lookup.

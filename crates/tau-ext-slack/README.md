@@ -201,6 +201,13 @@ fail-closed across route/config/session changes. Add `reactions:write` and
 reinstall the Slack app before enabling it. Whole-group `slack` grants include
 this new externally visible mutation surface.
 
+After Slack reports success, the reaction remains provisional while Tau writes
+and flushes the successful tool result locally. Only that confirmation commits
+add/remove ownership and same-call success replay. Writer failure retires the
+whole Slack session without retaining reaction authority, retrying Slack, or
+issuing a compensating mutation. Local flush is not a harness commit
+acknowledgement.
+
 Successful `slack_send` calls now return
 `{"status":"sent","message_ref":"slack-message:<digest>","delivery_copies":"one"|"one_or_two_possible"}`
 rather than the former
