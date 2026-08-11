@@ -9,6 +9,12 @@ bounds apply before the
 parser admits only supported assistant text, plain reasoning, and Function
 calls.
 
+The parser accepts at most 1,024 distinct provider output indices per attempt.
+It rejects an out-of-range index or terminal output array before allocating a
+slot, which bounds index-driven heap growth and ordered insertion work. Revisit
+this bound when changing the response-byte limit, supported output families, or
+provider output cardinality contract.
+
 Every public Responses attempt has finite network work: request, connection,
 and response headers have a five-minute bound, then a successful SSE or
 WebSocket body has an unextendable ten-minute total bound and a renewable

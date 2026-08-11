@@ -167,6 +167,123 @@ fn terminal_output_fallback_materializes_plain_reasoning_and_text() {
     ));
 }
 
+/// Terminal replacement retains exact raw provider item syntax for transcript
+/// replay rather than reserializing its key order, numeric spelling, or extras.
+#[test]
+fn terminal_output_retains_exact_raw_message_sidecar() {
+    let raw_message = r#"{"type":"message","z":1.2300,"id":"msg_terminal","status":"completed","future":true,"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"terminal","annotations":[]}]}"#;
+    let mut state = State::default();
+    state
+        .apply_event(&format!(
+            r#"{{"type":"response.completed","response":{{"output":[{raw_message}]}}}}"#
+        ))
+        .expect("terminal output");
+    let output = state.output_items();
+    let ContextItem::Message(message) = &output[0] else {
+        panic!("terminal message");
+    };
+    assert_eq!(message.responses_raw_json.as_deref(), Some(raw_message));
+    let mut prompt = minimal_prompt();
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::AssistantResponse(
+            tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: output,
+                usage: None,
+            },
+        ));
+    let request = build_request(
+        &prompt,
+        &AttemptConfig {
+            base_url: "https://example.test/v1".to_owned(),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+    )
+    .expect("request");
+    let request = serde_json::to_string(&request).expect("serialize request");
+    assert!(
+        request.contains(raw_message),
+        "terminal sidecar must survive transcript replay unchanged: {request}"
+    );
+}
+
+/// Both SSE and WebSocket streams use `State::apply_event`; when either
+/// transport delivers index one before index zero, progress waits and then
+/// projects the completed prefix in provider output-index order.
+#[test]
+fn shared_assembler_orders_out_of_order_progress_and_terminal_output() {
+    let mut state = State::default();
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":1,"delta":"second"}"#)
+        .expect("index one delta");
+    assert!(
+        state.progress().output_items.is_empty(),
+        "index one must remain hidden while index zero is unresolved"
+    );
+
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"first"}"#)
+        .expect("index zero delta");
+    let progress = state.progress();
+    assert_eq!(
+        progress
+            .output_items
+            .iter()
+            .map(|item| item.output_index)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+
+    state
+        .apply_event(r#"{"type":"response.completed","response":{"id":"resp_ordered"}}"#)
+        .expect("contiguous terminal response");
+    let output = state.output_items();
+    assert!(matches!(
+        output.as_slice(),
+        [
+            ContextItem::Message(MessageItem {
+                content: first,
+                ..
+            }),
+            ContextItem::Message(MessageItem {
+                content: second,
+                ..
+            }),
+        ] if first == &vec![ContentPart::Text { text: "first".to_owned() }]
+            && second == &vec![ContentPart::Text { text: "second".to_owned() }]
+    ));
+}
+
+/// A terminal response may not turn a sparse stream into a silently reordered
+/// transcript, and a present terminal output must use the authoritative array
+/// shape.
+#[test]
+fn shared_assembler_rejects_sparse_or_invalid_terminal_output_shape() {
+    let mut sparse = State::default();
+    sparse
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":1,"delta":"orphaned"}"#)
+        .expect("out-of-order stream event remains pending");
+    assert!(matches!(
+        sparse.apply_event(r#"{"type":"response.completed","response":{}}"#),
+        Err(Error::UnsupportedOutput)
+    ));
+
+    let mut invalid_terminal = State::default();
+    assert!(matches!(
+        invalid_terminal.apply_event(r#"{"type":"response.completed","response":{"output":{}}}"#),
+        Err(Error::UnsupportedOutput)
+    ));
+}
+
 /// Full-transcript lowering must skip the display-only companion and prefer
 /// the durable reasoning item's Responses replay sidecar.
 #[test]
@@ -299,6 +416,118 @@ fn incomplete_reasoning_attempt_rejects_terminal_sentinel() {
     assert!(failure.progress.has_timed_semantic_output);
 }
 
+/// The SSE `[DONE]` terminal dialect uses the same provider-index projection
+/// as event terminals: index one waits for index zero, then both progress and
+/// durable output retain index order.
+#[test]
+fn sse_done_orders_out_of_order_indices_and_rejects_sparse_output() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let _ = read_http_request(&mut socket);
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"second\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"first\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+    });
+    let mut updates = Vec::new();
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |progress| updates.push(progress),
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("contiguous SSE stream must complete");
+    };
+    assert_eq!(
+        updates[0].output_items.len(),
+        0,
+        "index one must not project before index zero"
+    );
+    assert_eq!(
+        updates[1]
+            .output_items
+            .iter()
+            .map(|item| item.output_index)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert!(matches!(
+        success.output_items.as_slice(),
+        [
+            ContextItem::Message(MessageItem {
+                content: first,
+                ..
+            }),
+            ContextItem::Message(MessageItem {
+                content: second,
+                ..
+            }),
+        ] if first == &vec![ContentPart::Text { text: "first".to_owned() }]
+            && second == &vec![ContentPart::Text { text: "second".to_owned() }]
+    ));
+}
+
+/// A sparse SSE stream must fail at its literal `[DONE]` sentinel rather than
+/// publishing a later output index as a valid completed response.
+#[test]
+fn sse_done_rejects_sparse_output_indices() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let _ = read_http_request(&mut socket);
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"orphaned\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+    assert!(matches!(outcome, AttemptOutcome::Terminal(_)));
+}
+
 /// Reasoning event indices are required exact `u32` values so malformed
 /// provider events cannot alias an existing output slot.
 #[test]
@@ -316,6 +545,51 @@ fn malformed_reasoning_output_indices_are_rejected() {
         assert!(
             matches!(state.apply_event(&event), Err(Error::UnsupportedOutput)),
             "unexpectedly accepted output_index {output_index}"
+        );
+    }
+}
+
+/// The shared assembler caps index-driven slot allocation at its documented
+/// per-attempt bound.
+#[test]
+fn output_index_limit_rejects_first_out_of_range_slot() {
+    let mut state = State::default();
+    let last = MAX_OUTPUT_ITEMS - 1;
+    state
+        .apply_event(&format!(
+            r#"{{"type":"response.output_text.delta","output_index":{last},"delta":"last"}}"#
+        ))
+        .expect("last allowed index");
+    assert!(matches!(
+        state.apply_event(&format!(
+            r#"{{"type":"response.output_text.delta","output_index":{MAX_OUTPUT_ITEMS},"delta":"too far"}}"#
+        )),
+        Err(Error::UnsupportedOutput)
+    ));
+}
+
+/// Authoritative terminal arrays share the documented item-cardinality limit
+/// with streamed indices, accepting the exact limit and rejecting one more.
+#[test]
+fn terminal_output_item_limit_is_exact() {
+    let output_item = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "item"}],
+    });
+    for (count, expected) in [
+        (MAX_OUTPUT_ITEMS as usize, true),
+        (MAX_OUTPUT_ITEMS as usize + 1, false),
+    ] {
+        let mut state = State::default();
+        let event = serde_json::json!({
+            "type": "response.completed",
+            "response": {"output": vec![output_item.clone(); count]},
+        });
+        assert_eq!(
+            state.apply_event(&event.to_string()).is_ok(),
+            expected,
+            "terminal output count {count}"
         );
     }
 }

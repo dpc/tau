@@ -25,6 +25,8 @@ use tokio::runtime as path_tokio_runtime;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+/// Maximum distinct provider output positions accepted in one bounded attempt.
+const MAX_OUTPUT_ITEMS: u32 = 1024;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Wire transport selected explicitly by a public Responses profile.
@@ -110,7 +112,8 @@ pub struct AttemptSuccess {
     pub usage: Option<ProviderTokenUsage>,
     /// Cumulative response body bytes.
     pub response_bytes_received: u64,
-    /// Stable slots for progress rendering.
+    /// Stable provider-ordered slots retained from the contiguous progress
+    /// prefix.
     pub progress_items: Vec<AttemptOutputItem>,
     /// Response identifier for diagnostics only, never chaining.
     pub provider_response_id: Option<String>,
@@ -119,7 +122,8 @@ pub struct AttemptSuccess {
 /// Progress observed while parsing an attempt.
 #[derive(Clone, Debug)]
 pub struct AttemptProgress {
-    /// Stable currently materialized items.
+    /// Stable provider-ordered items from the contiguous output-index prefix;
+    /// later items wait until every earlier index arrives.
     pub output_items: Vec<AttemptOutputItem>,
     /// Cumulative transport bytes.
     pub response_bytes_received: u64,
@@ -733,7 +737,7 @@ impl Slot {
 
 #[derive(Debug, Default)]
 struct State {
-    /// Provider-indexed slots in first-observed order.
+    /// Provider-indexed slots in ascending provider output order.
     ///
     /// Plain reasoning may populate display text before an opaque durable item
     /// exists. Only a validated completed item turns that pending slot into the
@@ -748,7 +752,8 @@ struct State {
     semantic_progress_revision: u64,
 }
 
-/// Raw JSON projections retained alongside semantically parsed SSE events.
+/// Raw JSON projections retained alongside semantically parsed Responses
+/// events.
 #[derive(Deserialize)]
 struct RawEvent<'a> {
     /// Exact output item carried by an added or done event.
@@ -759,7 +764,7 @@ struct RawEvent<'a> {
     response: Option<RawResponse<'a>>,
     /// Exact terminal output when the event itself is the response envelope.
     #[serde(default, borrow)]
-    output: Option<Vec<&'a RawValue>>,
+    output: Option<&'a RawValue>,
 }
 
 /// Borrowed terminal response fields whose exact item syntax must survive.
@@ -767,7 +772,7 @@ struct RawEvent<'a> {
 struct RawResponse<'a> {
     /// Exact ordered provider output items.
     #[serde(default, borrow)]
-    output: Option<Vec<&'a RawValue>>,
+    output: Option<&'a RawValue>,
 }
 
 impl State {
@@ -792,8 +797,7 @@ impl State {
     fn progress(&self) -> AttemptProgress {
         AttemptProgress {
             output_items: self
-                .items
-                .iter()
+                .contiguous_slots()
                 .flat_map(|slot| {
                     let reasoning_text = slot
                         .reasoning_text
@@ -855,12 +859,45 @@ impl State {
             .any(|slot| slot.state == SlotState::ReasoningAdded)
     }
 
+    /// Returns only the contiguous output-index prefix safe to project before
+    /// terminal validation.
+    fn contiguous_slots(&self) -> impl Iterator<Item = &Slot> {
+        self.items
+            .iter()
+            .zip(0_u32..)
+            .take_while(|(slot, index)| slot.index == *index)
+            .map(|(slot, _)| slot)
+    }
+
+    /// Rejects a completed response that leaves any provider output index
+    /// unrepresented.
+    fn validate_contiguous_output_indices(&self) -> Result<(), Error> {
+        if self
+            .items
+            .iter()
+            .zip(0_u32..)
+            .any(|(slot, index)| slot.index != index)
+        {
+            return Err(Error::UnsupportedOutput);
+        }
+        Ok(())
+    }
+
+    /// Marks this stream terminal only after its output indices form a complete
+    /// provider-defined sequence.
+    fn terminalize(&mut self) -> Result<(), Error> {
+        self.validate_contiguous_output_indices()?;
+        self.terminal = true;
+        Ok(())
+    }
+
     fn slot_mut(&mut self, index: u32) -> &mut Slot {
         if let Some(position) = self.items.iter().position(|slot| slot.index == index) {
             return &mut self.items[position];
         }
-        self.items.push(Slot::new(index));
-        self.items.last_mut().expect("just appended slot")
+        let position = self.items.partition_point(|slot| slot.index < index);
+        self.items.insert(position, Slot::new(index));
+        &mut self.items[position]
     }
 
     fn apply_item_at(
@@ -870,12 +907,18 @@ impl State {
         phase: OutputItemPhase,
         raw_json: Option<&RawValue>,
     ) -> Result<bool, Error> {
+        if !(index < MAX_OUTPUT_ITEMS) {
+            return Err(Error::UnsupportedOutput);
+        }
         if let Some(slot) = self.items.iter_mut().find(|slot| slot.index == index) {
             return slot.apply_item(item, phase, raw_json);
         }
         let mut slot = Slot::new(index);
         let qualifying_progress = slot.apply_item(item, phase, raw_json)?;
-        self.items.push(slot);
+        let position = self
+            .items
+            .partition_point(|existing| existing.index < index);
+        self.items.insert(position, slot);
         Ok(qualifying_progress)
     }
 
@@ -998,15 +1041,24 @@ impl State {
                     .map(ToOwned::to_owned);
                 let usage = parse_usage(response.get("usage"));
                 let mut replacement = None;
-                if let Some(output) = response.get("output").and_then(Value::as_array) {
+                if let Some(output) = response.get("output") {
+                    let output = output.as_array().ok_or(Error::UnsupportedOutput)?;
+                    if !(output.len() <= MAX_OUTPUT_ITEMS as usize) {
+                        return Err(Error::UnsupportedOutput);
+                    }
                     let raw_output = raw_event
                         .response
                         .and_then(|response| response.output)
-                        .or(raw_event.output);
+                        .or(raw_event.output)
+                        .map(|output| {
+                            serde_json::from_str::<Vec<&RawValue>>(output.get())
+                                .map_err(|_| Error::Json)
+                        })
+                        .transpose()?;
                     let mut terminal = State::default();
                     for (index, item) in output.iter().enumerate() {
                         terminal.apply_item_at(
-                            index as u32,
+                            u32::try_from(index).map_err(|_| Error::UnsupportedOutput)?,
                             item,
                             OutputItemPhase::TerminalFallback,
                             raw_output
@@ -1034,7 +1086,7 @@ impl State {
                 }
                 self.response_id = response_id;
                 self.usage = usage;
-                self.terminal = true;
+                self.terminalize()?;
                 false
             }
             "response.failed" | "response.incomplete" | "error" => {
@@ -1182,7 +1234,9 @@ async fn stream_sse(
             }
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
                 if data == "[DONE]" {
-                    state.terminal = true;
+                    state
+                        .terminalize()
+                        .map_err(|error| (error, state.progress()))?;
                     return Ok(state);
                 }
                 let qualifying_progress = state
@@ -1240,6 +1294,7 @@ fn output_index(event: &Value) -> Result<u32, Error> {
         .get("output_index")
         .and_then(Value::as_u64)
         .and_then(|index| u32::try_from(index).ok())
+        .filter(|index| *index < MAX_OUTPUT_ITEMS)
         .ok_or(Error::UnsupportedOutput)
 }
 
@@ -1539,7 +1594,14 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
                 if !is_text_assistant_message(&value) {
                     return Err(Error::UnsupportedOutput);
                 }
+                let original = value.clone();
                 rebase_assistant_message(&mut value, message);
+                if value == original {
+                    return RawValue::from_string(raw.clone())
+                        .map(ResponsesInputItem::Raw)
+                        .map(Some)
+                        .map_err(|_| Error::UnsupportedOutput);
+                }
                 return Ok(Some(ResponsesInputItem::Json(value)));
             }
             let role = match message.role {

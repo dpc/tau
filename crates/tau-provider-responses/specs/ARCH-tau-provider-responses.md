@@ -22,6 +22,15 @@ therefore reconnects and replays the complete local transcript rather than
 depending on connection-local continuation state. WebSocket selection never
 falls back to SSE.
 
+Both transports feed their decoded events into one indexed response assembler.
+It retains slots in ascending provider `output_index` order and projects only
+the contiguous prefix beginning at zero, so a later item never appears before
+an unresolved earlier item. A terminal `response.output` array authoritatively
+replaces streamed slots in array/index order while retaining exact raw item
+sidecars; a terminal without that array accepts only a contiguous accumulated
+sequence. Invalid indices, gaps, and non-array terminal output fail the finite
+attempt rather than inventing an order.
+
 Each transport gives request dispatch, connection, and response-header work
 five minutes. After successful headers, one response stream has a separate
 ten-minute absolute deadline plus a five-minute semantic-idle deadline.
