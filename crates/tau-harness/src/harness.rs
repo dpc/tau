@@ -3897,7 +3897,7 @@ impl Harness {
         provider_bound_names: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<ResolvedExtensionSecrets, HarnessError> {
         resolve_extension_secrets_excluding(config, state_dir, secret_sources, provider_bound_names)
-            .map_err(|error| HarnessError::Participant(error.to_string()))
+            .map_err(Into::into)
     }
 
     fn open_configured_harness(
@@ -3921,7 +3921,7 @@ impl Harness {
         let secret_sources = if ignore_secret_source_environment {
             Default::default()
         } else {
-            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?
+            load_secret_sources()?
         };
         let ProviderStartupSnapshot {
             settings: provider_settings_snapshots,

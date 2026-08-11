@@ -523,12 +523,7 @@ pub(crate) fn spawn_supervised(
         memory_only,
         provider_settings,
     )?;
-    for key in std::env::vars()
-        .map(|(key, _)| key)
-        .filter(|key| key.starts_with("TAU_SECRET_"))
-    {
-        command.env_remove(key);
-    }
+    scrub_secret_environment(&mut command);
     command.env_remove(tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV);
     let mut child = command.spawn().map_err(|source| {
         HarnessError::ExtensionSpawn(ExtensionSpawnError::new(
@@ -579,6 +574,17 @@ pub(crate) fn spawn_supervised(
         writer,
         protocol_io,
     })
+}
+
+/// Remove every OS-native named-secret key from a supervised child's inherited
+/// environment without attempting Unicode conversion.
+fn scrub_secret_environment(command: &mut Command) {
+    for key in std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| tau_config::secret_sources::is_secret_environment_key(key))
+    {
+        command.env_remove(key);
+    }
 }
 
 /// Read an extension's stderr line-by-line and append each line

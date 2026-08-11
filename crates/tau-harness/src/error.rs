@@ -94,6 +94,8 @@ pub enum HarnessError {
     SocketTransport(SocketTransportError),
     Route(RouteError),
     ToolRoute(ToolRouteError),
+    /// Named-secret source discovery or declaration resolution failed.
+    SecretSource(tau_config::secret_sources::SecretSourceError),
     StartupTimeout,
     /// Registered context providers did not finish session initialization.
     SessionInitTimeout,
@@ -114,6 +116,7 @@ impl fmt::Display for HarnessError {
             Self::SocketTransport(source) => write!(f, "socket transport error: {source}"),
             Self::Route(source) => write!(f, "routing error: {source}"),
             Self::ToolRoute(source) => write!(f, "tool routing error: {source}"),
+            Self::SecretSource(source) => write!(f, "secret source error: {source}"),
             Self::StartupTimeout => f.write_str("timed out waiting for extensions to start"),
             Self::SessionInitTimeout => {
                 f.write_str("timed out waiting for session context providers to initialize")
@@ -137,6 +140,7 @@ impl std::error::Error for HarnessError {
             Self::SocketTransport(source) => Some(source),
             Self::Route(source) => Some(source),
             Self::ToolRoute(source) => Some(source),
+            Self::SecretSource(source) => Some(source),
             _ => None,
         }
     }
@@ -175,6 +179,12 @@ impl From<RouteError> for HarnessError {
 impl From<ToolRouteError> for HarnessError {
     fn from(source: ToolRouteError) -> Self {
         Self::ToolRoute(source)
+    }
+}
+
+impl From<tau_config::secret_sources::SecretSourceError> for HarnessError {
+    fn from(source: tau_config::secret_sources::SecretSourceError) -> Self {
+        Self::SecretSource(source)
     }
 }
 

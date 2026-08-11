@@ -25,6 +25,73 @@ thread_local! {
     static BLOCKING_THREAD_LOCAL_TEARDOWN: RefCell<Option<BlockingTeardown>> = const { RefCell::new(None) };
 }
 
+#[cfg(unix)]
+const RAW_CHILD_SCRUB_TEST: &str =
+    "extension::tests::supervised_child_scrub_handles_raw_environment_keys";
+
+/// Proves the supervised-child launch scrub removes exact raw secret keys,
+/// ignores unrelated non-Unicode entries, and still launches the child.
+#[cfg(unix)]
+#[test]
+fn supervised_child_scrub_handles_raw_environment_keys() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::process::Command;
+
+    match std::env::var("TAU_RAW_CHILD_TEST_ACTION").as_deref() {
+        Ok("observer") => {
+            assert!(
+                !std::env::vars_os().any(|(key, _)| {
+                    tau_config::secret_sources::is_secret_environment_key(&key)
+                }),
+                "supervised child inherited a raw named-secret key"
+            );
+            assert!(
+                std::env::vars_os()
+                    .any(|(key, _)| key.as_encoded_bytes().starts_with(b"UNRELATED_")),
+                "scrub must leave unrelated raw entries untouched"
+            );
+        }
+        Ok("supervisor") => {
+            let mut child = Command::new(std::env::current_exe().expect("current test executable"));
+            child
+                .args(["--exact", RAW_CHILD_SCRUB_TEST, "--nocapture"])
+                .env("TAU_RAW_CHILD_TEST_ACTION", "observer");
+            scrub_secret_environment(&mut child);
+            let output = child.output().expect("launch scrubbed child observer");
+            assert!(
+                output.status.success(),
+                "scrubbed child observer failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(other) => panic!("unknown raw child test action: {other}"),
+        Err(_) => {
+            let output = Command::new(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", RAW_CHILD_SCRUB_TEST, "--nocapture"])
+                .env_clear()
+                .env("TAU_RAW_CHILD_TEST_ACTION", "supervisor")
+                .env(
+                    OsString::from_vec(b"TAU_SECRET_CHILD\xff".to_vec()),
+                    "raw-child-secret",
+                )
+                .env(
+                    OsString::from_vec(b"UNRELATED_\xff".to_vec()),
+                    OsString::from_vec(b"value\xff".to_vec()),
+                )
+                .output()
+                .expect("launch isolated supervisor");
+            assert!(
+                output.status.success(),
+                "isolated supervisor failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
 impl Drop for BlockingTeardown {
     fn drop(&mut self) {
         let _ = self.release.recv();

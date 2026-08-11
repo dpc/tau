@@ -235,6 +235,11 @@ than interpreting credential authority independently. Harness source capture rem
 environment variables before child spawn; setup retains them. Both modes share
 normalization, collision, environment-before-file precedence, trimming,
 optionality, UTF-8 failure, and safe-name rules.
+Environment discovery matches the exact `TAU_SECRET_` prefix in the OS-native
+key representation. Unrelated non-Unicode entries are ignored; a matching
+suffix or value that cannot enter the UTF-8 named-secret schema causes a
+redacted typed error. Harness capture still removes every matching raw key
+before returning that error, while setup retains it.
 `BuiltinComponentIdentity` separately preserves Tau-owned component authority
 through argv wrapping without deriving authority from flattened executable
 arguments.

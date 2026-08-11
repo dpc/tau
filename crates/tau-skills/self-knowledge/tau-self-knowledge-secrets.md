@@ -53,6 +53,11 @@ select one. Invalid matching names also fail. At harness startup these are
 global snapshot errors: they abort startup before Tau applies an extension's
 `require` setting.
 
+The prefix match uses the operating system's native key representation rather
+than lossy Unicode conversion. Tau ignores unrelated non-Unicode entries. A
+matching suffix or value that cannot enter the UTF-8 named-secret schema returns
+a redacted source error.
+
 A missing `optional: true` declaration is omitted from `Configure.secrets`.
 A missing required declaration fails a required extension's startup. For an
 enabled `require: false` extension, a failure while resolving one of its

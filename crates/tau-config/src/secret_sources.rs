@@ -2,6 +2,7 @@
 //! startup.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
@@ -28,6 +29,10 @@ pub enum SecretSourceError {
     InvalidName(String),
     /// More than one environment variable normalized to one source name.
     EnvironmentCollision(String),
+    /// A matching environment variable name cannot enter the UTF-8 schema.
+    EnvironmentNameNotUnicode,
+    /// A matching environment variable value cannot enter the UTF-8 schema.
+    EnvironmentValueNotUnicode,
     /// A source file did not contain UTF-8.
     InvalidUtf8(PathBuf),
     /// A source file could not be read.
@@ -45,6 +50,12 @@ impl fmt::Display for SecretSourceError {
                     formatter,
                     "multiple TAU_SECRET_* variables normalize to `{name}`"
                 )
+            }
+            Self::EnvironmentNameNotUnicode => {
+                formatter.write_str("a TAU_SECRET_* environment name is not Unicode")
+            }
+            Self::EnvironmentValueNotUnicode => {
+                formatter.write_str("a TAU_SECRET_* environment value is not Unicode")
             }
             Self::InvalidUtf8(path) => {
                 write!(formatter, "secret file {} is not UTF-8", path.display())
@@ -70,6 +81,8 @@ impl std::error::Error for SecretSourceError {
             Self::Io { source, .. } => Some(source),
             Self::InvalidName(_)
             | Self::EnvironmentCollision(_)
+            | Self::EnvironmentNameNotUnicode
+            | Self::EnvironmentValueNotUnicode
             | Self::InvalidUtf8(_)
             | Self::MissingRequired { .. } => None,
         }
@@ -93,6 +106,12 @@ impl fmt::Debug for SecretSources {
     }
 }
 
+/// Return whether an OS-native environment key starts with the exact
+/// `TAU_SECRET_` prefix without making a lossy Unicode authority decision.
+pub fn is_secret_environment_key(key: &OsStr) -> bool {
+    key.as_encoded_bytes().starts_with(b"TAU_SECRET_")
+}
+
 /// Load and optionally remove `TAU_SECRET_*` values using the harness's exact
 /// case-normalization and collision semantics.
 #[allow(unsafe_code)]
@@ -102,16 +121,28 @@ pub fn load_secret_sources(
     let mut environment = HashMap::new();
     let mut keys = Vec::new();
     let mut failure = None;
-    for (key, value) in std::env::vars() {
+    for (key, value) in std::env::vars_os() {
+        if !is_secret_environment_key(&key) {
+            continue;
+        }
+        keys.push(key.clone());
+        let Ok(key) = key.into_string() else {
+            failure.get_or_insert(SecretSourceError::EnvironmentNameNotUnicode);
+            continue;
+        };
         let Some(suffix) = key.strip_prefix("TAU_SECRET_") else {
+            failure.get_or_insert(SecretSourceError::EnvironmentNameNotUnicode);
             continue;
         };
         let name = suffix.to_ascii_lowercase();
-        keys.push(key);
         if let Err(error) = validate_secret_name(&name) {
             failure.get_or_insert(error);
             continue;
         }
+        let Ok(value) = value.into_string() else {
+            failure.get_or_insert(SecretSourceError::EnvironmentValueNotUnicode);
+            continue;
+        };
         if !value.is_empty() && environment.insert(name.clone(), value).is_some() {
             failure.get_or_insert(SecretSourceError::EnvironmentCollision(name));
         }

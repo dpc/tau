@@ -1074,6 +1074,18 @@ from malicious same-UID code or misuse of credentials returned to an authorized
 extension. Secret payloads remain absent from logs, events, journals, generic
 debug output, and errors. See
 [`SPEC-extension-secret-storage`](specs/SPEC-extension-secret-storage.md).
+Named-secret environment discovery matches the exact `TAU_SECRET_` prefix in
+the OS-native key representation and ignores unrelated raw entries. A matching
+suffix or value that cannot enter the UTF-8 schema returns a typed,
+value-redacted error. Harness source capture removes every matching native key
+before returning either its snapshot or a source error; provider setup retains
+the caller's entries. Every production supervised spawn and respawn
+independently removes matching native keys from the child environment.
+
+Changes to that predicate, disposition, spawn ordering, or error formatting
+must recheck the Unix raw-entry regressions in `tau-config` secret-source tests
+and the `tau-harness` extension and lifecycle tests.
+
 Startup, setup inspection, and development-copy paths share the
 4,096-profile-per-instance, 1-MiB-per-profile, and per-instance merged snapshot
 byte limits. They validate the opened descriptor, using nonblocking Unix opens

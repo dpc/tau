@@ -23,18 +23,121 @@ use crate::extension::{
 use crate::harness::extensions::StartupDeadline;
 use crate::harness::provider_startup::{self, ProviderStartupSnapshot};
 use crate::harness::{
-    EXTENSION_RESTART_DELAY, MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES,
-    PendingTool, PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
+    EXTENSION_RESTART_DELAY, HarnessSessionLaunch, HarnessStartupInputs,
+    MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES, PendingTool,
+    PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
     extension_disconnected_tool_call_error_message, extension_restart_disabled_notice,
     prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
     tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
 };
-use crate::settings::{ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource};
+use crate::settings::{
+    Config, ExtensionConfig, ExtensionStartupDiagnosticKind, TauStateAccessSource,
+};
 
 static STUCK_PROVIDER_OBSERVED_TRANSPORT_CLOSE: AtomicBool = AtomicBool::new(false);
 static STUCK_PROVIDER_RELEASE: AtomicBool = AtomicBool::new(false);
 static STUCK_PROVIDER_EXITED: AtomicBool = AtomicBool::new(false);
 static INVALID_CONFIG_PROVIDER_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(unix)]
+const RAW_SECRET_STARTUP_TEST: &str =
+    "harness::tests::lifecycle::raw_secret_source_error_prevents_provider_start";
+
+/// Proves normal startup returns a redacted typed error, removes the malformed
+/// source, and launches no configured process when a raw value is not Unicode.
+#[cfg(unix)]
+#[test]
+fn raw_secret_source_error_prevents_provider_start() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::process::Command;
+
+    if std::env::var_os("TAU_RAW_SECRET_STARTUP_TEST").is_some() {
+        let tempdir = TempDir::new().expect("tempdir");
+        // Any spawn attempt fails synchronously as ExtensionSpawn, so observing
+        // SecretSource proves discovery stopped startup before that boundary.
+        let missing_executable = format!("/tau-raw-secret-test-missing-{}", std::process::id());
+        let config = Config {
+            extensions: BTreeMap::from([(
+                "raw-secret-observer".to_owned(),
+                ExtensionConfig {
+                    tool_prefix: None,
+                    name: "raw-secret-observer".to_owned(),
+                    command: missing_executable,
+                    args: Vec::new(),
+                    role: None,
+                    component: None,
+                    require: true,
+                    startup_timeout: Duration::from_secs(1),
+                    cwd: None,
+                    config: serde_json::json!({}),
+                    secrets: BTreeMap::new(),
+                    tau_state_access: TauStateAccess::Legacy,
+                    tau_runtime_socket_access: TauRuntimeSocketAccess::Hidden,
+                },
+            )]),
+            extension_startup_diagnostics: Vec::new(),
+            harness_settings: HarnessSettings::built_in(),
+        };
+        let mut initial_client_error_stream = None;
+        let error = match Harness::from_config_with_initial_client(
+            &config,
+            tempdir.path().join("state"),
+            tau_config::settings::TauDirs {
+                config_dir: None,
+                state_dir: Some(tempdir.path().join("runtime")),
+            },
+            "raw-secret-source",
+            HarnessSessionLaunch {
+                reason: tau_proto::SessionStartReason::Initial,
+                storage_mode: crate::HarnessStorageMode::Durable,
+            },
+            HarnessStartupInputs {
+                initial_client: None,
+                internal_tool_handlers: Vec::new(),
+                ignore_startup_environment: false,
+                project_root: tempdir.path().canonicalize().expect("project root"),
+            },
+            &mut initial_client_error_stream,
+        ) {
+            Ok(_) => panic!("raw secret source must fail startup"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                HarnessError::SecretSource(
+                    tau_config::secret_sources::SecretSourceError::EnvironmentValueNotUnicode
+                )
+            ),
+            "unexpected startup error: {error:?}"
+        );
+        assert!(!error.to_string().contains("startup-secret-value"));
+        assert!(
+            !std::env::vars_os()
+                .any(|(key, _)| { tau_config::secret_sources::is_secret_environment_key(&key) }),
+            "failed startup must consume malformed matching sources"
+        );
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", RAW_SECRET_STARTUP_TEST, "--nocapture"])
+        .env_clear()
+        .env("TAU_RAW_SECRET_STARTUP_TEST", "1")
+        .env(
+            "TAU_SECRET_STARTUP",
+            OsString::from_vec(b"startup-secret-value\xff".to_vec()),
+        )
+        .output()
+        .expect("launch raw secret startup subprocess");
+    assert!(
+        output.status.success(),
+        "raw secret startup subprocess failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 /// Ensures malformed startup settings fail before even an injected provider
 /// process starts, preventing built-in or configured fallback authority.
