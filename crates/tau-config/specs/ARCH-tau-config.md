@@ -103,6 +103,14 @@ exceed 65,535 minutes because the persisted wait registration represents its
 effective timeout as `u16`. They do not affect argument-free or exact
 background-result waits.
 
+`agent_watch_retry_notification_threshold` suppresses model-visible
+`retrying` notifications through the configured attempt, while later attempts
+retain the existing once-per-sanitized-category delivery rule. It defaults to
+five; zero preserves category-deduplicated delivery from the first retry.
+`4294967295` suppresses every live retry notification, but current sanitized
+snapshot state still updates and remains available to newly enabled watchers.
+The setting does not suppress other provider-work phases or terminal failures.
+
 `tau-config::provider_debug_capture` owns the dependency-neutral provider
 capture basename contract shared by provider writers and harness retention:
 canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid

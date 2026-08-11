@@ -27649,9 +27649,10 @@ fn agent_watch_reachability_is_iterative_and_cycle_defensive() {
     h.shutdown().expect("shutdown");
 }
 
-/// Provider-watch fanout must sanitize payloads, dedupe retry storms without
-/// freezing the late-watcher snapshot, preserve phase/category transitions, and
-/// stop immediately when the relation or session is removed.
+/// Provider-watch fanout must suppress retries through the configured
+/// threshold, dedupe later retry storms without freezing the late-watcher
+/// snapshot, preserve phase/category transitions, and stop when the relation or
+/// session is removed.
 #[test]
 fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     let td = TempDir::new().expect("tempdir");
@@ -27744,7 +27745,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
             .state,
         tau_proto::AgentWatchProviderState::Retrying {
             category: tau_proto::AgentWatchProviderCategory::Transport,
-            attempt: 1,
+            attempt: 6,
             ..
         }
     ));
@@ -27858,6 +27859,201 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     assert!(h.agent_watch_provider_status.is_empty());
     assert!(h.agent_watch_provider_deliveries.is_empty());
     assert!(h.agent_watch_subscriptions.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// The configured retry boundary must hide attempt N without consuming its
+/// category, deliver that category at N+1, retain later category dedupe, and
+/// deliver a terminal failure even when its attempt is within the threshold.
+#[test]
+fn agent_watch_provider_retry_threshold_enforces_exact_delivery_boundary() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let late_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    let session_id = h.current_session_id.clone();
+    let retry_status = |category, attempt| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: 1,
+        agent_prompt_id: test_agent_prompt_id("sp-threshold-boundary"),
+        state: tau_proto::AgentWatchProviderState::Retrying {
+            category,
+            attempt,
+            next_retry_delay_secs: 1,
+        },
+        initial: false,
+    };
+    for (category, attempt) in [
+        (tau_proto::AgentWatchProviderCategory::Transport, 5),
+        (tau_proto::AgentWatchProviderCategory::Throttle, 5),
+    ] {
+        h.update_agent_watch_provider_status(&watched_id, retry_status(category, attempt));
+    }
+    h.set_agent_watch(
+        &late_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let late_snapshot = session_agent_message_received_events(&h)
+        .into_iter()
+        .rev()
+        .find(|message| message.recipient_id.as_str() == late_id)
+        .and_then(|message| message.watch_provider_status)
+        .expect("suppressed retry remains available as an initial snapshot");
+    assert!(late_snapshot.initial);
+    assert!(matches!(
+        late_snapshot.state,
+        tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Throttle,
+            attempt: 5,
+            ..
+        }
+    ));
+    assert!(
+        h.agents[&late_cid].pending_prompts.is_empty(),
+        "a suppressed late-watch snapshot must not prompt the watcher"
+    );
+    for (category, attempt) in [
+        (tau_proto::AgentWatchProviderCategory::Transport, 6),
+        (tau_proto::AgentWatchProviderCategory::Transport, 7),
+        (tau_proto::AgentWatchProviderCategory::Throttle, 7),
+    ] {
+        h.update_agent_watch_provider_status(&watched_id, retry_status(category, attempt));
+    }
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        tau_proto::AgentWatchProviderStatusNotification {
+            session_id,
+            subscription_id: String::new(),
+            turn_generation: 1,
+            agent_prompt_id: test_agent_prompt_id("sp-threshold-terminal"),
+            state: tau_proto::AgentWatchProviderState::TerminalError {
+                failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
+                attempt: 5,
+            },
+            initial: false,
+        },
+    );
+
+    let states: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter_map(|message| {
+            (message.recipient_id.as_str() == watcher_id)
+                .then_some(message.watch_provider_status?.state)
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Transport,
+                attempt: 6,
+                next_retry_delay_secs: 1,
+            },
+            tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Throttle,
+                attempt: 7,
+                next_retry_delay_secs: 1,
+            },
+            tau_proto::AgentWatchProviderState::TerminalError {
+                failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
+                attempt: 5,
+            },
+        ]
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A zero retry threshold must preserve category-deduplicated delivery from the
+/// first attempt rather than turning duplicate same-category updates into
+/// prompts.
+#[test]
+fn agent_watch_provider_retry_threshold_zero_preserves_category_dedupe() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.accepted_harness_settings
+        .agent_watch_retry_notification_threshold = 0;
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    let session_id = h.current_session_id.clone();
+    let status = |category, attempt| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: 1,
+        agent_prompt_id: test_agent_prompt_id("sp-zero-threshold"),
+        state: tau_proto::AgentWatchProviderState::Retrying {
+            category,
+            attempt,
+            next_retry_delay_secs: 1,
+        },
+        initial: false,
+    };
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderCategory::Transport, 0),
+    );
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderCategory::Transport, 1),
+    );
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderCategory::Throttle, 1),
+    );
+
+    let retries: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter_map(|message| {
+            (message.recipient_id.as_str() == watcher_id)
+                .then_some(message.watch_provider_status?.state)
+        })
+        .collect();
+    assert_eq!(
+        retries,
+        [
+            tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Transport,
+                attempt: 0,
+                next_retry_delay_secs: 1,
+            },
+            tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Throttle,
+                attempt: 1,
+                next_retry_delay_secs: 1,
+            },
+        ]
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -28160,6 +28356,8 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.accepted_harness_settings
+        .agent_watch_retry_notification_threshold = 0;
     let a_cid = ensure_test_user_agent(&mut h);
     let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_cid =
@@ -29469,6 +29667,8 @@ fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.accepted_harness_settings
+        .agent_watch_retry_notification_threshold = 0;
     h.selected_model = Some("test/model".into());
     let a_cid = ensure_test_user_agent(&mut h);
     let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());

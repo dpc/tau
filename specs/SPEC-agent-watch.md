@@ -144,9 +144,17 @@ exactly one occurrence after commit.
 Provider retries carry closed structured categories, saturating attempt counts, and
 approximate bounded delays independently of human UI prose. After validating prompt
 ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local
-watcher fanout. Live delivery is limited to first category, category/phase changes, and
-terminal failure; same-category storms only refresh the late-watch snapshot while their
-prompt remains among the 64 identities retained per subscription and generation.
+watcher fanout. A nonzero
+[`agent_watch_retry_notification_threshold`](../crates/tau-config/specs/ARCH-tau-config.md)
+inclusively suppresses live `retrying` delivery through that attempt; zero
+disables threshold suppression. Above the threshold, the first occurrence of
+each sanitized retry category is delivered per subscription, turn generation,
+and provider prompt. Suppressed attempts do not consume a category's first
+delivery opportunity. Per subscription, turn generation, and provider prompt,
+`recovering_context` is delivered once; each sanitized `blocked` and
+`dispatch_uncertain` category is delivered once. Terminal failure is always
+delivered. Same-category storms only refresh the late-watch snapshot while
+their prompt remains among the 64 identities retained per subscription and generation.
 Terminal-error delivery retires its prompt; capacity evicts the oldest nonterminal
 prompt, which is treated as fresh if it reappears. Older generations cannot mutate newer
 bookkeeping. Cardinality tracing contains only subscription/generation identity, counts,

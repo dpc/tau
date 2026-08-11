@@ -1428,6 +1428,18 @@ impl Harness {
             return;
         };
         if !initial {
+            let retry_notification_threshold = self
+                .accepted_harness_settings
+                .agent_watch_retry_notification_threshold;
+            if retry_notification_threshold != 0
+                && matches!(
+                status.state,
+                tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
+                    if attempt <= retry_notification_threshold
+                )
+            {
+                return;
+            }
             let deliveries = self
                 .agent_watch_provider_deliveries
                 .entry(subscription_id.clone())

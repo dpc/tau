@@ -4,6 +4,8 @@ session_retention_days: 60
 diagnostic_retention_days: 14
 wait_timeout_minimum_minutes: 5
 wait_timeout_maximum_minutes: 1440
+# Suppress early live retry notifications sent to agents watching other agents.
+agent_watch_retry_notification_threshold: 5
 provider_cache_refresh:
   enabled: false
   max_idle_seconds: 300

@@ -777,6 +777,9 @@ pub struct HarnessSettings {
     /// Highest effective activating-input wait timeout accepted from the `wait`
     /// tool, measured in whole minutes.
     pub wait_timeout_maximum_minutes: u64,
+    /// Largest provider retry attempt suppressed from model-visible agent-watch
+    /// notifications.
+    pub agent_watch_retry_notification_threshold: u32,
     /// Disabled-by-default bounded Provider cache refresh policy.
     pub provider_cache_refresh: ProviderCacheRefresh,
     /// Default Tau-state presentation for supervised extension instances.
@@ -858,6 +861,9 @@ struct HarnessSettingsWire {
     /// Highest effective activating-input wait timeout in whole minutes.
     #[serde(alias = "waitTimeoutMaximumMinutes")]
     wait_timeout_maximum_minutes: u64,
+    /// Largest provider retry attempt hidden from watching agents.
+    #[serde(alias = "agentWatchRetryNotificationThreshold")]
+    agent_watch_retry_notification_threshold: u32,
     /// Disabled-by-default bounded Provider cache refresh policy.
     #[serde(default)]
     provider_cache_refresh: ProviderCacheRefresh,
@@ -952,6 +958,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             diagnostic_retention_days: wire.diagnostic_retention_days,
             wait_timeout_minimum_minutes: wire.wait_timeout_minimum_minutes,
             wait_timeout_maximum_minutes: wire.wait_timeout_maximum_minutes,
+            agent_watch_retry_notification_threshold: wire.agent_watch_retry_notification_threshold,
             provider_cache_refresh: wire.provider_cache_refresh,
             tau_state_access: wire.tau_state_access,
             extensions: wire.extensions,
@@ -3201,6 +3208,13 @@ fn normalize_harness_config_value(
         source,
         "root",
     )?;
+    normalize_alias_key(
+        map,
+        "agentWatchRetryNotificationThreshold",
+        "agent_watch_retry_notification_threshold",
+        source,
+        "root",
+    )?;
     if let Some(serde_json::Value::Object(extensions)) = map.get_mut("extensions") {
         for (extension_name, extension) in extensions {
             if let serde_json::Value::Object(extension) = extension {
@@ -3547,6 +3561,7 @@ fn canonical_top_level_key(key: &str) -> &str {
         "toolPolicy" => "tool_policy",
         "waitTimeoutMinimumMinutes" => "wait_timeout_minimum_minutes",
         "waitTimeoutMaximumMinutes" => "wait_timeout_maximum_minutes",
+        "agentWatchRetryNotificationThreshold" => "agent_watch_retry_notification_threshold",
         _ => key,
     }
 }

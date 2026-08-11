@@ -418,6 +418,25 @@ fn wait_timeout_bounds_default_and_override() {
     assert_eq!(settings.wait_timeout_bounds(), (7, 11));
 }
 
+/// The built-in watch retry threshold must suppress the first five attempts,
+/// while layered config can disable threshold suppression completely.
+#[test]
+fn agent_watch_retry_notification_threshold_defaults_and_overrides() {
+    assert_eq!(
+        HarnessSettings::built_in().agent_watch_retry_notification_threshold,
+        5
+    );
+
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agent_watch_retry_notification_threshold: 0\n",
+    )
+    .expect("write config");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load threshold");
+    assert_eq!(settings.agent_watch_retry_notification_threshold, 0);
+}
+
 /// Ensures an inverted activating-input wait range fails configuration loading
 /// instead of creating contradictory silent-clamping behavior.
 #[test]
@@ -1061,6 +1080,10 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         "waitTimeoutMaximumMinutes".to_owned(),
         serde_json::Value::from(1_440),
     );
+    root.insert(
+        "agentWatchRetryNotificationThreshold".to_owned(),
+        serde_json::Value::from(5),
+    );
     for pointer in [
         "/agents/roleGroups/engineer",
         "/agents/roleGroups/engineer/roles/engineer",
@@ -1099,6 +1122,10 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     assert_eq!(
         value["wait_timeout_maximum_minutes"],
         serde_json::json!(1440)
+    );
+    assert_eq!(
+        value["agent_watch_retry_notification_threshold"],
+        serde_json::json!(5)
     );
     assert!(value.get("tool_policy").is_some());
     assert!(
@@ -1152,6 +1179,10 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         ("toolPolicy", "tool_policy"),
         ("waitTimeoutMinimumMinutes", "wait_timeout_minimum_minutes"),
         ("waitTimeoutMaximumMinutes", "wait_timeout_maximum_minutes"),
+        (
+            "agentWatchRetryNotificationThreshold",
+            "agent_watch_retry_notification_threshold",
+        ),
         ("agents.enabled", "agents.enable"),
         ("extensions.work.toolPrefix", "extensions.work.tool_prefix"),
         ("agents.defaultRole", "agents.default_role"),

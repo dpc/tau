@@ -225,12 +225,21 @@ marker, and a runtime-local work epoch. The initial snapshot is client-visible
 status only and is not injected into the watching agent's model context; later
 genuine transitions are injected as isolated internal notifications.
 
-While provider work is retrying, the watcher receives a sanitized structured
-status on the first retry and whenever its closed category or phase changes.
-Repeated attempts in the same category update the current snapshot without
-waking the model again. Enabling or re-enabling a watch returns that current
-snapshot and emits an initial client-visible, non-model event; it never replays
-the attempt history. Provider status remains independent of semantic work status.
+While provider work is retrying, the harness suppresses early live
+notifications through `agent_watch_retry_notification_threshold` in
+`harness.yaml`. The default is `5`. Above that inclusive threshold, the watcher
+receives a sanitized structured status on the first occurrence of each closed
+retry category; repeated attempts in the same category update the current
+snapshot without waking the model again. A value of `0` restores delivery
+consideration from attempt zero while retaining category dedupe.
+Per watch subscription, turn generation, and provider prompt,
+`recovering_context` is delivered once, while each sanitized `blocked` and
+`dispatch_uncertain` category is delivered once. Terminal failures are always
+delivered.
+Enabling or re-enabling a watch returns the current snapshot and emits an initial
+client-visible, non-model event, including when the current retry was suppressed
+from live delivery; it never replays the attempt history. Provider status remains
+independent of semantic work status.
 Provider bodies, human status/error text, headers, account data,
 secrets, and prompt content never cross this boundary; see
 [Watched provider status](events.md#watched-provider-status) for the wire shape.
