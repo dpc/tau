@@ -90,6 +90,8 @@
         # lane plain and non-interactive so terminal detection cannot add progress
         # frames or ANSI escapes to those persistent logs.
         nextestReporterArgs = "--color never --show-progress none --status-level none --no-input-handler";
+        slackReactionSpec = ./crates/tau-ext-slack/specs/SPEC-tau-ext-slack-agent-reactions.md;
+        slackReactionSpecsDirectory = ./crates/tau-ext-slack/specs;
         buildSrc =
           # The universal release binary needs parallel LLVM optimization. This
           # evaluation guard prevents normal release builds from silently
@@ -99,7 +101,18 @@
           flakeboxLib.source.fromPaths {
             root = ./.;
             paths = buildPaths;
-            filter = flakeboxLib.source.filters.excludeDirectoriesNamed [ "specs" ];
+            filter =
+              path: type:
+              let
+                pathText = toString path;
+                specsDirectory = toString slackReactionSpecsDirectory;
+              in
+              if pathText == specsDirectory then
+                true
+              else if pkgs.lib.hasPrefix "${specsDirectory}/" pathText then
+                pathText == toString slackReactionSpec
+              else
+                flakeboxLib.source.filters.excludeDirectoriesNamed [ "specs" ] path type;
           };
 
         # Placeholders are 40 / 16 raw bytes that the binary embeds via

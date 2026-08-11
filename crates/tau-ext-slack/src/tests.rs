@@ -6658,6 +6658,38 @@ fn latency_trace_classes_have_stable_spellings() {
     }
 }
 
+/// The public reaction section must retain the focused spec's fail-closed
+/// local-flush and canonical-echo authority boundaries.
+#[test]
+fn readme_reaction_target_activation_matches_spec() {
+    let readme = include_str!("../README.md");
+    let (_, reaction_section) = readme
+        .split_once("### Agent-invoked reactions")
+        .expect("README reaction section");
+    let (reaction_section, _) = reaction_section
+        .split_once("\n## ")
+        .expect("README section after reactions");
+    let normalize = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let readme = normalize(reaction_section);
+    let spec = normalize(include_str!(
+        "../specs/SPEC-tau-ext-slack-agent-reactions.md"
+    ));
+
+    for anchor in [
+        "local ingress report write/flush activates no target",
+        "only the matching canonical `message.sent` event type, target agent, configured publisher, and stable message ID on the downpath activate the target",
+    ] {
+        assert!(readme.contains(anchor), "README lacks anchor: {anchor}");
+        assert!(
+            spec.contains(anchor),
+            "reaction spec lacks anchor: {anchor}"
+        );
+    }
+    assert!(!readme.contains("locally submitted incoming create/edit reports"));
+    assert!(!readme
+        .contains("becomes usable only after the sent-report and result frames are written and flushed locally"));
+}
+
 /// Builds a validated extension name used by this test module.
 fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
     tau_proto::ExtensionName::parse(value.as_ref())

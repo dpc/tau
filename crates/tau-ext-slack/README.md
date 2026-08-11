@@ -193,10 +193,12 @@ proactive-only static DM does not.
 
 `slack_react {message_ref, emoji, action}` is disabled by default and uses the
 separate `slack:react` policy tag. It accepts only exact Tau-issued refs from
-locally submitted incoming create/edit reports or successful `slack_send` results.
-Refs have the documented opaque `slack-message:<digest>` fact-ID format, but the
-tool never accepts channel IDs or timestamps as separate route selectors, aliases,
-Unicode emoji, toggle, list, or discovery. Add/remove ownership is bounded, runtime-only, same-agent, and
+canonically confirmed incoming create/edit reports or successful `slack_send`
+results. A successful local ingress report write/flush activates no target and
+is not a harness commit acknowledgement. Refs have the documented opaque
+`slack-message:<digest>` fact-ID format, but the tool never accepts channel IDs
+or timestamps as separate route selectors, aliases, Unicode emoji, toggle, list,
+or discovery. Add/remove ownership is bounded, runtime-only, same-agent, and
 fail-closed across route/config/session changes. Add `reactions:write` and
 reinstall the Slack app before enabling it. Whole-group `slack` grants include
 this new externally visible mutation surface.
@@ -211,9 +213,11 @@ acknowledgement.
 Successful `slack_send` calls now return
 `{"status":"sent","message_ref":"slack-message:<digest>","delivery_copies":"one"|"one_or_two_possible"}`
 rather than the former
-plain `sent Slack message` text. The fact ref becomes usable only after the
-sent-report and result frames are written and flushed locally. A writer failure
-does not activate it; this is not a harness commit acknowledgement.
+plain `sent Slack message` text. The returned ref remains inert after local
+sent-report and result write/flush; only the matching canonical `message.sent`
+event type, target agent, configured publisher, and stable message ID on the
+downpath activate the target. A writer failure does not activate it; this is
+not a harness commit acknowledgement.
 
 ## Slack events and scopes
 
