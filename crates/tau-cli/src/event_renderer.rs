@@ -1317,6 +1317,8 @@ struct ShellBlockState {
 enum StatusElement {
     /// Agent, role, model, or no-selection identity.
     Identity,
+    /// Selected agent's current self-reported work phase.
+    WorkStatus,
     /// Selected model's context usage and capacity.
     Context,
     /// Main-agent tool progress.
@@ -1325,6 +1327,8 @@ enum StatusElement {
     ActiveAgents,
     /// Selected agent's human-readable description.
     Description,
+    /// Selected agent's current self-reported task title.
+    WorkTitle,
     /// Effective effort, verbosity, or service-tier adjustment.
     ModelAdjustment,
     /// Agents watching the selected agent.
@@ -1344,9 +1348,9 @@ impl StatusElement {
     const fn priority(self) -> tau_cli_term::PriorityLinePriority {
         let value = match self {
             Self::Identity => 0,
-            Self::Context => 10,
+            Self::WorkStatus | Self::Context => 10,
             Self::Tools | Self::ActiveAgents => 20,
-            Self::Description | Self::ModelAdjustment => 30,
+            Self::Description | Self::WorkTitle | Self::ModelAdjustment => 30,
             Self::Watchers => 40,
             Self::WeeklyQuota | Self::EstimatedCost => 50,
             Self::UiIoDebug => 60,
@@ -1673,14 +1677,19 @@ pub(crate) fn watched_agent_tool_display(
 fn watched_agent_work_status_phase(
     status: Option<&tau_proto::AgentWatchWorkStatusNotification>,
 ) -> String {
-    match status.map(|status| status.phase) {
+    agent_work_status_phase(status.map(|status| status.phase)).to_owned()
+}
+
+/// Returns the stable UI spelling shared by selected- and watched-agent work
+/// status presentation.
+fn agent_work_status_phase(phase: Option<tau_proto::AgentWorkStatusPhase>) -> &'static str {
+    match phase {
         None | Some(tau_proto::AgentWorkStatusPhase::Unreported) => "unreported",
         Some(tau_proto::AgentWorkStatusPhase::Working) => "working",
         Some(tau_proto::AgentWorkStatusPhase::Done) => "done",
         Some(tau_proto::AgentWorkStatusPhase::Blocked) => "blocked",
         Some(tau_proto::AgentWorkStatusPhase::Unknown) => "unknown",
     }
-    .to_owned()
 }
 
 impl EventRenderer {
@@ -3460,6 +3469,20 @@ impl EventRenderer {
                     left,
                     status_chip(&self.theme, names::STATUS_ROLE, format!("@{agent_id}")),
                 );
+                if let Some((phase, title)) = self.selected_agent_work_status(agent_id) {
+                    line.push(
+                        StatusElement::WorkStatus.priority(),
+                        left,
+                        status_chip(&self.theme, names::STATUS_ROLE, phase),
+                    );
+                    if let Some(title) = title {
+                        line.push(
+                            StatusElement::WorkTitle.priority(),
+                            left,
+                            status_chip(&self.theme, names::STATUS_ROLE, title),
+                        );
+                    }
+                }
                 if let Some(description) = self.agent_status_description(agent_id) {
                     line.push(
                         StatusElement::Description.priority(),
@@ -3676,6 +3699,16 @@ impl EventRenderer {
             }
         }
         self.handle.redraw();
+    }
+
+    /// Returns the selected-agent work phase and escaped task title from the
+    /// authoritative complete stats snapshot.
+    fn selected_agent_work_status(&self, agent_id: &str) -> Option<(&'static str, Option<String>)> {
+        let status = &self.agent_stats.get(agent_id)?.work_status;
+        Some((
+            agent_work_status_phase(Some(status.phase())),
+            status.title().map(tau_proto::visible_escape_metadata),
+        ))
     }
 
     fn role_default_effort(&self) -> Option<tau_proto::Effort> {

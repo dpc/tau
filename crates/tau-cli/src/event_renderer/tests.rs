@@ -347,10 +347,12 @@ fn status_element_priorities_cover_every_element() {
 
     let priorities = [
         (StatusElement::Identity, 0),
+        (StatusElement::WorkStatus, 10),
         (StatusElement::Context, 10),
         (StatusElement::Tools, 20),
         (StatusElement::ActiveAgents, 20),
         (StatusElement::Description, 30),
+        (StatusElement::WorkTitle, 30),
         (StatusElement::ModelAdjustment, 30),
         (StatusElement::Watchers, 40),
         (StatusElement::WeeklyQuota, 50),

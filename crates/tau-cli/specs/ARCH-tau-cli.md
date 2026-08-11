@@ -29,9 +29,10 @@ The prompt's right-side context renders `<cwd> <&session-id>` as one
 `prompt.cwd`-styled unit. If prompt input needs that space, terminal overflow
 hides the complete unit. The bottom status line identifies the selected role or
 agent but does not repeat the session id. Its independently hideable elements
-use ascending importance bands: identity `0`, context `10`, tool and active
-side-agent activity `20`, agent description and model adjustments `30`,
-watchers `40`, runtime estimated API cost and weekly quota `50`, UI-I/O
+use ascending importance bands: identity `0`, selected-agent work phase and
+context `10`, tool and active side-agent activity `20`, agent description,
+selected-agent task title, and model adjustments `30`, watchers `40`, runtime
+estimated API cost and weekly quota `50`, UI-I/O
 diagnostics `60`, and the redraw
 counter `70`. Larger priorities disappear first at narrow widths; equal
 priorities disappear in reverse visual declaration order. Retained elements

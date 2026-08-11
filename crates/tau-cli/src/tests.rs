@@ -1729,6 +1729,65 @@ fn renderer_starts_without_selected_or_default_agent() {
     );
 }
 
+/// Complete agent stats must redraw the selected-agent status row with escaped
+/// work metadata, retaining the phase when narrow width drops the task title.
+#[test]
+fn selected_agent_status_row_renders_phase_and_adapts_task_title() {
+    let title = "review \u{202e}fix";
+    let escaped_title = tau_proto::visible_escape_metadata(title);
+    let render_at_width = |width| {
+        let (_term, handle, vt) = setup(width, 8);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: test_session_id("s1"),
+            reason: tau_proto::SessionStartReason::Initial,
+        }));
+        renderer.switch_agent("worker".to_owned());
+        renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("worker"),
+            work_status: tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Blocked,
+                Some(title.to_owned()),
+            )
+            .expect("valid work status"),
+            navigation_mode: tau_proto::AgentNavigationMode::Active,
+            runtime_state: tau_proto::AgentRuntimeState::Idle,
+            tools: Default::default(),
+            context: Default::default(),
+            estimated_api_cost: Default::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
+        }));
+        sync(&handle);
+        vt.screen_text(width)
+    };
+
+    let wide = render_at_width(80);
+    assert!(
+        wide.iter()
+            .any(|row| row.contains(&format!("@worker blocked {escaped_title}"))),
+        "wide selected-agent status row should contain phase and escaped title: {wide:?}"
+    );
+    assert!(
+        wide.iter().all(|row| !row.contains(title)),
+        "raw structural metadata must not reach the terminal: {wide:?}"
+    );
+
+    let narrow = render_at_width(18);
+    assert!(
+        narrow.iter().any(|row| row.contains("@worker blocked")),
+        "work phase should survive narrow-width fitting: {narrow:?}"
+    );
+    assert!(
+        narrow.iter().all(|row| !row.contains(&escaped_title)),
+        "lower-priority task title should yield before phase: {narrow:?}"
+    );
+}
+
 /// Increasing `:set redraw-history-size` should restore more scrollback
 /// immediately by forcing a full redraw, while decreasing it should only affect
 /// the next otherwise-needed full redraw.
