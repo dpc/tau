@@ -305,7 +305,7 @@
 
             clippy = craneLib.cargoClippy {
               cargoArtifacts = workspaceDeps;
-              cargoClippyExtraArgs = "-- -D warnings";
+              cargoClippyExtraArgs = "-- -D warnings -D clippy::debug_assert_with_mut_call";
               # Clippy consumes prebuilt dependencies but is a terminal gate;
               # do not export its post-check target directory.
               doInstallCargoArtifacts = false;
@@ -521,7 +521,7 @@
         };
 
         ci = {
-          inherit (multiBuild)
+          inherit (multiBuild.ci)
             workspace
             clippy
             tests
