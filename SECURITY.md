@@ -169,13 +169,15 @@ therefore do not promise whole-process or end-to-end slow-client memory limits.
 
 ## Command-mode and prompt boundary
 
-First-non-whitespace `:` selects non-provider command authority. Unknown or
-malformed colon commands fail locally, while slash-prefixed text—including
-obsolete command spellings—is ordinary provider input. A doubled `::` escape
-keeps a typed literal marker through every harness-owned command consumer even
-though history, durable prompt text, and provider projection contain only the
-canonical single-colon text. This prevents canonical `:skill` prompt text from
-being reinterpreted after the CLI removes the escape.
+For interactive input, first-non-whitespace `:` selects non-provider command
+authority. Unknown or malformed colon commands fail locally, while slash-prefixed
+text—including obsolete command spellings—is ordinary provider input. A doubled
+`::` escape keeps a typed literal marker through every harness-owned command
+consumer even though history, durable prompt text, and provider projection contain
+only the canonical single-colon text. This prevents canonical `:skill` prompt
+text from being reinterpreted after the CLI removes the escape. `--prompt-stdin`
+instead preserves its complete stdin text and marks it literal, so its initial
+agent prompt bypasses CLI commands/actions and harness skill expansion.
 
 Only attached socket UIs may send `ui.create_agent`. The harness returns its
 bounded, sanitized admission result directly to that live connection without

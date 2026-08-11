@@ -3580,8 +3580,9 @@ pub struct UiCreateAgent {
     /// Optional first prompt to append after agent context has been loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
-    /// Whether `initial_prompt` came from a doubled-colon literal escape and
-    /// must bypass harness-owned prompt command processing.
+    /// Whether `initial_prompt` must bypass harness-owned prompt command
+    /// processing, such as after a doubled-colon escape or from
+    /// `--prompt-stdin`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub literal: bool,
     /// Whether the initial prompt is user-authored or hidden internal control

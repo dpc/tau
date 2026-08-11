@@ -114,6 +114,41 @@ fn prompt_stdin_accepted_prompt_prints_correlated_completion()
     Ok(())
 }
 
+/// `--prompt-stdin` must forward colon-prefixed input as literal user text so
+/// the initial agent prompt cannot be consumed by the command dispatcher.
+#[test]
+fn prompt_stdin_forwards_colon_prefixed_input_literally() -> Result<(), Box<dyn std::error::Error>>
+{
+    let scenario = ScenarioV2::new(
+        "prompt-stdin-literal-colon",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>:skill\n</user>".to_owned(),
+                response: "literal colon prompt".to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut command = fixture.command(None);
+    command
+        .arg("--prompt-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("prompt stdin")
+        .write_all(b":skill\n")?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout)?, "literal colon prompt\n");
+    fixture.complete();
+    Ok(())
+}
+
 /// The real prompt-stdin process remains attached after accepted admission and
 /// converts its correlated provider terminal into a nonzero, stdout-free exit.
 #[test]

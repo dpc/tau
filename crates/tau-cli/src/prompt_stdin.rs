@@ -18,7 +18,8 @@ use crate::daemon::{
     storage_mode_from_ephemeral,
 };
 use crate::ui_prompt::{
-    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
+    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, PromptCommandHandling,
+    create_user_agent_prompt,
 };
 use crate::{CliError, PromptStdinError};
 
@@ -131,7 +132,10 @@ fn submit_prompt(
         session_id,
         role,
         prompt,
-        CreateUserAgentPromptOptions::default(),
+        CreateUserAgentPromptOptions {
+            command_handling: PromptCommandHandling::LiteralEscape,
+            ..CreateUserAgentPromptOptions::default()
+        },
     );
     let request_id = request.request_id.clone();
     let ctx_id = request

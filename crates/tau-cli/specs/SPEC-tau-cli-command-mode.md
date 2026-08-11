@@ -61,11 +61,12 @@ requests `suspended`, and `:agent auto` requests `active-auto`.
 name` after resolving the currently selected agent, matching current-agent
 shortcuts such as `:suspend` and `:resume`.
 
-The first non-whitespace `:` intrinsically selects command mode and cannot be
-shadowed by configured prompt completion rules. Only after all command owners
-decline a line may the CLI report its leading colon token as an unknown command.
-A first-non-whitespace `/` is ordinary prompt text and participates in configured
-filesystem completion, including absolute paths and path tokens later in a line.
+For interactive input, the first non-whitespace `:` intrinsically selects command
+mode and cannot be shadowed by configured prompt completion rules. Only after all
+command owners decline a line may the CLI report its leading colon token as an
+unknown command. A first-non-whitespace `/` is ordinary prompt text and
+participates in configured filesystem completion, including absolute paths and path
+tokens later in a line.
 
 `::text` escapes command mode and is canonically submitted as literal prompt
 text `:text`. Tau removes exactly one colon before in-process and persistent
@@ -75,6 +76,12 @@ The CLI carries typed literal provenance beside that canonical text in its UI
 request so downstream command processors bypass it rather than interpreting the
 canonical leading colon again. The harness preserves the canonical text and
 does not copy the provenance marker into the provider prompt body.
+
+`--prompt-stdin` does not use the interactive colon grammar. It preserves its
+complete stdin body as the initial prompt and carries the same literal provenance,
+so neither CLI command/action dispatch nor harness skill expansion interprets
+colon-prefixed stdin. For example, stdin `:skill` reaches the initial agent prompt
+as `:skill`.
 
 Headless `tau dev send` shares the colon grammar, literal escape, shell
 shortcuts, and control-event mappings. Interactive-only commands are explicit

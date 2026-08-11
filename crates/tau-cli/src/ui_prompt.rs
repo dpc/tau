@@ -18,7 +18,7 @@ pub(crate) enum PromptCommandHandling {
     /// Apply the ordinary harness-owned prompt-command grammar.
     #[default]
     Interpret,
-    /// Preserve canonical text produced by the doubled-colon literal escape.
+    /// Preserve text from a source that bypasses prompt command processing.
     LiteralEscape,
 }
 
@@ -35,7 +35,7 @@ pub(crate) struct CreateUserAgentPromptOptions {
     pub(crate) model_override: Option<tau_proto::ModelId>,
     /// Whether the new agent should be memory-only for the daemon lifetime.
     pub(crate) ephemeral: bool,
-    /// Controls harness-owned prompt-command interpretation.
+    /// Controls whether harness-owned prompt commands may interpret the text.
     pub(crate) command_handling: PromptCommandHandling,
 }
 

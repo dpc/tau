@@ -10,6 +10,24 @@ fn prompt_stdin_role_uses_startup_role_or_default() {
     assert_eq!(prompt_stdin_role(None), DEFAULT_AGENT_ROLE);
 }
 
+/// `--prompt-stdin` must mark every initial prompt literal so colon-prefixed
+/// input reaches the created agent instead of entering command dispatch.
+#[test]
+fn prompt_stdin_submission_marks_colon_input_literal() {
+    let request = create_user_agent_prompt(
+        &tau_proto::SessionId::parse("s1").expect("session id"),
+        "engineer",
+        ":skill",
+        CreateUserAgentPromptOptions {
+            command_handling: PromptCommandHandling::LiteralEscape,
+            ..CreateUserAgentPromptOptions::default()
+        },
+    );
+
+    assert_eq!(request.initial_prompt.as_deref(), Some(":skill"));
+    assert!(request.literal);
+}
+
 fn create_result(
     request_id: &str,
     outcome: tau_proto::UiCreateAgentOutcome,

@@ -45,6 +45,7 @@ const MAX_AGENT_START_PAIRS: usize = 2;
 const PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS: &[&str] = &[
     "spawned-tau-cold-resume",
     "live-dual-pty-attach",
+    "prompt-stdin-literal-colon",
     "prompt-stdin-success",
     "prompt-stdin-provider-failure",
 ];
