@@ -672,11 +672,10 @@ impl Extension {
                     unowned_add: action == ReactionActionKind::Add && !owned_before,
                 },
             );
-            debug_assert!(
-                state
-                    .reactions
-                    .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight)
-            );
+            let remembered = state
+                .reactions
+                .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight);
+            debug_assert!(remembered);
             state.config_frozen = true;
             PreparedReaction {
                 cfg,
@@ -791,11 +790,10 @@ impl Extension {
                     ReactionActionKind::Add => {}
                 }
                 state.reactions.in_flight.remove(&prepared.key);
-                debug_assert!(
-                    state
-                        .reactions
-                        .remember_attempt(&invoke, ReactionAttemptDisposition::Success(result))
-                );
+                let remembered = state
+                    .reactions
+                    .remember_attempt(&invoke, ReactionAttemptDisposition::Success(result));
+                debug_assert!(remembered);
             }
         }
         drop(submission);
