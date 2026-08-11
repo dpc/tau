@@ -13,10 +13,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use tau_proto::{AgentId, Event, ToolCallId, ToolCancelled, ToolName, ToolType};
+use tau_proto::{AgentId, ToolCallId};
 use tracing::warn;
-
-use crate::Output;
 
 /// Default aggregate cap for approximated queued argument bytes.
 pub(crate) const DEFAULT_QUEUED_BYTES_LIMIT: usize = 1024 * 1024;
@@ -45,8 +43,6 @@ pub(crate) struct EnqueueError {
 pub(crate) struct WorkMeta {
     /// Tool call id, when this work corresponds to a model tool invocation.
     pub(crate) call_id: Option<ToolCallId>,
-    /// Tool name used for queued cancellation events.
-    pub(crate) tool_name: Option<ToolName>,
     /// Owner agent used for lifecycle cleanup.
     pub(crate) agent_id: Option<AgentId>,
     /// Approximate queued argument byte cost for bounded memory accounting.
@@ -115,7 +111,6 @@ pub(crate) struct WorkScheduler {
 struct Inner {
     state: Mutex<State>,
     changed: Condvar,
-    tx: Output,
     config: SchedulerConfig,
 }
 
@@ -139,12 +134,11 @@ enum WorkerKind {
 
 impl WorkScheduler {
     /// Create a scheduler and spawn its bounded worker set.
-    pub(crate) fn new(tx: Output, config: SchedulerConfig) -> Self {
+    pub(crate) fn new(config: SchedulerConfig) -> Self {
         let mut scheduler = Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::default()),
                 changed: Condvar::new(),
-                tx,
                 config,
             }),
             worker_handles: Vec::new(),
@@ -216,17 +210,7 @@ impl WorkScheduler {
             return false;
         };
         drop(state);
-        if let (Some(call_id), Some(tool_name)) = (item.meta.call_id, item.meta.tool_name) {
-            let _ = self
-                .inner
-                .tx
-                .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
-                    presentation: Default::default(),
-                    call_id,
-                    tool_name,
-                    tool_type: ToolType::Function,
-                }));
-        }
+        drop(item);
         true
     }
 

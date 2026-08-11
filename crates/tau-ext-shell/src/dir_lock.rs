@@ -42,6 +42,7 @@ use crate::Output;
 use crate::argument::{argument_text, optional_argument_text};
 use crate::config::{DirLockBackendConfig, DirLockConfig};
 use crate::display::{ToolFailure, ok_display};
+use crate::tool_lifecycle::ToolLifecycle;
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, GPT_SHELL_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
 };
@@ -1156,6 +1157,7 @@ pub(crate) fn dispatch_dir_lock_tool(
     manager: &DirLockManager,
     enabled: bool,
     tx: &Output,
+    lifecycle: ToolLifecycle,
 ) {
     if !enabled {
         send_event(
@@ -1190,7 +1192,7 @@ pub(crate) fn dispatch_dir_lock_tool(
     };
 
     match request.command.as_str() {
-        "update" => dispatch_dir_lock_update(invoke, manager, tx, request),
+        "update" => dispatch_dir_lock_update(invoke, manager, tx, request, lifecycle),
         "unlock" => dispatch_dir_lock_unlock(invoke, manager, tx, request),
         _ => send_event(tx, invalid_dir_lock_command_error(&invoke, &request)),
     }
@@ -1232,16 +1234,25 @@ fn dispatch_dir_lock_update(
     manager: &DirLockManager,
     tx: &Output,
     request: DirLockToolRequest,
+    lifecycle: ToolLifecycle,
 ) {
     let wait_invoke = invoke.clone();
     let wait_dir = request.dir.clone();
     let wait_tx = tx.clone();
+    let wait_manager = manager.clone();
+    let wait_call_id = invoke.call_id.clone();
+    let wait_lifecycle = lifecycle.clone();
+    #[cfg(test)]
+    lifecycle.test_pause_before_lock_waiter_registration();
     let acquire_result = manager.acquire_manual(
         invoke.call_id.clone(),
         invoke.agent_id.clone(),
         request.dir.clone(),
         move || {
             let _ = wait_tx.report_tool_progress(waiting_progress(&wait_invoke, &[wait_dir], None));
+            if wait_lifecycle.effect_cancel_requested() {
+                wait_manager.cancel_waiting_call(&wait_call_id);
+            }
         },
     );
 

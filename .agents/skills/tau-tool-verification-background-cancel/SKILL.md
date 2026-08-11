@@ -76,6 +76,10 @@ async and best effort: the success result only means Tau accepted the request,
 not that the child process or agent has already stopped. A canceled shell call
 should complete through `wait`, include timing headers if it ran longer than
 about 5 seconds, and must not keep running to normal `status: 0` completion.
+For an admitted ext-shell model call, cancellation processed before the
+extension's effect-start transition prevents process spawn or file mutation and
+produces one cancelled terminal. If effect start wins first, cancellation keeps
+the active process/search behavior and cannot roll back effects already started.
 
 Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Unknown ids should be distinguished from already-completed ids. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 

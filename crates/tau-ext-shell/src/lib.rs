@@ -43,6 +43,7 @@ mod runtime;
 mod scheduler;
 mod shell_output_spool;
 mod shell_process;
+mod tool_lifecycle;
 mod tools;
 mod truncate;
 
@@ -55,6 +56,7 @@ use crate::cwd_state::{CwdState, WorkdirSnapshot};
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
 use crate::runtime::ShellRuntime;
 use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
+use crate::tool_lifecycle::{ToolCancellationState, ToolLifecycle};
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
@@ -1331,7 +1333,7 @@ fn schedule_tool_started(
     tx: &Output,
     config: ExtConfig,
     lock_manager: DirLockManager,
-    running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    cancellation: ToolCancellationState,
     cwd_state: CwdState,
 ) -> Result<(), Box<(tau_proto::ToolStarted, crate::display::ToolFailure)>> {
     let wire_invoke = invoke.clone();
@@ -1433,31 +1435,43 @@ fn schedule_tool_started(
     let priority = priority_for_tool(&invoke, &config);
     let meta = WorkMeta {
         call_id: Some(invoke.call_id.clone()),
-        tool_name: Some(invoke.tool_name.clone()),
         agent_id: Some(invoke.agent_id.clone()),
         queued_bytes: approximate_tool_bytes(&invoke, scheduler.queued_bytes_limit()),
     };
     let tx_for_job = tx.clone();
+    let lifecycle = cancellation.lifecycles.admit(
+        invoke.call_id.clone(),
+        invoke.tool_name.clone(),
+        invoke.agent_id.clone(),
+        tx_for_job.clone(),
+    );
+    let lifecycle_for_error = lifecycle.clone();
     let invoke_for_error = wire_invoke;
     let cwd_state_for_error = cwd_state.clone();
     scheduler
         .enqueue(priority, meta, move || {
+            #[cfg(test)]
+            lifecycle.test_pause_after_dequeue();
             if invoke.tool_name == DIR_LOCK_TOOL_NAME {
-                crate::dir_lock::dispatch_dir_lock_tool(
-                    invoke,
-                    &lock_manager,
-                    config.dir_lock.enable,
-                    &tx_for_job,
-                );
+                if lifecycle.start_effect() {
+                    crate::dir_lock::dispatch_dir_lock_tool(
+                        invoke,
+                        &lock_manager,
+                        config.dir_lock.enable,
+                        &tx_for_job,
+                        lifecycle.clone(),
+                    );
+                }
             } else if config.dir_lock.enable && is_dir_lock_update_tool(invoke.tool_name.as_str()) {
                 dispatch_locked_tool_invoke(
                     invoke,
                     ToolDispatchContext {
                         shell_config: config.shell,
                         tx: tx_for_job,
-                        running_calls,
+                        running_calls: Arc::clone(&cancellation.running_calls),
                         enforce_ro_bind: config.dir_lock.enforce_ro_bind,
                         cwd_state: cwd_state.clone(),
+                        lifecycle: lifecycle.clone(),
                     },
                     &lock_manager,
                     match &workdir_snapshot {
@@ -1471,25 +1485,30 @@ fn schedule_tool_started(
                     },
                 );
             } else {
-                dispatch_tool_invoke(
-                    invoke,
-                    ToolDispatchContext {
-                        shell_config: config.shell,
-                        tx: tx_for_job,
-                        running_calls,
-                        enforce_ro_bind: config.dir_lock.enforce_ro_bind,
-                        cwd_state: cwd_state.clone(),
-                    },
-                    None,
-                    config
-                        .dir_lock
-                        .enable
-                        .then_some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
-                    workdir_snapshot.clone(),
-                );
+                if lifecycle.start_effect() {
+                    dispatch_tool_invoke(
+                        invoke,
+                        ToolDispatchContext {
+                            shell_config: config.shell,
+                            tx: tx_for_job,
+                            running_calls: Arc::clone(&cancellation.running_calls),
+                            enforce_ro_bind: config.dir_lock.enforce_ro_bind,
+                            cwd_state: cwd_state.clone(),
+                            lifecycle: lifecycle.clone(),
+                        },
+                        None,
+                        config
+                            .dir_lock
+                            .enable
+                            .then_some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
+                        workdir_snapshot.clone(),
+                    );
+                }
             }
+            lifecycle.finish();
         })
         .map_err(|error| {
+            lifecycle_for_error.finish();
             cwd_state_for_error.take_pending_workdir_by_call(&invoke_for_error.call_id);
             Box::new((
                 invoke_for_error,
@@ -1531,7 +1550,6 @@ fn schedule_ui_shell_command(
     } = context;
     let meta = WorkMeta {
         call_id: None,
-        tool_name: None,
         agent_id: cmd.target_agent_id.clone(),
         queued_bytes: cmd.command.len(),
     };
@@ -1650,6 +1668,8 @@ struct ToolDispatchContext {
     enforce_ro_bind: bool,
     /// Per-instance workdir state used by the persistent workdir tool.
     cwd_state: CwdState,
+    /// Shared effect-start and cancellation authority for this admitted call.
+    lifecycle: ToolLifecycle,
 }
 
 fn dispatch_locked_tool_invoke(
@@ -1664,6 +1684,7 @@ fn dispatch_locked_tool_invoke(
         running_calls,
         enforce_ro_bind,
         cwd_state,
+        lifecycle,
     } = context;
     let dirs = match crate::dir_lock::automatic_lock_dirs_for_tool_in_dir(
         invoke.tool_name.as_str(),
@@ -1672,7 +1693,9 @@ fn dispatch_locked_tool_invoke(
     ) {
         Ok(dirs) => crate::dir_lock::normalize_lock_dirs(dirs),
         Err(error) => {
-            send_tool_failure(invoke, error, &tx);
+            if lifecycle.claim_terminal_before_effect() {
+                send_tool_failure(invoke, error, &tx);
+            }
             return;
         }
     };
@@ -1708,70 +1731,81 @@ fn dispatch_locked_tool_invoke(
     } {
         Ok(guard) => guard,
         Err(path_crate_dir_lock::LockAcquireError::NotCovered) => {
-            dispatch_tool_invoke(
-                invoke,
-                ToolDispatchContext {
-                    shell_config,
-                    tx,
-                    running_calls,
-                    enforce_ro_bind,
-                    cwd_state,
-                },
-                None,
-                Some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
-                WorkdirSnapshot::Valid(cwd),
-            );
+            if lifecycle.start_effect() {
+                dispatch_tool_invoke(
+                    invoke,
+                    ToolDispatchContext {
+                        shell_config,
+                        tx,
+                        running_calls,
+                        enforce_ro_bind,
+                        cwd_state,
+                        lifecycle: lifecycle.clone(),
+                    },
+                    None,
+                    Some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
+                    WorkdirSnapshot::Valid(cwd),
+                );
+            }
             return;
         }
         Err(path_crate_dir_lock::LockAcquireError::Cancelled) => {
-            let _ = tx.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
-                presentation: Default::default(),
-                call_id: invoke.call_id,
-                tool_name: invoke.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-            }));
+            lifecycle.report_cancelled_before_effect();
             return;
         }
         Err(path_crate_dir_lock::LockAcquireError::Abandoned(lock)) => {
-            send_tool_failure(invoke, lock.tool_failure(), &tx);
+            if lifecycle.claim_terminal_before_effect() {
+                send_tool_failure(invoke, lock.tool_failure(), &tx);
+            }
             return;
         }
         Err(path_crate_dir_lock::LockAcquireError::SelfConflict { dir }) => {
-            send_tool_failure(
-                invoke,
-                path_crate_display::ToolFailure::new(format!(
-                    "automatic directory lock is outside your manual lock coverage: {}",
-                    dir.display()
-                )),
-                &tx,
-            );
+            if lifecycle.claim_terminal_before_effect() {
+                send_tool_failure(
+                    invoke,
+                    path_crate_display::ToolFailure::new(format!(
+                        "automatic directory lock is outside your manual lock coverage: {}",
+                        dir.display()
+                    )),
+                    &tx,
+                );
+            }
             return;
         }
         Err(path_crate_dir_lock::LockAcquireError::Backend(message)) => {
-            send_tool_failure(
-                invoke,
-                path_crate_display::ToolFailure::new(format!("dir_lock backend error: {message}")),
-                &tx,
-            );
+            if lifecycle.claim_terminal_before_effect() {
+                send_tool_failure(
+                    invoke,
+                    path_crate_display::ToolFailure::new(format!(
+                        "dir_lock backend error: {message}"
+                    )),
+                    &tx,
+                );
+            }
             return;
         }
     };
 
     let lock_wait_duration_seconds =
         reported_lock_wait_duration_seconds(lock_wait_started.elapsed());
-    dispatch_tool_invoke(
-        invoke,
-        ToolDispatchContext {
-            shell_config,
-            tx,
-            running_calls,
-            enforce_ro_bind,
-            cwd_state,
-        },
-        lock_wait_duration_seconds,
-        shell_command_mode,
-        WorkdirSnapshot::Valid(cwd),
-    );
+    #[cfg(test)]
+    lifecycle.test_pause_after_lock();
+    if lifecycle.start_effect() {
+        dispatch_tool_invoke(
+            invoke,
+            ToolDispatchContext {
+                shell_config,
+                tx,
+                running_calls,
+                enforce_ro_bind,
+                cwd_state,
+                lifecycle: lifecycle.clone(),
+            },
+            lock_wait_duration_seconds,
+            shell_command_mode,
+            WorkdirSnapshot::Valid(cwd),
+        );
+    }
     drop(guard);
 }
 
@@ -1893,6 +1927,7 @@ fn dispatch_tool_invoke(
         running_calls,
         enforce_ro_bind,
         cwd_state,
+        lifecycle,
     } = context;
     if invoke.tool_name == WORKDIR_TOOL_NAME {
         if cbor_optional_text(&invoke.arguments, "path").is_none() {
@@ -1983,6 +2018,7 @@ fn dispatch_tool_invoke(
             shell_config,
             tx: &tx,
             running_calls: &running_calls,
+            lifecycle: &lifecycle,
             lock_wait_duration_seconds,
             shell_command_mode: shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
             enforce_ro_bind,
@@ -1996,6 +2032,7 @@ fn dispatch_tool_invoke(
             invoke,
             &tx,
             &running_calls,
+            &lifecycle,
             lock_wait_duration_seconds,
             world,
         );
@@ -2053,14 +2090,20 @@ fn dispatch_cancellable_non_shell_tool(
     invoke: tau_proto::ToolStarted,
     tx: &Output,
     running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    lifecycle: &ToolLifecycle,
     lock_wait_duration_seconds: Option<u64>,
     world: path_crate_tools::world::ShellWorld,
 ) {
+    #[cfg(test)]
+    lifecycle.test_pause_before_active_registration();
     let (cancel_tx, cancel_rx) = mpsc::channel();
     running_calls
         .lock()
         .expect("running call registry lock poisoned")
-        .insert(invoke.call_id.clone(), cancel_tx);
+        .insert(invoke.call_id.clone(), cancel_tx.clone());
+    if lifecycle.effect_cancel_requested() {
+        let _ = cancel_tx.send(());
+    }
 
     if let Some(display) = crate::tools::initial_display(&invoke) {
         let _ = tx.report_tool_progress(tau_proto::ToolProgress {
@@ -2112,6 +2155,8 @@ struct CancellableShellDispatch<'a> {
     /// Shared registry used by cancel requests to signal running shell
     /// processes.
     running_calls: &'a Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    /// Lifecycle authority that bridges effect start to sender registration.
+    lifecycle: &'a ToolLifecycle,
     /// Seconds spent waiting on a directory lock before this invocation ran.
     lock_wait_duration_seconds: Option<u64>,
     /// Display and access mode chosen for the shell command.
@@ -2129,11 +2174,14 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         shell_config,
         tx,
         running_calls,
+        lifecycle,
         lock_wait_duration_seconds,
         shell_command_mode,
         enforce_ro_bind,
         mut world,
     } = params;
+    #[cfg(test)]
+    lifecycle.test_pause_before_active_registration();
     let (cancel_tx, cancel_rx) = mpsc::channel();
     debug!(
         call_id = %invoke.call_id,
@@ -2143,7 +2191,10 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
     running_calls
         .lock()
         .expect("running call registry lock poisoned")
-        .insert(invoke.call_id.clone(), cancel_tx);
+        .insert(invoke.call_id.clone(), cancel_tx.clone());
+    if lifecycle.effect_cancel_requested() {
+        let _ = cancel_tx.send(());
+    }
 
     let _ = tx.report_tool_progress(tau_proto::ToolProgress {
         call_id: invoke.call_id.clone(),

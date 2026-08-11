@@ -89,7 +89,10 @@ polling, and predicate-backed same-process wakeups. See
 [`SPEC-tau-ext-shell-directory-locking`](specs/SPEC-tau-ext-shell-directory-locking.md).
 
 Scheduler tests cover bounded admission, queued cancellation, drop, worker wakeup,
-running-work joins, and cancellation after search work starts.
+running-work joins, and cancellation after search work starts. Deterministic
+handoff barriers also cancel after scheduler dequeue and after automatic-lock
+acquisition but before effect start; both regressions require no mutation and
+exactly one cancelled terminal.
 
 ## Discovery
 

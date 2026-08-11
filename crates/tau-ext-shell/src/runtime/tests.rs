@@ -3,6 +3,483 @@ use std::time as path_std_time;
 use super::super::DiscoverySourcePolicy;
 use super::*;
 
+/// Ensures correlated delegate completion removes lifecycle state for queued
+/// work that scheduler ownership drops, so late cancellation cannot report.
+#[test]
+fn start_agent_result_removes_queued_tool_lifecycle() {
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    runtime.scheduler = Some(WorkScheduler::new(crate::scheduler::SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 0,
+        ..Default::default()
+    }));
+    let agent_id = tau_proto::AgentId::parse("agent-delegate-result").expect("agent id");
+    let cwd = std::env::current_dir().expect("current dir");
+    runtime.cwd_state.set(agent_id.clone(), cwd.clone());
+    runtime
+        .start_agent_owners
+        .insert("delegate-query".to_owned(), agent_id.clone());
+    let call_id = tau_proto::ToolCallId::new("delegate-queued-read");
+    schedule_runtime_tool(
+        &runtime,
+        call_id.clone(),
+        crate::tools::READ_TOOL_NAME,
+        CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(cwd.join("Cargo.toml").display().to_string()),
+        )]),
+        agent_id,
+    );
+
+    runtime.handle_start_agent_result(tau_proto::StartAgentResult {
+        query_id: "delegate-query".to_owned(),
+        text: "done".to_owned(),
+        error: None,
+    });
+    runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+        target_call_id: call_id,
+    });
+
+    assert!(
+        rx.recv_timeout(path_std_time::Duration::from_millis(50))
+            .is_err(),
+        "removed queued work must not emit a late cancellation"
+    );
+}
+
+/// Ensures disabling directory locking while an automatic mutation waits emits
+/// one cancellation terminal rather than silently dropping the call.
+#[test]
+fn config_disable_reports_waiting_automatic_call_cancelled_once() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("replace.txt");
+    std::fs::write(&path, "old\n").expect("write fixture");
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    configure_runtime_dir_lock(&mut runtime, true);
+    while rx.try_recv().is_ok() {}
+    let blocker = runtime
+        .lock_manager
+        .acquire_auto(
+            tau_proto::ToolCallId::new("config-disable-blocker"),
+            tau_proto::AgentId::parse("agent-blocker").expect("agent id"),
+            vec![tempdir.path().canonicalize().expect("canonical tempdir")],
+            || {},
+        )
+        .expect("blocking automatic lock");
+    let agent_id = tau_proto::AgentId::parse("agent-config-waiter").expect("agent id");
+    runtime
+        .cwd_state
+        .set(agent_id.clone(), tempdir.path().to_path_buf());
+    let call_id = tau_proto::ToolCallId::new("config-disable-waiter");
+    schedule_runtime_tool(
+        &runtime,
+        call_id.clone(),
+        crate::tools::REPLACE_TOOL_NAME,
+        CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(path.display().to_string()),
+            ),
+            (
+                CborValue::Text("edits".to_owned()),
+                CborValue::Array(vec![CborValue::Map(vec![
+                    (
+                        CborValue::Text("oldText".to_owned()),
+                        CborValue::Text("old".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("newText".to_owned()),
+                        CborValue::Text("new".to_owned()),
+                    ),
+                ])]),
+            ),
+        ]),
+        agent_id,
+    );
+    wait_for_tool_progress(&rx, &call_id);
+
+    configure_runtime_dir_lock(&mut runtime, false);
+    assert_cancelled_report(&rx, &call_id);
+    assert_no_second_terminal_for(&rx, &call_id);
+    assert_eq!(std::fs::read_to_string(path).expect("fixture"), "old\n");
+    drop(blocker);
+    runtime.final_shutdown();
+}
+
+/// Ensures cancellation of a direct `dir_lock(update)` waiter still removes the
+/// lock-manager waiter after the call has crossed its direct-dispatch boundary.
+#[test]
+fn tool_cancel_request_cancels_waiting_direct_dir_lock_once() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let dir = tempdir.path().canonicalize().expect("canonical tempdir");
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    configure_runtime_dir_lock(&mut runtime, true);
+    while rx.try_recv().is_ok() {}
+    let blocker_id = tau_proto::AgentId::parse("agent-manual-blocker").expect("agent id");
+    runtime
+        .lock_manager
+        .acquire_manual(
+            tau_proto::ToolCallId::new("manual-blocker"),
+            blocker_id.clone(),
+            dir.clone(),
+            || {},
+        )
+        .expect("blocking manual lock");
+    let waiter_id = tau_proto::AgentId::parse("agent-manual-waiter").expect("agent id");
+    runtime.cwd_state.set(waiter_id.clone(), dir.clone());
+    let call_id = tau_proto::ToolCallId::new("direct-lock-waiter");
+    schedule_runtime_tool(
+        &runtime,
+        call_id.clone(),
+        crate::dir_lock::DIR_LOCK_TOOL_NAME,
+        CborValue::Map(vec![
+            (
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("update".to_owned()),
+            ),
+            (
+                CborValue::Text("directory".to_owned()),
+                CborValue::Text(dir.display().to_string()),
+            ),
+        ]),
+        waiter_id,
+    );
+    wait_for_tool_progress(&rx, &call_id);
+
+    runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+        target_call_id: call_id.clone(),
+    });
+    assert_cancelled_report(&rx, &call_id);
+    assert_no_second_terminal_for(&rx, &call_id);
+    runtime.lock_manager.release_agent(&blocker_id);
+    runtime.final_shutdown();
+}
+
+/// Ensures cancellation before a direct `dir_lock(update)` waiter registers is
+/// bridged into registration and cannot later acquire the released lock.
+#[test]
+fn tool_cancel_request_bridges_direct_dir_lock_waiter_registration() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let dir = tempdir.path().canonicalize().expect("canonical tempdir");
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    configure_runtime_dir_lock(&mut runtime, true);
+    while rx.try_recv().is_ok() {}
+    let blocker_id = tau_proto::AgentId::parse("agent-registration-blocker").expect("agent id");
+    runtime
+        .lock_manager
+        .acquire_manual(
+            tau_proto::ToolCallId::new("registration-blocker"),
+            blocker_id.clone(),
+            dir.clone(),
+            || {},
+        )
+        .expect("blocking manual lock");
+    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::channel();
+    runtime
+        .cancellation
+        .lifecycles
+        .pause_before_lock_waiter_registration(reached_tx, resume_rx);
+    let waiter_id = tau_proto::AgentId::parse("agent-registration-waiter").expect("agent id");
+    runtime.cwd_state.set(waiter_id.clone(), dir.clone());
+    let call_id = tau_proto::ToolCallId::new("direct-lock-registration-gap");
+    schedule_runtime_tool(
+        &runtime,
+        call_id.clone(),
+        crate::dir_lock::DIR_LOCK_TOOL_NAME,
+        CborValue::Map(vec![
+            (
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("update".to_owned()),
+            ),
+            (
+                CborValue::Text("directory".to_owned()),
+                CborValue::Text(dir.display().to_string()),
+            ),
+        ]),
+        waiter_id,
+    );
+    reached_rx
+        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .expect("direct lock reached pre-registration handoff");
+
+    runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+        target_call_id: call_id.clone(),
+    });
+    resume_tx.send(()).expect("resume waiter registration");
+    assert_cancelled_report(&rx, &call_id);
+    assert_no_second_terminal_for(&rx, &call_id);
+    runtime.lock_manager.release_agent(&blocker_id);
+    runtime
+        .lock_manager
+        .acquire_manual(
+            tau_proto::ToolCallId::new("post-cancel-lock"),
+            tau_proto::AgentId::parse("agent-post-cancel").expect("agent id"),
+            dir,
+            || {},
+        )
+        .expect("cancelled waiter did not acquire lock");
+    runtime.final_shutdown();
+}
+
+/// Ensures production cancellation routing preserves a request that arrives
+/// after effect start but before the shell cancellation sender is registered.
+#[test]
+fn tool_cancel_request_survives_active_sender_registration_handoff() {
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    let (call_id, reached_rx, resume_tx) =
+        schedule_shell_paused_before_active_registration(&mut runtime, "cancel-handoff");
+
+    reached_rx
+        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .expect("shell reached sender-registration handoff");
+    runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+        target_call_id: call_id.clone(),
+    });
+    resume_tx.send(()).expect("resume shell registration");
+
+    assert_cancelled_report(&rx, &call_id);
+    runtime.final_shutdown();
+}
+
+/// Ensures production cancellation routing also bridges effect start to the
+/// separately implemented search cancellation sender registration.
+#[test]
+fn tool_cancel_request_survives_search_sender_registration_handoff() {
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    let cwd = std::env::current_dir().expect("current dir");
+    let (call_id, reached_rx, resume_tx) = schedule_tool_paused_before_active_registration(
+        &mut runtime,
+        "search-cancel-handoff",
+        crate::tools::FIND_TOOL_NAME,
+        CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text("**/*".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(cwd.display().to_string()),
+            ),
+        ]),
+    );
+
+    reached_rx
+        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .expect("find reached sender-registration handoff");
+    runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+        target_call_id: call_id.clone(),
+    });
+    resume_tx.send(()).expect("resume find registration");
+
+    assert_cancelled_report(&rx, &call_id);
+    runtime.final_shutdown();
+}
+
+/// Ensures shutdown records cancellation in the lifecycle before snapshotting
+/// active senders, so a shell delayed before registration cannot escape
+/// teardown.
+#[test]
+fn shutdown_survives_active_sender_registration_handoff() {
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+    );
+    let (call_id, reached_rx, resume_tx) =
+        schedule_shell_paused_before_active_registration(&mut runtime, "shutdown-handoff");
+
+    reached_rx
+        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .expect("shell reached sender-registration handoff");
+    runtime.shutdown();
+    resume_tx.send(()).expect("resume shell registration");
+    runtime.final_shutdown();
+
+    assert_cancelled_report(&rx, &call_id);
+}
+
+/// Schedule one shell call and pause it after effect start but before active
+/// cancellation sender registration.
+fn schedule_shell_paused_before_active_registration(
+    runtime: &mut ShellRuntime,
+    call_id: &str,
+) -> (tau_proto::ToolCallId, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    schedule_tool_paused_before_active_registration(
+        runtime,
+        call_id,
+        crate::tools::SHELL_TOOL_NAME,
+        CborValue::Map(vec![(
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("sleep 30".to_owned()),
+        )]),
+    )
+}
+
+/// Schedule one cancellable tool and pause it immediately before active sender
+/// registration.
+fn schedule_tool_paused_before_active_registration(
+    runtime: &mut ShellRuntime,
+    call_id: &str,
+    tool_name: &str,
+    arguments: CborValue,
+) -> (tau_proto::ToolCallId, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let agent_id = tau_proto::AgentId::parse("agent-active-handoff").expect("agent id");
+    runtime.cwd_state.set(
+        agent_id.clone(),
+        std::env::current_dir().expect("current dir"),
+    );
+    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::channel();
+    runtime
+        .cancellation
+        .lifecycles
+        .pause_before_active_registration(reached_tx, resume_rx);
+    let call_id = tau_proto::ToolCallId::new(call_id);
+    let invoke = tau_proto::ToolStarted {
+        call_id: call_id.clone(),
+        tool_name: tau_proto::ToolName::new(tool_name),
+        arguments,
+        agent_id,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let local_tool_name = invoke.tool_name.clone();
+    runtime
+        .handle_tool_started(invoke, &local_tool_name, false)
+        .expect("schedule shell");
+    (call_id, reached_rx, resume_tx)
+}
+
+/// Schedule one model tool through the production runtime admission path.
+fn schedule_runtime_tool(
+    runtime: &ShellRuntime,
+    call_id: tau_proto::ToolCallId,
+    tool_name: &str,
+    arguments: CborValue,
+    agent_id: tau_proto::AgentId,
+) {
+    let invoke = tau_proto::ToolStarted {
+        call_id,
+        tool_name: tau_proto::ToolName::new(tool_name),
+        arguments,
+        agent_id,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let local_tool_name = invoke.tool_name.clone();
+    runtime
+        .handle_tool_started(invoke, &local_tool_name, false)
+        .expect("schedule runtime tool");
+}
+
+/// Apply one directory-lock enablement state through production configuration.
+fn configure_runtime_dir_lock(runtime: &mut ShellRuntime, enable: bool) {
+    let mut config = ExtConfig::default();
+    config.dir_lock.enable = enable;
+    runtime
+        .apply_config(
+            tau_proto::ExtensionName::parse("core-shell").expect("extension name"),
+            None,
+            config,
+        )
+        .expect("configure dir lock");
+}
+
+/// Wait until one tool reports that it is blocked on directory-lock
+/// acquisition.
+fn wait_for_tool_progress(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+    call_id: &tau_proto::ToolCallId,
+) {
+    loop {
+        let HarnessInputMessage::Emit(emit) = rx
+            .recv_timeout(path_std_time::Duration::from_secs(1))
+            .expect("tool waiting progress")
+        else {
+            continue;
+        };
+        if let Event::ToolProgressReported(progress) = *emit.event
+            && &progress.call_id == call_id
+        {
+            return;
+        }
+    }
+}
+
+/// Wait through progress events for the cancellation terminal of one call.
+fn assert_cancelled_report(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+    call_id: &tau_proto::ToolCallId,
+) {
+    loop {
+        let HarnessInputMessage::Emit(emit) = rx
+            .recv_timeout(path_std_time::Duration::from_secs(2))
+            .expect("shell cancellation report")
+        else {
+            continue;
+        };
+        if let Event::ToolCancelledReported(cancelled) = *emit.event {
+            assert_eq!(&cancelled.call_id, call_id);
+            return;
+        }
+    }
+}
+
+/// Assert that no later terminal report exists for one call.
+fn assert_no_second_terminal_for(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+    call_id: &tau_proto::ToolCallId,
+) {
+    while let Ok(message) = rx.recv_timeout(path_std_time::Duration::from_millis(50)) {
+        let HarnessInputMessage::Emit(emit) = message else {
+            continue;
+        };
+        let terminal_call_id = match emit.event.as_ref() {
+            Event::ToolResultReported(event) => Some(&event.call_id),
+            Event::ToolErrorReported(event) => Some(&event.call_id),
+            Event::ToolCancelledReported(event) => Some(&event.call_id),
+            _ => None,
+        };
+        assert_ne!(
+            terminal_call_id,
+            Some(call_id),
+            "call emitted more than one terminal"
+        );
+    }
+}
+
 /// Ensures ToolCancelRequest reaches already-running cancellable tool
 /// calls, not just queued scheduler work or shell-only registry
 /// entries.
@@ -16,7 +493,15 @@ fn tool_cancel_request_signals_registered_running_call() {
     );
     let call_id = tau_proto::ToolCallId::new("running-find");
     let (cancel_tx, cancel_rx) = mpsc::channel();
+    let lifecycle = runtime.cancellation.lifecycles.admit(
+        call_id.clone(),
+        tau_proto::ToolName::new("find"),
+        tau_proto::AgentId::parse("agent-a").expect("agent id"),
+        runtime.tx.clone(),
+    );
+    assert!(lifecycle.start_effect());
     runtime
+        .cancellation
         .running_calls
         .lock()
         .expect("running call registry")
@@ -44,6 +529,7 @@ fn shutdown_signals_registered_running_call() {
     let call_id = tau_proto::ToolCallId::new("running-grep");
     let (cancel_tx, cancel_rx) = mpsc::channel();
     runtime
+        .cancellation
         .running_calls
         .lock()
         .expect("running call registry")

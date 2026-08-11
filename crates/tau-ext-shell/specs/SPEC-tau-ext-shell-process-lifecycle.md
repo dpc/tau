@@ -26,6 +26,10 @@ kills that process group. On
 non-Unix/Windows, cancellation and timeout use direct-child termination and a
 bounded post-terminal pipe drain; descendants outside the direct child may still
 survive, but they must not make the shell result wait indefinitely for pipe EOF.
+Model shell calls carry cancellation state across scheduling and automatic-lock
+handoffs. Cancellation before the shared effect-start transition prevents spawn
+and reports one cancelled terminal; once effect start wins, cancellation retains
+the platform behavior above and does not promise rollback.
 Before spawning either a model or user shell command, the shared boundary
 normally applies the protected non-interactive pager environment.
 After the bounded drain, a terminal flag prevents non-Unix pipe readers from

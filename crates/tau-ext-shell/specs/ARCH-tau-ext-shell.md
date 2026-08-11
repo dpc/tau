@@ -153,6 +153,16 @@ publish protocol messages. Dropping the scheduler is therefore a deterministic
 shutdown boundary: queued work is discarded, workers are woken, and already
 running jobs are joined before drop returns.
 
+Every admitted model tool call except the dedicated workdir-setter transaction
+has one bounded cancellation lifecycle from scheduler enqueue through terminal
+reporting. Scheduler dequeue, directory-lock waiting and acquisition, and
+dispatch transfer the same lifecycle authority. Cancellation and effect start
+race through one atomic transition: cancellation first emits one cancelled
+terminal and prevents process spawn or filesystem mutation; effect start first
+retains active shell/search cancellation without promising rollback. Terminal
+reporting removes the live registry entry rather than retaining call-id
+tombstones. UI `!` / `!!` commands keep their separate cancellation path.
+
 Long-running read-only search tools that run after dequeuing (`grep` / `find`)
 also register cancellation handles while active. Tool cancellation and runtime
 shutdown signal those handles so a running ripgrep child or filesystem traversal

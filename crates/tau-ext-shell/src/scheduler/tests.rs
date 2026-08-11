@@ -1,13 +1,10 @@
 use std::time as path_std_time;
 
-use tau_proto::HarnessInputMessage;
-
 use super::*;
 
 fn test_meta(call_id: &str) -> WorkMeta {
     WorkMeta {
         call_id: Some(call_id.into()),
-        tool_name: Some(ToolName::new("shell")),
         agent_id: Some(AgentId::parse("agent-a").expect("agent id")),
         queued_bytes: 1,
     }
@@ -17,17 +14,13 @@ fn test_meta(call_id: &str) -> WorkMeta {
 /// instead of spawning extra threads.
 #[test]
 fn enqueue_respects_total_limit() {
-    let (tx, _rx) = mpsc::channel();
-    let scheduler = WorkScheduler::new(
-        Output::channel(tx),
-        SchedulerConfig {
-            total_limit: 1,
-            control_workers: 0,
-            user_workers: 0,
-            general_workers: 0,
-            ..SchedulerConfig::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(SchedulerConfig {
+        total_limit: 1,
+        control_workers: 0,
+        user_workers: 0,
+        general_workers: 0,
+        ..SchedulerConfig::default()
+    });
 
     scheduler
         .enqueue(WorkPriority::Bulk, test_meta("call-a"), || {})
@@ -39,20 +32,16 @@ fn enqueue_respects_total_limit() {
     assert!(err.message.contains("queue limit is 1"));
 }
 
-/// Ensures cancellation removes queued work before it can run and emits the
-/// normal ToolCancelled event for the call.
+/// Ensures scheduler handoff cleanup removes queued work before it can run;
+/// lifecycle cancellation owns terminal reporting separately.
 #[test]
 fn cancel_queued_call_removes_work() {
-    let (tx, rx) = mpsc::channel();
-    let scheduler = WorkScheduler::new(
-        Output::channel(tx),
-        SchedulerConfig {
-            control_workers: 0,
-            user_workers: 0,
-            general_workers: 0,
-            ..SchedulerConfig::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        general_workers: 0,
+        ..SchedulerConfig::default()
+    });
     scheduler
         .enqueue(WorkPriority::Bulk, test_meta("call-a"), || {
             panic!("must not run")
@@ -60,32 +49,19 @@ fn cancel_queued_call_removes_work() {
         .expect("queued");
 
     assert!(scheduler.cancel_queued_call(&"call-a".into()));
-
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
-        panic!("expected emit");
-    };
-    assert!(!emit.persist);
-    let Event::ToolCancelledReported(cancelled) = *emit.event else {
-        panic!("expected ToolCancelledReported");
-    };
-    assert_eq!(cancelled.call_id.as_str(), "call-a");
 }
 
 /// Ensures lifecycle cleanup removes queued work before an unloaded agent
 /// can later run it.
 #[test]
 fn cancel_agent_removes_owned_queued_work() {
-    let (tx, _rx) = mpsc::channel();
-    let scheduler = WorkScheduler::new(
-        Output::channel(tx),
-        SchedulerConfig {
-            control_workers: 0,
-            user_workers: 0,
-            cheap_workers: 0,
-            general_workers: 0,
-            ..SchedulerConfig::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 0,
+        ..SchedulerConfig::default()
+    });
     scheduler
         .enqueue(WorkPriority::Bulk, test_meta("call-a"), || {
             panic!("must not run")
@@ -103,18 +79,14 @@ fn cancel_agent_removes_owned_queued_work() {
 /// accepting more work.
 #[test]
 fn enqueue_respects_queued_byte_limit() {
-    let (tx, _rx) = mpsc::channel();
-    let scheduler = WorkScheduler::new(
-        Output::channel(tx),
-        SchedulerConfig {
-            queued_bytes_limit: 1,
-            control_workers: 0,
-            user_workers: 0,
-            cheap_workers: 0,
-            general_workers: 0,
-            ..SchedulerConfig::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(SchedulerConfig {
+        queued_bytes_limit: 1,
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 0,
+        ..SchedulerConfig::default()
+    });
     let err = scheduler
         .enqueue(
             WorkPriority::Bulk,
@@ -133,17 +105,13 @@ fn enqueue_respects_queued_byte_limit() {
 /// while a bulk worker is occupied.
 #[test]
 fn control_work_runs_while_bulk_worker_is_busy() {
-    let (tx, _rx) = mpsc::channel();
-    let scheduler = WorkScheduler::new(
-        Output::channel(tx),
-        SchedulerConfig {
-            control_workers: 1,
-            user_workers: 0,
-            cheap_workers: 0,
-            general_workers: 1,
-            ..SchedulerConfig::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(SchedulerConfig {
+        control_workers: 1,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 1,
+        ..SchedulerConfig::default()
+    });
     let (bulk_started_tx, bulk_started_rx) = mpsc::channel();
     let (release_bulk_tx, release_bulk_rx) = mpsc::channel();
     let (control_ran_tx, control_ran_rx) = mpsc::channel();
@@ -177,17 +145,13 @@ fn control_work_runs_while_bulk_worker_is_busy() {
 /// running work before returning.
 #[test]
 fn drop_cancels_queued_work_and_joins_running_workers() {
-    let (tx, _rx) = mpsc::channel();
-    let scheduler = WorkScheduler::new(
-        Output::channel(tx),
-        SchedulerConfig {
-            control_workers: 0,
-            user_workers: 0,
-            cheap_workers: 0,
-            general_workers: 1,
-            ..SchedulerConfig::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 1,
+        ..SchedulerConfig::default()
+    });
     let (running_tx, running_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (drop_done_tx, drop_done_rx) = mpsc::channel();

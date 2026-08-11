@@ -27,6 +27,7 @@ use crate::config::ExtConfig;
 use crate::cwd_state::CwdState;
 use crate::dir_lock::DirLockManager;
 use crate::scheduler::WorkScheduler;
+use crate::tool_lifecycle::{CancelOutcome, ToolCancellationState};
 
 #[derive(Clone, Copy)]
 enum StartupCwdSource {
@@ -42,7 +43,8 @@ pub(super) struct ShellRuntime {
     discovery_policy: DiscoverySourcePolicy,
     scheduler: Option<WorkScheduler>,
     tx: Output,
-    running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    /// Shared pre-effect and active cancellation state for model tool calls.
+    cancellation: ToolCancellationState,
     running_ui_commands: Arc<Mutex<HashMap<tau_proto::ShellCommandId, mpsc::Sender<()>>>>,
     shutdown_generation: Arc<AtomicU64>,
     lock_manager: DirLockManager,
@@ -99,9 +101,9 @@ impl ShellRuntime {
         Self {
             config,
             discovery_policy,
-            scheduler: Some(WorkScheduler::new(tx.clone(), Default::default())),
+            scheduler: Some(WorkScheduler::new(Default::default())),
             tx,
-            running_calls: Arc::new(Mutex::new(HashMap::new())),
+            cancellation: ToolCancellationState::default(),
             running_ui_commands: Arc::new(Mutex::new(HashMap::new())),
             shutdown_generation: Arc::new(AtomicU64::new(0)),
             lock_manager: DirLockManager::default(),
@@ -127,10 +129,12 @@ impl ShellRuntime {
         // Dir-lock waiters must be woken before the scheduler is dropped,
         // because scheduler drop joins workers that may be blocked on locks.
         self.lock_manager.shutdown();
+        self.cancellation.lifecycles.prepare_shutdown();
         if let Some(scheduler) = &self.scheduler {
             scheduler.cancel_all_queued();
         }
         let running = self
+            .cancellation
             .running_calls
             .lock()
             .expect("running call registry lock poisoned")
@@ -281,7 +285,7 @@ impl ShellRuntime {
             &self.tx,
             self.config.clone(),
             self.lock_manager.clone(),
-            Arc::clone(&self.running_calls),
+            self.cancellation.clone(),
             self.cwd_state.clone(),
         ) {
             let (invoke, failure) = *error;
@@ -304,6 +308,9 @@ impl ShellRuntime {
         if let Some(scheduler) = &self.scheduler {
             scheduler.cancel_agent(&unloaded.agent_id);
         }
+        self.cancellation
+            .lifecycles
+            .remove_agent(&unloaded.agent_id);
         self.cwd_state.unset(&unloaded.agent_id);
         self.cwd_state.take_pending_ready(&unloaded.agent_id);
         self.cwd_state.remove_initialization(&unloaded.agent_id);
@@ -592,20 +599,11 @@ impl ShellRuntime {
             if let Some(scheduler) = &self.scheduler {
                 scheduler.cancel_agent(&agent_id);
             }
+            self.cancellation.lifecycles.remove_agent(&agent_id);
         }
     }
 
     fn handle_tool_cancel_request(&self, request: tau_proto::ToolCancelRequest) {
-        if self
-            .scheduler
-            .as_ref()
-            .is_some_and(|scheduler| scheduler.cancel_queued_call(&request.target_call_id))
-        {
-            self.cwd_state
-                .take_pending_workdir_by_call(&request.target_call_id);
-            debug!(call_id = %request.target_call_id, "cancellation requested for queued shell work");
-            return;
-        }
         if self
             .cwd_state
             .request_pending_workdir_cancel(&request.target_call_id)
@@ -613,7 +611,21 @@ impl ShellRuntime {
             debug!(call_id = %request.target_call_id, "workdir cancellation deferred to metadata commit");
             return;
         }
+        let Some(outcome) = self.cancellation.lifecycles.cancel(&request.target_call_id) else {
+            debug!(call_id = %request.target_call_id, "tool cancellation requested for unknown call");
+            return;
+        };
+        if outcome == CancelOutcome::PreventedEffect {
+            if let Some(scheduler) = &self.scheduler {
+                scheduler.cancel_queued_call(&request.target_call_id);
+            }
+            self.lock_manager
+                .cancel_waiting_call(&request.target_call_id);
+            debug!(call_id = %request.target_call_id, "tool cancellation prevented effect start");
+            return;
+        }
         let cancel_tx = self
+            .cancellation
             .running_calls
             .lock()
             .expect("running call registry lock poisoned")
@@ -624,13 +636,15 @@ impl ShellRuntime {
             if cancel_tx.send(()).is_err() {
                 debug!(call_id = %request.target_call_id, "shell cancellation receiver already gone");
             }
-        } else if self
-            .lock_manager
-            .cancel_waiting_call(&request.target_call_id)
-        {
-            debug!(call_id = %request.target_call_id, "cancellation requested for waiting dir-lock call");
         } else {
-            debug!(call_id = %request.target_call_id, "tool cancellation requested for unknown call");
+            if self
+                .lock_manager
+                .cancel_waiting_call(&request.target_call_id)
+            {
+                debug!(call_id = %request.target_call_id, "cancellation requested for active dir-lock waiter");
+            } else {
+                debug!(call_id = %request.target_call_id, "active cancellation recorded before sender registration");
+            }
         }
     }
 

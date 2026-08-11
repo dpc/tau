@@ -110,6 +110,10 @@ is removed, `wait` returns a canceled result if the call backgrounded, and the
 sentinel file is still absent after the lock is later released.
 
 Do not count cancellation of `edit` as required unless the harness exposes those call IDs as cancellable in that run. The important lock-specific behavior is that a waiting lock request can be canceled and does not run later after unlock.
+Cancellation remains authoritative during the handoff from a removed waiter to
+an acquired automatic guard. If cancellation is processed before effect start,
+the mutation must remain absent and exactly one cancelled terminal should
+complete the call; cancellation after effect start does not roll back changes.
 
 #### Phase 7: agent lifecycle cleanup
 

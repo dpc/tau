@@ -71,6 +71,13 @@ while update locks are held. Filesystem-backend waiters preserve FIFO and
 cancellation across processes through bounded registry rechecks; process-local
 release notifications wake local waiters promptly.
 
+Automatic lock handoff preserves the admitted model call's cancellation
+lifecycle after a waiter is removed and after its guard is acquired. A
+cancellation that wins before the atomic effect-start transition releases any
+acquired guard without running the mutation and reports cancellation once. A
+call that crosses effect start first keeps the existing active cancellation
+behavior, which does not roll back effects.
+
 ## Cleanup, recovery, and UI
 
 Manual locks are released when a tracked delegate or side agent starts, the

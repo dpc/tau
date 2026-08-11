@@ -24,6 +24,7 @@ use crate::argument::{
     cbor_map_int, cbor_map_text, optional_argument_bool, optional_argument_text,
 };
 use crate::dir_lock::DIR_LOCK_TOOL_NAME;
+use crate::tool_lifecycle::{ToolCancellationState, ToolLifecycleRegistry};
 use crate::tools::edit::edit_file as edit_file_with_world;
 use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
@@ -1545,17 +1546,14 @@ fn initial_dir_lock_override_is_final_before_ready() {
 fn schedule_tool_started_reports_queue_full_error() {
     let (tx, _rx) = path_std_sync::mpsc::channel();
     let output = Output::channel(tx);
-    let scheduler = WorkScheduler::new(
-        output.clone(),
-        crate::scheduler::SchedulerConfig {
-            total_limit: 0,
-            control_workers: 0,
-            user_workers: 0,
-            cheap_workers: 0,
-            general_workers: 0,
-            ..Default::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(crate::scheduler::SchedulerConfig {
+        total_limit: 0,
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 0,
+        ..Default::default()
+    });
     let Event::ToolStarted(invoke) = tool_started(
         "queue-full-read",
         READ_TOOL_NAME,
@@ -1572,7 +1570,7 @@ fn schedule_tool_started_reports_queue_full_error() {
         &output,
         ExtConfig::default(),
         DirLockManager::default(),
-        Arc::new(Mutex::new(HashMap::new())),
+        ToolCancellationState::default(),
         CwdState::new(),
     ) else {
         panic!("queue-full call should be rejected");
@@ -1592,18 +1590,78 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
     fs::write(&edit_path, "old\n").expect("initial file");
     let (tx, rx) = path_std_sync::mpsc::channel();
     let output = Output::channel(tx);
-    let scheduler = WorkScheduler::new(
-        output.clone(),
-        crate::scheduler::SchedulerConfig {
-            control_workers: 0,
-            user_workers: 0,
-            cheap_workers: 0,
-            general_workers: 0,
-            ..Default::default()
-        },
-    );
+    let scheduler = WorkScheduler::new(crate::scheduler::SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 0,
+        ..Default::default()
+    });
     let Event::ToolStarted(invoke) = tool_started(
         "queued-edit",
+        EDIT_TOOL_NAME,
+        edit_arguments(&edit_path, vec![line_edit(1, 2, "new\n")]),
+        "agent-a",
+    ) else {
+        panic!("expected tool started");
+    };
+    let call_id = invoke.call_id.clone();
+    let local_tool_name = invoke.tool_name.clone();
+
+    let lifecycles = ToolLifecycleRegistry::default();
+    schedule_tool_started(
+        (invoke, &local_tool_name),
+        &scheduler,
+        &output,
+        ExtConfig::default(),
+        DirLockManager::default(),
+        ToolCancellationState {
+            lifecycles: lifecycles.clone(),
+            ..Default::default()
+        },
+        CwdState::new(),
+    )
+    .expect("edit queued");
+    assert_eq!(
+        lifecycles.cancel(&call_id),
+        Some(crate::tool_lifecycle::CancelOutcome::PreventedEffect)
+    );
+    assert!(scheduler.cancel_queued_call(&call_id));
+
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
+        panic!("expected emit");
+    };
+    assert!(!emit.persist);
+    let Event::ToolCancelledReported(cancelled) = *emit.event else {
+        panic!("expected ToolCancelledReported");
+    };
+    assert_eq!(cancelled.call_id, call_id);
+    assert_eq!(fs::read_to_string(&edit_path).expect("file"), "old\n");
+}
+
+/// Ensures cancellation at the scheduler dequeue-to-dispatch handoff wins the
+/// atomic pre-effect transition, so no file mutation or duplicate terminal can
+/// occur.
+#[test]
+fn cancellation_after_dequeue_prevents_mutation_once() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let edit_path = tempdir.path().join("dequeued-edit.txt");
+    fs::write(&edit_path, "old\n").expect("initial file");
+    let (tx, rx) = path_std_sync::mpsc::channel();
+    let output = Output::channel(tx);
+    let scheduler = WorkScheduler::new(crate::scheduler::SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 1,
+        ..Default::default()
+    });
+    let lifecycles = ToolLifecycleRegistry::default();
+    let (reached_tx, reached_rx) = path_std_sync::mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = path_std_sync::mpsc::channel();
+    lifecycles.pause_after_dequeue(reached_tx, resume_rx);
+    let Event::ToolStarted(invoke) = tool_started(
+        "dequeued-edit",
         EDIT_TOOL_NAME,
         edit_arguments(&edit_path, vec![line_edit(1, 2, "new\n")]),
         "agent-a",
@@ -1619,21 +1677,121 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
         &output,
         ExtConfig::default(),
         DirLockManager::default(),
-        Arc::new(Mutex::new(HashMap::new())),
+        ToolCancellationState {
+            lifecycles: lifecycles.clone(),
+            ..Default::default()
+        },
         CwdState::new(),
     )
-    .expect("edit queued");
-    assert!(scheduler.cancel_queued_call(&call_id));
+    .expect("edit scheduled");
+    reached_rx.recv().expect("worker reached dequeue handoff");
+    assert_eq!(
+        lifecycles.cancel(&call_id),
+        Some(crate::tool_lifecycle::CancelOutcome::PreventedEffect)
+    );
+    resume_tx.send(()).expect("resume worker");
+    drop(scheduler);
 
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cancel event") else {
+    assert_eq!(lifecycles.cancel(&call_id), None);
+    assert_cancelled_terminal_once(&rx, &call_id);
+    assert_eq!(fs::read_to_string(&edit_path).expect("file"), "old\n");
+}
+
+/// Ensures cancellation after a directory-lock waiter becomes a held guard but
+/// before effect registration prevents mutation and emits one cancelled
+/// terminal.
+#[test]
+fn cancellation_after_lock_acquisition_prevents_mutation_once() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let edit_path = tempdir.path().join("lock-handoff-edit.txt");
+    fs::write(&edit_path, "old\n").expect("initial file");
+    let (tx, rx) = path_std_sync::mpsc::channel();
+    let output = Output::channel(tx);
+    let scheduler = WorkScheduler::new(crate::scheduler::SchedulerConfig {
+        control_workers: 0,
+        user_workers: 0,
+        cheap_workers: 0,
+        general_workers: 1,
+        ..Default::default()
+    });
+    let lifecycles = ToolLifecycleRegistry::default();
+    let (reached_tx, reached_rx) = path_std_sync::mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = path_std_sync::mpsc::channel();
+    lifecycles.pause_after_lock(reached_tx, resume_rx);
+    let lock_manager = DirLockManager::default();
+    let blocker = lock_manager
+        .acquire_auto(
+            tau_proto::ToolCallId::new("lock-handoff-blocker"),
+            tau_proto::AgentId::parse("agent-b").expect("agent id"),
+            vec![tempdir.path().canonicalize().expect("canonical tempdir")],
+            || {},
+        )
+        .expect("conflicting automatic lock");
+    let Event::ToolStarted(invoke) = tool_started(
+        "lock-handoff-edit",
+        EDIT_TOOL_NAME,
+        edit_arguments(&edit_path, vec![line_edit(1, 2, "new\n")]),
+        "agent-a",
+    ) else {
+        panic!("expected tool started");
+    };
+    let call_id = invoke.call_id.clone();
+    let local_tool_name = invoke.tool_name.clone();
+    let mut config = ExtConfig::default();
+    config.dir_lock.enable = true;
+
+    schedule_tool_started(
+        (invoke, &local_tool_name),
+        &scheduler,
+        &output,
+        config,
+        lock_manager,
+        ToolCancellationState {
+            lifecycles: lifecycles.clone(),
+            ..Default::default()
+        },
+        CwdState::new(),
+    )
+    .expect("edit scheduled");
+    let HarnessInputMessage::Emit(waiting) = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("lock waiting progress")
+    else {
+        panic!("expected lock waiting emit");
+    };
+    assert!(matches!(*waiting.event, Event::ToolProgressReported(_)));
+    drop(blocker);
+    reached_rx.recv().expect("worker reached lock handoff");
+    assert_eq!(
+        lifecycles.cancel(&call_id),
+        Some(crate::tool_lifecycle::CancelOutcome::PreventedEffect)
+    );
+    resume_tx.send(()).expect("resume worker");
+    drop(scheduler);
+
+    assert_cancelled_terminal_once(&rx, &call_id);
+    assert_eq!(fs::read_to_string(&edit_path).expect("file"), "old\n");
+}
+
+/// Assert that one cancellation report and no second terminal were emitted.
+fn assert_cancelled_terminal_once(
+    rx: &path_std_sync::mpsc::Receiver<HarnessInputMessage>,
+    call_id: &tau_proto::ToolCallId,
+) {
+    let HarnessInputMessage::Emit(emit) = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cancelled terminal")
+    else {
         panic!("expected emit");
     };
-    assert!(!emit.persist);
     let Event::ToolCancelledReported(cancelled) = *emit.event else {
         panic!("expected ToolCancelledReported");
     };
-    assert_eq!(cancelled.call_id, call_id);
-    assert_eq!(fs::read_to_string(&edit_path).expect("file"), "old\n");
+    assert_eq!(&cancelled.call_id, call_id);
+    assert!(
+        rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "cancellation must emit exactly one terminal"
+    );
 }
 
 #[test]
