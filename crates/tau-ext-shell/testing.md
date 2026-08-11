@@ -67,10 +67,11 @@ renderings under the 10 KiB visible cap and model-shell rendering under the
 15 KiB cap, the 16 MiB hard cap,
 honest complete/incomplete metadata, exact-path privacy,
 ordinary expiration only after both 32 later relevant calls and 15 minutes,
-and unconditional graceful shutdown. Remaining manual verification should
-exercise startup cleanup of locked/dead crash leftovers without
-deleting live owners, the explicit saved-output-unavailable fallback, and
-caller-local grep/find/edit-recovery rendering.
+unconditional graceful shutdown, and startup cleanup that removes only an old
+dead Tau-owned artifact while retaining old live-owner and unrelated temporary
+directories. Remaining manual verification should exercise the explicit
+saved-output-unavailable fallback and caller-local grep/find/edit-recovery
+rendering.
 Model-shell VCR coverage verifies that recordings own a bounded sibling `shell-output`
 artifact and replay regenerates a fresh ephemeral path with complete or
 incomplete metadata rather than persisting a stale path.

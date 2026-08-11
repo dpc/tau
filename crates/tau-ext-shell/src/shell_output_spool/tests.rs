@@ -45,3 +45,47 @@ fn saved_output_requires_both_age_and_call_thresholds() {
     assert!(path.exists());
     tracker.remove_all();
 }
+
+/// Ensures first-call crash cleanup removes only an old Tau-owned artifact
+/// whose owner lock is absent, not a live or unrelated temporary directory.
+#[test]
+fn crash_leftover_cleanup_removes_only_old_owned_dead_artifact() {
+    let temporary_directory = tempfile::tempdir().expect("temporary directory");
+    let dead_directory = temporary_directory
+        .path()
+        .join(format!("{DIRECTORY_PREFIX}dead"));
+    let live_directory = temporary_directory
+        .path()
+        .join(format!("{DIRECTORY_PREFIX}live"));
+    let unrelated_directory = temporary_directory.path().join("unrelated");
+    for directory in [&dead_directory, &live_directory, &unrelated_directory] {
+        fs::create_dir(directory).expect("artifact directory");
+        write_private_file(&directory.join(FILE_NAME), b"ordered output").expect("write output");
+    }
+
+    let live_lock_path = live_directory.join(LOCK_FILE_NAME);
+    write_private_file(&live_lock_path, b"").expect("write live owner lock");
+    let live_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(live_lock_path)
+        .expect("open live owner lock");
+    fs2::FileExt::lock_exclusive(&live_lock).expect("lock live owner");
+
+    cleanup_crash_leftovers_in(
+        temporary_directory.path(),
+        SystemTime::now()
+            .checked_add(MAX_AGE)
+            .expect("future cleanup time"),
+    );
+
+    assert!(
+        !dead_directory.exists(),
+        "dead owned artifact must be removed"
+    );
+    assert!(live_directory.exists(), "live owned artifact must remain");
+    assert!(
+        unrelated_directory.exists(),
+        "unrelated temporary directory must remain"
+    );
+}

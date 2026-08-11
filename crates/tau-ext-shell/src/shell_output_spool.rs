@@ -222,12 +222,15 @@ impl Tracker {
 }
 
 fn cleanup_crash_leftovers() {
-    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+    cleanup_crash_leftovers_in(&std::env::temp_dir(), SystemTime::now());
+}
+
+fn cleanup_crash_leftovers_in(temporary_directory: &Path, now: SystemTime) {
+    let Ok(entries) = fs::read_dir(temporary_directory) else {
         return;
     };
-    let now = SystemTime::now();
     for entry in entries.flatten() {
-        if entry
+        if !entry
             .file_name()
             .to_string_lossy()
             .starts_with(DIRECTORY_PREFIX)
