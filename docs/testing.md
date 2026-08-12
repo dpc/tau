@@ -183,7 +183,10 @@ current-status sequence also installs the production `status` handler before the
 first prompt and checks both parallel orders, accepted/rejected Working, repeated
 work while Working, the Working-final challenge, and Done/Blocked release.
 `ScenarioV2` adds
-bounded exact-correlation lanes for typed failures, cancellation/timeout and
+bounded exact-correlation lanes for typed failures, one canonical
+context-window failure that durably starts reactive opaque compaction and one
+opaque-replacement plus retained-overflow-suffix automatic continuation,
+cancellation/timeout and
 same-agent post-cancel liveness,
 barriers, fatal disconnect, quiescent same-agent restore, and one closed
 `restart_test_dummy` call/result pair. Its session-restore grammar also has one

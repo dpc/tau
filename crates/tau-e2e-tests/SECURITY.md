@@ -129,13 +129,16 @@ fixture. Its closed grammar permits only fixed Working, invalid, Done, and
 Blocked reports plus fixed no-side-effect dummy calls. It adds no network,
 shell, arbitrary tool, or provider authority.
 
-The local-summary-compaction acceptance actions are the fake's sole
+The standalone-compaction acceptance actions are the fake's sole
 standalone-compaction opt-in: all other scenarios continue publishing that
-capability as false. They accept only a nonempty harness-owned compact
-transcript, bounded terminal error or cancellation hold, and one bounded
-replacement summary. The production Chat Completions adapter, not this generic
-provider seam, owns static no-tools wire lowering and transcript-v1 request
-materialization.
+capability as false. They accept a nonempty harness-owned compact transcript,
+bounded terminal error or cancellation hold, one bounded replacement summary,
+or one fixed canonical opaque item. One closed reactive sequence additionally
+accepts a canonical no-output context-window failure, one correlated compact
+request for a verified pre-cut round, and one replacement/suffix continuation
+that retains the overflowing prompt while excluding that pre-cut round. The
+production Chat Completions adapter, not this generic provider seam, owns
+static no-tools wire lowering and transcript-v1 request materialization.
 
 S5 observes the existing bounded hold's prompt-correlated `hold_ready` trace
 only after its wait worker starts. The test correlates that live record with the

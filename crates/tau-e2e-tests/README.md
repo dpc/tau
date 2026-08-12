@@ -21,7 +21,9 @@ through `tau-ext-test-dummy`, current-status reminders and final gating through
 the real built-in `status` handler in both parallel orders with accepted and
 rejected reports plus Done/Blocked completion, explicit local-only standalone-compaction
 replacement plus terminal provider-error/cancellation recovery and later
-continuation, typed errors followed by an explicit later turn,
+continuation, one canonical context-window rejection followed by a uniquely
+correlated reactive opaque replacement and exactly one automatic continuation,
+typed errors followed by an explicit later turn,
 exact cancellation with same-agent post-cancel liveness, bounded holds, fatal
 provider disconnect without restart,
 clean resume, concurrent lane isolation, one production-`agent_start`

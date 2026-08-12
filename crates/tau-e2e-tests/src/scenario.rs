@@ -69,6 +69,44 @@ pub enum ScenarioActionV2 {
     },
     /// Return one fixed canonical opaque provider compaction item.
     StandaloneOpaqueCompaction,
+    /// Reject one ordinary inference with the sole canonical context-window
+    /// failure that may authorize reactive compaction.
+    ContextOverflow {
+        /// Exact latest user text on the rejected ordinary inference.
+        user_text: String,
+        /// Earlier compactable user text that the reactive replacement must
+        /// remove from its continuation context.
+        removed_user_text: String,
+        /// Assistant text that closes the pre-cut user round.
+        removed_assistant_text: String,
+        /// Safe machine-readable failure classification, fixed to
+        /// `ContextWindowExceeded` by the closed grammar.
+        failure_kind: ProviderFailureKind,
+    },
+    /// Return one fixed canonical opaque replacement for the reactive
+    /// compaction transaction caused by the immediately preceding overflow.
+    ReactiveOpaqueCompaction {
+        /// Earlier user text that the replacement boundary must remove from its
+        /// one following continuation.
+        removed_user_text: String,
+        /// Assistant text that closes the pre-cut user round.
+        removed_assistant_text: String,
+        /// Exact ordinary inference prompt retained after replacement.
+        overflow_user_text: String,
+    },
+    /// Complete the one ordinary continuation after a reactive opaque
+    /// replacement is visible to the provider.
+    ReactiveCompactedOpaqueText {
+        /// Earlier compacted user text that the replacement must remove from
+        /// continuation context.
+        removed_user_text: String,
+        /// Assistant text that closes the pre-cut user round.
+        removed_assistant_text: String,
+        /// Exact ordinary inference prompt retained after replacement.
+        overflow_user_text: String,
+        /// Complete assistant response after recovery.
+        response: String,
+    },
     /// Return text only after the prior standalone replacement is visible in
     /// the next ordinary provider prompt.
     CompactedText {

@@ -95,8 +95,13 @@ impl ScenarioConfig {
                 if scenario.lanes.iter().flat_map(|lane| &lane.actions).any(|action| {
                     matches!(
                         action,
-                        ScenarioActionV2::StandaloneCompaction { summary: _ }
+                            ScenarioActionV2::StandaloneCompaction { summary: _ }
                             | ScenarioActionV2::StandaloneOpaqueCompaction
+                            | ScenarioActionV2::ReactiveOpaqueCompaction {
+                                removed_user_text: _,
+                                removed_assistant_text: _,
+                                overflow_user_text: _,
+                            }
                             | ScenarioActionV2::StandaloneCompactionError {
                                 failure_kind: _,
                                 error: _,
@@ -1436,6 +1441,7 @@ impl FakeState {
             ScenarioActionV2::Text { response, .. }
             | ScenarioActionV2::CompactedText { response, .. }
             | ScenarioActionV2::CompactedOpaqueText { response, .. }
+            | ScenarioActionV2::ReactiveCompactedOpaqueText { response, .. }
             | ScenarioActionV2::DummyToolResult { response, .. }
             | ScenarioActionV2::DummyToolRepair { response, .. }
             | ScenarioActionV2::AgentStartResult { response, .. }
@@ -1455,6 +1461,11 @@ impl FakeState {
             ScenarioActionV2::StandaloneOpaqueCompaction => {
                 emit_opaque_compaction_response(prompt, handle)
             }
+            ScenarioActionV2::ReactiveOpaqueCompaction {
+                removed_user_text: _,
+                removed_assistant_text: _,
+                overflow_user_text: _,
+            } => emit_opaque_compaction_response(prompt, handle),
             ScenarioActionV2::StandaloneCompactionError {
                 failure_kind,
                 error,
@@ -1464,6 +1475,16 @@ impl FakeState {
                 error,
                 ..
             } => emit_error_response(prompt, handle, failure_kind, error),
+            ScenarioActionV2::ContextOverflow {
+                user_text: _,
+                failure_kind,
+                ..
+            } => emit_error_response(
+                prompt,
+                handle,
+                failure_kind,
+                "synthetic canonical context-window rejection".to_owned(),
+            ),
             ScenarioActionV2::StandaloneCompactionHold { timeout_ms } => {
                 self.emit_hold_until_cancel(prompt, handle, timeout_ms)
             }
@@ -1829,6 +1850,22 @@ impl FakeState {
                     ));
                 }
             }
+            ScenarioActionV2::ReactiveOpaqueCompaction {
+                removed_user_text,
+                removed_assistant_text,
+                overflow_user_text,
+            } => {
+                if prompt.context.blocks.is_empty()
+                    || !context_has_text(prompt, ContextRole::User, removed_user_text)
+                    || !context_has_text(prompt, ContextRole::Assistant, removed_assistant_text)
+                    || context_has_text(prompt, ContextRole::User, overflow_user_text)
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "reactive compaction request did not preserve the closed pre-cut round",
+                    ));
+                }
+            }
             ScenarioActionV2::CompactedText {
                 user_text: _,
                 summary,
@@ -1871,6 +1908,35 @@ impl FakeState {
                     return Err(self.mismatch(
                         cursor,
                         "canonical opaque replacement did not replace prior transcript",
+                    ));
+                }
+            }
+            ScenarioActionV2::ReactiveCompactedOpaqueText {
+                removed_user_text,
+                removed_assistant_text,
+                overflow_user_text,
+                response: _,
+            } => {
+                let opaque_items = prompt
+                    .context
+                    .flatten_iter()
+                    .filter_map(|item| match item {
+                        ContextItem::Compaction(compaction) => Some(compaction),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !matches!(
+                    opaque_items.as_slice(),
+                    [compaction]
+                        if compaction.raw_json.as_deref()
+                            == Some(CANONICAL_OPAQUE_COMPACTION_JSON)
+                ) || context_has_text(prompt, ContextRole::User, removed_user_text)
+                    || context_has_text(prompt, ContextRole::Assistant, removed_assistant_text)
+                    || !context_has_text(prompt, ContextRole::User, overflow_user_text)
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "reactive opaque replacement did not replace rejected transcript",
                     ));
                 }
             }
@@ -2415,6 +2481,7 @@ impl ScenarioActionV2 {
     fn binding_user_text(&self) -> Option<&str> {
         match self {
             Self::Text { user_text, .. }
+            | Self::ContextOverflow { user_text, .. }
             | Self::CompactedText {
                 user_text,
                 summary: _,
@@ -2444,6 +2511,8 @@ impl ScenarioActionV2 {
             | Self::BarrierText { user_text, .. } => Some(user_text),
             Self::StandaloneCompaction { summary: _ }
             | Self::StandaloneOpaqueCompaction
+            | Self::ReactiveOpaqueCompaction { .. }
+            | Self::ReactiveCompactedOpaqueText { .. }
             | Self::StandaloneCompactionError {
                 failure_kind: _,
                 error: _,
@@ -2460,6 +2529,7 @@ impl ScenarioActionV2 {
         match self {
             Self::StandaloneCompaction { summary: _ }
             | Self::StandaloneOpaqueCompaction
+            | Self::ReactiveOpaqueCompaction { .. }
             | Self::StandaloneCompactionError {
                 failure_kind: _,
                 error: _,
@@ -2539,6 +2609,36 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Returns whether provider context contains one exact role-specific text item.
+fn context_has_text(
+    prompt: &tau_proto::AgentPromptCreated,
+    role: ContextRole,
+    expected: &str,
+) -> bool {
+    prompt.context.flatten_iter().any(|item| {
+        let ContextItem::Message(message) = item else {
+            return false;
+        };
+        if message.role != role {
+            return false;
+        }
+        let actual = message
+            .content
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
+                    text.as_str()
+                }
+            })
+            .collect::<String>();
+        if role == ContextRole::User {
+            fixture_user_text_matches(&actual, expected)
+        } else {
+            actual == expected
+        }
+    })
 }
 
 /// Project fixture-authored typed HumanUi text without attempting inversion.

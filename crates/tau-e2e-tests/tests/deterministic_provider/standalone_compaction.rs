@@ -1,10 +1,136 @@
 //! Standalone local-summary-compaction deterministic acceptance.
 
 use tau_proto::{
-    ContextItem, Event, PromptOperation, ProviderFailureKind, StandaloneCompactionFailureReason,
+    ContextItem, ContextRecoveryDisposition, Event, PromptOperation, ProviderFailureKind,
+    StandaloneCompactionFailureReason, StandaloneCompactionTrigger,
 };
 
 use super::*;
+
+/// Proves one canonical ordinary context-window rejection commits its recovery
+/// plan before exactly one reactive opaque compaction and one replacement-based
+/// inference continuation, without retrying the rejected prompt.
+#[test]
+fn deterministic_context_overflow_reactively_compacts_and_continues()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pre_cut_body = "pre-cut ordinary body";
+    let overflow_prompt = "ordinary prompt that overflows";
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_context_overflow_reactively_compacts_and_continues",
+        &ScenarioV2::new(
+            "reactive-opaque-context-overflow",
+            vec![ScenarioLaneV2 {
+                ctx_id: "reactive-overflow-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::Text {
+                        user_text: pre_cut_body.to_owned(),
+                        response: "established compactable history".to_owned(),
+                    },
+                    ScenarioActionV2::ContextOverflow {
+                        user_text: overflow_prompt.to_owned(),
+                        removed_user_text: pre_cut_body.to_owned(),
+                        removed_assistant_text: "established compactable history".to_owned(),
+                        failure_kind: ProviderFailureKind::ContextWindowExceeded,
+                    },
+                    ScenarioActionV2::ReactiveOpaqueCompaction {
+                        removed_user_text: pre_cut_body.to_owned(),
+                        removed_assistant_text: "established compactable history".to_owned(),
+                        overflow_user_text: overflow_prompt.to_owned(),
+                    },
+                    ScenarioActionV2::ReactiveCompactedOpaqueText {
+                        removed_user_text: pre_cut_body.to_owned(),
+                        removed_assistant_text: "established compactable history".to_owned(),
+                        overflow_user_text: overflow_prompt.to_owned(),
+                        response: "recovered from opaque replacement".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("reactive-overflow");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "reactive-overflow-lane", pre_cut_body)?;
+    let established = recv_until_finished(&mut peer)?;
+    assert_assistant(&established.output_items, "established compactable history");
+    submit_prompt(
+        &mut peer,
+        &established.agent_id,
+        "reactive-overflow-prompt",
+        overflow_prompt,
+    )?;
+    let rejected_prompt = recv_until_created(&mut peer, Some("reactive-overflow-prompt"))?;
+    assert_eq!(rejected_prompt.operation, PromptOperation::Inference);
+    let rejected = recv_until_finished_for(&mut peer, &rejected_prompt.agent_prompt_id)?;
+    assert_eq!(rejected.agent_id, rejected_prompt.agent_id);
+    assert!(rejected.output_items.is_empty());
+    assert_eq!(
+        rejected.failure_kind,
+        Some(ProviderFailureKind::ContextWindowExceeded)
+    );
+    assert_eq!(
+        rejected.recovery_disposition,
+        ContextRecoveryDisposition::ReactiveCompactionPlanned
+    );
+
+    let started = recv_until_compaction_started(&mut peer)?;
+    assert_eq!(started.agent_id, rejected_prompt.agent_id);
+    assert_eq!(started.operation, PromptOperation::StandaloneCompaction);
+    assert!(matches!(
+        started.trigger,
+        StandaloneCompactionTrigger::ReactiveContextOverflow {
+            ref failed_agent_prompt_id
+        } if failed_agent_prompt_id == &rejected_prompt.agent_prompt_id
+    ));
+    let compact_prompt = recv_until_compaction_prompt(&mut peer)?;
+    assert_eq!(started.compact_prompt_id, compact_prompt.agent_prompt_id);
+    let compacted = recv_until_compacted(&mut peer)?;
+    assert_eq!(compacted.agent_id, rejected_prompt.agent_id);
+    assert_eq!(
+        compacted.transaction_id.as_ref(),
+        Some(&started.transaction_id)
+    );
+    assert_eq!(compacted.cut.as_ref(), Some(&started.cut));
+    assert_eq!(
+        compacted.compact_prompt_id.as_ref(),
+        Some(&compact_prompt.agent_prompt_id)
+    );
+    assert!(matches!(
+        compacted.replacement_window.as_slice(),
+        [ContextItem::Compaction(item)]
+            if item.raw_json.as_deref()
+                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+    ));
+
+    let continuation_prompt = recv_until_inference_prompt(&mut peer)?;
+    assert_ne!(
+        continuation_prompt.agent_prompt_id,
+        rejected_prompt.agent_prompt_id
+    );
+    assert_ne!(
+        continuation_prompt.agent_prompt_id,
+        compact_prompt.agent_prompt_id
+    );
+    let continued = recv_until_finished_for(&mut peer, &continuation_prompt.agent_prompt_id)?;
+    assert_assistant(&continued.output_items, "recovered from opaque replacement");
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+
+    ReactiveRecovery {
+        fixture: &fixture,
+        established_prompt: &established.agent_prompt_id,
+        rejected_prompt: &rejected_prompt,
+        compact_prompt: &compact_prompt,
+        continuation_prompt: &continuation_prompt,
+        rejected: &rejected,
+        started: &started,
+        compacted: &compacted,
+    }
+    .assert_durable()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
 
 /// Proves a manual standalone compaction durably preserves one canonical opaque
 /// provider item across a clean restart, and the resumed next inference
@@ -290,6 +416,20 @@ fn request_compaction(
     Ok(())
 }
 
+/// Waits for the automatic ordinary continuation materialized after a
+/// successful reactive compaction transaction.
+fn recv_until_inference_prompt(
+    peer: &mut tau_socket::SocketPeer,
+) -> Result<tau_proto::AgentPromptCreated, Box<dyn std::error::Error>> {
+    loop {
+        if let Event::AgentPromptCreated(prompt) = recv_event(peer)?
+            && prompt.operation == PromptOperation::Inference
+        {
+            return Ok(prompt);
+        }
+    }
+}
+
 /// Waits for the exact standalone request published after UI compaction starts.
 fn recv_until_compaction_prompt(
     peer: &mut tau_socket::SocketPeer,
@@ -346,6 +486,133 @@ fn recv_until_compaction_failure(
         if let Event::AgentStandaloneCompactionFailed(failed) = recv_event(peer)? {
             return Ok(failed);
         }
+    }
+}
+
+/// Typed live facts that one reactive recovery must persist in causal order.
+struct ReactiveRecovery<'a> {
+    /// Fixture owning the durable journal.
+    fixture: &'a DeterministicFixture,
+    /// Setup inference prompt that creates the pre-cut round.
+    established_prompt: &'a tau_proto::AgentPromptId,
+    /// Failed ordinary prompt that authorizes recovery.
+    rejected_prompt: &'a tau_proto::AgentPromptCreated,
+    /// Standalone prompt owned by the reactive transaction.
+    compact_prompt: &'a tau_proto::AgentPromptCreated,
+    /// Automatic ordinary continuation after replacement.
+    continuation_prompt: &'a tau_proto::AgentPromptCreated,
+    /// Durable no-output context-window terminal.
+    rejected: &'a tau_proto::ProviderResponseFinished,
+    /// Durable reactive transaction start.
+    started: &'a tau_proto::AgentStandaloneCompactionStarted,
+    /// Durable opaque replacement outcome.
+    compacted: &'a tau_proto::AgentCompacted,
+}
+
+impl ReactiveRecovery<'_> {
+    /// Checks the durable transaction and ordered setup, rejected, compaction,
+    /// and continuation prompt-start facts preserve one causal replacement
+    /// flow.
+    fn assert_durable(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = tau_e2e_tests::DurableSnapshot::load(
+            self.fixture.harness_state_dir(),
+            &"deterministic-e2e-session".parse()?,
+        )?;
+        let events = snapshot
+            .agent_events
+            .iter()
+            .map(|record| &record.event)
+            .collect::<Vec<_>>();
+        let rejected_terminals = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ProviderResponseFinished(value)
+                    if value.agent_prompt_id == self.rejected_prompt.agent_prompt_id =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if rejected_terminals.as_slice() != [self.rejected.clone()] {
+            return Err("durable ordinary overflow terminal was not unique".into());
+        }
+        let reactive_starts = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentStandaloneCompactionStarted(value)
+                    if value.agent_id == self.rejected_prompt.agent_id =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if reactive_starts.as_slice() != [self.started.clone()] {
+            return Err("durable reactive compaction start was not unique".into());
+        }
+        let compacted_events = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentCompacted(value) if value.agent_id == self.rejected_prompt.agent_id => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if compacted_events.as_slice() != [self.compacted.clone()] {
+            return Err("durable reactive replacement was not unique".into());
+        }
+        let checkpoints = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentPromptStarted(value)
+                    if value.agent_id == self.rejected_prompt.agent_id =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_pairs = checkpoints
+            .iter()
+            .map(|checkpoint| (&checkpoint.agent_prompt_id, checkpoint.operation))
+            .collect::<Vec<_>>();
+        let expected_checkpoint_pairs = [
+            (self.established_prompt, PromptOperation::Inference),
+            (
+                &self.rejected_prompt.agent_prompt_id,
+                PromptOperation::Inference,
+            ),
+            (
+                &self.compact_prompt.agent_prompt_id,
+                PromptOperation::StandaloneCompaction,
+            ),
+            (
+                &self.continuation_prompt.agent_prompt_id,
+                PromptOperation::Inference,
+            ),
+        ];
+        if checkpoint_pairs != expected_checkpoint_pairs {
+            return Err(
+                "durable recovery checkpoints changed or retried the ordinary prompt".into(),
+            );
+        }
+        let final_responses = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ProviderResponseFinished(value)
+                    if value.agent_prompt_id == self.continuation_prompt.agent_prompt_id =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if final_responses.len() != 1 {
+            return Err("reactive recovery did not produce exactly one final response".into());
+        }
+        Ok(())
     }
 }
 

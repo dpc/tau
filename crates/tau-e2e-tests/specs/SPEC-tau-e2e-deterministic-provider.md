@@ -97,7 +97,16 @@ terminal errors, exact cancellation holds with hard timeouts, deliberate
 disconnect, and named barriers whose participants must all submit before any
 lane completes. It also has one narrow adjacent action pair for the allowlisted
 `restart_test_dummy` empty-argument call and exact successful result; arbitrary
-tool names, arguments, and results remain outside the grammar. S6's separate
+tool names, arguments, and results remain outside the grammar. The one closed
+reactive-recovery sequence requires an ordinary `ContextOverflow` with empty
+semantic output and `context_window_exceeded`, immediately followed by
+`ReactiveOpaqueCompaction` and one `ReactiveCompactedOpaqueText` continuation.
+The fake verifies inference versus standalone operation, the rejected prompt's
+validated pre-cut compactor request, and the opaque replacement plus retained
+overflow-prompt suffix continuation context;
+the acceptance test separately correlates the durable failed terminal, reactive
+start, replacement, and the setup, rejected, compaction, and continuation
+prompt-start checkpoints. S6's separate
 closed repair sequence accepts the same sole dummy call only when followed by
 the exact synthetic interrupted error status and diagnostic, terminalizes that
 next explicit worker continuation only while the balanced call/error pair

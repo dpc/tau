@@ -2,6 +2,8 @@
 
 use std::collections as path_std_collections;
 
+use tau_proto::ProviderFailureKind;
+
 use super::*;
 
 pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
@@ -269,6 +271,106 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 {
                     return Err(ClientError::handler(
                         "watch notification chains require bounded prompt and response text",
+                    ));
+                }
+                ScenarioActionV2::ContextOverflow {
+                    user_text,
+                    removed_user_text,
+                    removed_assistant_text,
+                    failure_kind,
+                } if user_text.is_empty()
+                    || user_text.len() > 4 * 1024
+                    || removed_user_text.is_empty()
+                    || removed_user_text.len() > 4 * 1024
+                    || removed_assistant_text.is_empty()
+                    || removed_assistant_text.len() > 4 * 1024
+                    || *failure_kind != ProviderFailureKind::ContextWindowExceeded
+                    || !matches!(
+                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                        Some(ScenarioActionV2::Text {
+                            user_text: prior_user_text,
+                            response: prior_response,
+                        }) if prior_user_text == removed_user_text
+                            && prior_response == removed_assistant_text
+                    )
+                    || !matches!(
+                        lane.actions.get(action_index + 1),
+                        Some(ScenarioActionV2::ReactiveOpaqueCompaction {
+                            removed_user_text: reactive_removed,
+                            removed_assistant_text: reactive_response,
+                            overflow_user_text,
+                        }) if reactive_removed == removed_user_text
+                            && reactive_response == removed_assistant_text
+                            && overflow_user_text == user_text
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "context overflow must be bounded, canonical, and immediately start reactive opaque compaction",
+                    ));
+                }
+                ScenarioActionV2::ReactiveOpaqueCompaction {
+                    removed_user_text,
+                    removed_assistant_text,
+                    overflow_user_text,
+                } if removed_user_text.is_empty()
+                    || removed_user_text.len() > 4 * 1024
+                    || removed_assistant_text.is_empty()
+                    || removed_assistant_text.len() > 4 * 1024
+                    || overflow_user_text.is_empty()
+                    || overflow_user_text.len() > 4 * 1024
+                    || !matches!(
+                    action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                    Some(ScenarioActionV2::ContextOverflow {
+                        removed_user_text: overflow_removed,
+                        removed_assistant_text: overflow_response,
+                        user_text,
+                        ..
+                    }) if overflow_removed == removed_user_text
+                        && overflow_response == removed_assistant_text
+                        && user_text == overflow_user_text
+                    )
+                    || !matches!(
+                        lane.actions.get(action_index + 1),
+                        Some(ScenarioActionV2::ReactiveCompactedOpaqueText {
+                            removed_user_text: continued_removed,
+                            removed_assistant_text: continued_response,
+                            overflow_user_text: continued_overflow,
+                            response: _,
+                        }) if continued_removed == removed_user_text
+                            && continued_response == removed_assistant_text
+                            && continued_overflow == overflow_user_text
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "reactive opaque compaction must uniquely follow its overflow and precede its continuation",
+                    ));
+                }
+                ScenarioActionV2::ReactiveCompactedOpaqueText {
+                    removed_user_text,
+                    removed_assistant_text,
+                    overflow_user_text,
+                    response,
+                } if removed_user_text.is_empty()
+                    || removed_user_text.len() > 4 * 1024
+                    || removed_assistant_text.is_empty()
+                    || removed_assistant_text.len() > 4 * 1024
+                    || overflow_user_text.is_empty()
+                    || overflow_user_text.len() > 4 * 1024
+                    || response.is_empty()
+                    || response.len() > 4 * 1024
+                    || !matches!(
+                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                        Some(ScenarioActionV2::ReactiveOpaqueCompaction {
+                            removed_user_text: compacted_removed,
+                            removed_assistant_text: compacted_response,
+                            overflow_user_text: compacted_overflow,
+                        }) if compacted_removed == removed_user_text
+                            && compacted_response == removed_assistant_text
+                            && compacted_overflow == overflow_user_text
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "reactive continuation must be bounded and immediately follow its matching compaction",
                     ));
                 }
                 ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }
