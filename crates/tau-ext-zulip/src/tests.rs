@@ -1489,6 +1489,218 @@ fn direct_message_reply_is_source_bound() {
     );
 }
 
+/// Direct-message admission requires complete, bounded, unique participant
+/// evidence so malformed routes cannot omit a participant or narrow authority.
+#[test]
+fn direct_participant_admission_requires_complete_allowlisted_membership() {
+    let mut config = cfg();
+    config.allowed_user_ids.extend(1..=32);
+    let maximum = (1..=31)
+        .chain([42])
+        .map(|id| serde_json::json!({"id":id}))
+        .chain([serde_json::json!({"id":99})])
+        .collect::<Vec<_>>();
+    let mut one_over_maximum = maximum.clone();
+    one_over_maximum.push(serde_json::json!({"id":32}));
+    let cases = [
+        ("missing", "private", None, None),
+        ("null", "private", Some(serde_json::json!(null)), None),
+        (
+            "string",
+            "private",
+            Some(serde_json::json!("recipient")),
+            None,
+        ),
+        (
+            "object",
+            "private",
+            Some(serde_json::json!({"id":42})),
+            None,
+        ),
+        ("empty", "private", Some(serde_json::json!([])), None),
+        (
+            "non-object member",
+            "private",
+            Some(serde_json::json!([42])),
+            None,
+        ),
+        (
+            "missing member ID",
+            "private",
+            Some(serde_json::json!([{"id":99}, {}])),
+            None,
+        ),
+        (
+            "null member ID",
+            "private",
+            Some(serde_json::json!([{"id":99}, {"id":null}])),
+            None,
+        ),
+        (
+            "string member ID",
+            "private",
+            Some(serde_json::json!([{"id":99}, {"id":"42"}])),
+            None,
+        ),
+        (
+            "negative member ID",
+            "private",
+            Some(serde_json::json!([{"id":99}, {"id":-42}])),
+            None,
+        ),
+        (
+            "zero member ID",
+            "private",
+            Some(serde_json::json!([{"id":99}, {"id":0}])),
+            None,
+        ),
+        (
+            "missing bot",
+            "private",
+            Some(serde_json::json!([{"id":42}])),
+            None,
+        ),
+        (
+            "missing sender",
+            "private",
+            Some(serde_json::json!([{"id":99}, {"id":7}])),
+            None,
+        ),
+        (
+            "duplicate",
+            "private",
+            Some(serde_json::json!([{"id":99}, {"id":42}, {"id":42}])),
+            None,
+        ),
+        (
+            "maximum raw participants",
+            "private",
+            Some(serde_json::Value::Array(maximum)),
+            Some((1..=31).chain([42]).collect()),
+        ),
+        (
+            "raw participant limit plus one",
+            "private",
+            Some(serde_json::Value::Array(one_over_maximum)),
+            None,
+        ),
+        (
+            "one-to-one",
+            "direct",
+            Some(serde_json::json!([{"id":99}, {"id":42}])),
+            Some(vec![42]),
+        ),
+        (
+            "allowed group",
+            "private",
+            Some(serde_json::json!([{"id":7}, {"id":99}, {"id":42}])),
+            Some(vec![7, 42]),
+        ),
+        (
+            "mixed allowlist",
+            "private",
+            Some(serde_json::json!([{"id":777}, {"id":99}, {"id":42}])),
+            None,
+        ),
+    ];
+
+    for (name, kind, recipients, expected_users) in cases {
+        let mut message = serde_json::json!({"type":kind, "sender_id":42});
+        if let Some(recipients) = recipients {
+            message["display_recipient"] = recipients;
+        }
+        let users = admitted_conversation(&config, &message, 42, 99, false).map(|conversation| {
+            let NativeRoute::Direct(users) = conversation.route else {
+                panic!("{name}: expected direct route")
+            };
+            users
+        });
+        assert_eq!(users, expected_users, "{name}");
+    }
+}
+
+/// Direct-message route identity sorts participants before applying the
+/// existing hash domain, so equivalent provider orderings keep the same reply
+/// route.
+#[test]
+fn direct_participant_routes_are_sorted_and_stably_hashed() {
+    let mut config = cfg();
+    config.allowed_user_ids.insert(7);
+    let first = admitted_conversation(
+        &config,
+        &serde_json::json!({
+            "type": "private", "sender_id": 42,
+            "display_recipient": [{"id": 7}, {"id": 99}, {"id": 42}]
+        }),
+        42,
+        99,
+        false,
+    )
+    .expect("valid first participant ordering");
+    let reordered = admitted_conversation(
+        &config,
+        &serde_json::json!({
+            "type": "private", "sender_id": 42,
+            "display_recipient": [{"id": 42}, {"id": 7}, {"id": 99}]
+        }),
+        42,
+        99,
+        false,
+    )
+    .expect("valid reordered participants");
+
+    assert_eq!(first.route, NativeRoute::Direct(vec![7, 42]));
+    assert_eq!(reordered.route, NativeRoute::Direct(vec![7, 42]));
+    assert_eq!(
+        first.stable_id,
+        "zulip-direct:ab9d03690d0e16680d89d8d4302d6ff73d2a270a3e83d277b28df101ca96c530"
+    );
+    assert_eq!(reordered.stable_id, first.stable_id);
+}
+
+/// Rejected direct-message participant evidence emits no report and cannot
+/// create the owner required for a later source-bound reply.
+#[test]
+fn malformed_direct_participants_create_no_report_or_reply_owner() {
+    let (ext, rx, client) = extension();
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    ext.process_event(
+        serde_json::json!({
+            "id": 13, "type": "message", "message": {
+                "id": 502, "type": "private", "sender_id": 42, "content": "incomplete",
+                "display_recipient": [{"id": 42}]
+            }
+        }),
+        generation,
+        registration,
+        99,
+    );
+
+    assert!(
+        rx.try_recv().is_err(),
+        "malformed event must not emit a report"
+    );
+    assert!(
+        ext.state.lock().owners.is_empty(),
+        "malformed event must not install an owner"
+    );
+    let result = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("reply".to_owned())),
+            (
+                "reply_to",
+                CborValue::Text(message_fact_id(&cfg(), 502).as_str().to_owned()),
+            ),
+        ],
+    ));
+    assert!(matches!(result, Event::ToolError(_)));
+    assert!(client.sends.lock().expect("sends").is_empty());
+}
+
 /// Configured aliases permit only their fixed direct recipient, retain
 /// source-bound replies, and coexist with stream destinations without exposing
 /// a recipient ID through discovery or tool arguments.

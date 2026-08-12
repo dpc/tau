@@ -19,7 +19,10 @@ is required.
 Injected-client tests cover strict unknown-field and allowlist validation,
 official outer-event mention flags plus exact leading, middle, and non-mentioned
 Markdown bodies, one exact stream/topic and DM route,
-participant canonicalization, duplicate/self suppression, source-bound and
+strict direct/private participant admission (complete bounded unique numeric
+evidence, bot/sender membership, all-member allowlists, sorted stable routing)
+plus malformed-event no-report/no-owner regressions, duplicate/self suppression,
+source-bound and
 proactive stream and fixed-recipient direct-message sends, explicit
 agent-chosen-topic authorization including the empty
 general-chat topic, incoming edit/reaction/delete reports, stale ingress

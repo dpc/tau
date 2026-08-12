@@ -67,6 +67,7 @@ pub(crate) const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const RECENT_MESSAGE_LIMIT: usize = 4096;
 const REPLY_ROUTE_LIMIT: usize = 1024;
 const ACTIVE_TOOL_WORKER_LIMIT: usize = 64;
+const MAX_DIRECT_NON_BOT_PARTICIPANTS: usize = 32;
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -1010,7 +1011,8 @@ impl Extension {
             if !cfg.allowed_user_ids.contains(&sender_id) || cfg.max_message_bytes < text.len() {
                 return;
             }
-            let Some(conversation) = admitted_conversation(&cfg, message, bot_user_id, mentioned)
+            let Some(conversation) =
+                admitted_conversation(&cfg, message, sender_id, bot_user_id, mentioned)
             else {
                 return;
             };
@@ -1779,6 +1781,7 @@ fn log_queue_registration_failure(error: &ApiError) {
 fn admitted_conversation(
     cfg: &RuntimeConfig,
     message: &serde_json::Value,
+    sender_id: u64,
     bot_user_id: u64,
     mentioned: bool,
 ) -> Option<Conversation> {
@@ -1787,30 +1790,8 @@ fn admitted_conversation(
         if !cfg.receive_direct_messages {
             return None;
         }
-        let mut users = message
-            .get("display_recipient")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|user| user.get("id").and_then(serde_json::Value::as_u64))
-            .filter(|id| *id != bot_user_id)
-            .collect::<Vec<_>>();
-        if users.is_empty()
-            && let Some(sender) = message
-                .get("sender_id")
-                .and_then(serde_json::Value::as_u64)
-                .filter(|id| *id != bot_user_id)
-        {
-            users.push(sender);
-        }
+        let mut users = direct_participants(cfg, message, sender_id, bot_user_id)?;
         users.sort_unstable();
-        users.dedup();
-        if users.is_empty()
-            || 32 < users.len()
-            || users.iter().any(|id| !cfg.allowed_user_ids.contains(id))
-        {
-            return None;
-        }
         let mut hasher = blake3::Hasher::new_keyed(&cfg.id_key);
         hasher.update(b"tau-ext-zulip/direct-conversation/v1\0");
         for user in &users {
@@ -1845,6 +1826,48 @@ fn admitted_conversation(
         return None;
     }
     Some(stream_conversation(cfg, route, topic))
+}
+
+/// Parse and validate the complete participant evidence for one direct message.
+fn direct_participants(
+    cfg: &RuntimeConfig,
+    message: &serde_json::Value,
+    sender_id: u64,
+    bot_user_id: u64,
+) -> Option<Vec<u64>> {
+    let recipients = message
+        .get("display_recipient")
+        .and_then(serde_json::Value::as_array)?;
+    if MAX_DIRECT_NON_BOT_PARTICIPANTS + 1 < recipients.len() {
+        return None;
+    }
+
+    let mut participant_ids = HashSet::with_capacity(recipients.len());
+    for recipient in recipients {
+        let id = recipient
+            .as_object()?
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|id| *id != 0)?;
+        if !participant_ids.insert(id) {
+            return None;
+        }
+    }
+    if !participant_ids.contains(&bot_user_id) || !participant_ids.contains(&sender_id) {
+        return None;
+    }
+
+    let users = participant_ids
+        .into_iter()
+        .filter(|id| *id != bot_user_id)
+        .collect::<Vec<_>>();
+    if users.is_empty() || MAX_DIRECT_NON_BOT_PARTICIPANTS < users.len() {
+        return None;
+    }
+    if users.iter().any(|id| !cfg.allowed_user_ids.contains(id)) {
+        return None;
+    }
+    Some(users)
 }
 
 fn stream_conversation(cfg: &RuntimeConfig, route: &StreamRoute, topic: &str) -> Conversation {
