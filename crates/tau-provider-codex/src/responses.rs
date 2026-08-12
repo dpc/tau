@@ -409,23 +409,44 @@ fn build_compact_request(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
 ) -> Result<serde_json::Value, LlmError> {
-    let mut body =
-        serde_json::to_value(build_request(config, request, None)).map_err(LlmError::Json)?;
-    let object = body
-        .as_object_mut()
-        .expect("Responses request serializes as an object");
-    for field in [
-        "stream",
-        "store",
-        "tool_choice",
-        "include",
-        "context_management",
-        "previous_response_id",
-        "client_metadata",
-    ] {
-        object.remove(field);
+    let cached_response_anchor = CachedResponseAnchor::latest_from_context(request.context);
+    let ordinary = build_request(config, request, cached_response_anchor.as_ref());
+    let mut input = serde_json::to_value(ordinary.input)
+        .map_err(LlmError::Json)?
+        .as_array()
+        .cloned()
+        .expect("Responses input serializes as an array");
+    input.retain(|item| item["type"] != "compaction_trigger");
+    if config.mode.is_lite_compatibility() {
+        input.retain(|item| {
+            item["type"] != "additional_tools"
+                && !(item["type"] == "message" && item["role"] == "developer")
+        });
     }
-    Ok(body)
+    let tools = request
+        .tools
+        .iter()
+        .map(convert_tool_definition)
+        .collect::<Vec<_>>();
+    if !tools.is_empty() {
+        input.insert(
+            0,
+            serde_json::json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": tools,
+            }),
+        );
+    }
+    serde_json::to_value(CompactRequest {
+        model: ordinary.model,
+        instructions: (!request.system_prompt.is_empty()).then(|| request.system_prompt.to_owned()),
+        input,
+        previous_response_id: ordinary.previous_response_id,
+        prompt_cache_key: ordinary.prompt_cache_key,
+        service_tier: ordinary.service_tier,
+    })
+    .map_err(LlmError::Json)
 }
 
 fn send_compact_request(
@@ -667,9 +688,9 @@ fn parse_compact_response(response_body: &str) -> Result<Vec<ContextItem>, LlmEr
         apply_raw_json_event(&mut state, &event, &mut |_| {})?;
     }
     let output = state.into_output_items();
-    tau_proto::validate_compaction_window(&output)
-        .map_err(|error| LlmError::InvalidResponse(error.to_owned()))?;
-    Ok(output)
+    tau_proto::ValidatedCompactionWindow::new(output)
+        .map(tau_proto::ValidatedCompactionWindow::into_items)
+        .map_err(|error| LlmError::InvalidResponse(error.to_owned()))
 }
 
 pub(super) fn stream_idle_timeout_error(
@@ -1953,6 +1974,28 @@ struct ResponsesRequest {
     /// Per-request transport metadata used by Responses-over-WebSocket.
     #[serde(skip_serializing_if = "Option::is_none")]
     client_metadata: Option<ResponsesClientMetadata>,
+}
+
+/// Exact `/codex/responses/compact` request shape, kept separate from ordinary
+/// inference so new inference fields cannot reach the compact endpoint.
+#[derive(Serialize)]
+struct CompactRequest {
+    /// Selected upstream model.
+    model: String,
+    /// Optional compact instruction string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    /// Complete compact context and lowered tool declarations.
+    input: Vec<serde_json::Value>,
+    /// Optional valid upstream response-chain anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
+    /// Optional stable provider cache key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    /// Optional selected provider service tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'static str>,
 }
 
 #[derive(Serialize)]

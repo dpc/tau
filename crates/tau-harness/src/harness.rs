@@ -179,6 +179,56 @@ fn canonical_tool_terminal_call_id(event: &Event) -> Option<&ToolCallId> {
     }
 }
 
+/// A standalone compaction terminal classified before it can mutate context
+/// state.
+enum StandaloneCompactionTerminal {
+    /// The provider returned a structurally valid replacement window.
+    Accepted(tau_proto::ValidatedCompactionWindow),
+    /// The provider terminal cannot commit a replacement window.
+    Rejected(StandaloneCompactionRejection),
+}
+
+/// The only locally classified reasons a standalone provider terminal can fail.
+#[derive(Clone, Copy)]
+enum StandaloneCompactionRejection {
+    /// The provider explicitly reported a terminal failure.
+    ProviderError,
+    /// The provider did not report a completed terminal turn.
+    InvalidStop,
+    /// The provider did not return an acceptable replacement window.
+    InvalidWindow,
+}
+
+impl StandaloneCompactionRejection {
+    /// Convert this local classification to the durable transaction failure
+    /// reason.
+    fn durable_reason(self) -> tau_proto::StandaloneCompactionFailureReason {
+        match self {
+            Self::ProviderError => tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            Self::InvalidStop | Self::InvalidWindow => {
+                tau_proto::StandaloneCompactionFailureReason::InvalidWindow
+            }
+        }
+    }
+}
+
+/// Normalize provider cache usage before it updates either live or canonical
+/// state.
+fn normalize_finished_response_cached_usage(response: &mut ProviderResponseFinished) {
+    let Some(usage) = response.usage.as_mut() else {
+        return;
+    };
+    let sent_tokens = usage.prompt_sent_tokens;
+    usage.prompt_cached_tokens = usage.prompt_cached_tokens.min(sent_tokens);
+    if let Some(cache) = usage.cache.as_mut() {
+        **cache = cache.normalized(sent_tokens);
+        usage.prompt_cached_tokens = cache
+            .read_tokens
+            .unwrap_or(usage.prompt_cached_tokens)
+            .min(sent_tokens);
+    }
+}
+
 /// A render request awaiting the normal per-agent context initialization path.
 enum PendingRenderedPrompt {
     /// Render only the system prompt after context initialization.
@@ -26451,7 +26501,17 @@ impl Harness {
         // this AgentTree. Enforce that ownership boundary before attaching
         // telemetry or mutating usage, alerts, provider-watch state, or watcher
         // journals: rejected provider work must have no semantic side effects.
-        if raw_response_contains_tool_calls && self.agent_has_open_foreground_tool_round(&cid) {
+        let standalone_compaction = active_compaction_response
+            || self
+                .prompt_operations
+                .get(&response.agent_prompt_id)
+                .is_some_and(|operation| {
+                    operation.0 == tau_proto::PromptOperation::StandaloneCompaction
+                });
+        if !standalone_compaction
+            && raw_response_contains_tool_calls
+            && self.agent_has_open_foreground_tool_round(&cid)
+        {
             let standalone = self
                 .prompt_operations
                 .remove(&response.agent_prompt_id)
@@ -26465,7 +26525,12 @@ impl Harness {
             if standalone {
                 self.silent_compaction_failure_prompts
                     .insert(response.agent_prompt_id.clone());
-                self.reject_standalone_compaction(&cid, &response, source);
+                self.reject_standalone_compaction(
+                    &cid,
+                    &response,
+                    StandaloneCompactionRejection::InvalidWindow,
+                    source,
+                );
                 self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
             } else {
                 self.terminalize_global_round_rejected_prompt(&cid, &response, source);
@@ -26484,6 +26549,16 @@ impl Harness {
             self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
             return Ok(());
         }
+        let standalone_terminal = standalone_compaction
+            .then(|| self.classify_standalone_compaction_terminal(&cid, &response));
+        if !standalone_compaction {
+            self.clear_malformed_repetition_output(&mut response);
+        }
+        normalize_finished_response_cached_usage(&mut response);
+        let standalone_success = matches!(
+            standalone_terminal,
+            Some(StandaloneCompactionTerminal::Accepted(_))
+        );
         let refresh_success = response.error.is_none()
             && response.failure_kind.is_none()
             && matches!(
@@ -26492,12 +26567,13 @@ impl Harness {
                     | ProviderStopReason::ToolCalls
                     | ProviderStopReason::Length
             );
-        self.provider_cache_residency.finish_prompt(
-            &response.agent_prompt_id,
-            refresh_success,
-            response.usage.as_ref(),
-        );
-        self.clear_malformed_repetition_output(&mut response);
+        if !standalone_compaction || standalone_success {
+            self.provider_cache_residency.finish_prompt(
+                &response.agent_prompt_id,
+                refresh_success,
+                response.usage.as_ref(),
+            );
+        }
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
         let input_tokens = response
@@ -26520,19 +26596,26 @@ impl Harness {
         let compaction_original_input_tokens = response_contains_compaction
             .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
             .flatten();
-        self.update_finished_response_context_usage(
-            Some(&cid),
-            &response.agent_prompt_id,
-            input_tokens,
-            cached_tokens,
-            source,
-        );
+        if !standalone_compaction || standalone_success {
+            self.update_finished_response_context_usage(
+                Some(&cid),
+                &response.agent_prompt_id,
+                input_tokens,
+                cached_tokens,
+                source,
+            );
+        }
 
-        let context_size_alerts = self
-            .prompt_context_size_alerts
-            .remove(&response.agent_prompt_id)
+        let context_size_alerts = (!standalone_compaction || standalone_success)
+            .then(|| {
+                self.prompt_context_size_alerts
+                    .remove(&response.agent_prompt_id)
+            })
+            .flatten()
             .unwrap_or_default();
-        if self.try_plan_reactive_context_recovery(&cid, &mut response, source) {
+        if (!standalone_compaction || standalone_success)
+            && self.try_plan_reactive_context_recovery(&cid, &mut response, source)
+        {
             return Ok(());
         }
         self.prompt_semantic_output
@@ -26541,7 +26624,8 @@ impl Harness {
             .error
             .as_ref()
             .map(|_| tau_proto::ProviderFailureKind::Unknown));
-        if let Some(failure_kind) = safe_failure_kind
+        if (!standalone_compaction || standalone_success)
+            && let Some(failure_kind) = safe_failure_kind
             && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
             && !self
                 .agents
@@ -26583,7 +26667,8 @@ impl Harness {
                     initial: false,
                 },
             );
-        } else if response.error.is_none()
+        } else if (!standalone_compaction || standalone_success)
+            && response.error.is_none()
             && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
         {
             self.agent_watch_provider_status.remove(&public_id);
@@ -26596,46 +26681,26 @@ impl Harness {
             output_tokens,
         );
         self.add_finished_response_estimated_cost(&cid, &mut response, source);
-        let (requested_tool_calls, tool_calls_with_non_tool_stop) =
-            self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
         let prompt_operation = self
             .prompt_operations
             .remove(&response.agent_prompt_id)
             .unwrap_or_default();
-        let runtime_standalone = self.agents.get(&cid).is_some_and(|agent| {
-            matches!(
-                &agent.activation_dispatch,
-                crate::agent::ActivationDispatchState::Running {
-                    compact_prompt_id: prompt_id,
-                    ..
-                } if prompt_id == &response.agent_prompt_id
-            )
-        });
         if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction
-            || runtime_standalone
+            || standalone_compaction
         {
-            let valid = response.error.is_none()
-                && response.stop_reason == ProviderStopReason::EndTurn
-                && tau_proto::validate_compaction_window(&response.output_items).is_ok();
-            if valid {
-                self.accept_standalone_compaction(
-                    &cid,
-                    &response,
-                    response.output_items.clone(),
-                    source,
-                );
-            } else {
-                if response.context_limit_telemetry.is_some() {
-                    self.publish_for_agent_from(
-                        &cid,
-                        source,
-                        Event::ProviderResponseFinished(response.clone()),
-                    );
+            match standalone_terminal.expect("standalone compaction was classified before mutation")
+            {
+                StandaloneCompactionTerminal::Accepted(replacement_window) => {
+                    self.accept_standalone_compaction(&cid, &response, replacement_window, source);
                 }
-                self.reject_standalone_compaction(&cid, &response, source);
+                StandaloneCompactionTerminal::Rejected(reason) => {
+                    self.reject_standalone_compaction(&cid, &response, reason, source);
+                }
             }
             return Ok(());
         }
+        let (requested_tool_calls, tool_calls_with_non_tool_stop) =
+            self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
         if response_contains_compaction {
             self.attach_finished_response_compaction_usage(
                 &mut response,
@@ -27199,26 +27264,113 @@ impl Harness {
         );
     }
 
+    /// Classify a standalone terminal before it changes any context or cache
+    /// state, including the complete durable-boundary validation.
+    fn classify_standalone_compaction_terminal(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+    ) -> StandaloneCompactionTerminal {
+        if response.error.is_some() || response.failure_kind.is_some() {
+            return StandaloneCompactionTerminal::Rejected(
+                StandaloneCompactionRejection::ProviderError,
+            );
+        }
+        if response.stop_reason != ProviderStopReason::EndTurn {
+            return StandaloneCompactionTerminal::Rejected(
+                StandaloneCompactionRejection::InvalidStop,
+            );
+        }
+        let Ok(replacement_window) =
+            tau_proto::ValidatedCompactionWindow::new(response.output_items.clone())
+        else {
+            return StandaloneCompactionTerminal::Rejected(
+                StandaloneCompactionRejection::InvalidWindow,
+            );
+        };
+        if !self.standalone_compaction_boundary_is_valid(cid, response, &replacement_window) {
+            return StandaloneCompactionTerminal::Rejected(
+                StandaloneCompactionRejection::InvalidWindow,
+            );
+        }
+        StandaloneCompactionTerminal::Accepted(replacement_window)
+    }
+
+    /// Checks the complete core boundary contract without appending it.
+    fn standalone_compaction_boundary_is_valid(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        replacement_window: &tau_proto::ValidatedCompactionWindow,
+    ) -> bool {
+        let Some((agent_id, parent, boundary)) =
+            self.standalone_compaction_boundary(cid, response, replacement_window)
+        else {
+            return false;
+        };
+        self.agent_store
+            .validate_agent_event_at(
+                &agent_id,
+                None,
+                parent,
+                &boundary,
+                tau_proto::UnixMicros::now(),
+            )
+            .is_ok()
+    }
+
+    /// Materializes the exact boundary that a validated standalone terminal
+    /// would append at the current agent head.
+    fn standalone_compaction_boundary(
+        &self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        replacement_window: &tau_proto::ValidatedCompactionWindow,
+    ) -> Option<(String, tau_core::AgentEventParent, Event)> {
+        let agent = self.agents.get(cid)?;
+        let (transaction_id, cut, model, compact_prompt_id) = match &agent.activation_dispatch {
+            path_crate_agent::ActivationDispatchState::Running {
+                id,
+                cut,
+                model,
+                compact_prompt_id,
+                ..
+            } => (id.clone(), *cut, model.clone(), compact_prompt_id.clone()),
+            _ => return None,
+        };
+        let agent_id = agent.agent_id.clone()?;
+        let suffix_end = agent
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let parent = agent.head.map_or(
+            tau_core::AgentEventParent::Root,
+            tau_core::AgentEventParent::Under,
+        );
+        Some((
+            agent_id,
+            parent,
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                compact_prompt_id: Some(compact_prompt_id),
+                model: Some(model),
+                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                agent_id: response.agent_id.clone(),
+                transaction_id: Some(transaction_id),
+                cut: Some(cut),
+                suffix_end: Some(suffix_end),
+                replacement_window: replacement_window.items().to_vec(),
+            }),
+        ))
+    }
+
     fn accept_standalone_compaction(
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-        replacement_window: Vec<ContextItem>,
+        replacement_window: tau_proto::ValidatedCompactionWindow,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        let Some((transaction_id, cut, model, compact_prompt_id)) =
-            self.agents
-                .get(cid)
-                .and_then(|agent| match &agent.activation_dispatch {
-                    path_crate_agent::ActivationDispatchState::Running {
-                        id,
-                        cut,
-                        model,
-                        compact_prompt_id,
-                        ..
-                    } => Some((id.clone(), *cut, model.clone(), compact_prompt_id.clone())),
-                    _ => None,
-                })
+        let Some((_, _, boundary)) =
+            self.standalone_compaction_boundary(cid, response, &replacement_window)
         else {
             self.emit_info("ignoring standalone compaction response without an active transaction");
             return;
@@ -27232,25 +27384,7 @@ impl Harness {
             );
             return;
         }
-        let suffix_end = self
-            .agents
-            .get(cid)
-            .and_then(|agent| agent.head)
-            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-        self.publish_for_agent_from(
-            cid,
-            source,
-            Event::AgentCompacted(tau_proto::AgentCompacted {
-                compact_prompt_id: Some(compact_prompt_id.clone()),
-                model: Some(model),
-                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
-                agent_id: response.agent_id.clone(),
-                transaction_id: Some(transaction_id),
-                cut: Some(cut),
-                suffix_end: Some(suffix_end),
-                replacement_window,
-            }),
-        );
+        self.publish_for_agent_from(cid, source, boundary);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
     }
@@ -27313,18 +27447,24 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
+        rejection: StandaloneCompactionRejection,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        self.emit_info(&format!(
-            "provider returned an invalid standalone compaction window for agent_prompt_id={}",
-            response.agent_prompt_id
-        ));
-        let reason = if response.error.is_some() {
-            tau_proto::StandaloneCompactionFailureReason::ProviderError
-        } else {
-            tau_proto::StandaloneCompactionFailureReason::InvalidWindow
-        };
-        self.fail_standalone_compaction(cid, response, reason, source);
+        match rejection {
+            StandaloneCompactionRejection::ProviderError => self.emit_info(&format!(
+                "provider failed standalone compaction for agent_prompt_id={}",
+                response.agent_prompt_id
+            )),
+            StandaloneCompactionRejection::InvalidStop => self.emit_info(&format!(
+                "provider returned a non-terminal standalone compaction stop for agent_prompt_id={}",
+                response.agent_prompt_id
+            )),
+            StandaloneCompactionRejection::InvalidWindow => self.emit_info(&format!(
+                "provider returned an invalid standalone compaction window for agent_prompt_id={}",
+                response.agent_prompt_id
+            )),
+        }
+        self.fail_standalone_compaction(cid, response, rejection.durable_reason(), source);
     }
 
     fn fail_standalone_compaction(
@@ -27352,6 +27492,12 @@ impl Harness {
         let Some((transaction_id, cut, resume_through)) = transaction else {
             return;
         };
+        // Rejection retains neither cache evidence nor context-recovery authority,
+        // but it must release the prompt-local snapshots allocated for dispatch.
+        self.provider_cache_residency
+            .drop_prompt(&response.agent_prompt_id);
+        self.prompt_context_size_alerts
+            .remove(&response.agent_prompt_id);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         self.emit_info_important(&format!(
@@ -27633,7 +27779,7 @@ impl Harness {
             && (input_tokens.is_some() || cached_tokens.is_some() || output_tokens.is_some())
         {
             let sent_tokens = input_tokens.unwrap_or(0);
-            let legacy_cached_tokens = cached_tokens.unwrap_or(0).min(sent_tokens);
+            let cached_tokens = cached_tokens.unwrap_or(0);
             let received_tokens = output_tokens.unwrap_or(0);
             let cache = response
                 .usage
@@ -27641,13 +27787,13 @@ impl Harness {
                 .and_then(|usage| usage.cache.as_deref())
                 .map(|cache| {
                     let mut cache = *cache;
-                    cache.read_tokens = Some(cache.read_tokens.unwrap_or(legacy_cached_tokens));
-                    Box::new(cache.normalized(sent_tokens))
+                    cache.read_tokens = Some(cache.read_tokens.unwrap_or(cached_tokens));
+                    Box::new(cache)
                 });
             let cached_tokens = cache
                 .as_deref()
                 .and_then(|cache| cache.read_tokens)
-                .unwrap_or(legacy_cached_tokens);
+                .unwrap_or(cached_tokens);
             let cache_read_ceiling = validate_cache_read_ceiling(
                 sent_tokens,
                 cached_tokens,

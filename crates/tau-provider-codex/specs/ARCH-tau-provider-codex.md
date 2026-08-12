@@ -120,9 +120,15 @@ and previous-response chaining retain the selected mode; there is no mode fallba
 
 Both modes suppress legacy inline `context_management` for GPT-5.6 and advertise
 standalone compaction. The provider sends unary HTTP
-`POST /codex/responses/compact` using the selected mode's lowering and marker, and
-the harness installs its output as one replacement-window boundary. Older models
-retain inline context management and ignore the profile's Lite compatibility flag.
+`POST /codex/responses/compact` using its compact schema: both modes lower required
+tool declarations into `input` `additional_tools` items and omit ordinary
+top-level `tools`, `parallel_tool_calls`, `reasoning`, and `text`. Supported compact
+members, including `instructions`, `previous_response_id`, prompt-cache controls,
+and service tier, remain intact. Structurally valid provider-authored opaque
+items retain their raw replay sidecars through the durable replacement window and
+cold provider replay; typed items retain their normal semantic validation.
+Older models retain inline context management and ignore the profile's Lite
+compatibility flag.
 Hosted Responses tools are not part of either contract; Tau's tools remain
 client-executed definitions.
 

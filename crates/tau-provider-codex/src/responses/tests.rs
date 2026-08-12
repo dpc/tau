@@ -1472,20 +1472,32 @@ fn build_request_lite_chain_omits_owned_developer_prefix() {
 }
 
 /// Standalone Lite compaction must use the compact schema while retaining the
-/// Lite developer-prefix, all-turn reasoning, and serial-tool lowering.
+/// documented developer tool context without ordinary inference-only fields.
 #[test]
 fn build_compact_request_uses_lite_schema() {
     let config = ResponsesConfig {
         profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-terra".to_owned(),
+        supports_prompt_cache_key: true,
         ..chain_test_config()
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        model_visible_name: None,
+        description: None,
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
     };
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[user_text("compact me"), ContextItem::CompactionTrigger]),
-        tools: &[],
-        params: tau_proto::ModelParams::default(),
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams {
+            service_tier: Some(tau_proto::ServiceTier::Fast),
+            ..Default::default()
+        },
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: Some(tau_proto::PromptCompactionContext {
             compact_threshold: Some(10),
@@ -1504,17 +1516,22 @@ fn build_compact_request_uses_lite_schema() {
         "stream",
         "store",
         "tool_choice",
+        "tools",
+        "parallel_tool_calls",
+        "reasoning",
+        "text",
         "include",
         "context_management",
-        "previous_response_id",
         "client_metadata",
     ] {
         assert!(!object.contains_key(forbidden), "unexpected {forbidden}");
     }
-    assert_eq!(body["parallel_tool_calls"], false);
-    assert_eq!(body["reasoning"]["context"], "all_turns");
     assert_eq!(body["input"][0]["type"], "additional_tools");
-    assert_eq!(body["input"][1]["role"], "developer");
+    assert_eq!(body["instructions"], "system");
+    assert_eq!(body["input"].as_array().expect("input").len(), 2);
+    assert_eq!(body["input"][1]["role"], "user");
+    assert!(body.get("prompt_cache_key").is_some());
+    assert_eq!(body["service_tier"], "priority");
     assert!(
         body["input"]
             .as_array()
@@ -1524,8 +1541,8 @@ fn build_compact_request_uses_lite_schema() {
     );
 }
 
-/// Standard GPT-5.6 standalone compaction retains the standard top-level tool
-/// contract and does not force Lite reasoning continuity.
+/// Standard standalone compaction must lower required tools into compact input
+/// and omit ordinary inference-only top-level fields.
 #[test]
 fn build_compact_request_uses_standard_schema() {
     let config = ResponsesConfig {
@@ -1533,6 +1550,7 @@ fn build_compact_request_uses_standard_schema() {
         mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-terra".to_owned(),
         supports_compaction: false,
+        supports_prompt_cache_key: true,
         ..chain_test_config()
     };
     let tool = tau_proto::ToolDefinition {
@@ -1547,7 +1565,10 @@ fn build_compact_request_uses_standard_schema() {
         system_prompt: "system",
         context: context(&[user_text("compact me")]),
         tools: std::slice::from_ref(&tool),
-        params: tau_proto::ModelParams::default(),
+        params: tau_proto::ModelParams {
+            service_tier: Some(tau_proto::ServiceTier::Fast),
+            ..Default::default()
+        },
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
@@ -1560,10 +1581,48 @@ fn build_compact_request_uses_standard_schema() {
 
     let body = build_compact_request(&config, &request).expect("compact body");
     assert_eq!(body["instructions"], "system");
-    assert_eq!(body["tools"][0]["name"], "shell");
-    assert_eq!(body["parallel_tool_calls"], true);
-    assert!(body["reasoning"].get("context").is_none());
-    assert_ne!(body["input"][0]["role"], "developer");
+    for forbidden in ["tools", "parallel_tool_calls", "reasoning", "text"] {
+        assert!(body.get(forbidden).is_none(), "unexpected {forbidden}");
+    }
+    assert_eq!(body["input"][0]["type"], "additional_tools");
+    assert_eq!(body["input"][0]["tools"][0]["name"], "shell");
+    assert_eq!(body["input"][1]["role"], "user");
+    assert!(body.get("prompt_cache_key").is_some());
+    assert_eq!(body["service_tier"], "priority");
+}
+
+/// Compact requests retain a valid documented response chain while omitting
+/// ordinary inference-only fields.
+#[test]
+fn build_compact_request_preserves_previous_response_id() {
+    let config = chain_test_config();
+    let request = PromptPayload {
+        system_prompt: "system",
+        context: context_with_response_id(
+            "resp_parent",
+            vec![user_text("first")],
+            vec![assistant_text("answer")],
+            vec![user_text("second")],
+        ),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::parse("test-session")
+            .expect("known-safe SessionId must be valid"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
+    };
+
+    let body = build_compact_request(&config, &request).expect("compact body");
+
+    assert_eq!(body["previous_response_id"], "resp_parent");
+    assert!(body.get("tools").is_none());
+    assert!(body.get("parallel_tool_calls").is_none());
+    assert!(body.get("reasoning").is_none());
+    assert!(body.get("text").is_none());
 }
 
 /// Standalone Lite compact input must preserve balanced function and custom
@@ -1669,6 +1728,22 @@ fn parse_compact_response_preserves_ordered_replacement_items() {
     assert!(matches!(output[0], ContextItem::Reasoning(_)));
     assert!(matches!(output[1], ContextItem::Message(_)));
     assert!(matches!(output[2], ContextItem::UnknownProviderItem(_)));
+}
+
+/// Canonical compact output must retain the opaque provider compaction item
+/// exactly so the next request can replay the provider's replacement window.
+#[test]
+fn parse_compact_response_preserves_canonical_compaction_item() {
+    let raw = r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#;
+    let output = parse_compact_response(include_str!(
+        "../../fixtures/compat/responses-compact-output.json"
+    ))
+    .expect("compact response");
+
+    let ContextItem::Compaction(item) = &output[0] else {
+        panic!("expected provider compaction item");
+    };
+    assert_eq!(item.raw_json.as_deref(), Some(raw));
 }
 
 /// Empty and structurally incomplete compact windows must fail closed rather

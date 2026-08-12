@@ -1427,6 +1427,41 @@ fn legacy_compaction_boundary_without_transaction_metadata_replays() {
     ));
 }
 
+/// Provider-authored opaque compaction items must survive identical live and
+/// persisted boundary validation without a parsed or serialized replacement.
+#[test]
+fn provider_compaction_replacement_has_identical_live_and_replay_state() {
+    let replacement = ContextItem::Compaction(tau_proto::OpaqueProviderItem::with_raw_json(
+        tau_proto::CborValue::Map(vec![]),
+        r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#.to_owned(),
+    ));
+    let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
+        compact_prompt_id: None,
+        model: None,
+        operation: None,
+        replacement_window: vec![replacement.clone()],
+    });
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    live.validate_event(&boundary)
+        .expect("live boundary must validate");
+    live.apply_event(&boundary);
+    let mut replay = AgentTree::from_events(agent_id(), &[]);
+    apply_persisted_test_record(&mut replay, AgentEventParent::Root, boundary);
+
+    assert!(matches!(
+        live.current_branch().last(),
+        Some(AgentEntry::Compaction {
+            replacement_window,
+            ..
+        }) if replacement_window == &vec![replacement]
+    ));
+    assert_eq!(live.current_branch(), replay.current_branch());
+}
+
 /// Watch provider-status messages must carry their structured payload, while
 /// ordinary messages must not smuggle one into the durable agent transcript.
 #[test]

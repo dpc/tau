@@ -90,8 +90,12 @@ session and model totals, estimated cost, and latency never consume it.
 
 Canceled, stale, unknown, and duplicate reports produce no canonical response.
 Standalone-compaction success derives `agent.compacted`; invalid standalone compaction
-derives its failure and emits provider-finished only in the existing telemetry-bearing
-case. Ordinary and reactive-recovery paths retain their canonical response behavior.
+derives its failure without folding provider output into transcript history. Before
+either outcome, the harness normalizes cached usage to no more than sent usage for
+both live context state and the canonical report. Rejected standalone terminals retain
+context/cache and transaction authority but release prompt-local cache/alert snapshots;
+session token and cost accounting remains intentionally billable. Ordinary and
+reactive-recovery paths retain their canonical response behavior.
 Every report-derived alternative uses harness source.
 
 Report and successor publication are intentionally not transactional. The report commits

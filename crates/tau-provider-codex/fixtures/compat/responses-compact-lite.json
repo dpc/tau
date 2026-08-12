@@ -1,0 +1,61 @@
+{
+  "input": [
+    {
+      "role": "developer",
+      "tools": [
+        {
+          "description": "Look up one value.",
+          "name": "lookup",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "type": "object"
+          },
+          "strict": null,
+          "type": "function"
+        },
+        {
+          "description": "Run a code snippet.",
+          "format": {
+            "type": "text"
+          },
+          "name": "code",
+          "type": "custom"
+        }
+      ],
+      "type": "additional_tools"
+    },
+    {
+      "content": [
+        {
+          "text": "legacy user input",
+          "type": "input_text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "legacy assistant output",
+          "type": "output_text"
+        }
+      ],
+      "phase": "final_answer",
+      "role": "assistant",
+      "type": "message"
+    }
+  ],
+  "instructions": "Compatibility system instructions.",
+  "model": "gpt-5.6-sol",
+  "prompt_cache_key": "b0b69c77-e283-8188-a320-f505d5d08757",
+  "service_tier": "priority"
+}

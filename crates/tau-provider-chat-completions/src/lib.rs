@@ -86,11 +86,12 @@ impl LocalSummaryCompactionConfig {
         max_output_bytes: NonZeroU64,
     ) -> Option<Self> {
         let input_token_upper_bound = max_input_bytes.get();
+        let request_token_upper_bound = input_token_upper_bound
+            .checked_add(max_output_tokens.get() as u64)
+            .and_then(|total| total.checked_add(LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS));
         (declared_context_window_tokens.get() == advertised_context_window_tokens
-            && input_token_upper_bound
-                .saturating_add(max_output_tokens.get() as u64)
-                .saturating_add(LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS)
-                <= declared_context_window_tokens.get())
+            && request_token_upper_bound
+                .is_some_and(|total| total <= declared_context_window_tokens.get()))
         .then_some(Self {
             context_window_tokens: declared_context_window_tokens,
             max_input_bytes,

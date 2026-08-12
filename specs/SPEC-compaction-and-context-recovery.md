@@ -262,6 +262,15 @@ uncompleted checkpoint remains uncertain and is never automatically resent.
 Committed compaction replacement windows contain the provider items that the
 compacting request actually consumed. Replay does not reinterpret or rewrite
 those materialized items when a later release changes source-based presentation.
+Provider-authored opaque `Compaction` items are valid members of a nonempty,
+structurally closed standalone replacement window and retain their raw replay
+sidecars. Harness-authored `CompactionTrigger` items, malformed messages, and
+open, duplicate, or otherwise incomplete tool rounds remain invalid. A standalone
+terminal commits a replacement only on `EndTurn` with neither provider error nor
+typed failure; error and typed failure take precedence as provider failures.
+Rejected terminals retain the transaction cut/resume and context/cache baselines,
+while their report/accounting behavior is owned by
+[SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
 Typed suffix facts use the current projection, so a historical raw user prompt or
 `<tau_message>` may coexist with newly projected `<user>` or external `<message>`
 items across the compaction boundary. New compactions preserve their actual

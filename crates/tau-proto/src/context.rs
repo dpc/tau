@@ -545,10 +545,42 @@ pub enum ContextItem {
 /// Validates a standalone compaction replacement window before it can erase
 /// older transcript history.
 ///
-/// Unknown provider items remain allowed for forward compatibility, but
+/// Provider-authored opaque items remain allowed for forward compatibility, but
 /// harness-authored triggers/boundaries and structurally incomplete tool rounds
 /// are rejected.
 pub fn validate_compaction_window(items: &[ContextItem]) -> Result<(), &'static str> {
+    validate_compaction_window_items(items)
+}
+
+/// A replacement window whose structural safety was checked before standalone
+/// compaction can install it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedCompactionWindow(Vec<ContextItem>);
+
+impl ValidatedCompactionWindow {
+    /// Validate `items` and retain the exact ordered provider window on
+    /// success.
+    pub fn new(items: Vec<ContextItem>) -> Result<Self, &'static str> {
+        validate_compaction_window_items(&items)?;
+        Ok(Self(items))
+    }
+
+    /// Consume this proof and return the exact validated replacement window.
+    #[must_use]
+    pub fn into_items(self) -> Vec<ContextItem> {
+        self.0
+    }
+
+    /// Borrow the exact validated replacement items for an additional
+    /// transaction-specific acceptance check.
+    #[must_use]
+    pub fn items(&self) -> &[ContextItem] {
+        &self.0
+    }
+}
+
+/// Applies the exhaustive per-item replacement-window policy.
+fn validate_compaction_window_items(items: &[ContextItem]) -> Result<(), &'static str> {
     use std::collections::HashSet;
 
     if items.is_empty() {
@@ -580,12 +612,13 @@ pub fn validate_compaction_window(items: &[ContextItem]) -> Result<(), &'static 
                     return Err("replacement window has a duplicate tool result");
                 }
             }
-            ContextItem::CompactionTrigger | ContextItem::Compaction(_) => {
-                return Err("replacement window contains a compaction control item");
+            ContextItem::CompactionTrigger => {
+                return Err("replacement window contains a harness compaction trigger");
             }
             ContextItem::Message(_)
             | ContextItem::ReasoningText(_)
             | ContextItem::Reasoning(_)
+            | ContextItem::Compaction(_)
             | ContextItem::UnknownProviderItem(_) => {}
         }
     }
@@ -594,6 +627,9 @@ pub fn validate_compaction_window(items: &[ContextItem]) -> Result<(), &'static 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Materialized provider prompt context grouped into semantic blocks.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

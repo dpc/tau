@@ -1157,6 +1157,17 @@ fn local_summary_compaction_enforces_complete_context_budget_boundary() {
         )
         .is_none()
     );
+    assert!(
+        LocalSummaryCompactionConfig::new(
+            NonZeroU64::new(u64::MAX).expect("positive"),
+            u64::MAX,
+            NonZeroU64::new(u64::MAX - 1).expect("positive"),
+            NonZeroU32::new(1).expect("positive"),
+            NonZeroU64::new(1).expect("positive"),
+        )
+        .is_none(),
+        "an overflowing conservative budget must not saturate into an accepted fit"
+    );
 }
 
 /// Ensures request emission depends only on wire compatibility and tool

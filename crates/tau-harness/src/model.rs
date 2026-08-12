@@ -450,7 +450,7 @@ pub(crate) fn context_percent_used(input_tokens: u64, context_window: u64) -> u8
     if context_window == 0 {
         return 0;
     }
-    let percent = input_tokens.saturating_mul(100) / context_window;
+    let percent = u128::from(input_tokens) * 100 / u128::from(context_window);
     percent.min(100) as u8
 }
 
@@ -579,3 +579,6 @@ pub(crate) fn default_thinking_summary(
     }
     allowed.first().copied().unwrap_or(T::Off)
 }
+
+#[cfg(test)]
+mod tests;

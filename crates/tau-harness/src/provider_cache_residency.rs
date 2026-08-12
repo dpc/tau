@@ -361,6 +361,12 @@ impl<C: CacheClock, J: CacheJitter> ProviderCacheResidency<C, J> {
         self.tracked.remove(prompt_id);
     }
 
+    /// Return whether unresolved cache evidence retains `prompt_id`.
+    #[cfg(test)]
+    pub(crate) fn tracks_prompt(&self, prompt_id: &AgentPromptId) -> bool {
+        self.tracked.contains_key(prompt_id)
+    }
+
     /// Return the next due or exact stop deadline.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         let mut active_providers = BTreeMap::<&ProviderName, usize>::new();
