@@ -1,4 +1,5 @@
 use std::io::BufRead;
+use std::net::TcpListener;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, atomic as path_std_sync_atomic};
@@ -10,6 +11,115 @@ use super::gateway_supervisor::{
     GATEWAY_RECONNECT_INITIAL_DELAY, GATEWAY_RECONNECT_MAX_DELAY, next_gateway_retry_delay,
 };
 use super::*;
+
+/// HTTP framing emitted by a hermetic Bot API fixture.
+#[derive(Clone, Copy)]
+enum HttpResponseFraming {
+    /// A response with its body size declared up front.
+    ContentLength,
+    /// A response whose payload arrives in aggregate-sized chunks.
+    Chunked,
+}
+
+/// Start a loopback Bot API fixture that returns one successful response body.
+fn telegram_response_fixture(
+    framing: HttpResponseFraming,
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept Bot API request");
+        let mut request = path_std_io::BufReader::new(&mut stream);
+        let mut request_body_length = 0;
+        loop {
+            let mut line = Vec::new();
+            let read = request
+                .read_until(b'\n', &mut line)
+                .expect("read request header");
+            assert!(
+                0 < read,
+                "Bot API client closed before completing request headers"
+            );
+            if line == b"\r\n" {
+                break;
+            }
+            let line = String::from_utf8_lossy(&line);
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                request_body_length = value.trim().parse().expect("parse request Content-Length");
+            }
+        }
+        let mut request_body = vec![0; request_body_length];
+        request
+            .read_exact(&mut request_body)
+            .expect("read request body");
+        drop(request);
+
+        match framing {
+            HttpResponseFraming::ContentLength => {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len(),
+                )
+                .expect("write response headers");
+                stream.write_all(&body).expect("write response body");
+            }
+            HttpResponseFraming::Chunked => {
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response headers");
+                for chunk in body.chunks(8 * 1024) {
+                    write!(stream, "{:X}\r\n", chunk.len()).expect("write chunk size");
+                    stream.write_all(chunk).expect("write chunk");
+                    stream.write_all(b"\r\n").expect("write chunk terminator");
+                }
+                stream
+                    .write_all(b"0\r\n\r\n")
+                    .expect("write chunked response terminator");
+            }
+        }
+    });
+    (format!("http://{address}"), thread)
+}
+
+/// Build a syntactically valid JSON response at the exact successful-body cap.
+fn successful_response_at_body_limit() -> Vec<u8> {
+    let prefix = br#"{"ok":true,"result":""#;
+    let suffix = br#""}"#;
+    let maximum_body_bytes =
+        usize::try_from(MAX_SUCCESSFUL_RESPONSE_BODY_BYTES).expect("10 MiB fits usize");
+    let padding_bytes = maximum_body_bytes - prefix.len() - suffix.len();
+    let mut body = Vec::with_capacity(maximum_body_bytes);
+    body.extend_from_slice(prefix);
+    body.extend(std::iter::repeat_n(b'x', padding_bytes));
+    body.extend_from_slice(suffix);
+    body
+}
+
+/// Assert that an oversized successful response failed while reading rather
+/// than after a JSON decode attempt.
+fn assert_oversized_successful_response(error: TelegramApiFailure) {
+    let TelegramApiFailure::Protocol(message) = error else {
+        panic!("expected Protocol failure");
+    };
+    assert!(
+        message.contains("reading Telegram HTTP 200"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        !message.contains("invalid Telegram JSON"),
+        "response must fail before JSON decoding: {message}"
+    );
+}
 
 /// Remote diagnostic bounding preserves valid UTF-8, enforces the exact byte
 /// ceiling, and replaces control characters before stderr use.
@@ -3835,6 +3945,116 @@ fn telegram_transport_errors_do_not_expose_bot_token() {
         !err.to_string().contains("secret-token-for-test"),
         "err: {err}"
     );
+}
+
+/// A successful response declared at exactly 10 MiB must reach the production
+/// JSON decoder, preventing a dependency default from restoring a strict limit.
+#[test]
+fn telegram_content_length_response_at_body_limit_is_accepted() {
+    let (api_base, fixture) = telegram_response_fixture(
+        HttpResponseFraming::ContentLength,
+        successful_response_at_body_limit(),
+        "application/json",
+    );
+    let client = HttpTelegramClient::default();
+    let mut config = cfg();
+    config.api_base = api_base;
+
+    client
+        .send_message(&config, 123, "hello")
+        .expect("exactly 10 MiB response should succeed");
+    fixture.join().expect("fixture should exit");
+}
+
+/// A Content-Length response one byte over 10 MiB must become the established
+/// Protocol failure while its invalid payload remains unseen by JSON decoding.
+#[test]
+fn telegram_content_length_response_over_body_limit_is_protocol_failure() {
+    let (api_base, fixture) = telegram_response_fixture(
+        HttpResponseFraming::ContentLength,
+        vec![
+            b'x';
+            usize::try_from(MAX_SUCCESSFUL_RESPONSE_BODY_BYTES + 1).expect("10 MiB fits usize")
+        ],
+        "application/json",
+    );
+    let client = HttpTelegramClient::default();
+    let mut config = cfg();
+    config.api_base = api_base;
+
+    assert_oversized_successful_response(
+        client
+            .send_message(&config, 123, "hello")
+            .expect_err("response above 10 MiB must fail"),
+    );
+    fixture.join().expect("fixture should exit");
+}
+
+/// Chunked framing must accept an aggregate payload at exactly 10 MiB, so
+/// equality does not depend on a Content-Length header.
+#[test]
+fn telegram_chunked_response_at_body_limit_is_accepted() {
+    let (api_base, fixture) = telegram_response_fixture(
+        HttpResponseFraming::Chunked,
+        successful_response_at_body_limit(),
+        "application/json",
+    );
+    let client = HttpTelegramClient::default();
+    let mut config = cfg();
+    config.api_base = api_base;
+
+    client
+        .send_message(&config, 123, "hello")
+        .expect("exactly 10 MiB chunked response should succeed");
+    fixture.join().expect("fixture should exit");
+}
+
+/// Chunked framing must aggregate every chunk under the same cap and reject a
+/// 10 MiB plus one payload before its invalid JSON reaches the decoder.
+#[test]
+fn telegram_chunked_response_over_body_limit_is_protocol_failure() {
+    let (api_base, fixture) = telegram_response_fixture(
+        HttpResponseFraming::Chunked,
+        vec![
+            b'x';
+            usize::try_from(MAX_SUCCESSFUL_RESPONSE_BODY_BYTES + 1).expect("10 MiB fits usize")
+        ],
+        "application/json",
+    );
+    let client = HttpTelegramClient::default();
+    let mut config = cfg();
+    config.api_base = api_base;
+
+    assert_oversized_successful_response(
+        client
+            .send_message(&config, 123, "hello")
+            .expect_err("chunked response above 10 MiB must fail"),
+    );
+    fixture.join().expect("fixture should exit");
+}
+
+/// Successful text responses with malformed UTF-8 must retain the prior
+/// replacement behavior while the explicit body-limit configuration is active.
+#[test]
+fn telegram_text_response_with_invalid_utf8_remains_lossy() {
+    let (api_base, fixture) = telegram_response_fixture(
+        HttpResponseFraming::ContentLength,
+        b"{\"ok\":true,\"result\":\""
+            .iter()
+            .copied()
+            .chain([0xff])
+            .chain(b"\"}".iter().copied())
+            .collect(),
+        "text/plain",
+    );
+    let client = HttpTelegramClient::default();
+    let mut config = cfg();
+    config.api_base = api_base;
+
+    client
+        .send_message(&config, 123, "hello")
+        .expect("invalid UTF-8 text response should remain lossy");
+    fixture.join().expect("fixture should exit");
 }
 
 /// Registering starts a poller, and disconnect/EOF-facing shutdown must not

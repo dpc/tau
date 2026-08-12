@@ -1,6 +1,7 @@
 # Telegram testing
 
-Tests are hermetic. Use `FakeClient` for Bot API behavior and loopback Unix
+Tests are hermetic. Use `FakeClient` for Bot API behavior, loopback TCP for
+production HTTP framing and response-body-limit contracts, and loopback Unix
 sockets for gateway/sidecar behavior; never require credentials, public network
 access, or wall-clock sleeps.
 Concurrency regressions use fixture-controlled barriers to force the relevant

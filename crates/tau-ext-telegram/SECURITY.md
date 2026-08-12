@@ -11,6 +11,10 @@ make message text trustworthy or grant Tau tool authority.
   only the API base and domain-separated stream fingerprint, never the token or
   token-bearing URL. Production Bot API endpoints require HTTPS; plaintext is
   loopback-test-only.
+- Every successful Bot API response body has a Tau-owned inclusive 10 MiB cap
+  after HTTP framing. Exactly 10 MiB reaches JSON decoding; 10 MiB plus one
+  fails as a `Protocol` error before decoding. The cap applies equally to
+  Content-Length and chunked responses, rather than trusting a declared length.
 - Local polling takes one advisory lock per API-base-plus-token stream and
   refuses active webhooks or observed HTTP 409 contention. The lock coordinates
   only Tau processes sharing one state root; out-of-band consumers remain

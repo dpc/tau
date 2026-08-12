@@ -77,6 +77,11 @@ const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 const DEFAULT_POLL_TIMEOUT_SECONDS: u64 = 25;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_GATEWAY_OUTBOUND_MESSAGE_BYTES: usize = 3500;
+/// Maximum accepted size of one successful Telegram Bot API response body.
+///
+/// The reader requests one additional byte so it accepts this exact size and
+/// rejects a larger body before JSON decoding.
+const MAX_SUCCESSFUL_RESPONSE_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Run the Telegram extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -2998,11 +3003,17 @@ impl HttpTelegramClient {
                 message: bounded_api_diagnostic(&text),
             });
         }
-        let text = response.body_mut().read_to_string().map_err(|error| {
-            TelegramApiFailure::Protocol(format!(
-                "reading Telegram HTTP {status} response: {error}"
-            ))
-        })?;
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_SUCCESSFUL_RESPONSE_BODY_BYTES + 1)
+            .lossy_utf8(true)
+            .read_to_string()
+            .map_err(|error| {
+                TelegramApiFailure::Protocol(format!(
+                    "reading Telegram HTTP {status} response: {error}"
+                ))
+            })?;
         serde_json::from_str(&text).map_err(|error| {
             TelegramApiFailure::Protocol(format!("invalid Telegram JSON: {error}"))
         })
