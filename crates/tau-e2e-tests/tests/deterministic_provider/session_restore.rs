@@ -41,6 +41,210 @@ const WORKER_PROVIDER_INITIAL: &str = concat!(
     "Complete the deterministic worker instruction."
 );
 
+/// Proves the production message tool persists both owned facts, wakes its
+/// idle recipient without creating a HumanUi prompt, and projects one inbound
+/// wrapper into that recipient's sole provider turn.
+#[test]
+fn production_message_tool_delivers_one_canonical_inbound_wrapper()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session_id = SessionId::parse(SESSION).expect("known-safe session id");
+    let body = "complete the isolated message instruction";
+    let fixture = DeterministicFixture::new_session_message(
+        "production_message_tool_delivers_one_canonical_inbound_wrapper",
+        &ScenarioV2::new(
+            "production-message-tool",
+            vec![
+                ScenarioLaneV2 {
+                    ctx_id: "message-main".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::MessageCall {
+                            user_text: "send the worker its isolated instruction".to_owned(),
+                            call_id: "message-call".into(),
+                            message: body.to_owned(),
+                        },
+                        ScenarioActionV2::MessageSenderResult {
+                            call_id: "message-call".into(),
+                            message: body.to_owned(),
+                            response: "message sent".to_owned(),
+                        },
+                        ScenarioActionV2::Text {
+                            user_text: "fresh main work".to_owned(),
+                            response: "fresh main accepted".to_owned(),
+                        },
+                    ],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "message-worker".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::MessageInbound {
+                            call_id: "message-call".into(),
+                            message: body.to_owned(),
+                            response: "worker received exactly one message".to_owned(),
+                        },
+                        ScenarioActionV2::Text {
+                            user_text: "fresh worker work".to_owned(),
+                            response: "fresh worker accepted".to_owned(),
+                        },
+                    ],
+                },
+            ],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("message-tool");
+    let daemon = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut observer = SessionRestoreObserver::connect(&socket)?;
+    let main = observer.create_idle_main()?;
+    let worker = observer.create_idle_worker(&main)?;
+    let start = observer.events.len();
+    observer.submit(
+        &main,
+        "message-main",
+        "send the worker its isolated instruction",
+    )?;
+    observer.wait_for_agent_marker(&main, "message sent", start)?;
+    observer.wait_for_agent_marker(&worker, "worker received exactly one message", start)?;
+    observer.wait_for_agent_idle_after(&main, start)?;
+    observer.wait_for_agent_idle_after(&worker, start)?;
+
+    let dispatches = observer.events[start..]
+        .iter()
+        .filter_map(|observed| match &observed.event {
+            Event::AgentInferenceDispatchStarted(dispatch) => Some(&dispatch.agent_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dispatches.iter().filter(|id| ***id == main).count(),
+        2,
+        "main has one call and one correlated continuation"
+    );
+    assert_eq!(
+        dispatches.iter().filter(|id| ***id == worker).count(),
+        1,
+        "recipient activation has exactly one provider turn"
+    );
+    let snapshot = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    let sent = snapshot.agent_events[&main]
+        .iter()
+        .filter(|record| matches!(record.event, Event::AgentMessageSent(_)))
+        .collect::<Vec<_>>();
+    assert!(
+        snapshot.agent_events[&main]
+            .iter()
+            .all(|record| !matches!(record.event, Event::AgentMessageReceived(_))),
+        "sender journal must not own an inbound occurrence"
+    );
+    let received = snapshot.agent_events[&worker]
+        .iter()
+        .filter(|record| matches!(record.event, Event::AgentMessageReceived(_)))
+        .collect::<Vec<_>>();
+    assert!(
+        snapshot.agent_events[&worker]
+            .iter()
+            .all(|record| !matches!(record.event, Event::AgentMessageSent(_))),
+        "recipient journal must not own an outbound occurrence"
+    );
+    assert_eq!(sent.len(), 1, "sender owns exactly one sent occurrence");
+    assert_eq!(
+        received.len(),
+        1,
+        "recipient owns exactly one received occurrence"
+    );
+    let sent_index = usize::try_from(sent[0].seq.get()).expect("stored sender sequence fits usize");
+    let received_index =
+        usize::try_from(received[0].seq.get()).expect("stored recipient sequence fits usize");
+    assert_eq!(
+        snapshot.agent_events[&main][sent_index].event, sent[0].event,
+        "sent fact must retain its exact owning journal sequence"
+    );
+    assert_eq!(
+        snapshot.agent_events[&worker][received_index].event, received[0].event,
+        "received fact must retain its exact owning journal sequence"
+    );
+    let worker_suffix = snapshot.agent_events[&worker]
+        .get(received_index..)
+        .ok_or("received occurrence is outside the worker journal")?;
+    let worker_tree =
+        tau_core::AgentTree::from_events(worker.clone(), &snapshot.agent_events[&worker]);
+    let received_head = worker_tree
+        .nodes()
+        .iter()
+        .find(|node| {
+            matches!(
+                node.entry,
+                tau_core::AgentEntry::AgentMessage {
+                    durable_event_seq,
+                    direction: tau_core::AgentMessageDirection::Inbound,
+                    ..
+                } if durable_event_seq == received[0].seq
+            )
+        })
+        .map(|node| tau_proto::AgentHead::Node(node.id))
+        .ok_or("worker tree omitted received-message node")?;
+    let pre_receive_tree = tau_core::AgentTree::from_events(
+        worker.clone(),
+        &snapshot.agent_events[&worker][..received_index],
+    );
+    let pre_receive_head = pre_receive_tree
+        .head()
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    let dispatch = worker_suffix
+        .iter()
+        .skip(1)
+        .find_map(|record| match &record.event {
+            Event::AgentInferenceDispatchStarted(dispatch) => Some(dispatch),
+            _ => None,
+        })
+        .ok_or("received occurrence lacks a following dispatch checkpoint")?;
+    if dispatch.agent_id != worker
+        || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
+        || dispatch.activation_cut != Some(pre_receive_head)
+        || dispatch.through != received_head
+    {
+        return Err("worker checkpoint does not own the received-message activation".into());
+    }
+    let (Event::AgentMessageSent(sent), Event::AgentMessageReceived(received)) =
+        (&sent[0].event, &received[0].event)
+    else {
+        unreachable!("filtered typed message facts");
+    };
+    assert_eq!(sent.message_id, received.message_id);
+    assert_eq!(sent.sender_id, main);
+    assert_eq!(
+        sent.recipient,
+        tau_proto::AgentMessageRecipient::Agent {
+            agent_id: worker.clone()
+        }
+    );
+    assert_eq!(received.recipient_id, worker);
+    assert_eq!(received.sender_id, main);
+    assert_eq!(received.sender_session_id, None);
+    assert_eq!(sent.kind, tau_proto::AgentMessageKind::Message);
+    assert_eq!(received.kind, tau_proto::AgentMessageKind::Message);
+    assert_eq!(received.watch_provider_status, None);
+    assert_eq!(received.watch_work_status, None);
+    assert_eq!(received.watch_long_wait, None);
+    assert_eq!(sent.message, body);
+    assert_eq!(received.message, body);
+    assert!(
+        snapshot.agent_events[&worker]
+            .iter()
+            .all(|record| !matches!(&record.event, Event::AgentPromptSubmitted(_))),
+        "delivery must not manufacture a HumanUi prompt"
+    );
+
+    let fresh = observer.events.len();
+    observer.submit(&main, "fresh-main", "fresh main work")?;
+    observer.wait_for_agent_marker(&main, "fresh main accepted", fresh)?;
+    observer.submit(&worker, "fresh-worker", "fresh worker work")?;
+    observer.wait_for_agent_marker(&worker, "fresh worker accepted", fresh)?;
+    disconnect_ui(&mut observer.peer)?;
+    daemon.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 /// Return one agent's post-initialization resume suffix after validating the
 /// shared durable snapshot prefix.
 fn suffix_after_initialization<'a>(

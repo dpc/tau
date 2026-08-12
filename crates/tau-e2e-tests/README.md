@@ -26,7 +26,9 @@ correlated reactive opaque replacement and exactly one automatic continuation,
 typed errors followed by an explicit later turn,
 exact cancellation with same-agent post-cancel liveness, bounded holds, fatal
 provider disconnect without restart,
-clean resume, concurrent lane isolation, one production-`agent_start`
+clean resume, concurrent lane isolation, one production `message` call to a
+test-driver-created idle worker with dual journals, payload-free wake, exact
+inbound projection, and no outbound echo, one production-`agent_start`
 main/worker cold resume with a preserved worker route and dropped automatic
 watch, explicit post-resume watch recreation with exact new-subscription
 notifications, loaded/unloaded/ephemeral membership composition, two-worker

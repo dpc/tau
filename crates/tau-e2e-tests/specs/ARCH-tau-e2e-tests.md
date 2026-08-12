@@ -9,6 +9,9 @@ publishes and routes `fake/test`, and normally starts only the no-side-effect
 binary as bundled `component ext-shell`. The session-restore modes install the
 production harness-owned internal handlers. S1 exposes only `agent_start` to its
 exact main role; S2 adds only `agent_watch`; both expose no tools to the worker.
+The isolated production-message mode instead exposes only `message` to its main
+and no tools to its test-driver-created idle worker; its two lanes cover one
+delivery without restart, watch, wait, peer, or branch behavior.
 S3 reuses the S1 surface: `UiCreateAgent`, directed roster queries, and typed
 store seeding remain test-driver boundaries rather than fake-provider actions.
 S4 configures one main exposing only `agent_start` and two distinct tool-free

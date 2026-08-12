@@ -144,6 +144,10 @@ struct FakeState {
     /// Live S6 repair-pair progress for the sole closed dummy call; `None`
     /// means the exact `provider.tool_error` has not arrived.
     repair_progress: Option<DummyRepairProgress>,
+    /// Test-driver-created idle workers keyed by their durable parent.
+    idle_workers: HashMap<tau_proto::AgentId, tau_proto::AgentId>,
+    /// Exact message recipients selected by the closed message call.
+    message_recipients: HashMap<tau_proto::AgentId, tau_proto::AgentId>,
 }
 
 /// Correlation and phase for the sole live S6 repair pair.
@@ -370,6 +374,15 @@ impl TauExtension for FakeProvider {
                 },
             )
             .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::AGENT_STARTED),
+                |cx| {
+                    let Event::AgentStarted(started) = cx.delivery.event() else {
+                        return Ok(());
+                    };
+                    cx.state.record_idle_worker(started)
+                },
+            )
+            .on_raw_live(
                 tau_proto::EventSelector::Exact(EventName::AGENT_MESSAGE_RECEIVED),
                 |cx| {
                     let Event::AgentMessageReceived(message) = cx.delivery.event() else {
@@ -447,6 +460,32 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
 }
 
 impl FakeState {
+    /// Records the sole test-driver-created idle worker without accepting a
+    /// production `agent_start` worker as fixture authority.
+    fn record_idle_worker(&mut self, started: &tau_proto::AgentStarted) -> ClientResult<()> {
+        let message_scenario = matches!(
+            self.scenario.as_ref(),
+            Some(ScenarioConfig::V2(scenario))
+                if scenario.lanes.iter().flat_map(|lane| &lane.actions).any(
+                    |action| matches!(action, ScenarioActionV2::MessageCall { .. })
+                )
+        );
+        if !message_scenario {
+            return Ok(());
+        }
+        let Some(parent) = started.parent_agent.as_ref() else {
+            return Ok(());
+        };
+        if self
+            .idle_workers
+            .insert(parent.clone(), started.agent_id.clone())
+            .is_some()
+        {
+            return Err(ClientError::handler("message worker parent was duplicated"));
+        }
+        Ok(())
+    }
+
     /// Returns the child owned by the parent's most recently consumed start.
     fn current_child_agent(
         &mut self,
@@ -1375,10 +1414,14 @@ impl FakeState {
             0
         } else {
             if !self
-                .child_agents
+                .message_recipients
                 .values()
-                .flatten()
-                .any(|child_agent_id| child_agent_id == &prompt.agent_id)
+                .any(|id| id == &prompt.agent_id)
+                && !self
+                    .child_agents
+                    .values()
+                    .flatten()
+                    .any(|child_agent_id| child_agent_id == &prompt.agent_id)
             {
                 return Err(ClientError::handler(
                     "scenario first mismatch: no-context agent is not the validated child",
@@ -1393,7 +1436,10 @@ impl FakeState {
                 .filter(|(index, lane)| {
                     self.lane_cursors.get(*index) == Some(&0)
                         && !self.agent_lanes.values().any(|bound| bound == index)
-                        && lane
+                        && (matches!(
+                            lane.actions.first(),
+                            Some(ScenarioActionV2::MessageInbound { .. })
+                        ) || lane
                             .actions
                             .first()
                             .and_then(ScenarioActionV2::binding_user_text)
@@ -1401,7 +1447,7 @@ impl FakeState {
                                 actual.as_deref().is_some_and(|actual| {
                                     fixture_user_text_matches(actual, expected)
                                 })
-                            })
+                            }))
                 })
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
@@ -1444,6 +1490,8 @@ impl FakeState {
             | ScenarioActionV2::ReactiveCompactedOpaqueText { response, .. }
             | ScenarioActionV2::DummyToolResult { response, .. }
             | ScenarioActionV2::DummyToolRepair { response, .. }
+            | ScenarioActionV2::MessageSenderResult { response, .. }
+            | ScenarioActionV2::MessageInbound { response, .. }
             | ScenarioActionV2::AgentStartResult { response, .. }
             | ScenarioActionV2::AgentWatchResult { response, .. }
             | ScenarioActionV2::WatchNotifications { response, .. }
@@ -1492,6 +1540,7 @@ impl FakeState {
                 emit_dummy_tool_call(prompt, handle, call_id)
             }
             action @ (ScenarioActionV2::AgentStartCall { .. }
+            | ScenarioActionV2::MessageCall { .. }
             | ScenarioActionV2::AgentWatchCall { .. }) => {
                 self.emit_agent_tool_call(prompt, handle, action)
             }
@@ -1675,6 +1724,27 @@ impl FakeState {
                 ];
                 emit_tool_call(handle, prompt, call_id, "agent_start", cbor_map(fields))
             }
+            ScenarioActionV2::MessageCall {
+                call_id, message, ..
+            } => {
+                let Some(recipient_id) = self.idle_workers.get(&prompt.agent_id) else {
+                    return Err(
+                        self.mismatch(0, "message call has no test-driver-created idle worker")
+                    );
+                };
+                self.message_recipients
+                    .insert(prompt.agent_id.clone(), recipient_id.clone());
+                emit_tool_call(
+                    handle,
+                    prompt,
+                    call_id,
+                    "message",
+                    cbor_map(vec![
+                        ("recipient_id", CborValue::Text(recipient_id.to_string())),
+                        ("message", CborValue::Text(message)),
+                    ]),
+                )
+            }
             ScenarioActionV2::AgentWatchCall { call_id, .. } => {
                 let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id) else {
                     return Err(self.mismatch(
@@ -1832,6 +1902,77 @@ impl FakeState {
             } => {
                 require_repaired_dummy_result(prompt, call_id, diagnostic)
                     .map_err(|detail| self.mismatch(cursor, detail))?;
+            }
+            ScenarioActionV2::MessageCall { .. } => {
+                let message = prompt
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_str() == "message");
+                if message.is_none_or(|tool| tool.tool_type != ToolType::Function) {
+                    self.trace(&format!(
+                        "message tools={}",
+                        serde_json::to_string(&prompt.tools)
+                            .unwrap_or_else(|_| "<unserializable>".to_owned())
+                    ))?;
+                    return Err(self.mismatch(cursor, "message tool snapshot mismatch"));
+                }
+            }
+            ScenarioActionV2::MessageSenderResult {
+                call_id, message, ..
+            } => {
+                let results = prompt
+                    .context
+                    .flatten_iter()
+                    .filter_map(|item| match item {
+                        ContextItem::ToolResult(result) => Some(result),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if results.len() != 1
+                    || results[0].call_id != *call_id
+                    || results[0].tool_type != ToolType::Function
+                    || results[0].status != tau_proto::ToolResultStatus::Success
+                    || results[0].output.body != "Message sent"
+                    || prompt.context.flatten_iter().any(|item| {
+                        matches!(
+                            item,
+                            ContextItem::Message(message_item)
+                                if message_item.content.iter().any(|part| match part {
+                                    ContentPart::Text { text }
+                                    | ContentPart::HarnessInternalText { text } => text.contains(message),
+                                })
+                        )
+                    })
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "message sender continuation did not contain one compact result",
+                    ));
+                }
+            }
+            ScenarioActionV2::MessageInbound {
+                call_id: _,
+                message,
+                ..
+            } => {
+                let sender = self
+                    .message_recipients
+                    .iter()
+                    .find_map(|(sender, recipient)| {
+                        (recipient == &prompt.agent_id).then(|| sender.clone())
+                    })
+                    .ok_or_else(|| self.mismatch(cursor, "message worker was not selected"))?;
+                let expected = format!(
+                    "<tau_internal>You have received a message from {sender}\n\n<message>\n{message}\n</message></tau_internal>"
+                );
+                let texts = provider_user_texts(prompt);
+                if texts != vec![expected.clone()] {
+                    self.trace(&format!("message expected={expected:?} actual={texts:?}"))?;
+                    return Err(self.mismatch(
+                        cursor,
+                        "message worker did not receive exactly one canonical inbound wrapper",
+                    ));
+                }
             }
             ScenarioActionV2::StandaloneCompaction { summary: _ }
             | ScenarioActionV2::StandaloneOpaqueCompaction
@@ -2496,6 +2637,7 @@ impl ScenarioActionV2 {
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
             | Self::DummyToolRepair { user_text, .. }
+            | Self::MessageCall { user_text, .. }
             | Self::AgentStartCall { user_text, .. }
             | Self::AgentStartResult { user_text, .. }
             | Self::AgentWatchCall { user_text, .. }
@@ -2518,6 +2660,8 @@ impl ScenarioActionV2 {
                 error: _,
             }
             | Self::StandaloneCompactionHold { timeout_ms: _ }
+            | Self::MessageSenderResult { .. }
+            | Self::MessageInbound { .. }
             | Self::WatchNotifications { .. }
             | Self::WatchNotificationChains { .. } => None,
         }

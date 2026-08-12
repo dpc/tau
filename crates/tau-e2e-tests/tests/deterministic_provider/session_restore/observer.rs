@@ -90,6 +90,63 @@ impl SessionRestoreObserver {
         Ok(())
     }
 
+    /// Creates the durable main without dispatching an initial prompt.
+    pub(super) fn create_idle_main(&mut self) -> Result<AgentId, Box<dyn std::error::Error>> {
+        let start = self.events.len();
+        self.peer
+            .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+                tau_proto::UiCreateAgent {
+                    request_id: "message-e2e-idle-main-create".to_owned(),
+                    literal: false,
+                    session_id: SESSION
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
+                    role: "deterministic-main".to_owned(),
+                    model_override: None,
+                    metadata: Vec::new(),
+                    initial_prompt: None,
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    ctx_id: None,
+                    parent_agent: None,
+                    ephemeral: false,
+                },
+            )))?;
+        self.wait_for_main(start)
+    }
+
+    /// Waits for the one test-driver-created durable idle main.
+    fn wait_for_main(&mut self, start: usize) -> Result<AgentId, Box<dyn std::error::Error>> {
+        let mut next = start;
+        let mut agent_id = None;
+        let mut loaded = false;
+        loop {
+            while let Some(observed) = self.events.get(next) {
+                next += 1;
+                match &observed.event {
+                    Event::AgentStarted(started)
+                        if !started.ephemeral && started.parent_agent.is_none() =>
+                    {
+                        agent_id = Some(started.agent_id.clone());
+                    }
+                    Event::SessionAgentLoaded(event)
+                        if !event.ephemeral
+                            && agent_id
+                                .as_ref()
+                                .is_some_and(|agent_id| agent_id == &event.agent_id) =>
+                    {
+                        loaded = true;
+                    }
+                    _ => {}
+                }
+                if loaded {
+                    return agent_id.ok_or_else(|| "idle main identity missing".into());
+                }
+            }
+            self.recv_one()?;
+        }
+    }
+
     /// Creates one memory-only worker without dispatching an initial prompt and
     /// returns its harness-minted identity after exact membership publication.
     pub(super) fn create_ephemeral_worker(
@@ -117,6 +174,35 @@ impl SessionRestoreObserver {
                 },
             )))?;
         self.wait_for_ephemeral_worker(parent_agent, start)
+    }
+
+    /// Creates one durable idle worker without a delivery-created prompt and
+    /// returns its identity after the exact membership publication.
+    pub(super) fn create_idle_worker(
+        &mut self,
+        parent_agent: &AgentId,
+    ) -> Result<AgentId, Box<dyn std::error::Error>> {
+        let start = self.events.len();
+        self.peer
+            .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+                tau_proto::UiCreateAgent {
+                    request_id: "message-e2e-idle-worker-create".to_owned(),
+                    literal: false,
+                    session_id: SESSION
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
+                    role: "deterministic-worker".to_owned(),
+                    model_override: None,
+                    metadata: Vec::new(),
+                    initial_prompt: None,
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    ctx_id: None,
+                    parent_agent: Some(parent_agent.clone()),
+                    ephemeral: false,
+                },
+            )))?;
+        self.wait_for_idle_worker(parent_agent, start)
     }
 
     /// Waits for one exact ephemeral worker creation and membership after
@@ -159,6 +245,43 @@ impl SessionRestoreObserver {
                 }
                 if loaded {
                     return agent_id.ok_or_else(|| "ephemeral worker identity missing".into());
+                }
+            }
+            self.recv_one()?;
+        }
+    }
+
+    /// Waits for the one test-driver-created durable idle worker.
+    fn wait_for_idle_worker(
+        &mut self,
+        parent_agent: &AgentId,
+        start: usize,
+    ) -> Result<AgentId, Box<dyn std::error::Error>> {
+        let mut next = start;
+        let mut agent_id = None;
+        let mut loaded = false;
+        loop {
+            while let Some(observed) = self.events.get(next) {
+                next += 1;
+                match &observed.event {
+                    Event::AgentStarted(started)
+                        if !started.ephemeral
+                            && started.parent_agent.as_ref() == Some(parent_agent) =>
+                    {
+                        agent_id = Some(started.agent_id.clone());
+                    }
+                    Event::SessionAgentLoaded(event)
+                        if !event.ephemeral
+                            && agent_id
+                                .as_ref()
+                                .is_some_and(|agent_id| agent_id == &event.agent_id) =>
+                    {
+                        loaded = true;
+                    }
+                    _ => {}
+                }
+                if loaded {
+                    return agent_id.ok_or_else(|| "idle worker identity missing".into());
                 }
             }
             self.recv_one()?;
@@ -491,6 +614,7 @@ fn selectors() -> Vec<EventSelector> {
         E::AGENT_STATS_UPDATED,
         E::AGENT_WATCHES_UPDATED,
         E::AGENT_MESSAGE_RECEIVED,
+        E::AGENT_MESSAGE_SENT,
         E::HARNESS_NOTICE,
         E::AGENT_REPLAY_COMPLETE,
         E::SESSION_REPLAY_COMPLETE,

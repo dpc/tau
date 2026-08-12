@@ -50,6 +50,9 @@ enum FixtureMode {
     SessionRestoreMultipleWorkers,
     SessionRestoreInterruptedTool,
     SessionRestoreMixed,
+    /// Two durable roles with the production message tool enabled only for
+    /// main.
+    SessionMessage,
 }
 
 /// Closed configured-tool surface for one fixture.
@@ -239,6 +242,25 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the two-agent production-message fixture without restart or
+    /// watch capability.
+    pub fn new_session_message(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface::default(),
+            FixtureMode::SessionMessage,
+        )
+    }
+
     /// Creates the closed production core-shell cold-resume fixture.
     pub fn new_core_shell(
         name: &str,
@@ -392,8 +414,11 @@ impl DeterministicFixture {
                 | FixtureMode::SessionRestoreMultipleWorkers
                 | FixtureMode::SessionRestoreInterruptedTool
                 | FixtureMode::SessionRestoreMixed
+                | FixtureMode::SessionMessage
         ) {
-            let main_tools = if mode == FixtureMode::SessionRestoreWatch {
+            let main_tools = if mode == FixtureMode::SessionMessage {
+                serde_json::json!(["message"])
+            } else if mode == FixtureMode::SessionRestoreWatch {
                 serde_json::json!(["agent_start", "agent_watch"])
             } else {
                 serde_json::json!(["agent_start"])

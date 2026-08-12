@@ -176,6 +176,47 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                         "dummy tool repair must be bounded and follow its matching call",
                     ));
                 }
+                ScenarioActionV2::MessageCall {
+                    call_id, message, ..
+                } if call_id.is_empty()
+                    || call_id.len() > 256
+                    || message.is_empty()
+                    || 4 * 1024 < message.len()
+                    || !matches!(
+                        lane.actions.get(action_index + 1),
+                        Some(ScenarioActionV2::MessageSenderResult {
+                            call_id: result_id,
+                            message: result_message,
+                            ..
+                        }) if result_id == call_id && result_message == message
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "message call must have one bounded adjacent matching result",
+                    ));
+                }
+                ScenarioActionV2::MessageSenderResult {
+                    call_id, message, ..
+                } if call_id.is_empty()
+                    || call_id.len() > 256
+                    || message.is_empty()
+                    || 4 * 1024 < message.len() =>
+                {
+                    return Err(ClientError::handler(
+                        "message result fields must be bounded and nonempty",
+                    ));
+                }
+                ScenarioActionV2::MessageInbound {
+                    call_id, message, ..
+                } if call_id.is_empty()
+                    || call_id.len() > 256
+                    || message.is_empty()
+                    || 4 * 1024 < message.len() =>
+                {
+                    return Err(ClientError::handler(
+                        "message inbound fields must be bounded and nonempty",
+                    ));
+                }
                 ScenarioActionV2::AgentStartCall {
                     call_id,
                     prompt,
@@ -465,6 +506,57 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 _ => {}
             }
         }
+    }
+    let message_lanes = scenario
+        .lanes
+        .iter()
+        .filter(|lane| {
+            lane.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    ScenarioActionV2::MessageCall { .. }
+                        | ScenarioActionV2::MessageSenderResult { .. }
+                        | ScenarioActionV2::MessageInbound { .. }
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if !message_lanes.is_empty()
+        && (scenario.lanes.len() != 2
+            || message_lanes.len() != 2
+            || !matches!(
+                message_lanes[0].actions.as_slice(),
+                [ScenarioActionV2::MessageCall {
+                    call_id,
+                    message: body,
+                    ..
+                }, ScenarioActionV2::MessageSenderResult {
+                    call_id: result_id,
+                    message: result_body,
+                    ..
+                }, ScenarioActionV2::Text { .. }]
+                    if call_id == result_id && body == result_body
+            )
+            || !matches!(
+                message_lanes[1].actions.as_slice(),
+                [ScenarioActionV2::MessageInbound {
+                    call_id: inbound_id,
+                    message: inbound_body,
+                    ..
+                }, ScenarioActionV2::Text { .. }]
+                    if matches!(
+                        message_lanes[0].actions.first(),
+                        Some(ScenarioActionV2::MessageCall {
+                            call_id,
+                            message,
+                            ..
+                        }) if call_id == inbound_id && message == inbound_body
+                    )
+            ))
+    {
+        return Err(ClientError::handler(
+            "message scenario requires one closed main call/result lane and one matching inbound lane",
+        ));
     }
     if barriers
         .values()

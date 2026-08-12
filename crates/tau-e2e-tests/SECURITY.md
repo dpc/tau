@@ -30,7 +30,9 @@ distinction.
 
 The S1 session-restore fixture enables the production harness-owned `agent_start`
 built-in only for its closed main role; S2 adds only `agent_watch`. The worker
-role has no tools. S3 reuses the S1 tool surface. Its promptless ephemeral worker
+role has no tools. The isolated production-message fixture instead exposes only
+`message` to its main and no tools to its test-driver-created idle worker. S3
+reuses the S1 tool surface. Its promptless ephemeral worker
 is created only through the normal `UiCreateAgent` protocol. The seeded unloaded
 worker uses fixed synthetic identity and metadata and is appended only after
 Boot A releases both typed stores; reopening `AgentStore` and `SessionStore`

@@ -34,14 +34,23 @@ inference. V1's first text and tool-call actions additionally require the exact
 HumanUi envelope, so the always-on deterministic lane fails if interactive
 prompt projection disappears or changes structure.
 
+The V2 grammar includes one closed two-lane production-message exchange. Its
+message-only main binds one test-driver-created tool-free idle worker through
+typed creation identity, then checks a correlated compact sender result. The
+received fact causes a payload-free wake; its one later recipient provider
+request contains exactly one canonical inbound wrapper. The gate does not
+combine restart, watch, wait, peer, or branch behavior.
+
 The fixture uses fresh private config, state, session, and artifact directories.
 It disables every unrelated built-in extension and normally enables only the
 no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled
 exception: the exact universal `component ext-shell` may expose only `workdir`
 and `edit` to a closed scratch-only scenario. S1 is the other: its main role
 exposes only the production harness-owned `agent_start` built-in while its
-worker role exposes no tools. S2 adds only production `agent_watch` to that
-main role. S3 reuses S1's exact roles and grammar; its promptless ephemeral agent
+worker role exposes no tools. The isolated production-message fixture instead
+exposes only `message` to its main and no tools to its test-driver-created idle
+worker. S2 adds only production `agent_watch` to that main role. S3 reuses S1's
+exact roles and grammar; its promptless ephemeral agent
 and typed unloaded-worker store records consume no fake-provider action. S4
 instead configures two distinct tool-free worker roles and keeps only
 `agent_start` on the main. S5 reuses S2's two-role tool surface for one

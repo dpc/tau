@@ -170,6 +170,35 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response after accepting the repair.
         response: String,
     },
+    /// Request the production harness-owned `message` tool for the sole
+    /// test-driver-created worker in this closed scenario.
+    MessageCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact body delivered to the worker.
+        message: String,
+    },
+    /// Accept the sender's correlated compact message-tool result.
+    MessageSenderResult {
+        /// Exact provider-authored message-call identity.
+        call_id: ToolCallId,
+        /// Exact body delivered to the worker.
+        message: String,
+        /// Complete assistant response.
+        response: String,
+    },
+    /// Accept the recipient's sole canonical inbound message wrapper.
+    MessageInbound {
+        /// Exact provider-authored message-call identity shared with the
+        /// sender.
+        call_id: ToolCallId,
+        /// Exact body delivered to the worker.
+        message: String,
+        /// Complete worker response.
+        response: String,
+    },
     /// Request the production harness-owned `agent_start` tool.
     AgentStartCall {
         /// Exact latest user text.

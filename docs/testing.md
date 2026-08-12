@@ -79,10 +79,11 @@ Keep message tests separated by authority layer:
 - harness tests prove payload-free live wakes, checkpoint acknowledgement,
   wait interruption, navigation dormancy/reselection, admission release, and
   pre-persistence rejection;
-- deterministic E2E tests prove canonical watch and authenticated-peer context
-  does not reintroduce delivery-created prompt turns. The production `message`
-  tool's no-wrapper invariant currently has harness vertical-slice coverage,
-  not a strict fake-provider E2E scenario.
+- deterministic E2E tests prove canonical watch, authenticated-peer context,
+  and the production `message` tool. The message-tool gate uses a
+  test-driver-created idle worker, then requires dual journal ownership, one
+  payload-free worker activation, one canonical inbound wrapper, a compact
+  sender result, and fresh explicit turns for both agents.
 
 Do not use body or logical message-ID searches as occurrence or wake oracles.
 Correlate typed events by owning journal sequence, branch node, checkpoint, and
