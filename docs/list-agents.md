@@ -63,10 +63,10 @@ state shown in both pickers.
 `fzf` is optional and is started only when a picker command or configured
 binding action is used. Tau passes rows through stdin and invokes `fzf` directly
 rather than interpolating agent data into a shell command. The picker shows
-`<turn-emoji> <work-status-emoji> @agent-id`, self/inclusive creator-subtree
+`<work-status-emoji><turn-emoji> @agent-id`, self/inclusive creator-subtree
 estimated API cost, work-status title, and display name in space-padded,
 terminal-width-aware columns. The compact legend is `🚀` working, `⛔️` blocked,
-`✅` done, and `❓` unreported or unknown. Detailed activity uses `💡` responding, `🔨` manipulating, `🌐` fetching,
+`✅` done, and `❓` unreported or unknown. Detailed activity uses `✨` responding, `🔨` manipulating, `🌐` fetching,
 `⏳` waiting, `🕔` scheduled timer, and `💤` idle. Lifecycle and role remain available in the
 machine-facing roster but are omitted from the picker: picker membership is
 already restricted to live agents, and the stable agent id is its primary

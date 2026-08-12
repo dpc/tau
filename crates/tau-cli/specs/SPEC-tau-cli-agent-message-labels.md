@@ -92,7 +92,7 @@ its deterministic immediate predecessor as `via @parent`; the `via` label retain
 agent-context styling while `@parent` uses the same watched-agent identity style
 as the row's primary `@id`.
 
-A direct target renders as `<turn-emoji> <phase-emoji> @id (display name)
+A direct target renders as `<phase-emoji><turn-emoji> @id (display name)
 title`, followed by existing tool/context telemetry. The two fixed-width emoji and
 stable id form the mandatory leftmost prefix;
 the display name is optional persisted UI metadata; phase/title are the watched

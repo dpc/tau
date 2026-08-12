@@ -29,7 +29,7 @@ Bounded subprocess execution lives in `src/bounded_command.rs`.
 - The built-in agent picker starts `fzf` directly with fixed arguments and
   bounded stdin/stdout. It appends one terminal-width-aware, Unicode-width
   presentation field to each stable TSV row, including two-display-column work
-  status and current-turn emoji plus the nine-character-wide `$self/$subtree`
+  status/current-turn emoji prefix in `<work-emoji><turn-emoji>` order plus the nine-character-wide `$self/$subtree`
   cost pair. It omits the picker-constant live lifecycle and redundant role,
   asks `fzf` to show only the presentation field,
   and removes it from the accepted row. It uses foreground process-group

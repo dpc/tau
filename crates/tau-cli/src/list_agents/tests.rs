@@ -476,7 +476,7 @@ fn detailed_activity_mappings_cover_all_categories() {
         Fetching, Idle, Manipulating, Responding, TimerScheduled, Waiting,
     };
     let cases = [
-        (Responding, "responding", "💡"),
+        (Responding, "responding", "✨"),
         (Manipulating, "manipulating", "🔨"),
         (Fetching, "fetching", "🌐"),
         (Waiting, "waiting", "⏳"),

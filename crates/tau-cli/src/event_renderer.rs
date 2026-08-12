@@ -1648,9 +1648,9 @@ pub(crate) fn watched_agent_tool_display(
     let turn_activity = stats.map_or(fallback_activity, |stats| stats.turn_activity);
     rendered.status_prefix = Some((
         format!(
-            "{} {}",
+            "{}{}",
+            watched_agent_work_status_symbol(work_status),
             crate::list_agents::turn_activity_symbol(turn_activity),
-            watched_agent_work_status_symbol(work_status)
         ),
         ToolStatus::Progress,
     ));
@@ -3475,7 +3475,7 @@ impl EventRenderer {
                         &self.theme,
                         names::STATUS_ROLE,
                         format!(
-                            "{} {phase} @{agent_id}",
+                            "{phase}{} @{agent_id}",
                             crate::list_agents::turn_activity_symbol(
                                 self.selected_agent_turn_activity(agent_id),
                             ),

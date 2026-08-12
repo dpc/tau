@@ -274,7 +274,7 @@ pub(crate) fn work_status_symbol(phase: Option<tau_proto::AgentWorkStatusPhase>)
 /// Returns the compact human-facing symbol for detailed turn activity.
 pub(crate) fn turn_activity_symbol(activity: tau_proto::AgentTurnActivity) -> &'static str {
     match activity {
-        tau_proto::AgentTurnActivity::Responding => "💡",
+        tau_proto::AgentTurnActivity::Responding => "✨",
         tau_proto::AgentTurnActivity::Manipulating => "🔨",
         tau_proto::AgentTurnActivity::Fetching => "🌐",
         tau_proto::AgentTurnActivity::Waiting => "⏳",

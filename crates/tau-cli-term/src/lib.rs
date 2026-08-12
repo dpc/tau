@@ -875,7 +875,7 @@ fn agent_picker_column_widths(rows: &[Vec<&str>], content_width: usize) -> Vec<u
 /// Return one source column, synthesizing the mandatory visual prefix.
 fn agent_picker_column_value(fields: &[&str], source_field: usize) -> String {
     if source_field == usize::MAX {
-        format!("{} {} @{}", fields[14], fields[12], fields[0])
+        format!("{}{} @{}", fields[12], fields[14], fields[0])
     } else {
         fields[source_field].to_owned()
     }
