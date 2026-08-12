@@ -956,6 +956,31 @@ fn tool_line_text(
     StyledText::from(Span::new(normalize_inline_text(&text.into()), style))
 }
 
+/// Renders recursive-watch context with a semantic watched-agent identity.
+///
+/// The surrounding `via` label retains ordinary agent-context styling while the
+/// parent identity uses the same style as the watched row's primary identity.
+fn watched_agent_context_text(
+    theme: &tau_themes::Theme,
+    context: &str,
+) -> tau_cli_term::StyledText {
+    use tau_themes::names;
+
+    let Some((label, agent_id)) = context.split_once(" @") else {
+        return tool_line_text(theme, tool_status_style(ToolStatus::AgentContext), context);
+    };
+    let mut rendered = tool_line_text(
+        theme,
+        tool_status_style(ToolStatus::AgentContext),
+        format!("{label} "),
+    );
+    let agent_id = tool_line_text(theme, names::WATCHING_NAME, format!("@{agent_id}"));
+    for span in agent_id.spans() {
+        rendered.push(span.clone());
+    }
+    rendered
+}
+
 /// Returns the theme token used for one suffix category.
 fn tool_status_style(status: ToolStatus) -> &'static str {
     use tau_themes::names;
@@ -1050,11 +1075,15 @@ pub(crate) fn render_tool_block(
     );
     for segment in &display.leading_segments {
         let element = tool_suffix_element(segment.status);
-        let text = tool_line_text(
-            theme,
-            tool_status_style(segment.status),
-            segment.text.clone(),
-        );
+        let text = if matches!(segment.status, ToolStatus::AgentContext) {
+            watched_agent_context_text(theme, &segment.text)
+        } else {
+            tool_line_text(
+                theme,
+                tool_status_style(segment.status),
+                segment.text.clone(),
+            )
+        };
         let attached = segment.no_leading_space || segment.text.starts_with(':');
         match element {
             ToolLineElement::AgentId => {

@@ -88,7 +88,9 @@ Done targets while hiding their rows and retains topology targets that lack
 stats or status. Up to eight visible targets produce the complete closure; a
 ninth switches atomically to all visible direct watches, without truncating the
 direct set. Expanded rows use `(depth, agent-id)` order. Each indirect row shows
-its deterministic immediate predecessor as `via @parent`.
+its deterministic immediate predecessor as `via @parent`; the `via` label retains
+agent-context styling while `@parent` uses the same watched-agent identity style
+as the row's primary `@id`.
 
 A direct target renders as `<turn-emoji> <phase-emoji> @id (display name)
 title`, followed by existing tool/context telemetry. The two fixed-width emoji and

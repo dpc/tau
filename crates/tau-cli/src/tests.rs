@@ -14036,9 +14036,10 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(watching.style.fg, Some(Color::DarkYellow));
 }
 
-/// Indirect-row context follows stable identity at practical widths, while
-/// narrow layouts retain the fixed work-status prefix and a distinguishable
-/// identity within the exact terminal budget.
+/// Indirect-row context styles its parent ID as a watched-agent identity while
+/// retaining the `via` label's context style. It also follows stable identity
+/// at practical widths, while narrow layouts retain the fixed work-status
+/// prefix and a distinguishable identity within the exact terminal budget.
 #[test]
 fn watched_agent_indirect_context_respects_width_priorities() {
     let theme = cli_test_theme();
@@ -14083,6 +14084,25 @@ fn watched_agent_indirect_context_respects_width_priorities() {
     assert_eq!(
         priority_header_text(&block, 100),
         "💤 🚀 @worker-with-long-id via @reviewer review changes %1/1 #67%"
+    );
+    let cells = priority_header_cells(&block, 100);
+    let parent_identity_start = cells
+        .iter()
+        .rposition(|cell| cell.ch == '@')
+        .expect("recursive watch parent identity");
+    assert_eq!(
+        cells[parent_identity_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
+        "recursive watch parent identity uses the watched-agent identity style"
+    );
+    let via_start = cells
+        .iter()
+        .position(|cell| cell.ch == 'v')
+        .expect("recursive watch context label");
+    assert_eq!(
+        cells[via_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO),
+        "recursive watch context label remains agent-context metadata"
     );
     let boundary = priority_header_text(&block, 39);
     assert!(boundary.contains("via @reviewer"), "{boundary:?}");
