@@ -29,7 +29,7 @@ fn topology(
 #[test]
 fn projects_a_recursive_chain() {
     let (forward, reverse) = topology(&[("a", "b"), ("b", "c")]);
-    let projection = WatchActivityProjection::new(
+    let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
         HashSet::from([("b".to_owned(), "c".to_owned())]),
@@ -49,7 +49,7 @@ fn projects_a_recursive_chain() {
 #[test]
 fn selects_a_stable_witness_from_a_fork() {
     let (forward, reverse) = topology(&[("a", "c"), ("a", "b"), ("b", "z"), ("c", "y")]);
-    let projection = WatchActivityProjection::new(
+    let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
         HashSet::from([
@@ -65,7 +65,7 @@ fn selects_a_stable_witness_from_a_fork() {
 #[test]
 fn deduplicates_a_shared_diamond_descendant() {
     let (forward, reverse) = topology(&[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]);
-    let projection = WatchActivityProjection::new(
+    let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
         HashSet::from([
@@ -85,7 +85,7 @@ fn deduplicates_a_shared_diamond_descendant() {
 #[test]
 fn does_not_propagate_activity_downward() {
     let (forward, reverse) = topology(&[("parent", "a"), ("a", "b")]);
-    let projection = WatchActivityProjection::new(
+    let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
         HashSet::from([("parent".to_owned(), "a".to_owned())]),
@@ -107,7 +107,7 @@ fn projects_a_deep_chain_iteratively() {
         .map(|(watcher, watched)| (watcher.as_str(), watched.as_str()))
         .collect();
     let (forward, reverse) = topology(&borrowed);
-    let projection = WatchActivityProjection::new(
+    let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
         HashSet::from([("a2047".to_owned(), "a2048".to_owned())]),
@@ -115,4 +115,128 @@ fn projects_a_deep_chain_iteratively() {
 
     assert!(projection.watcher_is_active("a0"));
     assert_eq!(projection.effective_targets.len(), 2_048);
+}
+
+fn visible_ids(rows: &[VisibleWatchRow]) -> Vec<(&str, usize, Option<&str>)> {
+    rows.iter()
+        .map(|row| (row.agent_id.as_str(), row.depth, row.via.as_deref()))
+        .collect()
+}
+
+/// Eight visible descendants expand completely, while the ninth switches the
+/// result atomically back to the direct set.
+#[test]
+fn visible_rows_switch_from_eight_to_direct_only_at_nine() {
+    let edges = (0..9)
+        .map(|index| {
+            let parent = if index == 0 {
+                "root".to_owned()
+            } else {
+                format!("a{}", index - 1)
+            };
+            (parent, format!("a{index}"))
+        })
+        .collect::<Vec<_>>();
+    let borrowed = edges
+        .iter()
+        .map(|(watcher, watched)| (watcher.as_str(), watched.as_str()))
+        .collect::<Vec<_>>();
+    let (forward, _) = topology(&borrowed);
+
+    let eight =
+        WatchGraphProjection::visible_rows("root", &forward, |agent_id| agent_id != "a8", 8);
+    assert_eq!(eight.len(), 8);
+    assert_eq!(eight[7].agent_id, "a7");
+    assert_eq!(eight[7].depth, 8);
+
+    let nine = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    assert_eq!(visible_ids(&nine), vec![("a0", 1, None)]);
+}
+
+/// Recursive overflow never truncates an explicit direct set, even when that
+/// set alone is larger than the expansion limit.
+#[test]
+fn visible_rows_keep_every_direct_watch_above_limit() {
+    let edges = (0..10)
+        .map(|index| ("root".to_owned(), format!("d{index:02}")))
+        .collect::<Vec<_>>();
+    let borrowed = edges
+        .iter()
+        .map(|(watcher, watched)| (watcher.as_str(), watched.as_str()))
+        .collect::<Vec<_>>();
+    let (forward, _) = topology(&borrowed);
+
+    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    assert_eq!(rows.len(), 10);
+    assert!(rows.iter().all(|row| row.depth == 1 && row.via.is_none()));
+}
+
+/// Malformed cycles must terminate, deduplicate their members, and never
+/// reintroduce the viewed root as a watched row.
+#[test]
+fn visible_rows_are_cycle_safe_and_exclude_root() {
+    let (forward, _) = topology(&[("root", "a"), ("a", "b"), ("b", "root")]);
+
+    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    assert_eq!(
+        visible_ids(&rows),
+        vec![("a", 1, None), ("b", 2, Some("a"))]
+    );
+}
+
+/// Duplicate reachability chooses a shortest path and the lexicographically
+/// first predecessor when equal-depth paths reconverge.
+#[test]
+fn visible_rows_choose_shortest_then_lexicographic_paths() {
+    let (forward, _) = topology(&[
+        ("root", "a"),
+        ("root", "b"),
+        ("root", "c"),
+        ("a", "x"),
+        ("x", "short"),
+        ("b", "short"),
+        ("b", "shared"),
+        ("c", "shared"),
+    ]);
+
+    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    let short = rows
+        .iter()
+        .find(|row| row.agent_id == "short")
+        .expect("shortest-path row");
+    assert_eq!((short.depth, short.via.as_deref()), (2, Some("b")));
+    let shared = rows
+        .iter()
+        .find(|row| row.agent_id == "shared")
+        .expect("equal-depth row");
+    assert_eq!((shared.depth, shared.via.as_deref()), (2, Some("b")));
+}
+
+/// Hidden Done intermediates remain traversal nodes, while topology-only
+/// descendants without stats remain visible and retain immediate context.
+#[test]
+fn visible_rows_traverse_hidden_intermediates_and_keep_missing_stats() {
+    let (forward, _) = topology(&[("root", "done"), ("done", "no-stats")]);
+
+    let rows =
+        WatchGraphProjection::visible_rows("root", &forward, |agent_id| agent_id != "done", 8);
+    assert_eq!(visible_ids(&rows), vec![("no-stats", 2, Some("done"))]);
+}
+
+/// Display order is stable by depth and then agent id, independent of edge
+/// insertion order or lexicographic path-selection order.
+#[test]
+fn visible_rows_order_by_depth_then_agent_id() {
+    let (forward, _) = topology(&[("root", "z"), ("root", "a"), ("z", "b"), ("a", "c")]);
+
+    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    assert_eq!(
+        visible_ids(&rows),
+        vec![
+            ("a", 1, None),
+            ("z", 1, None),
+            ("b", 2, Some("z")),
+            ("c", 2, Some("a")),
+        ]
+    );
 }

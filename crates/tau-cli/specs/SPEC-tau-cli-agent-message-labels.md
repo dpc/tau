@@ -73,7 +73,7 @@ subsequent navigation; complete harness stats, not the local prompt event, updat
 the CLI cache.
 
 Current CLI watched status rows come from the current-session semantic
-`WorkStatus` snapshot for each direct target. Absent, unreported, and unknown
+`WorkStatus` snapshot for each selected target. Absent, unreported, and unknown
 status renders as `❓`; working, blocked, and done render as `🚀`, `⛔️`, and `✅`;
 unreported, working, blocked, and unknown remain visible, and done alone
 removes the row. The target's complete generic agent-stats runtime state controls
@@ -81,8 +81,17 @@ activity decoration: Running renders `💡`, while Idle renders `💤` and retai
 status row. Before the first stats snapshot, active
 prompt tracking for the target is the compatibility/catch-up fallback.
 
-The CLI derives recursive activity exactly over the current live watch DAG. A
-direct target whose edge reports Running renders as `phase-emoji @id (display name)
+The CLI independently selects rows and derives recursive activity over the
+current watch graph. Row selection starts from the agent whose UI is viewed,
+traverses forward edges cycle-safely, excludes the root, and deduplicates each
+target onto a shortest path with lexicographic path ties. It traverses through
+Done targets while hiding their rows and retains topology targets that lack
+stats or status. Up to eight visible targets produce the complete closure; a
+ninth switches atomically to all visible direct watches, without truncating the
+direct set. Expanded rows use `(depth, agent-id)` order. Each indirect row shows
+its deterministic immediate predecessor as `via @parent`.
+
+A direct target whose edge reports Running renders as `phase-emoji @id (display name)
 title 💡`, followed by existing tool/context telemetry. The fixed-width phase emoji
 stays leftmost while the stable id remains the primary identity;
 the display name is optional persisted UI metadata; phase/title are the watched
@@ -91,9 +100,8 @@ name yields before the title, while identity and phase retain their existing
 higher priority. An otherwise non-Running edge whose target watches an effective
 descendant adds `watching -> @witness`, where the witness is the nearest directly
 running descendant and equal-depth candidates use stable agent-id order. Direct
-activity wins when both apply. Rows remain ordered by stable target id, and the
-selected agent gets one row per direct target; recursive descendants are not
-flattened into additional rows.
+activity wins when both apply. Indirect `via @parent` context and
+`watching -> @witness` activity are independent and may coexist.
 
 The session-wide `@N` count deduplicates all recursively effective watch targets
 and excludes the selected agent. Active prompts outside every watch edge retain

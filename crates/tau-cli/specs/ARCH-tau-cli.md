@@ -135,11 +135,14 @@ than reconstructing it locally. Their behavior is specified by
 The CLI also owns presentation-only recursive watch activity. Its current
 implementation folds the harness-owned live watch DAG and uses the complete
 generic agent-stats runtime snapshot, with active-prompt fallback only before
-stats arrive, for direct `running` and transitive `watching` row presentation
-plus the session-wide side-agent count. Current-session
-semantic `WorkStatus` snapshots own direct watched-row lifetime: absent or
+stats arrive, for `running` and transitive `watching` row presentation plus the
+session-wide side-agent count. A separate cycle-safe graph projection selects
+the visible deduplicated closure from the viewed agent through eight rows and
+falls back to every direct watch on overflow. Current-session semantic
+`WorkStatus` snapshots own watched-row lifetime: absent or
 `unreported`, `working`, `blocked`, and `unknown` statuses remain visible, and
-only `done` removes the row. Agent-stats runtime state remains the
+only `done` hides the row without stopping traversal to its descendants.
+Agent-stats runtime state remains the
 running-activity authority and never adds or removes a row.
 This projection must not create protocol facts,
 model-visible notifications, navigation state, persistence, or routing behavior.

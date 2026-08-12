@@ -10925,14 +10925,14 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
     }
 }
 
-/// Direct watched rows must exist before any turn starts, remain a hierarchical
-/// projection while a descendant runs, and let a direct turn replace its
-/// witness.
+/// Recursive watched rows must include topology-only descendants before any
+/// stats arrive, label their deterministic parent, and retain distinct
+/// descendant-witness activity on direct rows.
 ///
 /// This prevents a parent row from flickering out between child model rounds or
-/// flattening the child into the selected agent's watch list.
+/// losing the reason an indirect child appears in the selected transcript.
 #[test]
-fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
+fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -10958,8 +10958,8 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
     sync(&handle);
     assert!(vt.screen_contains(100, "❓ @reviewer 💤"));
     assert!(
-        !vt.screen_contains(100, "[worker] @worker"),
-        "idle descendants must not be flattened into manager rows"
+        vt.screen_contains(100, "❓ @worker via @reviewer 💤"),
+        "topology-only indirect rows must remain visible without stats"
     );
     let prompt_started = |agent: &str| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
@@ -10980,13 +10980,14 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
     sync(&handle);
     assert!(vt.screen_contains(100, "❓ @reviewer 💤 watching -> @worker"));
     assert!(
-        !vt.screen_contains(100, "[worker] @worker"),
-        "recursive descendants must not be flattened into manager rows"
+        vt.screen_contains(100, "❓ @worker via @reviewer 💡"),
+        "via context and direct running state must coexist"
     );
 
     renderer.handle(&prompt_started("reviewer"));
     sync(&handle);
     assert!(vt.screen_contains(100, "❓ @reviewer 💡"));
+    assert!(vt.screen_contains(100, "❓ @worker via @reviewer 💡"));
     assert!(
         !vt.screen_contains(100, "@reviewer -> @worker"),
         "direct-running state must replace the transitive witness"
@@ -13857,6 +13858,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let display = watched_agent_tool_display(
         Some("review"),
         "engineer_1",
+        None,
         Some(&stats),
         WatchedAgentActivity::Running,
         Some(&status),
@@ -13955,6 +13957,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let display = watched_agent_tool_display(
         Some("review"),
         "engineer_1",
+        None,
         Some(&percent_only_stats),
         WatchedAgentActivity::Watching { witness: "leaf" },
         Some(&status),
@@ -13972,6 +13975,66 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)
     );
     assert_eq!(watching.style.fg, Some(Color::DarkYellow));
+}
+
+/// Indirect-row context follows stable identity at practical widths, while
+/// narrow layouts retain the fixed work-status prefix and a distinguishable
+/// identity within the exact terminal budget.
+#[test]
+fn watched_agent_indirect_context_respects_width_priorities() {
+    let theme = cli_test_theme();
+    let status = tau_proto::AgentWatchWorkStatusNotification {
+        session_id: test_session_id("s1"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: 1,
+        phase: tau_proto::AgentWorkStatusPhase::Working,
+        title: Some("review changes".to_owned()),
+        initial: false,
+    };
+    let stats = tau_proto::AgentStatsUpdated {
+        session_id: test_session_id("s1"),
+        agent_id: agent_id("worker-with-long-id"),
+        navigation_mode: tau_proto::AgentNavigationMode::Active,
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 0,
+            started_total: 1,
+        },
+        context: tau_proto::AgentContextStats {
+            input_tokens: None,
+            cached_tokens: None,
+            context_window: None,
+            percent_used: Some(67),
+        },
+        estimated_api_cost: Default::default(),
+        creator_subtree_estimated_api_cost: Default::default(),
+        work_status: Default::default(),
+    };
+    let display = watched_agent_tool_display(
+        None,
+        "worker-with-long-id",
+        Some("reviewer"),
+        Some(&stats),
+        WatchedAgentActivity::Idle,
+        Some(&status),
+    );
+    let block = render_tool_block(&theme, &display);
+
+    assert_eq!(
+        priority_header_text(&block, 100),
+        "🚀 @worker-with-long-id via @reviewer review changes 💤 %1/1 #67%"
+    );
+    let boundary = priority_header_text(&block, 39);
+    assert!(boundary.contains("via @reviewer"), "{boundary:?}");
+    assert!(!boundary.contains("💤"), "{boundary:?}");
+    for width in [12, 16, 24, 40] {
+        let text = priority_header_text(&block, width);
+        assert!(text.starts_with("🚀 @"), "{width}: {text:?}");
+        assert!(
+            tau_term_screen::display_width(&text) <= width,
+            "{width}: {text:?}"
+        );
+    }
 }
 
 #[test]

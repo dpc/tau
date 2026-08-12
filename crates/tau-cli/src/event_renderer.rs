@@ -43,7 +43,7 @@ use crate::tool_render::{
     streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
     tool_duration_suffix, ui_dir_block,
 };
-use crate::watch_activity::WatchActivityProjection;
+use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
 use crate::{
     MUTEX_POISONED, build_banner, estimated_cost as path_crate_estimated_cost,
     message_fact_render as path_crate_message_fact_render,
@@ -1557,13 +1557,13 @@ fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallIte
         .collect()
 }
 
-/// Semantic state of a visible direct watched-agent row.
+/// Semantic state of one visible projected watched-agent row.
 pub(crate) enum WatchedAgentActivity<'a> {
-    /// The direct watch is idle and has no running watched descendant.
+    /// The selected predecessor edge is idle with no running descendant.
     Idle,
-    /// The directed watch edge reports a running outer turn.
+    /// The selected predecessor edge reports a running outer turn.
     Running,
-    /// The edge is idle but its target watches an active descendant.
+    /// The selected edge is idle but its target watches an active descendant.
     Watching {
         /// Nearest directly running descendant, identified by stable id.
         witness: &'a str,
@@ -1580,6 +1580,7 @@ pub(crate) enum WatchedAgentActivity<'a> {
 pub(crate) fn watched_agent_tool_display(
     display_name: Option<&str>,
     agent_id: &str,
+    via: Option<&str>,
     stats: Option<&tau_proto::AgentStatsUpdated>,
     activity: WatchedAgentActivity<'_>,
     work_status: Option<&tau_proto::AgentWatchWorkStatusNotification>,
@@ -1630,6 +1631,13 @@ pub(crate) fn watched_agent_tool_display(
         rendered.leading_segments.push(ToolLineSegment {
             text: format!("({})", tau_proto::visible_escape_metadata(display_name)),
             status: ToolStatus::Info,
+            no_leading_space: false,
+        });
+    }
+    if let Some(via) = via {
+        rendered.leading_segments.push(ToolLineSegment {
+            text: format!("via @{via}"),
+            status: ToolStatus::AgentContext,
             no_leading_space: false,
         });
     }
@@ -2198,18 +2206,14 @@ impl EventRenderer {
             self.clear_watched_agent_blocks();
             return;
         };
-        let watched = self
-            .watched_agents
-            .get(&current)
-            .cloned()
-            .unwrap_or_default();
         let projection = self.watch_activity_projection();
-        let mut visible: Vec<String> = watched
-            .into_iter()
-            .filter(|agent_id| self.watched_agent_is_visible(agent_id))
-            .collect();
-        visible.sort();
-        let visible_set: HashSet<_> = visible.iter().cloned().collect();
+        let visible = WatchGraphProjection::visible_rows(
+            &current,
+            &self.watched_agents,
+            |agent_id| self.watched_agent_is_visible(agent_id),
+            VISIBLE_WATCH_EXPANSION_LIMIT,
+        );
+        let visible_set: HashSet<_> = visible.iter().map(|row| row.agent_id.clone()).collect();
         let stale: Vec<_> = self
             .watched_agent_blocks
             .keys()
@@ -2221,22 +2225,29 @@ impl EventRenderer {
                 self.handle.remove_block(block_id);
             }
         }
-        for (index, agent_id) in visible.iter().enumerate() {
-            let block = self.watched_agent_block(&current, agent_id, &projection);
-            let block_id = if let Some(block_id) = self.watched_agent_blocks.get(agent_id).copied()
-            {
-                self.handle.set_block(block_id, block);
-                block_id
-            } else {
-                let block_id = self
-                    .handle
-                    .new_block(format!("watched-agent:{agent_id}"), block);
-                self.watched_agent_blocks.insert(agent_id.clone(), block_id);
-                block_id
-            };
-            let later_blocks = visible[index + 1..].iter().filter_map(|later_agent_id| {
-                self.watched_agent_blocks.get(later_agent_id).copied()
-            });
+        for (index, row) in visible.iter().enumerate() {
+            let edge_watcher = row.via.as_deref().unwrap_or(&current);
+            let block = self.watched_agent_block(
+                edge_watcher,
+                &row.agent_id,
+                row.via.as_deref(),
+                &projection,
+            );
+            let block_id =
+                if let Some(block_id) = self.watched_agent_blocks.get(&row.agent_id).copied() {
+                    self.handle.set_block(block_id, block);
+                    block_id
+                } else {
+                    let block_id = self
+                        .handle
+                        .new_block(format!("watched-agent:{}", row.agent_id), block);
+                    self.watched_agent_blocks
+                        .insert(row.agent_id.clone(), block_id);
+                    block_id
+                };
+            let later_blocks = visible[index + 1..]
+                .iter()
+                .filter_map(|later| self.watched_agent_blocks.get(&later.agent_id).copied());
             self.handle
                 .push_above_active_before_any(block_id, later_blocks);
         }
@@ -2263,7 +2274,7 @@ impl EventRenderer {
         anchors
     }
 
-    /// Returns whether a direct watched-agent row remains visible for its
+    /// Returns whether a selected watched target remains visible for its
     /// current self-reported task status.
     ///
     /// A missing snapshot is the canonical unreported state. Work status,
@@ -2298,7 +2309,7 @@ impl EventRenderer {
 
     /// Derives exact recursive watch activity from current live topology and
     /// current runtime state.
-    fn watch_activity_projection(&self) -> WatchActivityProjection {
+    fn watch_activity_projection(&self) -> WatchGraphProjection {
         let direct_edges = self
             .watched_agents
             .iter()
@@ -2309,7 +2320,7 @@ impl EventRenderer {
                     .map(|target| (watcher.clone(), target.clone()))
             })
             .collect();
-        WatchActivityProjection::new(&self.watched_agents, &self.agent_watchers, direct_edges)
+        WatchGraphProjection::new(&self.watched_agents, &self.agent_watchers, direct_edges)
     }
 
     /// Records a current-session self-reported work-status snapshot for a
@@ -2403,7 +2414,8 @@ impl EventRenderer {
         &self,
         watcher_id: &str,
         agent_id: &str,
-        projection: &WatchActivityProjection,
+        via: Option<&str>,
+        projection: &WatchGraphProjection,
     ) -> tau_cli_term::StyledBlock {
         let display_name = self
             .agent_display_names
@@ -2426,6 +2438,7 @@ impl EventRenderer {
         let display = watched_agent_tool_display(
             display_name.as_deref(),
             agent_id,
+            via,
             stats,
             activity,
             work_status,

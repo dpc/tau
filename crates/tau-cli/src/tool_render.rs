@@ -329,6 +329,7 @@ pub(crate) enum ToolStatus {
     Info,
     WorkTitle,
     Agent,
+    AgentContext,
     Counter,
     Progress,
     DiffAdded,
@@ -902,6 +903,8 @@ pub(crate) enum ToolLineElement {
     Arguments,
     /// Stable `@agent-id` information.
     AgentId,
+    /// Atomic relationship context for a watched-agent identity.
+    AgentContext,
     /// Tool execution or access mode.
     Mode,
     /// Structured range associated with the arguments.
@@ -924,7 +927,7 @@ impl ToolLineElement {
             Self::ResultStatus => 10,
             Self::ErrorDetails => 20,
             Self::Arguments => 30,
-            Self::AgentId => 40,
+            Self::AgentId | Self::AgentContext => 40,
             Self::Mode => 50,
             Self::Range => 60,
             Self::Counter => 70,
@@ -967,6 +970,7 @@ fn tool_status_style(status: ToolStatus) -> &'static str {
         | ToolStatus::Info
         | ToolStatus::WorkTitle
         | ToolStatus::Agent
+        | ToolStatus::AgentContext
         | ToolStatus::Counter => names::TOOL_STATUS_INFO,
         ToolStatus::Error => names::TOOL_STATUS_ERROR,
         ToolStatus::Progress => names::PROGRESS_INDICATOR,
@@ -985,6 +989,7 @@ fn tool_suffix_element(status: ToolStatus) -> ToolLineElement {
             ToolLineElement::ResultStatus
         }
         ToolStatus::Agent => ToolLineElement::AgentId,
+        ToolStatus::AgentContext => ToolLineElement::AgentContext,
         ToolStatus::DiffAdded
         | ToolStatus::DiffRemoved
         | ToolStatus::Context

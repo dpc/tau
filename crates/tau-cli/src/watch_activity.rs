@@ -1,4 +1,4 @@
-//! Exact recursive activity projection for the current live agent-watch DAG.
+//! Cycle-safe watched-row selection and recursive activity projection.
 
 #[cfg(test)]
 mod tests;
@@ -8,9 +8,22 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Directed watch edge `(watcher, watched)`.
 pub(crate) type WatchEdge = (String, String);
 
-/// Derived recursive activity over the current live watch topology.
+/// One visible row selected from the watched-agent graph.
+pub(crate) struct VisibleWatchRow {
+    /// Stable watched-agent identity.
+    pub(crate) agent_id: String,
+    /// Shortest distance from the viewed root agent.
+    pub(crate) depth: usize,
+    /// Deterministic immediate predecessor for an indirect row.
+    pub(crate) via: Option<String>,
+}
+
+/// Largest visible recursive closure rendered before direct-only fallback.
+pub(crate) const VISIBLE_WATCH_EXPANSION_LIMIT: usize = 8;
+
+/// Derived row selection and recursive activity over the current watch graph.
 #[derive(Debug, Default)]
-pub(crate) struct WatchActivityProjection {
+pub(crate) struct WatchGraphProjection {
     /// Watchers that own or can reach a directly running watch edge.
     #[cfg(test)]
     active_watchers: HashSet<String>,
@@ -20,7 +33,7 @@ pub(crate) struct WatchActivityProjection {
     direct_edges: HashMap<String, HashSet<String>>,
 }
 
-impl WatchActivityProjection {
+impl WatchGraphProjection {
     /// Computes exact activity by flooding from direct-running edge owners to
     /// their ancestors through the reverse watch index.
     pub(crate) fn new(
@@ -93,6 +106,90 @@ impl WatchActivityProjection {
     /// Returns the unique recursively effective targets for global counting.
     pub(crate) fn effective_targets(&self) -> &HashSet<String> {
         &self.effective_targets
+    }
+
+    /// Selects a cycle-safe, deduplicated visible closure from one viewed root.
+    ///
+    /// Full expansion uses shortest paths with lexicographic path ties and
+    /// returns `(depth, agent_id)` order. Once the visible closure exceeds
+    /// `expansion_limit`, it falls back to every visible direct watch without
+    /// truncating that direct set.
+    pub(crate) fn visible_rows(
+        root: &str,
+        watched_agents: &HashMap<String, Vec<String>>,
+        visible: impl Fn(&str) -> bool,
+        expansion_limit: usize,
+    ) -> Vec<VisibleWatchRow> {
+        let mut direct = watched_agents
+            .get(root)
+            .into_iter()
+            .flatten()
+            .filter(|agent_id| agent_id.as_str() != root)
+            .cloned()
+            .collect::<Vec<_>>();
+        direct.sort();
+        direct.dedup();
+        let direct_rows = direct
+            .iter()
+            .filter(|agent_id| visible(agent_id))
+            .map(|agent_id| VisibleWatchRow {
+                agent_id: agent_id.clone(),
+                depth: 1,
+                via: None,
+            })
+            .collect::<Vec<_>>();
+
+        let mut visited = HashSet::from([root.to_owned()]);
+        let mut level = direct
+            .into_iter()
+            .map(|agent_id| (agent_id, root.to_owned()))
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        let mut depth = 1;
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            let mut next_ids = HashSet::new();
+            // `level` is lexicographic path order: parents retain the previous
+            // level's order and each sorted child set extends one common prefix.
+            // The first candidate for a shared child therefore owns its stable
+            // equal-depth predecessor.
+            for (agent_id, predecessor) in level {
+                if !visited.insert(agent_id.clone()) {
+                    continue;
+                }
+                if visible(&agent_id) {
+                    rows.push(VisibleWatchRow {
+                        agent_id: agent_id.clone(),
+                        depth,
+                        via: (1 < depth).then_some(predecessor),
+                    });
+                    if expansion_limit < rows.len() {
+                        return direct_rows;
+                    }
+                }
+
+                let mut children = watched_agents
+                    .get(&agent_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|child| !visited.contains(child.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                children.sort();
+                children.dedup();
+                for child in children {
+                    if next_ids.insert(child.clone()) {
+                        next.push((child, agent_id.clone()));
+                    }
+                }
+            }
+            level = next;
+            depth += 1;
+        }
+        rows.sort_by(|left, right| {
+            (left.depth, left.agent_id.as_str()).cmp(&(right.depth, right.agent_id.as_str()))
+        });
+        rows
     }
 
     /// Finds the nearest directly running descendant, breaking equal-depth ties
