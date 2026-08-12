@@ -160,6 +160,45 @@
           buildDate = "1970-01-01 00:00";
           buildDirty = true;
         };
+        tauTelegramGatewayProtocol = nixpkgsPkgs.rustPlatform.buildRustPackage {
+          pname = "tau-telegram-gateway-protocol";
+          inherit (tauPackage) version src cargoDeps;
+
+          cargoBuildFlags = [
+            "--package"
+            "tau-ext-telegram"
+          ];
+          cargoTestFlags = [
+            "--package"
+            "tau-ext-telegram"
+          ];
+
+          doCheck = true;
+          installPhase = "touch $out";
+        };
+        tauTelegramGatewayPackage = tauPackage.overrideAttrs (
+          _finalAttrs: previousAttrs: {
+            pname = "tau-telegram-gateway";
+            inherit (tauPackage) src cargoDeps;
+            cargoBuildFlags = [
+              "--package"
+              "tau-ext-telegram"
+              "--bin"
+              "tau-telegram-gateway"
+            ];
+            postFixup = "";
+            nativeBuildInputs = builtins.filter (
+              input: input != nixpkgsPkgs.bbe
+            ) previousAttrs.nativeBuildInputs;
+
+            passthru.tests.telegram-protocol = tauTelegramGatewayProtocol;
+
+            meta = previousAttrs.meta // {
+              description = "Single-owner Tau Telegram gateway";
+              mainProgram = "tau-telegram-gateway";
+            };
+          }
+        );
 
         replaceTauBuildInfo =
           package:
@@ -513,6 +552,7 @@
         packages = {
           default = tauPackage;
           tau = tauPackage;
+          tau-telegram-gateway = tauTelegramGatewayPackage;
           site = site;
           "cargo-crap" = cargoCrap;
         }
@@ -536,6 +576,7 @@
         };
 
         checks = {
+          tau-telegram-gateway-protocol = tauTelegramGatewayProtocol;
           tau-version = tauPackage.passthru.tests.version;
           tau-provenance = pkgs.runCommand "tau-package-provenance" { nativeBuildInputs = [ tauPackage ]; } ''
             tau --version | grep -qF '(${tauBuildRevisionDisplay},'
