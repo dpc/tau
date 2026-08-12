@@ -53,6 +53,16 @@ Internal prompt facts use their typed `submission_source` at the same live or
 replay position. `Extension { name }` renders once as an attributed message;
 typed `HarnessInternal` renders as `[tau-internal]: <text>` only when the
 default-off `show_internal_prompts` setting is enabled; `Legacy` stays hidden.
+Typed watch-provider notifications use the same normalized
+`[tau-internal]: <text>` notice presentation without exposing the provider-only
+outer envelope. An `initial: true` notification instead uses
+`[tau-internal current snapshot]: <text>` to distinguish client-visible current
+state from live retry fanout. The renderer removes only an exact canonical
+`<tau_internal>...&lt;/tau_internal&gt;` outer frame; partial, nested, nonmatching,
+and legacy text remains verbatim. Replay and live rendering use the same
+projection. See
+[SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md) for
+the corresponding typed message classification.
 The `internal_kind=context_size_alert` presentation takes precedence and always
 renders its exact text once. Missing tags, `ctx_id`, and prompt text never
 imply trusted provenance or special presentation. This behavior is confirmed by

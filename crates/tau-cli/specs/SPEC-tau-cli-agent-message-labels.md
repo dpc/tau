@@ -113,11 +113,16 @@ state rather than ordinary messages. Working, done, and blocked reports render
 as `▤ Status update from <sender>: <phase-emoji> (<reported task>)`, suppress their
 empty compatibility body, and bypass `show-messages`.
 
-Harness-authored `WatchProviderStatus` and `WatchLongWait` records also render
-as `▤` status rows. Provider statuses retain their existing bounded
-harness-authored presentation text; long waits derive a nonempty summary from
-their typed threshold because their producer body is empty. Both bypass
-`show-messages` and never become ordinary message blocks.
+Harness-authored `WatchProviderStatus` records render as `□ [tau-internal]:`
+notices, or `□ [tau-internal current snapshot]:` when `initial` is true. The
+renderer removes only the exact canonical outer
+`<tau_internal>...&lt;/tau_internal&gt;` frame; nonmatching, partial, nested, and
+legacy presentation text remains verbatim after the label. `WatchLongWait`
+records remain `▤` status rows and derive a nonempty summary from their typed
+threshold because their producer body is empty. Both bypass `show-messages` and
+never become ordinary message blocks. See
+[SPEC-tau-cli-transcript-context](SPEC-tau-cli-transcript-context.md) for the
+matching live and replay transcript projection.
 
 Genuine watched responses and direct-user-prompt notifications retain their
 `WatchResponse` and `WatchPrompt` kinds, sender/watcher attribution, history

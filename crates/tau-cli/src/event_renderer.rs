@@ -5207,8 +5207,14 @@ impl EventRenderer {
         event: &Event,
         use_local_names: bool,
     ) -> tau_cli_term::StyledBlock {
-        if let Some(summary) =
-            self.watch_provider_or_long_wait_status_summary_with_local_names(event, use_local_names)
+        if let Some(summary) = Self::watch_provider_status_summary(event) {
+            return self.marked_plain_block(
+                tau_themes::names::SYSTEM_INFO,
+                crate::transcript_markers::NOTICE,
+                summary,
+            );
+        }
+        if let Some(summary) = self.watch_long_wait_summary_with_local_names(event, use_local_names)
         {
             return self.marked_plain_block(
                 tau_themes::names::SYSTEM_INFO,
@@ -5236,10 +5242,36 @@ impl EventRenderer {
         }
     }
 
-    /// Renders harness-authored provider-work and long-wait records as
-    /// statuses, retaining provider presentation text and deriving wait text
-    /// from the typed threshold.
-    fn watch_provider_or_long_wait_status_summary_with_local_names(
+    /// Renders a harness-authored provider-work record as a normalized internal
+    /// notice.
+    fn watch_provider_status_summary(event: &Event) -> Option<String> {
+        let Event::AgentMessageReceived(message) = event else {
+            return None;
+        };
+        if message.kind != tau_proto::AgentMessageKind::WatchProviderStatus {
+            return None;
+        }
+        if let Some(status) = &message.watch_provider_status {
+            const OPEN: &str = "<tau_internal>";
+            const CLOSE: &str = "&lt;/tau_internal&gt;";
+
+            let body = message
+                .message
+                .strip_prefix(OPEN)
+                .and_then(|text| text.strip_suffix(CLOSE))
+                .unwrap_or(&message.message);
+            let label = if status.initial {
+                "[tau-internal current snapshot]"
+            } else {
+                "[tau-internal]"
+            };
+            return Some(format!("{label}: {body}"));
+        }
+        None
+    }
+
+    /// Renders a harness-authored long-wait record as a typed status summary.
+    fn watch_long_wait_summary_with_local_names(
         &self,
         event: &Event,
         use_local_names: bool,
@@ -5247,9 +5279,6 @@ impl EventRenderer {
         let Event::AgentMessageReceived(message) = event else {
             return None;
         };
-        if message.watch_provider_status.is_some() {
-            return Some(message.message.clone());
-        }
         let long_wait = message.watch_long_wait.as_ref()?;
         let sender = self.agent_message_received_sender_label(message, use_local_names);
         let minute_label = if long_wait.threshold_minutes == 1 {

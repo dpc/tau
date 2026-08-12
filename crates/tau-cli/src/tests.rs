@@ -2629,15 +2629,52 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     assert_eq!(retoggled.matches("replayed steered internal").count(), 1);
 }
 
-/// The provider-only envelope never enters durable prompt text, so the CLI
-/// retains its established diagnostic prefix for both live and cold replay.
+/// Authenticated internal prompts and watch-provider snapshots share normalized
+/// notice presentation in both live and cold-replay paths, while the snapshot
+/// remains visibly distinguished from ordinary live delivery.
 #[test]
-fn internal_prompt_ui_keeps_legacy_prefix_without_model_envelope() {
+fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     let agent = agent_id("internal-agent");
+    let provider_snapshot =
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("provider-snapshot")
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("watched-agent"),
+            sender_session_id: None,
+            recipient_id: agent.clone(),
+            kind: tau_proto::AgentMessageKind::WatchProviderStatus,
+            watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
+                session_id: test_session_id("s1"),
+                subscription_id: "subscription-1".to_owned(),
+                turn_generation: 1,
+                agent_prompt_id: test_agent_prompt_id("prompt-1"),
+                state: tau_proto::AgentWatchProviderState::Retrying {
+                    category: tau_proto::AgentWatchProviderCategory::Unknown,
+                    attempt: 1,
+                    next_retry_delay_secs: 11,
+                },
+                initial: true,
+            }),
+            watch_work_status: None,
+            watch_long_wait: None,
+            message: "<tau_internal>Watched agent watched-agent provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;".to_owned(),
+        });
+    let mut wrong_kind_provider = provider_snapshot.clone();
+    let Event::AgentMessageReceived(message) = &mut wrong_kind_provider else {
+        unreachable!("cloned provider event retains its variant");
+    };
+    message.kind = tau_proto::AgentMessageKind::Message;
+    message.message = "wrong-kind provider body".to_owned();
+    let mut missing_typed_provider = provider_snapshot.clone();
+    let Event::AgentMessageReceived(message) = &mut missing_typed_provider else {
+        unreachable!("cloned provider event retains its variant");
+    };
+    message.watch_provider_status = None;
+    message.message = "missing-typed provider body".to_owned();
     let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: false,
         agent_id: agent.clone(),
-        text: "live internal body".to_owned(),
+        text: "Your `status` is set to `working` on \"Fix Slack mandatory terminal delivery\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.".to_owned(),
         trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
@@ -2661,26 +2698,56 @@ fn internal_prompt_ui_keeps_legacy_prefix_without_model_envelope() {
     let (_live_term, live_handle, live_vt) = setup(100, 24);
     let mut live = marker_test_renderer(live_handle.clone());
     live.switch_agent(agent.as_str().to_owned());
+    live.handle(&provider_snapshot);
+    live.handle(&wrong_kind_provider);
+    live.handle(&missing_typed_provider);
     live.handle(&submitted);
-    live.handle(&steered);
     live.apply_setting("show-internal-prompts", "on");
     sync(&live_handle);
     let live_text = visible_lines(&live_vt, 100).join("\n");
-    assert!(live_text.contains("□ [tau-internal]: live internal body"));
-    assert!(live_text.contains("□ [tau-internal]: replayed internal body"));
+    assert!(live_text.contains(
+        "□ [tau-internal current snapshot]: Watched agent watched-agent provider status:"
+    ));
+    assert!(
+        live_text.contains(
+            "□ [tau-internal]: Your `status` is set to `working` on \"Fix Slack mandatory"
+        )
+    );
     assert!(!live_text.contains("<tau_internal>"));
+    assert!(!live_text.contains("&lt;/tau_internal&gt;"));
+    assert!(live_text.contains("■ Message from @watched-agent:"));
+    assert!(live_text.contains("wrong-kind provider body"));
+    assert!(live_text.contains("missing-typed provider body"));
+    assert!(!live_text.contains("[tau-internal]: wrong-kind provider body"));
+    assert!(!live_text.contains("[tau-internal]: missing-typed provider body"));
 
     let (_cold_term, cold_handle, cold_vt) = setup(100, 24);
     let mut cold = marker_test_renderer(cold_handle.clone());
     cold.switch_agent(agent.as_str().to_owned());
+    cold.handle_recorded_at(&provider_snapshot, tau_proto::UnixMicros::new(1));
+    cold.handle_recorded_at(&wrong_kind_provider, tau_proto::UnixMicros::new(1));
+    cold.handle_recorded_at(&missing_typed_provider, tau_proto::UnixMicros::new(1));
     cold.handle_recorded_at(&submitted, tau_proto::UnixMicros::new(1));
     cold.handle_recorded_at(&steered, tau_proto::UnixMicros::new(2));
     cold.apply_setting("show-internal-prompts", "on");
     sync(&cold_handle);
     let cold_text = visible_lines(&cold_vt, 100).join("\n");
-    assert!(cold_text.contains("□ [tau-internal]: live internal body"));
+    assert!(cold_text.contains(
+        "□ [tau-internal current snapshot]: Watched agent watched-agent provider status:"
+    ));
+    assert!(
+        cold_text.contains(
+            "□ [tau-internal]: Your `status` is set to `working` on \"Fix Slack mandatory"
+        )
+    );
     assert!(cold_text.contains("□ [tau-internal]: replayed internal body"));
     assert!(!cold_text.contains("<tau_internal>"));
+    assert!(!cold_text.contains("&lt;/tau_internal&gt;"));
+    assert!(cold_text.contains("■ Message from @watched-agent:"));
+    assert!(cold_text.contains("wrong-kind provider body"));
+    assert!(cold_text.contains("missing-typed provider body"));
+    assert!(!cold_text.contains("[tau-internal]: wrong-kind provider body"));
+    assert!(!cold_text.contains("[tau-internal]: missing-typed provider body"));
 }
 
 /// Semantic row markers keep messages and notices visually distinct while
@@ -7183,7 +7250,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
         },
     ));
     sync(&handle);
-    let provider_status_row = format!("▤ {provider_status_body}");
+    let provider_status_row = format!("□ [tau-internal]: {provider_status_body}");
     assert!(!vt.screen_contains(100, &provider_status_row));
     assert!(!vt.screen_contains(100, long_wait_row));
 

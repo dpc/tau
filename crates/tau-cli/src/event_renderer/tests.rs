@@ -1230,13 +1230,13 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     );
 }
 
-/// Provider-work retains its presentation body, while a long-wait record uses
-/// its typed threshold because production records have an empty body.
+/// Provider-work normalizes its model-facing authenticated envelope for
+/// terminal display, while a long-wait record uses its typed threshold.
 #[test]
-fn watch_provider_and_long_wait_statuses_use_the_status_marker() {
+fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
     let renderer = renderer_for_agent_id_tests();
     let provider = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("provider-status")
+        message_id: tau_proto::AgentMessageId::parse("provider-live")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("worker"),
         sender_session_id: None,
@@ -1254,8 +1254,17 @@ fn watch_provider_and_long_wait_statuses_use_the_status_marker() {
         }),
         watch_work_status: None,
         watch_long_wait: None,
-        message: "provider status body".to_owned(),
+        message: "<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;".to_owned(),
     });
+    let mut initial_provider = provider.clone();
+    let tau_proto::Event::AgentMessageReceived(initial_message) = &mut initial_provider else {
+        unreachable!("cloned provider event retains its variant");
+    };
+    initial_message
+        .watch_provider_status
+        .as_mut()
+        .expect("provider event has typed status")
+        .initial = true;
     let long_wait = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
         message_id: tau_proto::AgentMessageId::parse("long-wait")
             .expect("test identifier must satisfy its grammar"),
@@ -1276,7 +1285,53 @@ fn watch_provider_and_long_wait_statuses_use_the_status_marker() {
 
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&provider)),
-        "▤ provider status body"
+        "□ [tau-internal]: Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
+    );
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&initial_provider)),
+        "□ [tau-internal current snapshot]: Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
+    );
+    for (body, expected) in [
+        (
+            "<tau_internal>partial",
+            "□ [tau-internal]: <tau_internal>partial",
+        ),
+        (
+            "legacy &lt;/tau_internal&gt;",
+            "□ [tau-internal]: legacy &lt;/tau_internal&gt;",
+        ),
+        (
+            "<tau_internal>nested <tau_internal>body&lt;/tau_internal&gt;",
+            "□ [tau-internal]: nested <tau_internal>body",
+        ),
+    ] {
+        let mut noncanonical = provider.clone();
+        let tau_proto::Event::AgentMessageReceived(message) = &mut noncanonical else {
+            unreachable!("cloned provider event retains its variant");
+        };
+        message.message = body.to_owned();
+        assert_eq!(
+            block_text(&renderer.render_agent_message_block(&noncanonical)),
+            expected
+        );
+    }
+    let mut wrong_kind = provider.clone();
+    let tau_proto::Event::AgentMessageReceived(message) = &mut wrong_kind else {
+        unreachable!("cloned provider event retains its variant");
+    };
+    message.kind = tau_proto::AgentMessageKind::Message;
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&wrong_kind)),
+        "■ Message from @worker to @manager:\n<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;"
+    );
+    let mut missing_status = provider.clone();
+    let tau_proto::Event::AgentMessageReceived(message) = &mut missing_status else {
+        unreachable!("cloned provider event retains its variant");
+    };
+    message.watch_provider_status = None;
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&missing_status)),
+        "■ Message from @worker to @manager:\n<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;"
     );
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&long_wait)),
