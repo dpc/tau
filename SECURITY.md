@@ -1051,6 +1051,16 @@ no-eviction command table and deny later remote commands until process restart. 
 configured bounds can exhaust extension memory; they are operator trust and
 capacity choices rather than untrusted local-IPC hardening boundaries.
 
+Each Swarm worker generation owns publication authority. Worker return or panic
+unwind retires that authority synchronously before any optional terminal
+notice; panic-abort builds terminate the extension process instead.
+`blocker` add/cancel and `update` serialize their full admission and mutation
+sections against retirement; after retirement they fail before changing
+process-memory state or reporting success. Revisit this synchronization when
+changing worker lifecycle, mutating tool paths, health ownership, or terminal
+notice ordering. Deterministic worker-return, panic, mutation-ordering,
+tool-authority, saturation, and cleanup regressions protect this boundary.
+
 ### Compact semantic trace disclosure
 
 Compact lite traces expose up to 4 KiB each of unredacted assistant prose, displayable reasoning, explicit sent/received message text, and tool output, in addition to complete tool arguments. Full mode exposes complete text and output. Reasoning and messages can contain secrets, private communications, user data, or model-derived sensitive content; paired directional records can duplicate the same sensitive body across included journals. Absolute timestamps, agent/session/message/prompt IDs, membership, and activity patterns are sensitive metadata. Cross-agent wall-clock order is not causality.

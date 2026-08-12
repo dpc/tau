@@ -17,6 +17,7 @@ use tokio::sync as path_tokio_sync;
 
 use super::*;
 use crate::tools as path_crate_tools;
+use crate::worker_health::WorkerHealth;
 
 fn resolved_config() -> ResolvedConfig {
     let peer_id = iroh::SecretKey::generate().public().to_string();
@@ -43,6 +44,17 @@ fn bounds_terminal_worker_error() {
     let bounded = bounded_error(&error);
     assert!(bounded.len() <= 4 * 1024);
     assert!(bounded.is_char_boundary(bounded.len()));
+}
+
+/// The production worker completion boundary retires authoritative health
+/// before invoking its optional terminal-notice callback.
+#[test]
+fn worker_error_retires_health_before_optional_notice() {
+    let health = WorkerHealth::running();
+    finish_worker(Err("terminal".into()), health.terminal_guard(), |_| {
+        assert!(!health.is_running())
+    });
+    assert!(!health.is_running());
 }
 
 /// An ordinary session reset retains the process incarnation, while a newly
@@ -947,3 +959,5 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
         .expect("runner result");
     server.shutdown().await.expect("server shutdown");
 }
+
+mod saturation;

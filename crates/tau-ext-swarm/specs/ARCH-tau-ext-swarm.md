@@ -17,6 +17,12 @@ blocker history, updates, and acknowledgements while retaining the
 process-incarnation command table. Ordinary Iroh
 reconnects retain that process-memory state and restart publication from a
 coherent snapshot when retained changes no longer cover the reader revision.
+The owned worker generation also owns authoritative publication health. Normal
+return or panic unwind makes that health indeterminate before any optional
+warning; panic-abort builds terminate the extension process. The mutating
+`blocker` and `update` tools serialize their complete mutation against
+retirement, then reject without changing local state until a fresh session
+replay starts a live publisher.
 `SwarmRuntime` generates one collision-resistant application-incarnation ID at
 process startup and retains it across session workers and ordinary reconnects.
 A replacement process declares a fresh ID, allowing Tau Swarm to fence ambiguous

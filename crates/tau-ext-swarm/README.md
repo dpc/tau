@@ -107,7 +107,10 @@ logical UTF-8 fields; `publication_bytes` separately bounds each encoded change
 and current encoded snapshot. Falling behind retained changes forces a new
 snapshot. Projection overflow or malformed lifecycle replay invalidates and
 clears the projection; mutating tools reject until a new session replay rebuilds
-it.
+it. A terminal worker or panic unwind likewise makes publication health
+indeterminate immediately; panic-abort builds terminate the extension process.
+The `blocker` and `update` tools then reject before mutation rather than
+reporting success for state that no live worker can publish.
 
 All command deduplication, blocker history, updates, and acknowledgements live
 only in extension process memory. Iroh reconnect within that process preserves
@@ -135,5 +138,9 @@ remote prompt dispatch, and direct application loopback. A composed
 `TauExtensionRunner` vertical additionally drives Configure, replay boundaries,
 worker startup, published snapshot observation, transient internal-prompt
 emission, matching canonical Tau submission, and the accepted remote result.
+Worker return, retirement ordering, and panic-process coverage verifies health
+authority, tool-result authority, unchanged state after rejection, and bounded
+cleanup. A production-FIFO saturation regression verifies that detached
+internal-prompt overload remains a cached indeterminate command result.
 Tau's workspace checks also build the bundled component and default-disabled
 harness configuration.

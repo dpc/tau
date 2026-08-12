@@ -264,6 +264,8 @@ fn add_blocker(
     recommended_answer: Option<String>,
     task_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let health = state.worker_health.clone();
+    let _authority = health.mutation_authority()?;
     require_valid_owner(state, owner)?;
     validate_text("title", &title, 256)?;
     validate_text("description", &description, 65_536)?;
@@ -332,6 +334,8 @@ fn cancel_blocker(
     id: String,
     reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let health = state.worker_health.clone();
+    let _authority = health.mutation_authority()?;
     require_valid_owner(state, owner)?;
     validate_optional("reason", reason.as_deref(), 4_096, false)?;
     let mut history = state
@@ -433,6 +437,8 @@ fn add_update(
     owner: &str,
     args: UpdateArgs,
 ) -> Result<serde_json::Value, String> {
+    let health = state.worker_health.clone();
+    let _authority = health.mutation_authority()?;
     require_valid_owner(state, owner)?;
     validate_text("title", &args.title, 256)?;
     validate_text("description", &args.description, 65_536)?;
@@ -479,7 +485,7 @@ fn require_valid_owner(state: &SwarmRuntime, owner: &str) -> Result<(), String> 
         Ok(())
     } else {
         Err(
-            "Tau Swarm owner is unavailable until successful session and agent replay complete"
+            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
                 .into(),
         )
     }

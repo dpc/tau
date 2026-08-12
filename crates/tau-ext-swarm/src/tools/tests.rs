@@ -1,7 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
 use std::sync as path_std_sync;
 
-use tau_proto::SecretValue;
+use tau_client::{ExtensionBuilder, TauExtension, TauExtensionRunner};
+use tau_proto::{
+    Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
+    SecretValue,
+};
 use tau_swarm_api::{Agent, AgentActivity, AgentNavigationMode, AgentWorkStatus};
 use tau_swarm_client::Application;
 use tau_swarm_client_api::v4::BlockerAnswerKind;
@@ -10,6 +15,22 @@ use tokio::sync as path_tokio_sync;
 
 use super::*;
 use crate::application::SwarmApplication;
+use crate::worker_health::WorkerHealth;
+
+/// Minimal runner used to exercise the production Swarm tool handlers.
+struct ToolTestExtension;
+
+impl TauExtension for ToolTestExtension {
+    type State = SwarmRuntime;
+
+    fn name(&self) -> &'static str {
+        "swarm-tool-test"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        super::register(builder);
+    }
+}
 
 /// Ensures Tau Swarm exposes the public `update` name, never the retired
 /// `swarm_update` name, while keeping both public tools disabled until a role
@@ -88,6 +109,7 @@ fn configured_runtime() -> SwarmRuntime {
             .expect("resolved config"),
     );
     state.replay_complete = true;
+    state.worker_health = WorkerHealth::running();
     state
         .projection
         .blocking_lock()
@@ -101,6 +123,152 @@ fn configured_runtime() -> SwarmRuntime {
         })
         .expect("owner projection");
     state
+}
+
+/// Worker termination makes both mutating tools fail before changing the
+/// projection or blocker history, so no successful local state can outlive its
+/// sole publisher.
+#[test]
+fn terminal_worker_rejects_mutations_without_changing_state() {
+    let mut state = configured_runtime();
+    let blocker = add_blocker(
+        &mut state,
+        "agent",
+        "existing".into(),
+        "description".into(),
+        None,
+        None,
+    )
+    .expect("blocker before retirement");
+    let blocker_id = blocker
+        .get("blocker_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("blocker ID")
+        .to_owned();
+    drop(state.worker_health.terminal_guard());
+    let before = state.projection.blocking_lock().snapshot();
+
+    assert_eq!(
+        add_blocker(
+            &mut state,
+            "agent",
+            "blocked".into(),
+            "description".into(),
+            None,
+            None,
+        ),
+        Err(
+            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
+                .into()
+        )
+    );
+    assert_eq!(
+        cancel_blocker(&mut state, "agent", blocker_id, None),
+        Err(
+            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
+                .into()
+        )
+    );
+    assert_eq!(
+        add_update(
+            &mut state,
+            "agent",
+            UpdateArgs {
+                title: "update".into(),
+                description: "description".into(),
+                task_id: None,
+            },
+        ),
+        Err(
+            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
+                .into()
+        )
+    );
+
+    assert_eq!(state.blocker_history.lock().expect("history").len(), 1);
+    assert_eq!(state.projection.blocking_lock().snapshot(), before);
+}
+
+/// A routed call received after worker death emits only an authoritative tool
+/// error for both mutating tools, never a successful terminal.
+#[test]
+fn terminal_worker_cannot_report_successful_tool_results() {
+    for (name, arguments) in [
+        (
+            "blocker",
+            serde_json::json!({
+                "action": "add",
+                "title": "blocked",
+                "description": "description"
+            }),
+        ),
+        (
+            "update",
+            serde_json::json!({
+                "title": "update",
+                "description": "description"
+            }),
+        ),
+    ] {
+        let state = configured_runtime();
+        drop(state.worker_health.terminal_guard());
+        let mut input = Vec::new();
+        let mut input_writer = HarnessOutputWriter::new(&mut input);
+        input_writer
+            .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                config: tau_proto::CborValue::Null,
+                instance_name: tau_proto::ExtensionName::parse("swarm-tool-test")
+                    .expect("instance name"),
+                tool_prefix: None,
+                state_dir: None,
+                secrets: BTreeMap::new(),
+                settings_files: Default::default(),
+            }))
+            .expect("configure");
+        input_writer
+            .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+                tau_proto::ToolStarted {
+                    call_id: tau_proto::ToolCallId::new(format!("call-{name}")),
+                    tool_name: tau_proto::ToolName::new(name),
+                    arguments: tau_proto::json_to_cbor(&arguments),
+                    agent_id: tau_proto::AgentId::parse("agent").expect("agent ID"),
+                    originator: tau_proto::PromptOriginator::User,
+                },
+            )))
+            .expect("tool invocation");
+        let mut output = Vec::new();
+
+        TauExtensionRunner::new(ToolTestExtension)
+            .run(Cursor::new(input), &mut output, state)
+            .expect("tool runner");
+
+        let frames = std::iter::from_fn({
+            let mut reader = HarnessInputReader::new(output.as_slice());
+            move || reader.read_message().transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tool output");
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    frame,
+                    HarnessInputMessage::Emit(emit)
+                        if matches!(emit.event.as_ref(), Event::ToolErrorReported(_))
+                ))
+                .count(),
+            1,
+            "{name} must fail exactly once"
+        );
+        assert!(
+            !frames.iter().any(|frame| matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
+            )),
+            "{name} must not report success"
+        );
+    }
 }
 
 /// The tagged action enum rejects fields belonging to another action instead

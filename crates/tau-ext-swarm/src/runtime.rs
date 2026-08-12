@@ -26,6 +26,7 @@ use crate::application::{BlockerSubmission, CommandState, PromptSubmission, Swar
 use crate::config::{ExtConfig, ResolvedConfig};
 use crate::projection::SessionProjection;
 use crate::tools::BlockerRecord;
+use crate::worker_health::WorkerHealth;
 
 /// Tracing target for the bundled extension.
 pub const LOG_TARGET: &str = "std-swarm";
@@ -87,6 +88,9 @@ struct PendingKey {
     text: String,
 }
 
+/// Shared exact loopbacks awaiting canonical Tau completion.
+type PendingCompletions = Arc<Mutex<HashMap<PendingKey, Completion>>>;
+
 /// Owned Swarm worker and cooperative shutdown channel.
 struct Worker {
     /// Cooperative cancellation observed by the Tokio owner.
@@ -125,11 +129,13 @@ pub(crate) struct SwarmRuntime {
     /// Wakes Swarm change readers after committed projection mutation.
     pub(crate) changed: Arc<tokio::sync::Notify>,
     /// Exact target/context/text loopbacks awaiting canonical Tau facts.
-    pending: Arc<Mutex<HashMap<PendingKey, Completion>>>,
+    pending: PendingCompletions,
     /// No-eviction command results retained for this process incarnation.
     commands: Option<Arc<tokio::sync::Mutex<CommandState>>>,
     /// Owned worker for the current replay-complete session.
     worker: Option<Worker>,
+    /// Authoritative health of the current worker generation.
+    pub(crate) worker_health: WorkerHealth,
     /// Full current-session blocker lifecycle history in opening order.
     pub(crate) blocker_history: Arc<Mutex<Vec<BlockerRecord>>>,
 }
@@ -152,6 +158,7 @@ impl SwarmRuntime {
             pending: Arc::new(Mutex::new(HashMap::new())),
             commands: None,
             worker: None,
+            worker_health: WorkerHealth::indeterminate(),
             blocker_history: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -190,6 +197,7 @@ impl SwarmRuntime {
         if let Some(worker) = self.worker.take() {
             worker.stop();
         }
+        self.worker_health = WorkerHealth::indeterminate();
     }
 
     fn publish_agent(&mut self, id: &AgentId) -> Result<(), ClientError> {
@@ -330,10 +338,13 @@ impl SwarmRuntime {
                     config.limits.blocker_bytes,
                 ),
         );
+        let worker_health = WorkerHealth::running();
+        let task_health = worker_health.clone();
         let thread = path_std_thread::Builder::new()
             .name("tau-ext-swarm".into())
             .spawn(move || {
-                if let Err(error) = worker_main(
+                let terminal = task_health.terminal_guard();
+                let result = worker_main(
                     config,
                     (application, application_incarnation_id),
                     handle.clone(),
@@ -341,19 +352,33 @@ impl SwarmRuntime {
                     prompts_rx,
                     blockers_rx,
                     shutdown_rx,
-                ) {
+                );
+                finish_worker(result, terminal, |error| {
                     let _ = handle.request_notice_detached(
-                        format!("Tau Swarm worker stopped: {}", bounded_error(&error)),
+                        format!("Tau Swarm worker stopped: {}", bounded_error(error)),
                         tau_proto::NoticeLevel::Warning,
                     );
-                }
+                });
             })
             .map_err(|error| format!("failed to start Swarm worker: {error}"))?;
+        self.worker_health = worker_health;
         self.worker = Some(Worker {
             shutdown: shutdown_tx,
             thread: Some(thread),
         });
         Ok(())
+    }
+}
+
+/// Retires publication authority before optional reporting of a worker error.
+fn finish_worker(
+    result: Result<(), String>,
+    terminal: crate::worker_health::WorkerTerminalGuard,
+    report_error: impl FnOnce(&str),
+) {
+    drop(terminal);
+    if let Err(error) = result {
+        report_error(&error);
     }
 }
 
