@@ -61,13 +61,17 @@ and serialized output. Shell-specific policy remains local: cwd folding,
 session/agent lifecycle cleanup, directory-lock scheduling, tool cancellation,
 and `StartAgentResult` correlation are owned by `ShellRuntime`.
 
-Worker and scheduler output goes through a shell-local `Output` adapter backed
-by `ClientHandle::send_detached` in production, so optional progress and
-diagnostics do not block worker threads on protocol flush. Session and per-agent
-discovery, correlated context, prerequisite metadata, and readiness instead use
-checked ordered writes. A failure in that mandatory transaction exits the
-extension loop, allowing disconnect cleanup to release harness waiters rather
-than leaving a connected provider with missing readiness. Configure-time tool
+Worker and scheduler output goes through a shell-local `Output` adapter. Optional
+progress and diagnostics use `ClientHandle::send_detached` in production, so
+they do not block worker threads on protocol flush. Sole model-tool terminals,
+user-shell completion, session and per-agent discovery, correlated context,
+prerequisite metadata, and readiness use checked ordered writes instead. The
+extension retains tool ownership until checked terminal flush and retains a
+workdir-setter reservation through its canonical metadata echo until the
+echo-correlated terminal flushes. A failure in mandatory output
+wakes and exits the extension loop, allowing disconnect cleanup to release
+harness waiters rather than leaving a connected provider with missing
+settlement. Configure-time tool
 re-registration deliberately uses synchronous
 `register_local_tool`: tau-client buffers that declaration behind static startup
 defaults and flushes the configured override before `Ready`. Tests can use an

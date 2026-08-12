@@ -555,7 +555,7 @@ fn send_user_shell_finished(
     cancelled: bool,
     tx: &Output,
 ) {
-    let _ = tx.send(HarnessInputMessage::emit(
+    let _ = tx.send_checked(HarnessInputMessage::emit(
         Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
             session_id: cmd.session_id,

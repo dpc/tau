@@ -3,11 +3,13 @@ use std::net::Shutdown;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Condvar;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{
-    collections as path_std_collections, fs as path_std_fs, fs, io as path_std_io,
-    path as path_std_path, process as path_std_process, sync as path_std_sync, thread,
-    time as path_std_time,
+    collections as path_std_collections, fs as path_std_fs, fs, io as path_std_io_error,
+    io as path_std_io, path as path_std_path, process as path_std_process, sync as path_std_sync,
+    thread, time as path_std_time,
 };
 
 use tau_proto::{
@@ -46,6 +48,35 @@ use crate::truncate::{
 use crate::{config as path_crate_config, tools as path_crate_tools};
 
 const TEST_SAFE_FILE_READ_LIMIT: u64 = 10 * 1024 * 1024;
+static SATURATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Panic-safe ownership of the process-global detached-overload test observer.
+struct SaturationHookGuard {
+    /// Serial guard preventing cross-fixture notification.
+    _fixture: std::sync::MutexGuard<'static, ()>,
+}
+
+impl SaturationHookGuard {
+    /// Serializes the fixture and installs its unique overload observer.
+    fn install(notify: mpsc::Sender<()>) -> Self {
+        let fixture = SATURATION_FIXTURE_LOCK
+            .lock()
+            .expect("saturation fixture lock");
+        *DETACHED_OUTPUT_OVERLOAD_NOTIFY
+            .lock()
+            .expect("overload notification") = Some(notify);
+        Self { _fixture: fixture }
+    }
+}
+
+impl Drop for SaturationHookGuard {
+    fn drop(&mut self) {
+        DETACHED_OUTPUT_OVERLOAD_NOTIFY
+            .lock()
+            .expect("overload notification")
+            .take();
+    }
+}
 
 #[derive(Clone, Default)]
 struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -64,6 +95,94 @@ impl std::io::Write for SharedWriter {
 impl SharedWriter {
     fn bytes(&self) -> Vec<u8> {
         self.0.lock().expect("writer").clone()
+    }
+}
+
+/// Writer that rejects one selected mandatory frame after startup.
+struct MandatoryFrameFailureWriter {
+    /// Protocol event-name bytes that identify the mandatory frame.
+    needle: &'static [u8],
+    /// Whether startup reached `Ready`.
+    ready: bool,
+    /// Whether the selected frame reached the writer.
+    failed: Arc<AtomicBool>,
+}
+
+/// Production writer blocked on the first optional action error.
+struct SaturationWriter {
+    /// Serialized extension output.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Gate held while detached output reaches actual overload.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Notification that the writer reached optional output.
+    entered: mpsc::Sender<()>,
+    /// Prevents repeated blocking.
+    blocked: bool,
+    /// Notification that a mandatory frame reached the writer.
+    mandatory: mpsc::Sender<()>,
+    /// Mandatory bytes observed since the previous flush.
+    mandatory_pending: bool,
+}
+
+impl std::io::Write for SaturationWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.blocked
+            && bytes
+                .windows(21)
+                .any(|window| window == b"action.error_reported")
+        {
+            self.blocked = true;
+            self.entered.send(()).expect("writer entry notification");
+            let (lock, condvar) = &*self.gate;
+            let mut closed = lock.lock().expect("writer gate");
+            while *closed {
+                closed = condvar.wait(closed).expect("writer gate wait");
+            }
+        }
+        let mandatory = [
+            b"tool.result_reported".as_slice(),
+            b"tool.error_reported".as_slice(),
+            b"tool.cancelled_reported".as_slice(),
+            b"shell.command_finished_reported".as_slice(),
+            b"agent.metadata_set_request".as_slice(),
+        ]
+        .iter()
+        .any(|needle| bytes.windows(needle.len()).any(|window| window == *needle));
+        self.bytes.lock().expect("writer bytes").extend(bytes);
+        self.mandatory_pending |= mandatory;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if std::mem::take(&mut self.mandatory_pending) {
+            let _ = self.mandatory.send(());
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Write for MandatoryFrameFailureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.windows(5).any(|window| window == b"ready") {
+            self.ready = true;
+        }
+        if self.ready
+            && bytes
+                .windows(self.needle.len())
+                .any(|window| window == self.needle)
+        {
+            self.failed.store(true, Ordering::Release);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err(path_std_io_error::Error::other(
+                "forced mandatory frame failure",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1604,6 +1723,446 @@ fn mandatory_discovery_write_failure_exits_production_manual_loop() {
         .recv_timeout(Duration::from_secs(1))
         .expect("extension must exit after mandatory write failure");
     assert!(result.is_err());
+}
+
+/// A production model-tool terminal flush failure must escape the manual loop
+/// instead of leaving its routed call owned by a connected extension.
+#[test]
+fn mandatory_model_tool_terminal_failure_exits_production_manual_loop() {
+    let event = tool_started(
+        "call-mandatory-terminal-failure",
+        ECHO_TOOL_NAME,
+        cbor_text_map(vec![("text", "settle me")]),
+        "main",
+    );
+    assert_mandatory_frame_failure_exits(event, b"tool.result_reported", "model tool terminal");
+}
+
+/// A live workdir setter's metadata prerequisite must fail the extension loop
+/// while disconnect cleanup still owns the uncommitted setter transaction.
+#[test]
+fn mandatory_workdir_prerequisite_failure_exits_production_manual_loop() {
+    let tempdir = TempDir::new().expect("workdir target");
+    let event = tool_started(
+        "call-workdir-prerequisite-failure",
+        WORKDIR_TOOL_NAME,
+        cbor_text_map(vec![(
+            "path",
+            tempdir.path().to_str().expect("UTF-8 workdir"),
+        )]),
+        "main",
+    );
+    assert_mandatory_frame_failure_exits(
+        event,
+        b"agent.metadata_set_request",
+        "workdir metadata prerequisite",
+    );
+}
+
+/// A user-shell completion flush failure must exit the extension loop so the
+/// harness can release its private route and command-id reservation.
+#[test]
+fn mandatory_user_shell_completion_failure_exits_production_manual_loop() {
+    assert_mandatory_frame_failure_exits(
+        ui_shell_command("ui-mandatory-completion-failure", "printf done"),
+        b"shell.command_finished_reported",
+        "user shell completion",
+    );
+}
+
+/// Observing the first worker output error must not clear the sticky marker
+/// that keeps call ownership retained until disconnect cleanup.
+#[test]
+fn mandatory_output_failure_remains_sticky_after_loop_observation() {
+    let (tx, rx) = path_std_sync::mpsc::channel();
+    drop(rx);
+    let output = Output::channel(tx);
+    output
+        .send_checked(HarnessInputMessage::emit_transient(Event::TermBell(
+            tau_proto::TermBell {},
+        )))
+        .expect_err("closed output must fail");
+    output
+        .take_mandatory_failure()
+        .expect_err("manual loop observes first failure");
+    assert!(output.mandatory_output_failed());
+}
+
+/// The real production detached FIFO may be full when a successful model tool
+/// completes; checked output must drain earlier observations and publish once.
+#[test]
+fn saturated_production_fifo_preserves_model_result() {
+    let frames = run_after_production_fifo_saturation(
+        vec![tool_started(
+            "call-saturated-result",
+            ECHO_TOOL_NAME,
+            cbor_text_map(vec![("text", "settled")]),
+            "main",
+        )],
+        false,
+    );
+    assert_eq!(
+        count_reported_terminal(
+            &frames,
+            "call-saturated-result",
+            EventName::TOOL_RESULT_REPORTED
+        ),
+        1
+    );
+}
+
+/// The real production detached FIFO may be full when a failing model tool
+/// completes; checked output must publish its sole error once.
+#[test]
+fn saturated_production_fifo_preserves_model_error() {
+    let frames = run_after_production_fifo_saturation(
+        vec![tool_started(
+            "call-saturated-error",
+            READ_TOOL_NAME,
+            cbor_text_map(vec![("path", "/definitely/missing/tau-ext-shell")]),
+            "main",
+        )],
+        false,
+    );
+    assert_eq!(
+        count_reported_terminal(
+            &frames,
+            "call-saturated-error",
+            EventName::TOOL_ERROR_REPORTED
+        ),
+        1
+    );
+}
+
+/// Directory-lock validation errors use the same checked sole-terminal path
+/// after actual detached FIFO exhaustion.
+#[test]
+fn saturated_production_fifo_preserves_dir_lock_error() {
+    let frames = run_after_production_fifo_saturation(
+        vec![tool_started(
+            "call-saturated-dir-lock-error",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![("command", "invalid"), ("directory", "/tmp")]),
+            "main",
+        )],
+        false,
+    );
+    assert_eq!(
+        count_reported_terminal(
+            &frames,
+            "call-saturated-dir-lock-error",
+            EventName::TOOL_ERROR_REPORTED,
+        ),
+        1
+    );
+}
+
+/// Cancellation remains the sole terminal when it races a sleeping shell call
+/// immediately after actual detached FIFO exhaustion.
+#[test]
+fn saturated_production_fifo_preserves_model_cancellation() {
+    let call_id = tau_proto::ToolCallId::new("call-saturated-cancel");
+    let frames = run_after_production_fifo_saturation(
+        vec![
+            tool_started(
+                call_id.as_str(),
+                SHELL_TOOL_NAME,
+                cbor_text_map(vec![("command", "sleep 5")]),
+                "main",
+            ),
+            Event::ToolCancelRequest(ToolCancelRequest {
+                target_call_id: call_id,
+            }),
+        ],
+        false,
+    );
+    assert_eq!(
+        count_reported_terminal(
+            &frames,
+            "call-saturated-cancel",
+            EventName::TOOL_CANCELLED_REPORTED,
+        ),
+        1
+    );
+}
+
+/// A user-shell completion queued after actual detached FIFO exhaustion must
+/// retain include-in-context correlation and publish exactly once.
+#[test]
+fn saturated_production_fifo_preserves_user_shell_completion() {
+    let frames = run_after_production_fifo_saturation(
+        vec![ui_shell_command(
+            "ui-saturated-completion",
+            "printf settled",
+        )],
+        false,
+    );
+    let completions = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ShellCommandFinishedReported(event)
+                    if event.command_id.as_str() == "ui-saturated-completion" =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 1);
+    assert!(completions[0].include_in_context);
+    assert_eq!(completions[0].output, "settled");
+}
+
+/// Scheduler rejection after actual detached FIFO exhaustion still publishes
+/// one include-in-context user-shell completion.
+#[test]
+fn saturated_production_fifo_preserves_rejected_user_shell_completion() {
+    let Event::UiShellCommand(mut command) = ui_shell_command(
+        "ui-saturated-rejection",
+        "x".repeat(crate::scheduler::DEFAULT_QUEUED_BYTES_LIMIT + 1)
+            .as_str(),
+    ) else {
+        unreachable!();
+    };
+    command.include_in_context = true;
+    let frames = run_after_production_fifo_saturation(vec![Event::UiShellCommand(command)], false);
+    let completions = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ShellCommandFinishedReported(event)
+                    if event.command_id.as_str() == "ui-saturated-rejection" =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 1);
+    assert!(completions[0].include_in_context);
+    assert!(completions[0].output.contains("queue"));
+}
+
+/// A live workdir setter admitted after actual detached FIFO exhaustion must
+/// publish its sole correlated metadata prerequisite exactly once.
+#[test]
+fn saturated_production_fifo_preserves_workdir_prerequisite() {
+    let target = TempDir::new().expect("workdir target");
+    let frames = run_after_production_fifo_saturation(
+        vec![tool_started(
+            "call-saturated-workdir",
+            WORKDIR_TOOL_NAME,
+            cbor_text_map(vec![(
+                "path",
+                target.path().to_str().expect("UTF-8 workdir"),
+            )]),
+            "main",
+        )],
+        true,
+    );
+    let requests = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(
+                        emit.event.as_ref(),
+                        Event::AgentMetadataSetRequest(request)
+                            if request.mutation_id.is_some()
+                    )
+            )
+        })
+        .count();
+    assert_eq!(requests, 1);
+    assert_eq!(
+        count_reported_terminal(
+            &frames,
+            "call-saturated-workdir",
+            EventName::TOOL_RESULT_REPORTED,
+        ),
+        1
+    );
+}
+
+/// Blocks the production writer, observes actual detached FIFO exhaustion, then
+/// admits one live mandatory boundary and returns every successfully flushed
+/// frame.
+fn run_after_production_fifo_saturation(
+    events: Vec<Event>,
+    echo_workdir: bool,
+) -> Vec<HarnessInputMessage> {
+    let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let runtime_reader = runtime_stream.try_clone().expect("runtime reader");
+    drop(runtime_stream);
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (overloaded_tx, overloaded_rx) = mpsc::channel();
+    let (mandatory_tx, mandatory_rx) = mpsc::channel();
+    let _hook = SaturationHookGuard::install(overloaded_tx);
+    let writer = SaturationWriter {
+        bytes: Arc::clone(&bytes),
+        gate: Arc::clone(&gate),
+        entered: entered_tx,
+        blocked: false,
+        mandatory: mandatory_tx,
+        mandatory_pending: false,
+    };
+    let runner = thread::spawn(move || {
+        run_impl(
+            runtime_reader,
+            writer,
+            DiscoverySourcePolicy::EmptyFixture,
+            RuntimeCwdSource::Fixture(PathBuf::from("/tmp")),
+        )
+        .map_err(|error| error.to_string())
+    });
+    let mut input = EventWriter::new(harness_stream);
+    input
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: test_extension_name("test-extension"),
+            config: CborValue::Map(Vec::new()),
+            state_dir: None,
+            secrets: Default::default(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input.flush().expect("flush configure");
+    input
+        .write_event(&action_invoke(
+            "optional-saturation",
+            "test.saturate-optional-output",
+            "/tmp",
+        ))
+        .expect("optional saturation action");
+    input.flush().expect("flush optional actions");
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("optional output reached writer");
+    overloaded_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("detached FIFO reached overload");
+    let (lock, condvar) = &*gate;
+    *lock.lock().expect("writer gate") = false;
+    condvar.notify_all();
+    while mandatory_rx.try_recv().is_ok() {}
+    for event in events {
+        input.write_event(&event).expect("mandatory event");
+    }
+    input.flush().expect("flush mandatory events");
+    mandatory_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("mandatory frame reached writer");
+    if echo_workdir {
+        let output = bytes.lock().expect("output bytes").clone();
+        let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(output));
+        let parsed = std::iter::from_fn(|| reader.read_message().transpose())
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let request = parsed
+            .into_iter()
+            .find_map(|frame| match frame {
+                HarnessInputMessage::Emit(emit) => match *emit.event {
+                    Event::AgentMetadataSetRequest(request) => Some(request),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("correlated workdir prerequisite");
+        input
+            .write_event(&Event::AgentMetadataSet(request))
+            .expect("canonical metadata echo");
+        input.flush().expect("flush canonical echo");
+        mandatory_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("echo-correlated terminal reached writer");
+    }
+    drop(input);
+    runner
+        .join()
+        .expect("extension runner")
+        .expect("mandatory output flush");
+    let output = bytes.lock().expect("output bytes").clone();
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(output));
+    std::iter::from_fn(|| reader.read_message().transpose())
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Counts exact reported terminal frames for one call and event name.
+fn count_reported_terminal(
+    frames: &[HarnessInputMessage],
+    call_id: &str,
+    event_name: EventName,
+) -> usize {
+    frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if emit.event.name() == event_name
+                        && match emit.event.as_ref() {
+                            Event::ToolResultReported(event) => event.call_id.as_str() == call_id,
+                            Event::ToolErrorReported(event) => event.call_id.as_str() == call_id,
+                            Event::ToolCancelledReported(event) => event.call_id.as_str() == call_id,
+                            _ => false,
+                        }
+            )
+        })
+        .count()
+}
+
+/// Drives one live production adapter frame into a writer that fails the
+/// selected mandatory flush and requires prompt loop teardown.
+fn assert_mandatory_frame_failure_exits(event: Event, needle: &'static [u8], label: &str) {
+    let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let runtime_reader = runtime_stream.try_clone().expect("runtime reader");
+    let failed = Arc::new(AtomicBool::new(false));
+    let writer = MandatoryFrameFailureWriter {
+        needle,
+        ready: false,
+        failed: Arc::clone(&failed),
+    };
+    let (done_tx, done_rx) = path_std_sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = run_impl(
+            runtime_reader,
+            writer,
+            DiscoverySourcePolicy::EmptyFixture,
+            RuntimeCwdSource::Fixture(PathBuf::from("/tmp")),
+        )
+        .map_err(|error| error.to_string());
+        let _ = done_tx.send(result);
+    });
+    let mut input = EventWriter::new(harness_stream);
+    input
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: test_extension_name("test-extension"),
+            config: CborValue::Map(Vec::new()),
+            state_dir: None,
+            secrets: Default::default(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input.write_event(&event).expect("mandatory input");
+    input.flush().expect("flush mandatory input");
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| panic!("{label} failure must exit the extension loop"));
+    assert!(
+        failed.load(Ordering::Acquire),
+        "{label} did not reach the production writer"
+    );
+    assert!(result.is_err(), "{label} failure unexpectedly succeeded");
 }
 
 /// Ensures the dispatch path returns a clear bounded-backpressure ToolError

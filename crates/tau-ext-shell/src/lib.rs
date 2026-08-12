@@ -24,6 +24,9 @@ use tau_proto::{
 };
 use tracing::{debug, trace};
 
+#[cfg(test)]
+static DETACHED_OUTPUT_OVERLOAD_NOTIFY: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+
 use crate::tools::{shell as path_crate_tools_shell, world as path_crate_tools_world};
 use crate::{
     dir_lock as path_crate_dir_lock, display as path_crate_display, tools as path_crate_tools,
@@ -70,15 +73,30 @@ use crate::tools::{
 ///
 /// Production optional worker, progress, and diagnostic output uses
 /// tau-client's detached enqueue path so shell workers do not block on protocol
-/// flush. Mandatory discovery, context, prerequisite metadata, and readiness
-/// output uses the checked path and waits for writer flush. Tests can use an
-/// mpsc-backed adapter for direct state-machine coverage.
+/// flush. Sole terminals, user-shell completion, discovery, context,
+/// prerequisite metadata, and readiness use checked writes instead. The shared
+/// sticky failure state wakes the manual loop and prevents worker cleanup from
+/// releasing ownership after a failed terminal. Tests can use an mpsc-backed
+/// adapter for direct state-machine coverage.
 #[derive(Clone)]
 pub(crate) struct Output {
     /// Production client or test channel receiving output frames.
     inner: OutputInner,
     /// Optional local-to-wire tool-name mapping for one scoped invocation.
     tool_name_scope: Option<(tau_proto::ToolName, tau_proto::ToolName)>,
+    /// First mandatory-output failure shared with the manual policy loop.
+    failure: Arc<Mutex<MandatoryOutputFailure>>,
+}
+
+/// Cross-thread notification that a checked protocol write failed.
+#[derive(Default)]
+struct MandatoryOutputFailure {
+    /// First failure retained until the policy loop observes it.
+    message: Option<String>,
+    /// Sticky marker preserving worker ownership after loop observation.
+    failed: bool,
+    /// Manual-loop wake handle installed after tau-client startup.
+    waker: Option<tau_client::ManualRuntimeWaker>,
 }
 
 /// Backend used by [`Output`] to publish protocol frames.
@@ -96,6 +114,7 @@ impl Output {
         Self {
             inner: OutputInner::Client(handle),
             tool_name_scope: None,
+            failure: Arc::default(),
         }
     }
 
@@ -104,6 +123,7 @@ impl Output {
         Self {
             inner: OutputInner::Channel(tx),
             tool_name_scope: None,
+            failure: Arc::default(),
         }
     }
 
@@ -111,6 +131,7 @@ impl Output {
         Self {
             inner: self.inner.clone(),
             tool_name_scope: Some((local, wire)),
+            failure: Arc::clone(&self.failure),
         }
     }
 
@@ -124,25 +145,36 @@ impl Output {
 
     fn send(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
         self.scope_message(&mut message);
-        match &self.inner {
+        let result = match &self.inner {
             OutputInner::Client(handle) => handle.send_detached(message),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
                 .send(message)
                 .map_err(|_| tau_client::ClientError::WriterClosed),
+        };
+        #[cfg(test)]
+        if matches!(result, Err(tau_client::ClientError::Overloaded))
+            && let Some(notify) = DETACHED_OUTPUT_OVERLOAD_NOTIFY
+                .lock()
+                .expect("detached overload notification")
+                .as_ref()
+        {
+            let _ = notify.send(());
         }
+        result
     }
 
     /// Sends mandatory lifecycle traffic in order and waits for writer flush.
     fn send_checked(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
         self.scope_message(&mut message);
-        match &self.inner {
+        let result = match &self.inner {
             OutputInner::Client(handle) => handle.send(message),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
                 .send(message)
                 .map_err(|_| tau_client::ClientError::WriterClosed),
-        }
+        };
+        self.retain_mandatory_failure(result)
     }
 
     fn scope_message(&self, message: &mut HarnessInputMessage) {
@@ -183,8 +215,8 @@ impl Output {
             ))
         })?;
         self.scope_tool_name(outcome.tool_name_mut());
-        match &self.inner {
-            OutputInner::Client(handle) => handle.report_tool_terminal_detached(outcome),
+        let result = match &self.inner {
+            OutputInner::Client(handle) => handle.report_tool_terminal(outcome),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
                 .send(HarnessInputMessage::emit_with_persist(
@@ -192,7 +224,61 @@ impl Output {
                     false,
                 ))
                 .map_err(|_| tau_client::ClientError::WriterClosed),
+        };
+        self.retain_mandatory_failure(result)
+    }
+
+    /// Installs the wake handle used when a worker observes checked-output
+    /// failure.
+    fn install_waker(&self, waker: tau_client::ManualRuntimeWaker) {
+        self.failure
+            .lock()
+            .expect("mandatory output failure lock poisoned")
+            .waker = Some(waker);
+    }
+
+    /// Returns the first worker-side mandatory-output failure.
+    fn take_mandatory_failure(&self) -> tau_client::ClientResult<()> {
+        let message = self
+            .failure
+            .lock()
+            .expect("mandatory output failure lock poisoned")
+            .message
+            .take();
+        match message {
+            Some(message) => Err(tau_client::ClientError::handler(message)),
+            None => Ok(()),
         }
+    }
+
+    /// Returns whether any checked output has failed before loop teardown.
+    fn mandatory_output_failed(&self) -> bool {
+        self.failure
+            .lock()
+            .expect("mandatory output failure lock poisoned")
+            .failed
+    }
+
+    /// Records a checked-output failure and wakes the policy loop.
+    fn retain_mandatory_failure(
+        &self,
+        result: tau_client::ClientResult<()>,
+    ) -> tau_client::ClientResult<()> {
+        if let Err(error) = &result {
+            let waker = {
+                let mut failure = self
+                    .failure
+                    .lock()
+                    .expect("mandatory output failure lock poisoned");
+                failure.message.get_or_insert_with(|| error.to_string());
+                failure.failed = true;
+                failure.waker.clone()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+        result
     }
 
     fn register_local_tool(
@@ -973,6 +1059,8 @@ where
         ),
     })?;
 
+    let waker = runtime.waker();
+    runtime.state().install_waker(waker);
     let loop_result = run_shell_manual_loop(&mut runtime);
 
     // EOF/disconnect/errors may arrive without a committed SessionShutdown event.
@@ -992,16 +1080,17 @@ fn run_shell_manual_loop(
     runtime: &mut tau_client::ManualExtensionRuntime<ShellRuntime>,
 ) -> tau_client::ClientResult<()> {
     loop {
-        match runtime.recv()? {
-            tau_client::ManualRuntimeInput::Message(message) => {
+        runtime.state().take_mandatory_output_failure()?;
+        match runtime.try_recv()? {
+            tau_client::ManualRuntimePoll::Message(message) => {
                 match runtime.dispatch_one(message)? {
                     tau_client::DispatchOutcome::Continue => {}
                     tau_client::DispatchOutcome::StopRequested
                     | tau_client::DispatchOutcome::Disconnect(_) => return Ok(()),
                 }
             }
-            tau_client::ManualRuntimeInput::Timeout => {}
-            tau_client::ManualRuntimeInput::InputClosed => return Ok(()),
+            tau_client::ManualRuntimePoll::InputClosed => return Ok(()),
+            tau_client::ManualRuntimePoll::Empty => runtime.wait_for_wake(),
         }
     }
 }
@@ -1480,7 +1569,7 @@ fn schedule_tool_started(
         let mutation_id =
             cwd_state.pending_workdir_mutation_id(&invoke.agent_id, &wire_invoke.call_id);
         if tx
-            .send(HarnessInputMessage::emit_transient(
+            .send_checked(HarnessInputMessage::emit_transient(
                 Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                     agent_id: invoke.agent_id,
                     key: cwd_state.key(),
@@ -1491,11 +1580,12 @@ fn schedule_tool_started(
             ))
             .is_err()
         {
-            cwd_state.take_pending_workdir_by_call(&wire_invoke.call_id);
-            return Err(Box::new((
-                wire_invoke,
-                path_crate_display::ToolFailure::new("failed to request workdir metadata commit"),
-            )));
+            let failure =
+                path_crate_display::ToolFailure::new("failed to request workdir metadata commit");
+            if send_tool_failure(wire_invoke.clone(), failure, &tx).is_ok() {
+                cwd_state.take_pending_workdir_by_call(&wire_invoke.call_id);
+            }
+            return Ok(());
         }
         return Ok(());
     }
@@ -1534,7 +1624,7 @@ fn schedule_tool_started(
                     invoke,
                     ToolDispatchContext {
                         shell_config: config.shell,
-                        tx: tx_for_job,
+                        tx: tx_for_job.clone(),
                         running_calls: Arc::clone(&cancellation.running_calls),
                         enforce_ro_bind: config.dir_lock.enforce_ro_bind,
                         cwd_state: cwd_state.clone(),
@@ -1557,7 +1647,7 @@ fn schedule_tool_started(
                         invoke,
                         ToolDispatchContext {
                             shell_config: config.shell,
-                            tx: tx_for_job,
+                            tx: tx_for_job.clone(),
                             running_calls: Arc::clone(&cancellation.running_calls),
                             enforce_ro_bind: config.dir_lock.enforce_ro_bind,
                             cwd_state: cwd_state.clone(),
@@ -1572,7 +1662,9 @@ fn schedule_tool_started(
                     );
                 }
             }
-            lifecycle.finish();
+            if !tx_for_job.mandatory_output_failed() {
+                lifecycle.finish();
+            }
         })
         .map_err(|error| {
             lifecycle_for_error.finish();
@@ -1761,7 +1853,7 @@ fn dispatch_locked_tool_invoke(
         Ok(dirs) => crate::dir_lock::normalize_lock_dirs(dirs),
         Err(error) => {
             if lifecycle.claim_terminal_before_effect() {
-                send_tool_failure(invoke, error, &tx);
+                let _ = send_tool_failure(invoke, error, &tx);
             }
             return;
         }
@@ -1822,13 +1914,13 @@ fn dispatch_locked_tool_invoke(
         }
         Err(path_crate_dir_lock::LockAcquireError::Abandoned(lock)) => {
             if lifecycle.claim_terminal_before_effect() {
-                send_tool_failure(invoke, lock.tool_failure(), &tx);
+                let _ = send_tool_failure(invoke, lock.tool_failure(), &tx);
             }
             return;
         }
         Err(path_crate_dir_lock::LockAcquireError::SelfConflict { dir }) => {
             if lifecycle.claim_terminal_before_effect() {
-                send_tool_failure(
+                let _ = send_tool_failure(
                     invoke,
                     path_crate_display::ToolFailure::new(format!(
                         "automatic directory lock is outside your manual lock coverage: {}",
@@ -1841,7 +1933,7 @@ fn dispatch_locked_tool_invoke(
         }
         Err(path_crate_dir_lock::LockAcquireError::Backend(message)) => {
             if lifecycle.claim_terminal_before_effect() {
-                send_tool_failure(
+                let _ = send_tool_failure(
                     invoke,
                     path_crate_display::ToolFailure::new(format!(
                         "dir_lock backend error: {message}"
@@ -1877,7 +1969,7 @@ fn dispatch_locked_tool_invoke(
 }
 
 fn send_ui_shell_saturated_failure(cmd: tau_proto::UiShellCommand, message: String, tx: &Output) {
-    let _ = tx.send(HarnessInputMessage::emit(
+    let _ = tx.send_checked(HarnessInputMessage::emit(
         Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
             session_id: cmd.session_id,
@@ -1895,13 +1987,13 @@ fn send_tool_failure(
     invoke: tau_proto::ToolStarted,
     failure: crate::display::ToolFailure,
     tx: &Output,
-) {
+) -> tau_client::ClientResult<()> {
     let crate::display::ToolFailure {
         message,
         details,
         display,
     } = failure;
-    let _ = tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
+    tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
         presentation: Default::default(),
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
@@ -1910,7 +2002,7 @@ fn send_tool_failure(
         details: details.map(|details| *details),
         display: Some(*display),
         originator: invoke.originator,
-    }));
+    }))
 }
 
 fn reported_lock_wait_duration_seconds(elapsed: Duration) -> Option<u64> {
@@ -2026,7 +2118,7 @@ fn dispatch_tool_invoke(
                     mutation_id: None,
                     inheritable: true,
                 });
-                let _ = tx.send(HarnessInputMessage::emit_transient(metadata));
+                let _ = tx.send_checked(HarnessInputMessage::emit_transient(metadata));
             }
             return;
         }

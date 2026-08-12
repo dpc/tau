@@ -105,10 +105,25 @@ Protocol coverage feeds deterministic complete session and correlated per-agent
 skill/AGENTS.md snapshots and asserts `persist=false` metadata plus
 snapshot-before-context-before-readiness ordering. It also covers rapid
 multi-agent initialization, session-only collision diagnostics, and checked
-mandatory-output failure escaping dispatch so connection teardown can release
-waiters. Tau-client tests independently saturate the detached FIFO and prove
-checked synchronous output remains ordered and cannot starve behind continuous
-optional output.
+discovery-output failure escaping dispatch so connection teardown can release
+waiters.
+
+## Mandatory output lifecycle
+
+Production-runner regressions force writer flush failures for sole model-tool
+terminals, user-shell completion, and the live workdir setter metadata
+prerequisite. Each requires the failure to escape the manual extension loop so
+harness disconnect cleanup can settle retained ownership. Focused workdir tests
+require a correlated canonical echo to snapshot, but not consume, the setter
+reservation; only successful checked terminal publication releases it.
+Production FIFO regressions also block the real writer, observe actual exhaustion
+of tau-client's 64-frame detached queue, and then cover model result, ordinary
+error, directory-lock error, cancellation, normal and scheduler-rejected
+include-in-context user-shell completion, and the complete workdir
+prerequisite/echo/terminal transaction. Each asserts exactly one correlated
+reported terminal or prerequisite. Tau-client tests independently prove checked
+synchronous output remains ordered and cannot starve behind continuous optional
+output.
 Harness test-provider fixtures use the `echo-agent`-gated empty discovery policy;
 their child-process regression poisons `HOME` with a user skill and verifies the
 fixture does not discover it. Production extension runners always use environment

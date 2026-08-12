@@ -74,7 +74,8 @@ enum State {
     /// The effect started; the flag remembers cancellation during sender
     /// handoff.
     EffectStarted { cancel_requested: bool },
-    /// A terminal path won and the registry entry has been removed.
+    /// A terminal path won; successful publication or shutdown removes the
+    /// registry entry.
     Terminal,
 }
 
@@ -203,16 +204,18 @@ impl ToolLifecycleRegistry {
                 State::Terminal => return None,
             }
         };
-        if outcome == CancelOutcome::PreventedEffect {
-            entry.remove_from_registry();
-            let _ = entry
+        if outcome == CancelOutcome::PreventedEffect
+            && entry
                 .tx
                 .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
                     presentation: Default::default(),
                     call_id: entry.call_id.clone(),
                     tool_name: entry.tool_name.clone(),
                     tool_type: ToolType::Function,
-                }));
+                }))
+                .is_ok()
+        {
+            entry.remove_from_registry();
         }
         Some(outcome)
     }
@@ -300,9 +303,8 @@ impl ToolLifecycle {
                 false
             }
         };
-        if should_report {
-            self.entry.remove_from_registry();
-            let _ = self
+        if should_report
+            && self
                 .entry
                 .tx
                 .report_tool_terminal(Event::ToolCancelled(ToolCancelled {
@@ -310,14 +312,17 @@ impl ToolLifecycle {
                     call_id: self.entry.call_id.clone(),
                     tool_name: self.entry.tool_name.clone(),
                     tool_type: ToolType::Function,
-                }));
+                }))
+                .is_ok()
+        {
+            self.entry.remove_from_registry();
         }
     }
 
     /// Claim a terminal error before effect start, unless cancellation won
     /// first.
     pub(crate) fn claim_terminal_before_effect(&self) -> bool {
-        let claimed = {
+        {
             let mut state = self
                 .entry
                 .state
@@ -335,11 +340,7 @@ impl ToolLifecycle {
                 }
                 State::Terminal => false,
             }
-        };
-        if claimed {
-            self.entry.remove_from_registry();
         }
-        claimed
     }
 
     /// Pause at the scheduler-dequeue handoff when a focused test installed a

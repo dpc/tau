@@ -31,6 +31,7 @@ pub(crate) enum WorkdirSnapshot {
 }
 
 /// One setter awaiting its matching committed metadata event.
+#[derive(Clone)]
 struct PendingWorkdirResult {
     /// Opaque request token that must round-trip with the committed metadata
     /// fact.
@@ -47,9 +48,11 @@ struct PendingWorkdirResult {
     cancel_requested: bool,
 }
 
-/// Terminal data retained while a setter waits for committed metadata.
+/// Terminal data snapshotted at a correlated commit while the setter
+/// reservation remains retained until checked terminal publication succeeds.
+#[derive(Clone)]
 pub(crate) struct CompletedPendingWorkdir {
-    /// Original invocation completed after the metadata linearization point.
+    /// Original invocation retained after the metadata linearization point.
     pub(crate) invoke: tau_proto::ToolStarted,
     /// Optional directory-lock wait duration preserved for the terminal event.
     pub(crate) lock_wait_duration_seconds: Option<u64>,
@@ -468,15 +471,15 @@ impl CwdState {
             .map(|pending| pending.expected_cwd.clone())
     }
 
-    /// Consume a pending setter at a committed text-metadata linearization
-    /// point.
-    pub(crate) fn take_committed_pending_workdir_result(
+    /// Snapshot a setter whose exact text-metadata echo committed, retaining
+    /// its reservation until the caller confirms terminal publication.
+    pub(crate) fn committed_pending_workdir_result(
         &self,
         agent_id: &tau_proto::AgentId,
         committed_cwd: &PathBuf,
         mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
     ) -> Option<CompletedPendingWorkdir> {
-        let mut pending_by_agent = self
+        let pending_by_agent = self
             .pending_workdir_by_agent
             .lock()
             .expect("workdir setter map lock poisoned");
@@ -484,23 +487,22 @@ impl CwdState {
         if !pending.awaiting_echo || mutation_id != Some(&pending.mutation_id) {
             return None;
         }
-        let pending = pending_by_agent.remove(agent_id)?;
         Some(CompletedPendingWorkdir {
             matched_request: pending.expected_cwd == *committed_cwd,
             cancel_requested: pending.cancel_requested,
-            invoke: pending.invoke,
+            invoke: pending.invoke.clone(),
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }
 
-    /// Consume an awaiting setter whose correlated commit carries no usable
-    /// path.
-    pub(crate) fn take_correlated_pending_workdir_result(
+    /// Snapshot a correlated malformed setter echo without releasing its
+    /// reservation before terminal publication succeeds.
+    pub(crate) fn correlated_pending_workdir_result(
         &self,
         agent_id: &tau_proto::AgentId,
         mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
     ) -> Option<CompletedPendingWorkdir> {
-        let mut pending_by_agent = self
+        let pending_by_agent = self
             .pending_workdir_by_agent
             .lock()
             .expect("workdir setter map lock poisoned");
@@ -508,11 +510,10 @@ impl CwdState {
         if !pending.awaiting_echo || mutation_id != Some(&pending.mutation_id) {
             return None;
         }
-        let pending = pending_by_agent.remove(agent_id)?;
         Some(CompletedPendingWorkdir {
             matched_request: false,
             cancel_requested: pending.cancel_requested,
-            invoke: pending.invoke,
+            invoke: pending.invoke.clone(),
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }

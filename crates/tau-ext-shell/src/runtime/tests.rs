@@ -859,7 +859,7 @@ fn workdir_reservation_commit_phase_is_linearized() {
     assert!(
         runtime
             .cwd_state
-            .take_committed_pending_workdir_result(
+            .committed_pending_workdir_result(
                 &agent_id,
                 &PathBuf::from("/pre-emission"),
                 Some(&mutation_id),
@@ -874,26 +874,33 @@ fn workdir_reservation_commit_phase_is_linearized() {
     assert!(
         runtime
             .cwd_state
-            .take_committed_pending_workdir_result(&agent_id, &PathBuf::from("/superseding"), None,)
+            .committed_pending_workdir_result(&agent_id, &PathBuf::from("/superseding"), None,)
             .is_none(),
         "unrelated commit must not consume the setter"
     );
     assert!(
         runtime
             .cwd_state
-            .take_committed_pending_workdir_result(&agent_id, &PathBuf::from("/expected"), None,)
+            .committed_pending_workdir_result(&agent_id, &PathBuf::from("/expected"), None,)
             .is_none(),
         "same-value external commit must not impersonate the setter echo"
     );
     let completed = runtime
         .cwd_state
-        .take_committed_pending_workdir_result(
+        .committed_pending_workdir_result(
             &agent_id,
             &PathBuf::from("/expected"),
             Some(&mutation_id),
         )
-        .expect("matching echo consumes setter");
+        .expect("matching echo snapshots retained setter");
     assert!(completed.matched_request);
+    assert!(
+        runtime
+            .cwd_state
+            .take_pending_workdir_by_call(&invoke.call_id)
+            .is_some(),
+        "simulated successful terminal publication releases the reservation"
+    );
 }
 
 /// Awaiting-echo cancellation stays attached to the transaction and emits

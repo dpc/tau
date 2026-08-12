@@ -57,6 +57,16 @@ pub(super) struct ShellRuntime {
 }
 
 impl ShellRuntime {
+    /// Connects worker-side checked-output failures to the manual policy loop.
+    pub(super) fn install_waker(&self, waker: tau_client::ManualRuntimeWaker) {
+        self.tx.install_waker(waker);
+    }
+
+    /// Propagates the first checked-output failure observed by a worker.
+    pub(super) fn take_mandatory_output_failure(&self) -> tau_client::ClientResult<()> {
+        self.tx.take_mandatory_failure()
+    }
+
     /// Creates a production runtime that freezes the process startup cwd during
     /// initial configuration.
     pub(super) fn new(
@@ -260,6 +270,16 @@ impl ShellRuntime {
             }
             Event::StartAgentResult(result) => self.handle_start_agent_result(result),
             Event::ActionInvoke(invoke) => {
+                #[cfg(test)]
+                if invoke.action_id == "test.saturate-optional-output" {
+                    for _ in 0..70 {
+                        let _ = self.send(HarnessInputMessage::emit(dispatch_action_invoke(
+                            invoke.clone(),
+                            &self.lock_manager,
+                        )));
+                    }
+                    return Ok(());
+                }
                 self.send(HarnessInputMessage::emit(dispatch_action_invoke(
                     invoke,
                     &self.lock_manager,
@@ -291,7 +311,7 @@ impl ShellRuntime {
             self.cwd_state.clone(),
         ) {
             let (invoke, failure) = *error;
-            send_tool_failure(invoke, failure, &self.tx);
+            let _ = send_tool_failure(invoke, failure, &self.tx);
         }
         Ok(())
     }
@@ -373,14 +393,14 @@ impl ShellRuntime {
         }
         let pending_workdir =
             self.cwd_state
-                .take_committed_pending_workdir_result(&agent_id, &cwd, mutation_id);
+                .committed_pending_workdir_result(&agent_id, &cwd, mutation_id);
         if pending_workdir.is_some() {
             let _ = self.tx.send(HarnessInputMessage::emit(cwd_notice_event(
                 agent_id.clone(),
                 &cwd,
             )));
         }
-        self.complete_pending_workdir_after_text_metadata(pending_workdir, &cwd);
+        self.complete_pending_workdir_after_text_metadata(pending_workdir, &cwd)?;
         self.publish_ready_if_pending(agent_id)
     }
 
@@ -388,8 +408,9 @@ impl ShellRuntime {
         &self,
         pending_workdir: Option<crate::cwd_state::CompletedPendingWorkdir>,
         cwd: &Path,
-    ) {
+    ) -> tau_client::ClientResult<()> {
         if let Some(pending_workdir) = pending_workdir {
+            let call_id = pending_workdir.invoke.call_id.clone();
             let event = if pending_workdir.cancel_requested {
                 Event::ToolCancelled(tau_proto::ToolCancelled {
                     presentation: Default::default(),
@@ -425,11 +446,13 @@ impl ShellRuntime {
                     originator: pending_workdir.invoke.originator,
                 })
             };
-            let _ = self.tx.report_tool_terminal(with_lock_wait_duration(
+            self.tx.report_tool_terminal(with_lock_wait_duration(
                 event,
                 pending_workdir.lock_wait_duration_seconds,
-            ));
+            ))?;
+            self.cwd_state.take_pending_workdir_by_call(&call_id);
         }
+        Ok(())
     }
 
     fn handle_invalid_cwd_metadata_set(
@@ -454,12 +477,12 @@ impl ShellRuntime {
         }
         if let Some(pending) = self
             .cwd_state
-            .take_correlated_pending_workdir_result(&agent_id, mutation_id)
+            .correlated_pending_workdir_result(&agent_id, mutation_id)
         {
             self.send_pending_workdir_error(
                 pending,
                 "committed workdir metadata is malformed; workdir setter was superseded",
-            );
+            )?;
         }
         self.publish_ready_if_pending(agent_id)
     }
@@ -497,7 +520,8 @@ impl ShellRuntime {
         &self,
         pending: crate::cwd_state::CompletedPendingWorkdir,
         message: &str,
-    ) {
+    ) -> tau_client::ClientResult<()> {
+        let call_id = pending.invoke.call_id.clone();
         let event = if pending.cancel_requested {
             Event::ToolCancelled(tau_proto::ToolCancelled {
                 presentation: Default::default(),
@@ -517,7 +541,9 @@ impl ShellRuntime {
                 originator: pending.invoke.originator,
             })
         };
-        let _ = self.tx.report_tool_terminal(event);
+        self.tx.report_tool_terminal(event)?;
+        self.cwd_state.take_pending_workdir_by_call(&call_id);
+        Ok(())
     }
 
     fn publish_ready_if_pending(
