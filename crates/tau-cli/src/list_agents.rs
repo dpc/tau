@@ -233,8 +233,7 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
     format_rows_with(agents, |_| None)
 }
 
-/// Formats picker rows with canonical runtime cost, work status, and running
-/// state appended.
+/// Formats picker rows with canonical runtime cost, work status, and activity.
 pub(crate) fn format_picker_rows(
     agents: &[SessionAgentListEntry],
     cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<crate::estimated_cost::AgentCostSnapshot>,
@@ -255,10 +254,8 @@ pub(crate) fn format_picker_rows(
                 )
             },
         );
-        let running = lifecycle_runtime(agent.lifecycle)
-            .map(runtime_state_symbol)
-            .unwrap_or("-");
-        Some(vec![cost, status, title, running.to_owned()])
+        let activity = agent.turn_activity.map(turn_activity_symbol).unwrap_or("-");
+        Some(vec![cost, status, title, activity.to_owned()])
     })
 }
 
@@ -274,11 +271,15 @@ pub(crate) fn work_status_symbol(phase: Option<tau_proto::AgentWorkStatusPhase>)
     }
 }
 
-/// Returns the compact human-facing symbol for current-turn state.
-pub(crate) fn runtime_state_symbol(state: tau_proto::AgentRuntimeState) -> &'static str {
-    match state {
-        tau_proto::AgentRuntimeState::Running => "💡",
-        tau_proto::AgentRuntimeState::Idle => "💤",
+/// Returns the compact human-facing symbol for detailed turn activity.
+pub(crate) fn turn_activity_symbol(activity: tau_proto::AgentTurnActivity) -> &'static str {
+    match activity {
+        tau_proto::AgentTurnActivity::Responding => "💡",
+        tau_proto::AgentTurnActivity::Manipulating => "🔨",
+        tau_proto::AgentTurnActivity::Fetching => "🌐",
+        tau_proto::AgentTurnActivity::Waiting => "⏳",
+        tau_proto::AgentTurnActivity::TimerScheduled => "🕔",
+        tau_proto::AgentTurnActivity::Idle => "💤",
     }
 }
 
@@ -293,6 +294,12 @@ fn format_rows_with(
             lifecycle_name(agent.lifecycle).to_owned(),
             lifecycle_runtime(agent.lifecycle)
                 .map(runtime_name)
+                .unwrap_or("-")
+                .to_owned(),
+            matches!(agent.lifecycle, SessionAgentLifecycle::Live { .. })
+                .then_some(agent.turn_activity)
+                .flatten()
+                .map(turn_activity_name)
                 .unwrap_or("-")
                 .to_owned(),
             lifecycle_navigation(agent.lifecycle)
@@ -434,6 +441,17 @@ fn runtime_name(runtime: tau_proto::AgentRuntimeState) -> &'static str {
     match runtime {
         tau_proto::AgentRuntimeState::Idle => "idle",
         tau_proto::AgentRuntimeState::Running => "running",
+    }
+}
+
+fn turn_activity_name(activity: tau_proto::AgentTurnActivity) -> &'static str {
+    match activity {
+        tau_proto::AgentTurnActivity::Responding => "responding",
+        tau_proto::AgentTurnActivity::Manipulating => "manipulating",
+        tau_proto::AgentTurnActivity::Fetching => "fetching",
+        tau_proto::AgentTurnActivity::Waiting => "waiting",
+        tau_proto::AgentTurnActivity::TimerScheduled => "timer_scheduled",
+        tau_proto::AgentTurnActivity::Idle => "idle",
     }
 }
 

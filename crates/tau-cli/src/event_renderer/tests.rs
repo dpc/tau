@@ -347,7 +347,6 @@ fn status_element_priorities_cover_every_element() {
 
     let priorities = [
         (StatusElement::Identity, 0),
-        (StatusElement::WorkStatus, 10),
         (StatusElement::Context, 10),
         (StatusElement::Tools, 20),
         (StatusElement::ActiveAgents, 20),
@@ -390,6 +389,7 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
             work_status: Default::default(),
             navigation_mode: tau_proto::AgentNavigationMode::Active,
             runtime_state,
+            turn_activity: tau_proto::AgentTurnActivity::Idle,
             tools: Default::default(),
             context: Default::default(),
             estimated_api_cost: Default::default(),

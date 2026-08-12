@@ -1250,6 +1250,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_child"),
             navigation_mode: AgentNavigationMode::Active,
             runtime_state: AgentRuntimeState::Running,
+            turn_activity: AgentTurnActivity::Idle,
             tools: AgentToolStats {
                 in_flight: 1,
                 started_total: 1,
@@ -2255,6 +2256,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                         )
                         .expect("valid status"),
                     ),
+                    turn_activity: Some(AgentTurnActivity::Idle),
                 }],
             },
         })),
@@ -4325,6 +4327,7 @@ fn agent_stats_updated_serde_round_trip() {
         .expect("valid status"),
         navigation_mode: AgentNavigationMode::Active,
         runtime_state: AgentRuntimeState::Running,
+        turn_activity: AgentTurnActivity::Idle,
         tools: AgentToolStats {
             in_flight: 1,
             started_total: 3,
@@ -4360,6 +4363,7 @@ fn agent_stats_updated_defaults_missing_creator_subtree_cost() {
             "work_status": { "phase": "unreported" },
             "navigation_mode": "active",
             "runtime_state": "idle",
+            "turn_activity": "idle",
             "tools": { "in_flight": 0, "started_total": 0 },
             "context": {},
             "estimated_api_cost": 7
@@ -6318,4 +6322,26 @@ fn provider_capture_round_trips_with_redacted_debug() {
     let debug = format!("{message:?}");
     assert!(debug.contains("zstd_len"));
     assert!(!debug.contains("raw-sensitive-bytes"));
+}
+
+/// Ambient indicator declarations must remain transient and preserve the
+/// bounded typed payload across the shared wire codec.
+#[test]
+fn agent_runtime_indicator_declaration_round_trips_transiently() {
+    let event =
+        crate::Event::AgentRuntimeIndicatorsDeclared(crate::AgentRuntimeIndicatorsDeclared {
+            agent_id: crate::AgentId::parse("agent_1").expect("agent id"),
+            indicators: vec![crate::AgentRuntimeIndicator::TimerScheduled],
+        });
+
+    assert_eq!(
+        event.name(),
+        crate::EventName::AGENT_RUNTIME_INDICATORS_DECLARED
+    );
+    assert!(!event.defaults_to_persist());
+    let encoded = serde_json::to_vec(&event).expect("serialize");
+    assert_eq!(
+        serde_json::from_slice::<crate::Event>(&encoded).expect("deserialize"),
+        event
+    );
 }

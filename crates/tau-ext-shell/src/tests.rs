@@ -1038,7 +1038,10 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
                 .iter()
                 .map(|tag| tag.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(tags, vec!["shell:read"]);
+            assert_eq!(
+                tags,
+                vec!["shell:read", tau_proto::TURN_DATA_FETCH_TOOL_TAG]
+            );
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let range_item = &parameters["properties"]["ranges"]["items"];
             assert_eq!(
@@ -1290,9 +1293,10 @@ fn startup_registers_dir_lock_disabled_by_default() {
         };
         if register.tool.name == DIR_LOCK_TOOL_NAME {
             assert!(!register.tool.enabled_by_default);
-            assert!(
-                register.tool.tags.is_empty(),
-                "disabled dir_lock must not be re-enabled by shell tag policy"
+            assert_eq!(
+                register.tool.tags,
+                vec![tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)],
+                "disabled dir_lock retains static activity classification"
             );
             found_dir_lock = true;
         }

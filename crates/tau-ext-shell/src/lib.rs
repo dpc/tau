@@ -402,7 +402,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:read"]),
+        tags: tool_tags(&["shell:read", tau_proto::TURN_DATA_FETCH_TOOL_TAG]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -464,7 +464,12 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:read", "shell:read:image", "provider-content:image"]),
+        tags: tool_tags(&[
+            "shell:read",
+            "shell:read:image",
+            "provider-content:image",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]),
         enabled_by_default: true,
         background_support: Some(tau_proto::BackgroundSupport::Never),
         examples: vec![ToolExample {
@@ -538,7 +543,12 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:edit", "shell:edit:line", "shell:mutates-files"]),
+        tags: tool_tags(&[
+            "shell:edit",
+            "shell:edit:line",
+            "shell:mutates-files",
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
+        ]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -571,6 +581,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "shell:edit",
             "shell:edit:apply_patch",
             "shell:mutates-files",
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
         ]),
         enabled_by_default: false,
         background_support: None,
@@ -610,7 +621,12 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:edit", "shell:edit:replace", "shell:mutates-files"]),
+        tags: tool_tags(&[
+            "shell:edit",
+            "shell:edit:replace",
+            "shell:mutates-files",
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
+        ]),
         enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),
@@ -663,7 +679,11 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:read", "shell:search"]),
+        tags: tool_tags(&[
+            "shell:read",
+            "shell:search",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -709,7 +729,11 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:read", "shell:search"]),
+        tags: tool_tags(&[
+            "shell:read",
+            "shell:search",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -752,7 +776,11 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:read", "shell:list"]),
+        tags: tool_tags(&[
+            "shell:read",
+            "shell:list",
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        ]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -780,7 +808,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:workdir"]),
+        tags: tool_tags(&["shell:workdir", tau_proto::TURN_MANIPULATOR_TOOL_TAG]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -833,7 +861,11 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:exec", "shell:exec:generic"]),
+        tags: tool_tags(&[
+            "shell:exec",
+            "shell:exec:generic",
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
+        ]),
         enabled_by_default: true,
         background_support: None,
         examples: vec![ToolExample {
@@ -878,7 +910,11 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:exec", "shell:exec:shell_command"]),
+        tags: tool_tags(&[
+            "shell:exec",
+            "shell:exec:shell_command",
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
+        ]),
         enabled_by_default: false,
         background_support: None,
         examples: vec![ToolExample {
@@ -1125,9 +1161,9 @@ fn set_process_working_directory(working_directory: &Path) -> Result<(), String>
 
 fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
     let tags = if enabled_by_default {
-        tool_tags(&["shell:lock"])
+        tool_tags(&["shell:lock", tau_proto::TURN_WAIT_TOOL_TAG])
     } else {
-        Vec::new()
+        tool_tags(&[tau_proto::TURN_WAIT_TOOL_TAG])
     };
     ToolSpec {
         name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),

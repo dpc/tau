@@ -722,6 +722,8 @@ pub struct SessionAgentListEntry {
     pub facts: SessionAgentFacts,
     /// Current runtime-only canonical work status, absent without a live agent.
     pub work_status: Option<SessionAgentWorkStatus>,
+    /// Detailed transient activity, absent when the agent is not live.
+    pub turn_activity: Option<crate::AgentTurnActivity>,
 }
 
 /// Current canonical self-reported work status for one live roster agent.

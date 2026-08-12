@@ -160,7 +160,9 @@ use crate::secrets::{
 };
 use crate::session_init_deadline::{SessionInitDeadline, SessionInitProgressGeneration};
 use crate::settings::{Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind};
-use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
+use crate::tool_turn::{
+    ForegroundAction, PendingToolInvocation, ToolTurnCategories, ToolTurnMachine,
+};
 use crate::turn::{PromptSubmission, TurnState};
 
 /// Returns the call identity carried by a canonical final tool terminal.
@@ -475,6 +477,7 @@ enum RuntimeEventWait {
 
 const RESTORE_NOTICE_BODY_PREFIX: &str = "Previous session was interrupted and restored.";
 const CHANGED_SESSION_NOTICE_BODY: &str = "This existing agent was loaded into a different session. Session-scoped tool and extension state may have changed or may not carry over; inspect current tool state and recreate timers or other session-scoped setup if still needed.";
+const MAX_AGENT_RUNTIME_INDICATORS: usize = 8;
 
 fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRuntimeState {
     match state {
@@ -1008,6 +1011,8 @@ struct NormalizedFinishedToolCall {
     call: AgentToolCall,
     /// Foreground/background support policy for this call.
     background_support: BackgroundSupport,
+    /// Recognized activity categories frozen from the prompt-owned tool spec.
+    turn_categories: ToolTurnCategories,
 }
 
 struct FinishedToolCallNormalization {
@@ -2672,6 +2677,11 @@ pub struct Harness {
     pub(crate) pending_notices: PendingPromptNoticeState,
     /// Pure scheduler state for queued and in-flight tool invocations.
     pub(crate) tool_turn: ToolTurnMachine,
+    /// Complete transient ambient-indicator contributions by source and agent.
+    agent_runtime_indicators: HashMap<
+        tau_proto::ConnectionId,
+        HashMap<AgentId, std::collections::BTreeSet<tau_proto::AgentRuntimeIndicator>>,
+    >,
     /// Backgrounded calls whose real completion should not enqueue an internal
     /// model-visible steering prompt. The real result/error event is still
     /// published normally.
@@ -3382,6 +3392,7 @@ impl Harness {
             initialized_sessions: HashSet::new(),
             pending_notices: PendingPromptNoticeState::default(),
             tool_turn: ToolTurnMachine::default(),
+            agent_runtime_indicators: HashMap::new(),
             suppressed_background_completion_prompts: HashSet::new(),
             background_completion_targets: HashMap::new(),
             canceled_prompts: HashSet::new(),
@@ -7279,6 +7290,10 @@ impl Harness {
                         }
                     }
                 }
+                Event::ToolCancelled(_) => {
+                    self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]), None);
+                    self.finish_harness_owned_tool_tracking(call_id);
+                }
                 _ => {}
             }
             self.release_disconnect_terminal_batch_after_commit(call_id, runtime_cid);
@@ -10269,16 +10284,19 @@ impl Harness {
         agent_ids.sort();
         let live_agents = self
             .agents
-            .values()
-            .filter(|agent| {
+            .iter()
+            .filter(|(_, agent)| {
                 !agent.terminating
                     && agent.session_id == self.current_session_id
                     && agent.agent_id.is_some()
             })
-            .filter_map(|agent| {
+            .filter_map(|(cid, agent)| {
                 let agent_id = AgentId::parse(agent.agent_id.as_deref()?).ok()?;
                 let navigation_mode = self.agent_navigation_modes.get(&agent_id).copied()?;
-                Some((agent_id, (agent.published_runtime_state, navigation_mode)))
+                Some((
+                    agent_id,
+                    (agent.published_runtime_state, navigation_mode, cid.clone()),
+                ))
             })
             .collect::<HashMap<_, _>>();
         let mut remaining_enrichment_bytes = MAX_SESSION_AGENT_LIST_ENRICHMENT_BYTES;
@@ -10289,10 +10307,12 @@ impl Harness {
                 .then(|| live_agents.get(&agent_id))
                 .flatten();
             let lifecycle = match live {
-                Some((runtime_state, navigation_mode)) => tau_proto::SessionAgentLifecycle::Live {
-                    runtime_state: *runtime_state,
-                    navigation_mode: *navigation_mode,
-                },
+                Some((runtime_state, navigation_mode, _)) => {
+                    tau_proto::SessionAgentLifecycle::Live {
+                        runtime_state: *runtime_state,
+                        navigation_mode: *navigation_mode,
+                    }
+                }
                 None if loaded.contains(&agent_id) => tau_proto::SessionAgentLifecycle::Unavailable,
                 None => tau_proto::SessionAgentLifecycle::Unloaded,
             };
@@ -10358,6 +10378,7 @@ impl Harness {
                 },
                 facts,
                 work_status,
+                turn_activity: live.map(|(_, _, cid)| self.agent_turn_activity(&agent_id, cid)),
             });
         }
         Ok(agents)
@@ -12569,6 +12590,28 @@ impl Harness {
             );
             return Ok(());
         }
+        if matches!(event, Event::AgentRuntimeIndicatorsDeclared(_)) {
+            let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
+                matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                    && entry.state != ExtensionState::Disconnected
+            });
+            if !authorized {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = %source_id,
+                    event = %event_name,
+                    "extension lacks agent runtime indicator declaration authority"
+                );
+                return Ok(());
+            }
+            self.handle_extension_fallback_event_with_admission(
+                source_id,
+                event,
+                Some(false),
+                admission,
+            );
+            return Ok(());
+        }
         if matches!(
             event,
             Event::ToolProgressReported(_)
@@ -13161,6 +13204,10 @@ impl Harness {
             self.discard_peer_activation_reservation(peer_context);
             return;
         }
+        if let Event::AgentRuntimeIndicatorsDeclared(declaration) = event {
+            self.process_committed_agent_runtime_indicators(peer_context, declaration);
+            return;
+        }
         if let Some(publisher) = peer_context.extension.as_ref().map(|extension| {
             tau_proto::MessagePublisherId::from_extension_name(&extension.publisher)
         }) && let Some(canonical) = event.clone().into_stamped_canonical_message_fact(publisher)
@@ -13563,35 +13610,44 @@ impl Harness {
         }
 
         self.track_extension_tool_request_metadata(request);
+        let turn_categories = self
+            .registry
+            .resolve_provider(request.tool_name.as_str())
+            .map_or_else(ToolTurnCategories::default, |provider| {
+                ToolTurnCategories::from_tags(&provider.tool.tags)
+            });
         match self.registry.route_tool_request(request.clone()) {
             Ok(route) => {
+                let Some(cid) = self
+                    .agent_routes
+                    .get(request.agent_id.as_str())
+                    .filter(|cid| self.agents.contains_key(*cid))
+                    .cloned()
+                else {
+                    self.reject_peer_tool_request(
+                        request.clone(),
+                        request.tool_name.clone(),
+                        format!(
+                            "cannot invoke tool `{}` for unavailable agent `{}`",
+                            request.tool_name, request.agent_id
+                        ),
+                    );
+                    return;
+                };
+                self.peer_internal_tool_agents
+                    .insert(request.call_id.clone(), cid.clone());
+                self.tool_turn.record_unqueued_in_flight(
+                    cid.clone(),
+                    request.call_id.clone(),
+                    turn_categories,
+                );
+                self.bump_tools_started_for(&cid);
                 match &route.target {
                     ToolRouteTarget::Internal => {
                         // Configured extensions are trusted local executables; see
                         // `SECURITY.md#local-ipc-and-external-ingress`. Their
                         // payload agent id supplies ordinary request correlation,
                         // while the harness still requires a live loaded route.
-                        let Some(cid) = self
-                            .agent_routes
-                            .get(request.agent_id.as_str())
-                            .filter(|cid| self.agents.contains_key(*cid))
-                            .cloned()
-                        else {
-                            self.reject_peer_tool_request(
-                                request.clone(),
-                                request.tool_name.clone(),
-                                format!(
-                                    "cannot invoke harness-internal tool `{}` for unavailable agent `{}`",
-                                    request.tool_name, request.agent_id
-                                ),
-                            );
-                            return;
-                        };
-                        self.peer_internal_tool_agents
-                            .insert(request.call_id.clone(), cid.clone());
-                        self.tool_turn
-                            .record_unqueued_in_flight(cid.clone(), request.call_id.clone());
-                        self.bump_tools_started_for(&cid);
                         self.record_wait_tool_request(&request.call_id);
                     }
                     ToolRouteTarget::Extension(provider_connection_id) => {
@@ -14812,14 +14868,12 @@ impl Harness {
         } else if self.peer_tool_requests.contains(&cancelled.call_id)
             && let Some(tool) = self.pending_tools.get(&cancelled.call_id).cloned()
         {
-            let call_id = cancelled.call_id.to_string();
             cancelled.tool_name = tool.name;
             cancelled.tool_type = tool.tool_type;
             self.publish_event(
                 Some(crate::harness::harness_connection_id()),
                 Event::ToolCancelled(cancelled),
             );
-            self.clear_tool_call_tracking(&call_id);
         }
     }
 
@@ -17279,6 +17333,7 @@ impl Harness {
         // owned by this connection. Resolution may synchronously commit deferred
         // readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
+        self.clear_agent_runtime_indicators_for_source(connection_id);
         self.suspended_interceptor_connections
             .remove(&connection_id.clone());
         self.interceptors.remove_connection(connection_id);
@@ -18198,6 +18253,7 @@ impl Harness {
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
+                | Event::AgentRuntimeIndicatorsDeclared(_)
                 | Event::ShellCommandProgressReported(_)
                 | Event::ShellCommandFinishedReported(_)
                 | Event::ProviderQuotaReplaceReported(_)
@@ -19469,6 +19525,7 @@ impl Harness {
                     tau_proto::AgentNavigationMode::Active
                 }),
             runtime_state: agent.published_runtime_state,
+            turn_activity: self.agent_turn_activity(&stable_agent_id, cid),
             tools: AgentToolStats {
                 in_flight: agent.tools_in_flight,
                 started_total: agent.tools_total,
@@ -19484,6 +19541,154 @@ impl Harness {
                 .cost_ledger
                 .creator_subtree_cost(&stable_agent_id),
         })
+    }
+
+    /// Reduce provider, active-call, and ambient state into one presentation
+    /// value.
+    fn agent_turn_activity(
+        &self,
+        agent_id: &AgentId,
+        cid: &AgentId,
+    ) -> tau_proto::AgentTurnActivity {
+        if self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.in_flight_prompt.is_some())
+        {
+            return tau_proto::AgentTurnActivity::Responding;
+        }
+        let categories = self.tool_turn.active_categories_for(cid);
+        if categories.manipulator() {
+            return tau_proto::AgentTurnActivity::Manipulating;
+        }
+        if categories.data_fetch() {
+            return tau_proto::AgentTurnActivity::Fetching;
+        }
+        if categories.wait() {
+            return tau_proto::AgentTurnActivity::Waiting;
+        }
+        if self.agent_runtime_indicators.values().any(|by_agent| {
+            by_agent.get(agent_id).is_some_and(|indicators| {
+                indicators.contains(&tau_proto::AgentRuntimeIndicator::TimerScheduled)
+            })
+        }) {
+            return tau_proto::AgentTurnActivity::TimerScheduled;
+        }
+        tau_proto::AgentTurnActivity::Idle
+    }
+
+    /// Apply a committed complete ambient-indicator declaration from one
+    /// source.
+    fn process_committed_agent_runtime_indicators(
+        &mut self,
+        peer_context: &interception::PeerPublicationContext,
+        declaration: &tau_proto::AgentRuntimeIndicatorsDeclared,
+    ) {
+        let Some(extension) = peer_context
+            .extension
+            .as_ref()
+            .filter(|extension| matches!(extension.kind, ClientKind::Tool | ClientKind::Core))
+        else {
+            return;
+        };
+        let source_id = &extension.source;
+        let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
+            entry.connection_id == extension.source
+                && entry.instance_id == extension.instance_id
+                && entry.name == extension.publisher
+                && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
+                && entry.state != ExtensionState::Disconnected
+        });
+        let targets_current_live_agent = self
+            .agent_routes
+            .get(declaration.agent_id.as_str())
+            .and_then(|cid| self.agents.get(cid))
+            .is_some_and(|agent| {
+                !agent.terminating
+                    && agent.session_id == self.current_session_id
+                    && agent.agent_id.as_deref() == Some(declaration.agent_id.as_str())
+            });
+        if !source_is_current || !targets_current_live_agent {
+            return;
+        }
+        let unique = declaration
+            .indicators
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if MAX_AGENT_RUNTIME_INDICATORS < declaration.indicators.len()
+            || unique.len() != declaration.indicators.len()
+        {
+            let message = format!(
+                "agent runtime indicator declaration must contain at most {MAX_AGENT_RUNTIME_INDICATORS} unique values"
+            );
+            if let Err(error) = self.handle_extension_protocol_failure(source_id, message) {
+                self.pending_publish_error.get_or_insert(error);
+            }
+            return;
+        }
+        let before = self
+            .agent_runtime_indicators
+            .values()
+            .filter_map(|by_agent| by_agent.get(&declaration.agent_id))
+            .fold(
+                std::collections::BTreeSet::<tau_proto::AgentRuntimeIndicator>::new(),
+                |mut all, values| {
+                    all.extend(values);
+                    all
+                },
+            );
+        let by_agent = self
+            .agent_runtime_indicators
+            .entry(source_id.clone())
+            .or_default();
+        if unique.is_empty() {
+            by_agent.remove(&declaration.agent_id);
+        } else {
+            by_agent.insert(declaration.agent_id.clone(), unique);
+        }
+        if by_agent.is_empty() {
+            self.agent_runtime_indicators.remove(source_id);
+        }
+        let after = self
+            .agent_runtime_indicators
+            .values()
+            .filter_map(|by_agent| by_agent.get(&declaration.agent_id))
+            .fold(BTreeSet::new(), |mut all, values| {
+                all.extend(values);
+                all
+            });
+        if before != after
+            && let Some(cid) = self
+                .agent_routes
+                .get(declaration.agent_id.as_str())
+                .cloned()
+        {
+            self.emit_agent_stats_updated(&cid);
+        }
+    }
+
+    /// Clear one disconnected source and refresh agents whose aggregate
+    /// changed.
+    fn clear_agent_runtime_indicators_for_source(&mut self, source_id: &tau_proto::ConnectionId) {
+        let Some(removed) = self.agent_runtime_indicators.remove(source_id) else {
+            return;
+        };
+        let affected = removed.keys().cloned().collect::<Vec<_>>();
+        for agent_id in affected {
+            if let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() {
+                self.emit_agent_stats_updated(&cid);
+            }
+        }
+    }
+
+    /// Remove every source contribution for one unloaded agent.
+    fn clear_agent_runtime_indicators_for_agent(&mut self, agent_id: &AgentId) {
+        for by_agent in self.agent_runtime_indicators.values_mut() {
+            by_agent.remove(agent_id);
+        }
+        self.agent_runtime_indicators
+            .retain(|_, by_agent| !by_agent.is_empty());
     }
 
     fn emit_agent_stats_updated(&mut self, cid: &AgentId) {
@@ -21723,6 +21928,7 @@ impl Harness {
         self.enqueued_standalone_inference_checkpoints.clear();
         self.pending_publish_idle_dispatches.clear();
         self.clear_session_agent_context();
+        self.agent_runtime_indicators.clear();
         self.subagents =
             SubagentToolState::with_input_wait_timeout_bounds(self.input_wait_timeout_bounds());
 
@@ -23068,6 +23274,7 @@ impl Harness {
             .and_then(|agent| agent.agent_id.clone());
         if let Some(unloading_agent_id) = unloading_agent_id {
             let unloading_agent_id_proto = crate::parse_agent_id(&unloading_agent_id);
+            self.clear_agent_runtime_indicators_for_agent(&unloading_agent_id_proto);
             self.pending_rendered_prompts
                 .remove(&unloading_agent_id_proto);
             self.enqueued_standalone_inference_checkpoints
@@ -27629,9 +27836,15 @@ impl Harness {
         self.prompt_tool_call_prompts
             .insert(call.id.clone(), response.agent_prompt_id.clone());
         let background_support = self.resolve_tool_background_support(call.name.as_str());
+        let turn_categories = self
+            .resolve_enabled_tool_spec_for_prompt(&call.name, &response.agent_prompt_id)
+            .map_or_else(ToolTurnCategories::default, |spec| {
+                ToolTurnCategories::from_tags(&spec.tags)
+            });
         NormalizedFinishedToolCall {
             call,
             background_support,
+            turn_categories,
         }
     }
 
@@ -27982,6 +28195,7 @@ impl Harness {
                     call,
                     entry.background_support,
                     source.cloned(),
+                    entry.turn_categories,
                 );
             }
         }
@@ -28288,6 +28502,7 @@ impl Harness {
                     invocation,
                     background_support: _,
                     source,
+                    turn_categories: _,
                 },
                 foreground_action,
             )) = self.tool_turn.pop_dispatchable(Instant::now())

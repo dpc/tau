@@ -317,7 +317,7 @@ fn exa_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: Vec::new(),
+        tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG)],
         enabled_by_default: true,
         background_support: None,
         examples: Vec::new(),
@@ -346,7 +346,9 @@ fn parallel_search_tool_spec() -> ToolSpec {
             "description": "Provider-specific Parallel MCP arguments may be passed through in addition to query."
         })),
         format: None,
-        tags: Vec::new(),
+        tags: vec![tau_proto::ToolTag::new(
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        )],
         enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),
@@ -375,7 +377,9 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
             "description": "Provider-specific Parallel MCP arguments may be passed through in addition to url."
         })),
         format: None,
-        tags: Vec::new(),
+        tags: vec![tau_proto::ToolTag::new(
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        )],
         enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),

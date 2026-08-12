@@ -110,7 +110,7 @@ pub(super) fn assert_worker_size_projection(
     }
     let status_rows = frame
         .lines()
-        .filter(|line| line.trim_start().starts_with(&format!("@{agent_id} ")))
+        .filter(|line| line.contains(&format!("@{agent_id} ")))
         .collect::<Vec<_>>();
     let [status] = status_rows.as_slice() else {
         return Err(format!(

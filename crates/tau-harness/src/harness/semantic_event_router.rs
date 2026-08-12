@@ -23,6 +23,7 @@ pub(crate) fn should_persist_event(event: &Event, persist: bool) -> bool {
         || matches!(
             event,
             Event::ProviderModelsDeclared(_)
+                | Event::AgentRuntimeIndicatorsDeclared(_)
                 | Event::ProviderModelsUpdated(_)
                 | Event::ToolRegistrationDeclared(_)
                 | Event::ToolUnregistrationDeclared(_)

@@ -26,6 +26,46 @@ fn pop_id(machine: &mut ToolTurnMachine) -> Option<String> {
         .map(|(pending, _)| pending.invocation.id.as_str().to_owned())
 }
 
+/// Active-category aggregation must retain real background calls, apply the
+/// conservative uncategorized fallback, and combine concurrent categories.
+#[test]
+fn active_categories_cover_all_real_in_flight_calls() {
+    let mut machine = ToolTurnMachine::default();
+    let conv = cid("conv");
+    let fetch_id = ToolCallId::from("fetch");
+    machine.record_unqueued_in_flight(
+        conv.clone(),
+        fetch_id.clone(),
+        ToolTurnCategories::from_tags(&[tau_proto::ToolTag::new(
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        )]),
+    );
+    assert!(machine.begin_backgrounding(&fetch_id));
+    assert!(machine.mark_backgrounded(&fetch_id));
+    machine.record_unqueued_in_flight(
+        conv.clone(),
+        ToolCallId::from("wait"),
+        ToolTurnCategories::from_tags(&[tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)]),
+    );
+
+    let categories = machine.active_categories_for(&conv);
+    assert!(!categories.manipulator());
+    assert!(categories.data_fetch());
+    assert!(categories.wait());
+
+    machine.record_unqueued_in_flight(
+        conv.clone(),
+        ToolCallId::from("uncategorized"),
+        ToolTurnCategories::default(),
+    );
+    assert!(machine.active_categories_for(&conv).manipulator());
+
+    assert!(machine.mark_complete(&ToolCallId::from("uncategorized")));
+    assert!(!machine.active_categories_for(&conv).manipulator());
+    assert!(machine.mark_complete(&fetch_id));
+    assert!(!machine.active_categories_for(&conv).data_fetch());
+}
+
 #[test]
 fn queued_calls_dispatch_in_provider_order_without_global_locking() {
     let mut machine = ToolTurnMachine::default();

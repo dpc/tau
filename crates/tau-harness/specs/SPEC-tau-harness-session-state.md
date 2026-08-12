@@ -325,6 +325,12 @@ already-loaded or journal-bound checkpoint display projection; missing, invalid,
 and unreadable facts remain categorical rows. Any snapshot failure is atomic.
 For live agents, the same event-loop snapshot copies the current harness-owned
 work-status phase and canonical title; unavailable and unloaded rows omit it.
+Live rows also carry the same harness-owned detailed turn activity as complete
+agent stats snapshots. The reducer gives response generation precedence over
+active manipulator or uncategorized calls, data-fetch calls, wait calls,
+scheduled-timer ambient state, and idle, in that order. This transient
+presentation state does not alter binary runtime state, navigation,
+notifications, watch semantics, or outer-turn lifecycle.
 Configured-instance Secret data is durable in persistent and ephemeral-session
 modes but unavailable in memory-only mode. Its 1 MiB complete-file bound,
 append denial, compare-and-swap generation, permissions, durability, and

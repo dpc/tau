@@ -34,6 +34,7 @@ fn entry(id: &str, parent: Option<&str>, started_at: Option<u64>) -> SessionAgen
             display_name: None,
         },
         work_status: Some(tau_proto::SessionAgentWorkStatus::default()),
+        turn_activity: Some(tau_proto::AgentTurnActivity::Idle),
     }
 }
 
@@ -151,8 +152,8 @@ fn all_picker_includes_suspended_agents_and_preserves_runtime_column() {
 
     let output = format_rows(&picker_agents(vec![running, idle], AgentPickerFilter::All));
 
-    assert!(output.contains("suspended-running\tlive\trunning\tsuspended\t"));
-    assert!(output.contains("auto-idle\tlive\tidle\tactive_auto\tdurable\tmissing\t"));
+    assert!(output.contains("suspended-running\tlive\trunning\tidle\tsuspended\t"));
+    assert!(output.contains("auto-idle\tlive\tidle\tidle\tactive_auto\tdurable\tmissing\t"));
 }
 
 /// Picker rows append canonical cost, status, and running-state symbols without
@@ -184,7 +185,7 @@ fn picker_rows_append_canonical_cost_and_status() {
     });
     let extras = output
         .lines()
-        .map(|row| row.split('\t').skip(10).collect::<Vec<_>>())
+        .map(|row| row.split('\t').skip(11).collect::<Vec<_>>())
         .collect::<Vec<_>>();
     assert_eq!(
         extras,
@@ -434,16 +435,16 @@ fn format_rows_escapes_free_text() {
     let output = format_rows(&[row]);
     let fields = output.trim_end().split('\t').collect::<Vec<_>>();
 
-    assert_eq!(fields.len(), 10);
+    assert_eq!(fields.len(), 11);
     assert_eq!(fields[0], "agent");
-    assert_eq!(fields[6], "role\\twith\\\\slash");
-    assert_eq!(fields[9], "line\\nname");
+    assert_eq!(fields[7], "role\\twith\\\\slash");
+    assert_eq!(fields[10], "line\\nname");
 }
 
 /// The stable schema renders representative sentinels and enum spellings in
-/// exactly ten columns.
+/// exactly eleven columns.
 #[test]
-fn format_rows_matches_exact_ten_column_contract() {
+fn format_rows_matches_exact_eleven_column_contract() {
     let mut row = entry("agent", None, None);
     row.lifecycle = SessionAgentLifecycle::Unavailable;
     row.persistence = SessionAgentPersistence::Ephemeral;
@@ -451,7 +452,7 @@ fn format_rows_matches_exact_ten_column_contract() {
 
     assert_eq!(
         format_rows(&[row]),
-        "agent\tunavailable\t-\t-\tephemeral\tinvalid\t-\t-\t-\t-\n"
+        "agent\tunavailable\t-\t-\t-\tephemeral\tinvalid\t-\t-\t-\t-\n"
     );
 }
 
@@ -466,6 +467,26 @@ fn selected_agent_id_rejects_multiline_or_invalid_rows() {
     );
     assert!(selected_agent_id("bad/id\tlive").is_err());
     assert!(selected_agent_id("agent-1\nagent-2").is_err());
+}
+
+/// Machine names and human emoji must cover every detailed activity category.
+#[test]
+fn detailed_activity_mappings_cover_all_categories() {
+    use tau_proto::AgentTurnActivity::{
+        Fetching, Idle, Manipulating, Responding, TimerScheduled, Waiting,
+    };
+    let cases = [
+        (Responding, "responding", "💡"),
+        (Manipulating, "manipulating", "🔨"),
+        (Fetching, "fetching", "🌐"),
+        (Waiting, "waiting", "⏳"),
+        (TimerScheduled, "timer_scheduled", "🕔"),
+        (Idle, "idle", "💤"),
+    ];
+    for (activity, name, emoji) in cases {
+        assert_eq!(turn_activity_name(activity), name);
+        assert_eq!(turn_activity_symbol(activity), emoji);
+    }
 }
 
 /// A connected but silent harness cannot wedge the one-shot roster request.

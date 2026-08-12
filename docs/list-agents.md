@@ -22,18 +22,20 @@ Output is headerless TSV, one agent per line, in stable parent-before-child
 order. Ready rows are ordered by known creation timestamp and then agent id.
 Malformed parent cycles are broken deterministically without dropping rows.
 
-The ten fields are:
+The eleven fields are:
 
 1. stable agent id
 2. lifecycle: `live`, `unavailable`, or `unloaded`
 3. runtime: `idle`, `running`, or `-`
-4. navigation: `active`, `active_auto`, `suspended`, or `-`
-5. persistence: `durable` or `ephemeral`
-6. creation facts: `available`, `missing`, `invalid`, or `unreadable`
-7. creation role or `-`
-8. parent agent id or `-`
-9. creation timestamp in Unix microseconds or `-`
-10. current in-memory or stored checkpoint display name, or `-`
+4. detailed activity: `responding`, `manipulating`, `fetching`, `waiting`,
+   `timer_scheduled`, `idle`, or `-`
+5. navigation: `active`, `active_auto`, `suspended`, or `-`
+6. persistence: `durable` or `ephemeral`
+7. creation facts: `available`, `missing`, `invalid`, or `unreadable`
+8. creation role or `-`
+9. parent agent id or `-`
+10. creation timestamp in Unix microseconds or `-`
+11. current in-memory or stored checkpoint display name, or `-`
 
 Free-text fields escape backslash, tab, newline, carriage return, and other
 controls. The first field is always the unescaped agent id, so scripts can use:
@@ -61,11 +63,11 @@ state shown in both pickers.
 `fzf` is optional and is started only when a picker command or configured
 binding action is used. Tau passes rows through stdin and invokes `fzf` directly
 rather than interpolating agent data into a shell command. The picker shows
-agent id, work-status emoji, current-turn emoji, self/inclusive creator-subtree
+`<turn-emoji> <work-status-emoji> @agent-id`, self/inclusive creator-subtree
 estimated API cost, work-status title, and display name in space-padded,
 terminal-width-aware columns. The compact legend is `🚀` working, `⛔️` blocked,
-`✅` done, and `❓` unreported or unknown; `💡` marks a running current turn
-and `💤` marks no current turn. Lifecycle and role remain available in the
+`✅` done, and `❓` unreported or unknown. Detailed activity uses `💡` responding, `🔨` manipulating, `🌐` fetching,
+`⏳` waiting, `🕔` scheduled timer, and `💤` idle. Lifecycle and role remain available in the
 machine-facing roster but are omitted from the picker: picker membership is
 already restricted to live agents, and the stable agent id is its primary
 identity. Work status comes from the same fresh harness snapshot as roster

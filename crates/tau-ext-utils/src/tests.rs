@@ -158,6 +158,7 @@ fn runtime() -> TimerRuntime {
         timers: HashMap::new(),
         pending_invocations: HashMap::new(),
         replay_complete_agents: HashSet::new(),
+        reported_timer_agents: HashSet::new(),
         timer_tool_name: None,
         papercut_tool_name: None,
         session_id: None,
@@ -820,6 +821,135 @@ fn papercut_runtime_dispatches_only_prefixed_live_calls() {
     assert_eq!(appends.len(), 1);
     assert_eq!(appends[0].scope, ExtensionDataScope::User);
     assert_eq!(results, ["prefixed"]);
+}
+
+/// Live schedule and cancel mutations must publish complete transient timer
+/// indicator replacements instead of keeping the timer tool call active.
+#[test]
+fn timer_runtime_declares_and_retracts_scheduled_indicator() {
+    let mut schedule = started(
+        "schedule",
+        "agent-one",
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("wake".to_owned())),
+            ("delay_seconds", CborValue::Integer(60.into())),
+            ("message", CborValue::Text("wake up".to_owned())),
+        ]),
+    );
+    schedule.tool_name = tau_proto::ToolName::new("work_timer");
+    let mut cancel = started(
+        "cancel",
+        "agent-one",
+        cbor_map(vec![
+            ("action", CborValue::Text("cancel".to_owned())),
+            ("timer_id", CborValue::Text("wake".to_owned())),
+        ]),
+    );
+    cancel.tool_name = tau_proto::ToolName::new("work_timer");
+    let frames = run_frames(
+        false,
+        [
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(1),
+                Event::SessionStarted(tau_proto::SessionStarted {
+                    session_id: tau_proto::SessionId::parse("session-42").expect("session id"),
+                    reason: tau_proto::SessionStartReason::Initial,
+                }),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(2),
+                Event::ToolStarted(schedule),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(3),
+                Event::ToolStarted(cancel),
+            )),
+        ],
+    );
+
+    let declarations = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::AgentRuntimeIndicatorsDeclared(declaration) => {
+                    assert!(!emit.persist);
+                    Some(declaration.indicators.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declarations,
+        [
+            vec![tau_proto::AgentRuntimeIndicator::TimerScheduled],
+            vec![]
+        ]
+    );
+}
+
+/// Successful replay reconstruction must publish timer presence after the
+/// agent boundary rather than while historical facts are still arriving.
+#[test]
+fn timer_runtime_replay_declares_reconstructed_presence() {
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    let mut start = started(
+        "replay-schedule",
+        agent.as_ref(),
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("wake".to_owned())),
+            ("delay_seconds", CborValue::Integer(60.into())),
+            ("message", CborValue::Text("wake up".to_owned())),
+        ]),
+    );
+    start.tool_name = tau_proto::ToolName::new("work_timer");
+    let result = ToolResult {
+        presentation: Default::default(),
+        call_id: start.call_id.clone(),
+        tool_name: start.tool_name.clone(),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let frames = run_frames(
+        false,
+        [
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::replay(
+                UnixMicros::new(1),
+                Event::ToolStarted(start),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::replay(
+                UnixMicros::new(2),
+                Event::ToolResult(result),
+            )),
+            HarnessOutputMessage::Deliver(tau_proto::EventDelivery::live(
+                UnixMicros::new(3),
+                Event::AgentReplayComplete(AgentReplayComplete {
+                    agent_id: agent,
+                    session_id: None,
+                    error: None,
+                }),
+            )),
+        ],
+    );
+
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if !emit.persist
+                && matches!(
+                    emit.event.as_ref(),
+                    Event::AgentRuntimeIndicatorsDeclared(declaration)
+                        if declaration.indicators
+                            == [tau_proto::AgentRuntimeIndicator::TimerScheduled]
+                )
+    )));
 }
 
 /// Live session shutdown drops the current attribution before later calls, and

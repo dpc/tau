@@ -71,6 +71,14 @@ event persistence or the harness-extension interface require the explicit
 confirmation mandated by
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
+Detailed turn activity is a required transient field in complete
+`agent.stats_updated` snapshots and an optional field in live roster entries.
+Tool declarations classify active calls through the reserved
+`tau:turn:manipulator`, `tau:turn:data_fetch`, and `tau:turn:wait` tags.
+Configured Tool/Core extensions may replace their bounded, transient
+per-agent `agent.runtime_indicators_declared` contribution; the only current
+indicator is `timer_scheduled`.
+
 Prompt lifecycle deliberately separates the durable, content-free
 `agent.prompt_started` authority fact from the transient, content-bearing
 `agent.prompt_created` provider request. Their ordering, replay, and compatibility

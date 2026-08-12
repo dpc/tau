@@ -76,9 +76,8 @@ Current CLI watched status rows come from the current-session semantic
 `WorkStatus` snapshot for each selected target. Absent, unreported, and unknown
 status renders as `❓`; working, blocked, and done render as `🚀`, `⛔️`, and `✅`;
 unreported, working, blocked, and unknown remain visible, and done alone
-removes the row. The target's complete generic agent-stats runtime state controls
-activity decoration: Running renders `💡`, while Idle renders `💤` and retains the
-status row. Before the first stats snapshot, active
+removes the row. The target's complete generic agent-stats detailed turn activity controls
+activity decoration. Before the first stats snapshot, active
 prompt tracking for the target is the compatibility/catch-up fallback.
 
 The CLI independently selects rows and derives recursive activity over the
@@ -91,9 +90,9 @@ ninth switches atomically to all visible direct watches, without truncating the
 direct set. Expanded rows use `(depth, agent-id)` order. Each indirect row shows
 its deterministic immediate predecessor as `via @parent`.
 
-A direct target whose edge reports Running renders as `phase-emoji @id (display name)
-title 💡`, followed by existing tool/context telemetry. The fixed-width phase emoji
-stays leftmost while the stable id remains the primary identity;
+A direct target renders as `<turn-emoji> <phase-emoji> @id (display name)
+title`, followed by existing tool/context telemetry. The two fixed-width emoji and
+stable id form the mandatory leftmost prefix;
 the display name is optional persisted UI metadata; phase/title are the watched
 agent's own structured `WorkStatus` report. Under width pressure the display
 name yields before the title, while identity and phase retain their existing

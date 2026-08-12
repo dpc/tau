@@ -68,6 +68,13 @@ See
 Periodic timers coalesce downtime into one internal prompt and advance the next
 fire time beyond the current wall clock.
 
+After live timer mutations and successful timer replay, the extension declares
+`timer_scheduled` exactly when an agent's reconstructed timer map is nonempty.
+One-shot fire removes presence; periodic fire retains it. The extension emits
+replacement declarations after map mutations, while the harness clears source,
+agent-unload, and session-rollover contributions. Scheduled timers are not
+modeled as active tool calls.
+
 Session lifecycle is explicit: live `session.started` and `session.shutdown` clear all active timer state, and `session.agent_unloaded` makes that agent's timers dormant until a later successful replay boundary. Schedule requests reject duplicate active ids instead of acting as implicit updates. The default safety floor is 10 seconds for one-shot delays and 60 seconds for recurring intervals.
 
 ## Timer tool display

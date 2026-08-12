@@ -2845,6 +2845,49 @@ pub enum AgentRuntimeState {
     Running,
 }
 
+/// Retained runtime condition reported as a transient extension observation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeIndicator {
+    /// At least one session-scoped timer remains scheduled for the agent.
+    TimerScheduled,
+}
+
+/// Complete transient ambient-indicator declaration for one agent and source.
+///
+/// Configured Tool/Core extensions replace their previous contribution with
+/// this bounded set. The harness aggregates current source contributions by
+/// union and clears them at connection, agent, and session lifecycle
+/// boundaries.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentRuntimeIndicatorsDeclared {
+    /// Live agent whose ambient runtime conditions are being declared.
+    pub agent_id: AgentId,
+    /// Complete replacement set contributed by this configured extension
+    /// source.
+    pub indicators: Vec<AgentRuntimeIndicator>,
+}
+
+/// Detailed, transient presentation of one agent's current turn activity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTurnActivity {
+    /// A provider is generating the agent response.
+    Responding,
+    /// At least one active tool is mutating state or is conservatively
+    /// uncategorized.
+    Manipulating,
+    /// At least one active tool is fetching data.
+    Fetching,
+    /// At least one active tool is waiting.
+    Waiting,
+    /// No higher-precedence work is active and at least one timer is scheduled.
+    TimerScheduled,
+    /// No response, tool call, or ambient indicator is active.
+    #[default]
+    Idle,
+}
+
 /// Current runtime state for an agent.
 ///
 /// This is a transient agent-state snapshot: it describes live work owned by
@@ -2943,6 +2986,9 @@ pub struct AgentStatsUpdated {
     pub navigation_mode: AgentNavigationMode,
     /// Current harness runtime state for the agent.
     pub runtime_state: AgentRuntimeState,
+    /// Detailed transient activity reduced independently from binary runtime
+    /// state.
+    pub turn_activity: AgentTurnActivity,
     /// Current and cumulative tool counters.
     pub tools: AgentToolStats,
     /// Latest context usage known to the harness.
@@ -5830,6 +5876,8 @@ pub enum Event {
     AgentWatchesUpdated(AgentWatchesUpdated),
     #[serde(rename = "agent.stats_updated")]
     AgentStatsUpdated(AgentStatsUpdated),
+    #[serde(rename = "agent.runtime_indicators_declared")]
+    AgentRuntimeIndicatorsDeclared(AgentRuntimeIndicatorsDeclared),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
     #[serde(rename = "harness.verbosities_available")]
@@ -6297,6 +6345,7 @@ impl Event {
             Self::AgentState(_) => EventName::AGENT_STATE,
             Self::AgentWatchesUpdated(_) => EventName::AGENT_WATCHES_UPDATED,
             Self::AgentStatsUpdated(_) => EventName::AGENT_STATS_UPDATED,
+            Self::AgentRuntimeIndicatorsDeclared(_) => EventName::AGENT_RUNTIME_INDICATORS_DECLARED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
             Self::HarnessVerbositiesAvailable(_) => EventName::HARNESS_VERBOSITIES_AVAILABLE,
             Self::HarnessThinkingSummariesAvailable(_) => {
@@ -6456,6 +6505,7 @@ impl Event {
         !matches!(
             self,
             Self::ToolRegistrationDeclared(_)
+                | Self::AgentRuntimeIndicatorsDeclared(_)
                 | Self::ToolUnregistrationDeclared(_)
                 | Self::ToolRegister(_)
                 | Self::ToolUnregister(_)

@@ -742,21 +742,28 @@ fn selected_agent_status_styles(
         return Err("selected-agent style marker must be ASCII".into());
     }
     let contents = parser.screen().contents();
-    let expected_prefix = format!("@{marker} ");
+    let expected_identity = format!("@{marker} ");
     let matches = contents
         .lines()
         .enumerate()
-        .filter(|(_, line)| line.trim_start().starts_with(&expected_prefix))
+        .filter(|(_, line)| line.contains(&expected_identity))
         .collect::<Vec<_>>();
-    let [(row, line)] = matches.as_slice() else {
+    let [(row, _)] = matches.as_slice() else {
         return Err(format!(
             "expected one selected-agent status row for `{marker}`, found {}",
             matches.len()
         )
         .into());
     };
-    let col = line
-        .find(marker)
+    let col = (0..parser.screen().size().1)
+        .find(|&column| {
+            marker.bytes().enumerate().all(|(offset, byte)| {
+                parser
+                    .screen()
+                    .cell(*row as u16, column + offset as u16)
+                    .is_some_and(|cell| cell.contents() == char::from(byte).to_string())
+            })
+        })
         .ok_or("selected-agent marker missing from matched status row")?;
     marker
         .bytes()
@@ -764,7 +771,7 @@ fn selected_agent_status_styles(
         .map(|(offset, _)| {
             let cell = parser
                 .screen()
-                .cell(*row as u16, (col + offset) as u16)
+                .cell(*row as u16, col + offset as u16)
                 .ok_or("selected-agent marker cell is outside the visible VT")?;
             Ok(VtCellStyle {
                 foreground: cell.fgcolor(),
@@ -911,7 +918,7 @@ fn complete_frame_wait_rejects_idle_only_generation() {
                 Instant::now() + Duration::from_secs(1),
                 |frame| {
                     frame.contains("This active-auto agent is idle")
-                        && frame.lines().any(|line| line.starts_with("@worker "))
+                        && frame.lines().any(|line| line.contains("@worker "))
                 },
             )
             .map_err(|error| error.to_string());
@@ -940,7 +947,7 @@ fn complete_frame_wait_rejects_idle_only_generation() {
             .expect("complete frame result")
             .expect("complete selected status frame");
         assert!(frame.contains("This active-auto agent is idle"));
-        assert!(frame.lines().any(|line| line.starts_with("@worker ")));
+        assert!(frame.lines().any(|line| line.contains("@worker ")));
         writer
             .write_all(b"third\r")
             .expect("release selected status process");

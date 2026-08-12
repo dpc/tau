@@ -15,6 +15,60 @@ use tau_proto::{AgentId, BackgroundSupport, ConnectionId, ToolCallId, ToolName, 
 
 use crate::harness::AgentToolCall;
 
+/// Recognized static turn-activity categories frozen for one tool invocation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ToolTurnCategories {
+    /// Recognized category bits; zero is reserved for an empty aggregate.
+    bits: u8,
+}
+
+impl ToolTurnCategories {
+    /// Derive recognized categories from a registered tool's neutral tags.
+    pub(crate) fn from_tags(tags: &[tau_proto::ToolTag]) -> Self {
+        let mut bits = 0;
+        for tag in tags {
+            bits |= match tag.as_ref() {
+                tau_proto::TURN_MANIPULATOR_TOOL_TAG => 1,
+                tau_proto::TURN_DATA_FETCH_TOOL_TAG => 2,
+                tau_proto::TURN_WAIT_TOOL_TAG => 4,
+                _ => 0,
+            };
+        }
+        Self {
+            bits: if bits == 0 { 1 } else { bits },
+        }
+    }
+
+    /// Combine another active call's normalized categories.
+    fn combine(&mut self, other: Self) {
+        self.bits |= other.bits;
+    }
+
+    /// Convert an empty caller value into the conservative call fallback.
+    fn normalized_call(self) -> Self {
+        if self.bits == 0 {
+            Self { bits: 1 }
+        } else {
+            self
+        }
+    }
+
+    /// Whether any active call is manipulating.
+    pub(crate) fn manipulator(self) -> bool {
+        self.bits & 1 != 0
+    }
+
+    /// Whether any active call is fetching data.
+    pub(crate) fn data_fetch(self) -> bool {
+        self.bits & 2 != 0
+    }
+
+    /// Whether any active call is waiting.
+    pub(crate) fn wait(self) -> bool {
+        self.bits & 4 != 0
+    }
+}
+
 /// A tool call emitted by an agent response but not yet completed.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingToolInvocation {
@@ -26,6 +80,8 @@ pub(crate) struct PendingToolInvocation {
     pub(crate) background_support: BackgroundSupport,
     /// Source to apply to report-derived dispatch successors.
     pub(crate) source: Option<ConnectionId>,
+    /// Recognized static activity categories frozen at enqueue time.
+    pub(crate) turn_categories: ToolTurnCategories,
 }
 
 /// Pure queue and in-flight state for tool dispatch during agent turns.
@@ -48,6 +104,8 @@ pub(crate) enum ForegroundAction {
 #[derive(Clone, Debug)]
 struct InFlightToolInvocation {
     conversation_id: AgentId,
+    /// Recognized static categories frozen before dispatch.
+    turn_categories: ToolTurnCategories,
     foreground_pending: bool,
     /// The sole placeholder is reserved but has not committed yet.
     backgrounding: bool,
@@ -64,7 +122,13 @@ impl ToolTurnMachine {
         invocation: AgentToolCall,
         background_support: BackgroundSupport,
     ) {
-        self.push_from(conversation_id, invocation, background_support, None);
+        self.push_from(
+            conversation_id,
+            invocation,
+            background_support,
+            None,
+            ToolTurnCategories::default(),
+        );
     }
 
     /// Enqueue one tool invocation and retain source for derived facts.
@@ -74,6 +138,7 @@ impl ToolTurnMachine {
         invocation: AgentToolCall,
         background_support: BackgroundSupport,
         source: Option<ConnectionId>,
+        turn_categories: ToolTurnCategories,
     ) {
         self.pending_tool_invocations
             .push_back(PendingToolInvocation {
@@ -81,6 +146,7 @@ impl ToolTurnMachine {
                 invocation,
                 background_support,
                 source,
+                turn_categories: turn_categories.normalized_call(),
             });
     }
 
@@ -110,6 +176,7 @@ impl ToolTurnMachine {
         &mut self,
         conversation_id: AgentId,
         call_id: ToolCallId,
+        turn_categories: ToolTurnCategories,
     ) {
         self.in_flight_tool_invocations.insert(
             call_id,
@@ -119,6 +186,7 @@ impl ToolTurnMachine {
                 backgrounding: false,
                 backgrounded: false,
                 foreground_deadline: None,
+                turn_categories: turn_categories.normalized_call(),
             },
         );
     }
@@ -170,6 +238,7 @@ impl ToolTurnMachine {
             .entry(call_id)
             .or_insert(InFlightToolInvocation {
                 conversation_id,
+                turn_categories: ToolTurnCategories::default().normalized_call(),
                 foreground_pending: false,
                 backgrounding: false,
                 backgrounded: true,
@@ -288,6 +357,21 @@ impl ToolTurnMachine {
         })
     }
 
+    /// Aggregate recognized categories for all real active calls owned by an
+    /// agent.
+    pub(crate) fn active_categories_for(&self, conversation_id: &AgentId) -> ToolTurnCategories {
+        self.in_flight_tool_invocations
+            .values()
+            .filter(|invocation| &invocation.conversation_id == conversation_id)
+            .fold(
+                ToolTurnCategories::default(),
+                |mut aggregate, invocation| {
+                    aggregate.combine(invocation.turn_categories);
+                    aggregate
+                },
+            )
+    }
+
     fn record_in_flight(
         &mut self,
         pending: &PendingToolInvocation,
@@ -319,6 +403,7 @@ impl ToolTurnMachine {
                 backgrounding: false,
                 backgrounded,
                 foreground_deadline,
+                turn_categories: pending.turn_categories.normalized_call(),
             },
         );
         action

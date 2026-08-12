@@ -70,6 +70,81 @@ fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
     h.shutdown().expect("shutdown");
 }
 
+/// The central detailed-activity reducer must apply the approved precedence
+/// without changing the binary runtime projection.
+#[test]
+fn agent_turn_activity_reduces_provider_tools_and_timer_in_order() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h
+        .agents
+        .get(&cid)
+        .and_then(|agent| agent.agent_id.as_deref())
+        .map(crate::parse_agent_id)
+        .expect("stable agent id");
+    let source = tau_proto::ConnectionId::parse("timer-source").expect("connection id");
+    h.agent_runtime_indicators.insert(
+        source,
+        path_std_collections::HashMap::from([(
+            agent_id.clone(),
+            path_std_collections::BTreeSet::from([
+                tau_proto::AgentRuntimeIndicator::TimerScheduled,
+            ]),
+        )]),
+    );
+    assert_eq!(
+        h.agent_turn_activity(&agent_id, &cid),
+        tau_proto::AgentTurnActivity::TimerScheduled
+    );
+
+    let wait_id = ToolCallId::from("wait");
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        wait_id.clone(),
+        ToolTurnCategories::from_tags(&[tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)]),
+    );
+    assert_eq!(
+        h.agent_turn_activity(&agent_id, &cid),
+        tau_proto::AgentTurnActivity::Waiting
+    );
+    let fetch_id = ToolCallId::from("fetch");
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        fetch_id.clone(),
+        ToolTurnCategories::from_tags(&[tau_proto::ToolTag::new(
+            tau_proto::TURN_DATA_FETCH_TOOL_TAG,
+        )]),
+    );
+    assert_eq!(
+        h.agent_turn_activity(&agent_id, &cid),
+        tau_proto::AgentTurnActivity::Fetching
+    );
+    let manipulator_id = ToolCallId::from("manipulator");
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        manipulator_id.clone(),
+        ToolTurnCategories::default(),
+    );
+    assert_eq!(
+        h.agent_turn_activity(&agent_id, &cid),
+        tau_proto::AgentTurnActivity::Manipulating
+    );
+
+    h.agents.get_mut(&cid).expect("agent").in_flight_prompt =
+        Some(test_agent_prompt_id("responding"));
+    assert_eq!(
+        h.agent_turn_activity(&agent_id, &cid),
+        tau_proto::AgentTurnActivity::Responding
+    );
+    assert_eq!(
+        h.agent_stats_snapshot(&cid).expect("stats").runtime_state,
+        tau_proto::AgentRuntimeState::Idle
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Dispatching work to a loaded durable agent refreshes its session retention
 /// hint while preserving the manifest's canonical creation timestamp.
 #[test]
@@ -7376,8 +7451,11 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         },
     );
     h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
@@ -7493,8 +7571,11 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
         },
     );
     h.tool_agents.insert(call_id.clone(), cancel_cid.clone());
-    h.tool_turn
-        .record_unqueued_in_flight(cancel_cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        cancel_cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
@@ -17225,8 +17306,11 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
                 allows_provider_image: false,
             },
         );
-        h.tool_turn
-            .record_unqueued_in_flight(cid.clone(), call_id.into());
+        h.tool_turn.record_unqueued_in_flight(
+            cid.clone(),
+            call_id.into(),
+            ToolTurnCategories::default(),
+        );
         h.prompt_tool_call_prompts
             .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     }
@@ -18045,8 +18129,11 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
                 allows_provider_image: false,
             },
         );
-        h.tool_turn
-            .record_unqueued_in_flight(cid.clone(), call_id.into());
+        h.tool_turn.record_unqueued_in_flight(
+            cid.clone(),
+            call_id.into(),
+            ToolTurnCategories::default(),
+        );
         h.prompt_tool_call_prompts
             .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     }
@@ -18204,8 +18291,11 @@ fn manual_self_compaction_failure_delivers_error_once() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     h.prompt_tool_call_prompts
         .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
@@ -18333,8 +18423,11 @@ fn manual_self_compaction_cold_failure_before_delivery() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     h.prompt_tool_call_prompts
         .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
@@ -18445,8 +18538,11 @@ fn manual_self_compaction_success_delivers_directly() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     h.prompt_tool_call_prompts
         .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
@@ -18524,8 +18620,11 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), "call-replay-compact".into());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        "call-replay-compact".into(),
+        ToolTurnCategories::default(),
+    );
     h.prompt_tool_call_prompts.insert(
         "call-replay-compact".into(),
         test_agent_prompt_id("sp-seeded-tools"),
@@ -19970,8 +20069,11 @@ fn register_manual_cross_compaction_call(
             allows_provider_image: false,
         },
     );
-    h.tool_turn
-        .record_unqueued_in_flight(caller_cid.clone(), call_id.into());
+    h.tool_turn.record_unqueued_in_flight(
+        caller_cid.clone(),
+        call_id.into(),
+        ToolTurnCategories::default(),
+    );
     h.prompt_tool_call_prompts
         .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     AgentToolCall {
@@ -20379,8 +20481,11 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), "call-self-blocked".into());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        "call-self-blocked".into(),
+        ToolTurnCategories::default(),
+    );
     h.prompt_tool_call_prompts.insert(
         "call-self-blocked".into(),
         test_agent_prompt_id("sp-seeded-tools"),
@@ -25725,8 +25830,11 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     h.tool_agents.insert(call_id.clone(), side_cid.clone());
     h.background_completion_targets
         .insert(call_id.clone(), side_cid.clone());
-    h.tool_turn
-        .record_unqueued_in_flight(side_cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        side_cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     assert!(h.tool_turn.begin_backgrounding(&call_id));
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.queue_background_completion_prompt(&side_cid, &call_id);
@@ -25830,8 +25938,11 @@ fn background_completion_from_removed_side_conversation_is_retired() {
         .insert(fault_call_id.clone(), fault_cid.clone());
     h.background_completion_targets
         .insert(fault_call_id.clone(), fault_cid.clone());
-    h.tool_turn
-        .record_unqueued_in_flight(fault_cid.clone(), fault_call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        fault_cid.clone(),
+        fault_call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     assert!(h.tool_turn.begin_backgrounding(&fault_call_id));
     assert!(h.tool_turn.mark_backgrounded(&fault_call_id));
     let journal = h

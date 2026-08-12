@@ -1806,6 +1806,7 @@ fn selected_agent_status_row_renders_phase_and_adapts_task_title() {
             .expect("valid work status"),
             navigation_mode: tau_proto::AgentNavigationMode::Active,
             runtime_state: tau_proto::AgentRuntimeState::Idle,
+            turn_activity: tau_proto::AgentTurnActivity::Manipulating,
             tools: Default::default(),
             context: Default::default(),
             estimated_api_cost: Default::default(),
@@ -1818,7 +1819,7 @@ fn selected_agent_status_row_renders_phase_and_adapts_task_title() {
     let wide = render_at_width(80);
     assert!(
         wide.iter()
-            .any(|row| row.contains(&format!("@worker ⛔️ {escaped_title}"))),
+            .any(|row| row.contains(&format!("🔨 ⛔️ @worker {escaped_title}"))),
         "wide selected-agent status row should contain phase and escaped title: {wide:?}"
     );
     assert!(
@@ -1828,7 +1829,7 @@ fn selected_agent_status_row_renders_phase_and_adapts_task_title() {
 
     let narrow = render_at_width(18);
     assert!(
-        narrow.iter().any(|row| row.contains("@worker ⛔️")),
+        narrow.iter().any(|row| row.contains("🔨 ⛔️ @worker")),
         "work phase should survive narrow-width fitting: {narrow:?}"
     );
     assert!(
@@ -5177,6 +5178,7 @@ fn agent_stats_does_not_overwrite_display_name() {
         agent_id: agent_id("engineer-Ab12"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
@@ -5210,6 +5212,7 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
             agent_id: agent_id(agent),
             navigation_mode: tau_proto::AgentNavigationMode::Active,
             runtime_state: tau_proto::AgentRuntimeState::Idle,
+            turn_activity: tau_proto::AgentTurnActivity::Idle,
             tools: tau_proto::AgentToolStats::default(),
             context: tau_proto::AgentContextStats::default(),
             estimated_api_cost: cost,
@@ -5295,6 +5298,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         agent_id: agent_id("worker-1"),
         navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5341,6 +5345,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         agent_id: agent_id("worker-1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5414,6 +5419,7 @@ fn apply_test_navigation_mode(renderer: &mut EventRenderer, mode: tau_proto::Age
         agent_id: agent_id("worker-1"),
         navigation_mode: mode,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5515,6 +5521,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         agent_id: agent_id("worker-1"),
         navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5568,6 +5575,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         agent_id: agent_id("worker-1"),
         navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5628,6 +5636,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         agent_id: agent_id("worker-1"),
         navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5674,6 +5683,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
         agent_id: agent_id("worker-1"),
         navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
@@ -5911,6 +5921,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 1,
             started_total: 2,
@@ -5921,11 +5932,11 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         work_status: Default::default(),
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(90, "❓ @engineer_1 💡"));
+    assert!(!vt.screen_contains(90, "💤 ❓ @engineer_1"));
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "❓ @engineer_1 💡"));
+    assert!(vt.screen_contains(90, "💤 ❓ @engineer_1"));
     assert!(vt.screen_contains(90, "%1/2"));
 }
 
@@ -8102,7 +8113,7 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
         .into_iter()
         .find(|row| row.contains("@engineer_abc"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("@engineer_abc"));
+    assert!(status_row.starts_with("💤 ❓ @engineer_abc"));
     assert!(!status_row.contains("+engineer"));
 
     renderer.clear_selected_agent();
@@ -8158,7 +8169,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         .into_iter()
         .find(|row| row.contains("@engineer-junior_b"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("@engineer-junior_b (engineer-junior)"));
+    assert!(status_row.starts_with("💤 ❓ @engineer-junior_b (engineer-junior)"));
     assert!(!status_row.contains("@engineer-junior (engineer-junior_b)"));
 }
 
@@ -8203,7 +8214,7 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
         .into_iter()
         .find(|row| row.contains("@engineer-junior_b"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("@engineer-junior_b"));
+    assert!(status_row.starts_with("💤 ❓ @engineer-junior_b"));
     assert!(!status_row.contains("(engineer-junior)"));
     assert!(!status_row.contains("@engineer-junior_b ("));
 }
@@ -8660,6 +8671,7 @@ fn model_status_shows_selected_creator_cost_pair() {
         agent_id: agent_id("main"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
@@ -8704,7 +8716,7 @@ fn estimated_cost_status_hides_under_width_pressure() {
     sync(&handle);
 
     assert!(vt.screen_contains(13, "@a"));
-    assert!(vt.screen_contains(13, "#-/200k"));
+    assert!(vt.screen_contains(13, "💡 ❓ @a"));
     assert!(!vt.screen_contains(13, "$"));
 }
 
@@ -9286,6 +9298,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 2,
             started_total: 3,
@@ -10595,7 +10608,7 @@ fn watched_agent_stats_redraws_status_row() {
         },
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @engineer_1 💤"));
+    assert!(vt.screen_contains(100, "💤 ❓ @engineer_1"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         model_params: Some(tau_proto::ModelParams::default()),
@@ -10618,6 +10631,7 @@ fn watched_agent_stats_redraws_status_row() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
             started_total: 3,
@@ -10629,12 +10643,12 @@ fn watched_agent_stats_redraws_status_row() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡"),
+        eventually_screen_contains(&vt, 100, "💤 ❓ @engineer_1"),
         "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡 %3/3"),
+        eventually_screen_contains(&vt, 100, "💤 ❓ @engineer_1 %3/3"),
         "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
@@ -10672,7 +10686,7 @@ fn watched_agent_stats_redraws_status_row() {
         eventually_screen_contains(
             &vt,
             100,
-            "🚀 @engineer_1 (worker display) investigate session 💡 %3/3",
+            "💤 🚀 @engineer_1 (worker display) investigate session %3/3",
         ),
         "the watched row should use the agent's own status title and display name: {:?}",
         vt.screen_text(100)
@@ -10693,7 +10707,7 @@ fn watched_agent_stats_redraws_status_row() {
         },
     ));
     assert!(
-        eventually_screen_contains(&vt, 100, "❓ @engineer_1 (worker display) 💡"),
+        eventually_screen_contains(&vt, 100, "💤 ❓ @engineer_1 (worker display)"),
         "a reloaded same-id row must not retain its former self-reported title: {:?}",
         vt.screen_text(100)
     );
@@ -10702,7 +10716,7 @@ fn watched_agent_stats_redraws_status_row() {
         .into_iter()
         .find(|row| {
             row.trim_start()
-                .starts_with("❓ @engineer_1 (worker display)")
+                .starts_with("💤 ❓ @engineer_1 (worker display)")
         })
         .expect("reloaded watched row");
     assert!(!reloaded_row.contains("investigate session"));
@@ -10759,11 +10773,11 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     let screen = vt.screen_text(100);
     let first = screen
         .iter()
-        .position(|line| line.contains("❓ @engineer_a 💡"))
+        .position(|line| line.contains("💡 ❓ @engineer_a"))
         .expect("engineer_a running row");
     let second = screen
         .iter()
-        .position(|line| line.contains("❓ @engineer_b 💡"))
+        .position(|line| line.contains("💡 ❓ @engineer_b"))
         .expect("engineer_b running row");
     assert!(
         first < second,
@@ -10845,8 +10859,8 @@ fn mixed_live_activity_blocks_keep_category_and_internal_order() {
             "read_two 0s pending",
             "queued-one (queued)",
             "queued-two (queued)",
-            "❓ @engineer_a 💤",
-            "❓ @engineer_b 💤",
+            "💤 ❓ @engineer_a",
+            "💤 ❓ @engineer_b",
         ]
         .map(|needle| {
             screen
@@ -10916,7 +10930,7 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
             .unwrap_or_else(|| panic!("missing pending response in {screen:?}"));
         let watched = screen
             .iter()
-            .position(|line| line.contains("❓ @engineer_1 💤"))
+            .position(|line| line.contains("💤 ❓ @engineer_1"))
             .unwrap_or_else(|| panic!("missing watched row in {screen:?}"));
         assert!(
             response < watched,
@@ -10956,9 +10970,9 @@ fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
         ));
     }
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @reviewer 💤"));
+    assert!(vt.screen_contains(100, "💤 ❓ @reviewer"));
     assert!(
-        vt.screen_contains(100, "❓ @worker via @reviewer 💤"),
+        vt.screen_contains(100, "💤 ❓ @worker via @reviewer"),
         "topology-only indirect rows must remain visible without stats"
     );
     let prompt_started = |agent: &str| {
@@ -10978,16 +10992,16 @@ fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
 
     renderer.handle(&prompt_started("worker"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @reviewer 💤 watching -> @worker"));
+    assert!(vt.screen_contains(100, "💤 ❓ @reviewer watching -> @worker"));
     assert!(
-        vt.screen_contains(100, "❓ @worker via @reviewer 💡"),
+        vt.screen_contains(100, "💡 ❓ @worker via @reviewer"),
         "via context and direct running state must coexist"
     );
 
     renderer.handle(&prompt_started("reviewer"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @reviewer 💡"));
-    assert!(vt.screen_contains(100, "❓ @worker via @reviewer 💡"));
+    assert!(vt.screen_contains(100, "💡 ❓ @reviewer"));
+    assert!(vt.screen_contains(100, "💡 ❓ @worker via @reviewer"));
     assert!(
         !vt.screen_contains(100, "@reviewer -> @worker"),
         "direct-running state must replace the transitive witness"
@@ -11041,6 +11055,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
             started_total: 13,
@@ -11054,7 +11069,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "❓ @engineer_1 💡 %13/13",
+        "💤 ❓ @engineer_1 %13/13",
     ));
 
     renderer.switch_agent("other_1".to_owned());
@@ -11064,6 +11079,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
             started_total: 42,
@@ -11078,12 +11094,12 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
     let watching_rows: Vec<_> = vt
         .screen_text(100)
         .into_iter()
-        .filter(|row| row.contains("❓ @engineer_1 💡"))
+        .filter(|row| row.contains("💤 ❓ @engineer_1"))
         .map(|row| row.trim_end().to_owned())
         .collect();
     assert_eq!(
         watching_rows,
-        vec!["❓ @engineer_1 💡 %42/42"],
+        vec!["💤 ❓ @engineer_1 %42/42"],
         "watched-agent row should update in place after transcript restore: {:?}",
         vt.screen_text(100)
     );
@@ -11134,6 +11150,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
             started_total: 15,
@@ -11147,7 +11164,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "❓ @engineer_1 💡 %15/15",
+        "💤 ❓ @engineer_1 %15/15",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -11177,7 +11194,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓ @engineer_1 💡 %15/15"),
+        vt.screen_contains(100, "💤 ❓ @engineer_1 %15/15"),
         "outer runtime state should remain running after the inner response finishes: {:?}",
         vt.screen_text(100)
     );
@@ -11216,6 +11233,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             work_status: Default::default(),
             navigation_mode: tau_proto::AgentNavigationMode::Active,
             runtime_state,
+            turn_activity: tau_proto::AgentTurnActivity::Idle,
             tools: Default::default(),
             context: Default::default(),
             estimated_api_cost: Default::default(),
@@ -11246,7 +11264,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
 
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "❓ @engineer_1 💤"),
+        vt.screen_contains(100, "💤 ❓ @engineer_1"),
         "an absent status snapshot is canonically unreported"
     );
 
@@ -11257,11 +11275,11 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
     ));
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @engineer_1 💡"));
+    assert!(vt.screen_contains(100, "💤 ❓ @engineer_1"));
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @engineer_1 💤"));
-    assert!(!vt.screen_contains(100, "❓ @engineer_1 💡"));
+    assert!(vt.screen_contains(100, "💤 ❓ @engineer_1"));
+    assert!(vt.screen_contains(100, "💤 ❓ @engineer_1"));
 
     renderer.handle(&watch_status(
         "status-working",
@@ -11269,7 +11287,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         Some("implement fix"),
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "🚀 @engineer_1 implement fix 💤"));
+    assert!(vt.screen_contains(100, "💤 🚀 @engineer_1 implement fix"));
 
     renderer.handle(&watch_status(
         "status-blocked",
@@ -11277,7 +11295,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         Some("await input"),
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "⛔️ @engineer_1 await input 💤"));
+    assert!(vt.screen_contains(100, "💤 ⛔️ @engineer_1 await input"));
 
     renderer.handle(&watch_status(
         "status-unknown",
@@ -11285,7 +11303,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         None,
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "❓ @engineer_1 💤"));
+    assert!(vt.screen_contains(100, "💤 ❓ @engineer_1"));
 
     renderer.handle(&watch_status(
         "status-done",
@@ -11341,7 +11359,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     ));
     sync(&handle);
 
-    assert!(eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡",));
+    assert!(eventually_screen_contains(&vt, 100, "💡 ❓ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -11370,7 +11388,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓ @engineer_1 💤"),
+        vt.screen_contains(100, "💤 ❓ @engineer_1"),
         "provider-fallback terminal should retain the watched status row: {:?}",
         vt.screen_text(100)
     );
@@ -11417,7 +11435,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     }));
     sync(&handle);
 
-    assert!(eventually_screen_contains(&vt, 100, "❓ @engineer_1 💡",));
+    assert!(eventually_screen_contains(&vt, 100, "💡 ❓ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -11446,7 +11464,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓ @engineer_1 💤"),
+        vt.screen_contains(100, "💤 ❓ @engineer_1"),
         "terminal prompt id should clear activity but retain the status row: {:?}",
         vt.screen_text(100)
     );
@@ -11525,7 +11543,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "❓ @engineer_1 💤"),
+        vt.screen_contains(100, "💤 ❓ @engineer_1"),
         "delayed start/create must retain, not reactivate, the status row: {:?}",
         vt.screen_text(100)
     );
@@ -13832,6 +13850,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         agent_id: agent_id("engineer_1"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 1,
             started_total: 3,
@@ -13875,16 +13894,16 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
             .status_prefix
             .as_ref()
             .map(|(text, _)| text.as_str()),
-        Some("🚀")
+        Some("💤 🚀")
     );
-    assert_eq!(leading, vec!["(review)", "review changes", "💡"]);
+    assert_eq!(leading, vec!["(review)", "review changes"]);
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["%2/3", "#133k/200k"]);
 
     let block = render_tool_block(&theme, &display);
     assert_eq!(
         priority_header_text(&block, 100),
-        "🚀 @engineer_1 (review) review changes 💡 %2/3 #133k/200k"
+        "💤 🚀 @engineer_1 (review) review changes %2/3 #133k/200k"
     );
     let wide_cells = priority_header_cells(&block, 100);
     let identity_start = wide_cells
@@ -13936,7 +13955,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     );
     let without_task_title = priority_header_text(&block, 19);
     assert!(
-        without_task_title.starts_with("🚀 @"),
+        without_task_title.starts_with("💤 🚀 @"),
         "{without_task_title:?}"
     );
     assert!(without_task_title.contains("🚀"), "{without_task_title:?}");
@@ -13996,6 +14015,7 @@ fn watched_agent_indirect_context_respects_width_priorities() {
         agent_id: agent_id("worker-with-long-id"),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
+        turn_activity: tau_proto::AgentTurnActivity::Idle,
         tools: tau_proto::AgentToolStats {
             in_flight: 0,
             started_total: 1,
@@ -14022,14 +14042,14 @@ fn watched_agent_indirect_context_respects_width_priorities() {
 
     assert_eq!(
         priority_header_text(&block, 100),
-        "🚀 @worker-with-long-id via @reviewer review changes 💤 %1/1 #67%"
+        "💤 🚀 @worker-with-long-id via @reviewer review changes %1/1 #67%"
     );
     let boundary = priority_header_text(&block, 39);
     assert!(boundary.contains("via @reviewer"), "{boundary:?}");
-    assert!(!boundary.contains("💤"), "{boundary:?}");
+    assert!(boundary.starts_with("💤 🚀 @"), "{boundary:?}");
     for width in [12, 16, 24, 40] {
         let text = priority_header_text(&block, width);
-        assert!(text.starts_with("🚀 @"), "{width}: {text:?}");
+        assert!(text.starts_with("💤 🚀 @"), "{width}: {text:?}");
         assert!(
             tau_term_screen::display_width(&text) <= width,
             "{width}: {text:?}"

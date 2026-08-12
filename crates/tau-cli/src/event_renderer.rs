@@ -1317,8 +1317,6 @@ struct ShellBlockState {
 enum StatusElement {
     /// Agent, role, model, or no-selection identity.
     Identity,
-    /// Selected agent's current self-reported work phase.
-    WorkStatus,
     /// Selected model's context usage and capacity.
     Context,
     /// Main-agent tool progress.
@@ -1348,7 +1346,7 @@ impl StatusElement {
     const fn priority(self) -> tau_cli_term::PriorityLinePriority {
         let value = match self {
             Self::Identity => 0,
-            Self::WorkStatus | Self::Context => 10,
+            Self::Context => 10,
             Self::Tools | Self::ActiveAgents => 20,
             Self::Description | Self::WorkTitle | Self::ModelAdjustment => 30,
             Self::Watchers => 40,
@@ -1641,8 +1639,19 @@ pub(crate) fn watched_agent_tool_display(
             no_leading_space: false,
         });
     }
+    let fallback_activity = match activity {
+        WatchedAgentActivity::Running => tau_proto::AgentTurnActivity::Responding,
+        WatchedAgentActivity::Idle | WatchedAgentActivity::Watching { .. } => {
+            tau_proto::AgentTurnActivity::Idle
+        }
+    };
+    let turn_activity = stats.map_or(fallback_activity, |stats| stats.turn_activity);
     rendered.status_prefix = Some((
-        watched_agent_work_status_symbol(work_status),
+        format!(
+            "{} {}",
+            crate::list_agents::turn_activity_symbol(turn_activity),
+            watched_agent_work_status_symbol(work_status)
+        ),
         ToolStatus::Progress,
     ));
     if let Some(title) = work_status.and_then(|status| status.title.as_deref()) {
@@ -1653,30 +1662,11 @@ pub(crate) fn watched_agent_tool_display(
         });
     }
     match activity {
-        WatchedAgentActivity::Idle => {
-            rendered.leading_segments.push(ToolLineSegment {
-                text: crate::list_agents::runtime_state_symbol(tau_proto::AgentRuntimeState::Idle)
-                    .to_owned(),
-                status: ToolStatus::Info,
-                no_leading_space: false,
-            });
-        }
-        WatchedAgentActivity::Running => {
-            rendered.leading_segments.push(ToolLineSegment {
-                text: crate::list_agents::runtime_state_symbol(
-                    tau_proto::AgentRuntimeState::Running,
-                )
-                .to_owned(),
-                status: ToolStatus::Info,
-                no_leading_space: false,
-            });
-        }
+        WatchedAgentActivity::Idle => {}
+        WatchedAgentActivity::Running => {}
         WatchedAgentActivity::Watching { witness } => {
             rendered.leading_segments.push(ToolLineSegment {
-                text: format!(
-                    "{} watching",
-                    crate::list_agents::runtime_state_symbol(tau_proto::AgentRuntimeState::Idle)
-                ),
+                text: "watching".to_owned(),
                 status: ToolStatus::Info,
                 no_leading_space: false,
             });
@@ -3477,24 +3467,27 @@ impl EventRenderer {
             self.current_model.as_ref(),
         ) {
             (Some(agent_id), _, _) => {
+                let (phase, title) = self.selected_agent_work_status(agent_id);
                 line.push(
                     StatusElement::Identity.priority(),
                     left,
-                    status_chip(&self.theme, names::STATUS_ROLE, format!("@{agent_id}")),
+                    status_chip(
+                        &self.theme,
+                        names::STATUS_ROLE,
+                        format!(
+                            "{} {phase} @{agent_id}",
+                            crate::list_agents::turn_activity_symbol(
+                                self.selected_agent_turn_activity(agent_id),
+                            ),
+                        ),
+                    ),
                 );
-                if let Some((phase, title)) = self.selected_agent_work_status(agent_id) {
+                if let Some(title) = title {
                     line.push(
-                        StatusElement::WorkStatus.priority(),
+                        StatusElement::WorkTitle.priority(),
                         left,
-                        status_chip(&self.theme, names::STATUS_ROLE, phase),
+                        status_chip(&self.theme, names::STATUS_ROLE, title),
                     );
-                    if let Some(title) = title {
-                        line.push(
-                            StatusElement::WorkTitle.priority(),
-                            left,
-                            status_chip(&self.theme, names::STATUS_ROLE, title),
-                        );
-                    }
                 }
                 if let Some(description) = self.agent_status_description(agent_id) {
                     line.push(
@@ -3714,14 +3707,33 @@ impl EventRenderer {
         self.handle.redraw();
     }
 
-    /// Returns the selected-agent work phase and escaped task title from the
-    /// authoritative complete stats snapshot.
-    fn selected_agent_work_status(&self, agent_id: &str) -> Option<(&'static str, Option<String>)> {
-        let status = &self.agent_stats.get(agent_id)?.work_status;
-        Some((
+    /// Returns detailed turn activity with a live-prompt fallback before stats.
+    fn selected_agent_turn_activity(&self, agent_id: &str) -> tau_proto::AgentTurnActivity {
+        self.agent_stats.get(agent_id).map_or_else(
+            || {
+                if self.main_agent_turn_active || self.active_agent_prompts.contains_key(agent_id) {
+                    tau_proto::AgentTurnActivity::Responding
+                } else {
+                    tau_proto::AgentTurnActivity::Idle
+                }
+            },
+            |stats| stats.turn_activity,
+        )
+    }
+
+    /// Returns the selected-agent work phase and escaped task title.
+    fn selected_agent_work_status(&self, agent_id: &str) -> (&'static str, Option<String>) {
+        let Some(status) = self
+            .agent_stats
+            .get(agent_id)
+            .map(|stats| &stats.work_status)
+        else {
+            return (crate::list_agents::work_status_symbol(None), None);
+        };
+        (
             crate::list_agents::work_status_symbol(Some(status.phase())),
             status.title().map(tau_proto::visible_escape_metadata),
-        ))
+        )
     }
 
     fn role_default_effort(&self) -> Option<tau_proto::Effort> {

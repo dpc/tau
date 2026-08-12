@@ -48,6 +48,7 @@ use crate::model::{
     verbosities_for_model,
 };
 use crate::pending_agent_discovery::PendingAgentDiscovery;
+use crate::tool_turn::ToolTurnCategories;
 use crate::turn::{PromptSubmission, TurnState};
 use crate::{AgentId, event_log as path_crate_event_log, extension as path_crate_extension};
 
@@ -1611,6 +1612,7 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
         ws_pool_delta: None,
     };
     let normalized_calls = vec![NormalizedFinishedToolCall {
+        turn_categories: ToolTurnCategories::default(),
         call: AgentToolCall {
             call_ref: None,
             id: "call-normalized".into(),

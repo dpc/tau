@@ -7396,8 +7396,11 @@ fn disconnected_tool_completes_pending_call() {
     );
     h.pending_tool_providers
         .insert(call_id.clone(), crate::test_connection_id(conn_id.clone()));
-    h.tool_turn
-        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.tool_turn.record_unqueued_in_flight(
+        cid.clone(),
+        call_id.clone(),
+        ToolTurnCategories::default(),
+    );
     if let Some(conv) = h.agents.get_mut(&cid) {
         conv.turn_state = AgentTurnState::ToolsRunning {
             remaining_calls: vec![call_id.clone()],

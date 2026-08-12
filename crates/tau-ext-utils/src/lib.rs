@@ -115,6 +115,9 @@ struct TimerRuntime {
     pending_invocations: HashMap<String, PendingInvocation>,
     /// Agents whose restore boundary succeeded and may receive timer prompts.
     replay_complete_agents: HashSet<AgentId>,
+    /// Agents whose last emitted complete indicator set contained
+    /// TimerScheduled.
+    reported_timer_agents: HashSet<AgentId>,
     /// Configured wire name for timer calls after optional tool-prefix scoping.
     timer_tool_name: Option<tau_proto::ToolName>,
     /// Configured wire name for papercut calls after optional tool-prefix
@@ -422,6 +425,7 @@ impl TimerRuntime {
             timers: HashMap::new(),
             pending_invocations: HashMap::new(),
             replay_complete_agents: HashSet::new(),
+            reported_timer_agents: HashSet::new(),
             timer_tool_name: None,
             papercut_tool_name: None,
             session_id: None,
@@ -474,12 +478,54 @@ impl TimerRuntime {
         if self.handle.is_none() {
             return Ok(());
         }
+        let before = self.timer_agents();
         let fires = self.collect_due(UnixMicros::now());
+        self.sync_timer_indicators_for(before)?;
         for fire in fires {
             let Some(handle) = &self.handle else {
                 continue;
             };
             handle.send(fire.into_internal_prompt_message())?;
+        }
+        Ok(())
+    }
+
+    /// Return agents that currently own at least one retained timer.
+    fn timer_agents(&self) -> HashSet<AgentId> {
+        self.timers.keys().map(|key| key.agent_id.clone()).collect()
+    }
+
+    /// Publish complete indicator sets for every agent whose timer presence
+    /// changed.
+    fn sync_timer_indicators_for(&mut self, mut candidates: HashSet<AgentId>) -> ClientResult<()> {
+        candidates.extend(self.timer_agents());
+        candidates.extend(self.reported_timer_agents.iter().cloned());
+        let current = self.timer_agents();
+        let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+        candidates.sort();
+        for agent_id in candidates {
+            let present = current.contains(&agent_id);
+            if present == self.reported_timer_agents.contains(&agent_id) {
+                continue;
+            }
+            let indicators = present
+                .then_some(tau_proto::AgentRuntimeIndicator::TimerScheduled)
+                .into_iter()
+                .collect();
+            let Some(handle) = &self.handle else {
+                continue;
+            };
+            handle.emit_transient(tau_proto::Event::AgentRuntimeIndicatorsDeclared(
+                tau_proto::AgentRuntimeIndicatorsDeclared {
+                    agent_id: agent_id.clone(),
+                    indicators,
+                },
+            ))?;
+            if present {
+                self.reported_timer_agents.insert(agent_id);
+            } else {
+                self.reported_timer_agents.remove(&agent_id);
+            }
         }
         Ok(())
     }
@@ -591,9 +637,10 @@ impl TimerRuntime {
     fn complete_agent_replay(&mut self, done: &AgentReplayComplete) -> ClientResult<()> {
         if done.error.is_none() {
             self.replay_complete_agents.insert(done.agent_id.clone());
+            self.sync_timer_indicators_for(HashSet::from([done.agent_id.clone()]))?;
             self.fire_due_now()?;
         } else {
-            self.drop_agent_restore_state(&done.agent_id);
+            self.drop_agent_restore_state(&done.agent_id)?;
         }
         Ok(())
     }
@@ -602,6 +649,7 @@ impl TimerRuntime {
         self.timers.clear();
         self.pending_invocations.clear();
         self.replay_complete_agents.clear();
+        self.reported_timer_agents.clear();
         self.session_id = None;
     }
 
@@ -622,13 +670,18 @@ impl TimerRuntime {
         self.replay_complete_agents.remove(agent_id);
         self.pending_invocations
             .retain(|_, pending| &pending.agent_id != agent_id);
+        // The harness clears the source contribution at unload. Forget the
+        // delivery cache so successful replay for a later reload republishes
+        // presence from the retained dormant timer map.
+        self.reported_timer_agents.remove(agent_id);
     }
 
-    fn drop_agent_restore_state(&mut self, agent_id: &AgentId) {
+    fn drop_agent_restore_state(&mut self, agent_id: &AgentId) -> ClientResult<()> {
         self.replay_complete_agents.remove(agent_id);
         self.pending_invocations
             .retain(|_, pending| &pending.agent_id != agent_id);
         self.timers.retain(|key, _| &key.agent_id != agent_id);
+        self.sync_timer_indicators_for(HashSet::from([agent_id.clone()]))
     }
 
     fn handle_live_tool(
@@ -650,6 +703,8 @@ impl TimerRuntime {
         let display_args = timer_action_display_args(&action);
         let TimerActionResult { result, outcome } =
             self.apply_timer_action(&pending.agent_id, action, now)?;
+        self.sync_timer_indicators_for(HashSet::from([pending.agent_id.clone()]))
+            .map_err(|error| error.to_string())?;
         Ok(TimerToolCompletion {
             result,
             display: timer_success_display(display_args, outcome),
@@ -1004,7 +1059,9 @@ fn handle_delivery(
             runtime.state_mut().session_id = Some(event.session_id.to_string());
         }
         Event::SessionShutdown(_) => runtime.state_mut().clear_session_state(),
-        Event::SessionAgentUnloaded(event) => runtime.state_mut().unload_agent(&event.agent_id),
+        Event::SessionAgentUnloaded(event) => {
+            runtime.state_mut().unload_agent(&event.agent_id);
+        }
         _ => {}
     }
     Ok(())
@@ -1193,7 +1250,9 @@ fn timer_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: vec![],
+        tags: vec![tau_proto::ToolTag::new(
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
+        )],
         enabled_by_default: true,
         background_support: None,
         examples: vec![],
@@ -1219,7 +1278,9 @@ fn papercut_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: vec![],
+        tags: vec![tau_proto::ToolTag::new(
+            tau_proto::TURN_MANIPULATOR_TOOL_TAG,
+        )],
         enabled_by_default: true,
         background_support: None,
         examples: vec![],

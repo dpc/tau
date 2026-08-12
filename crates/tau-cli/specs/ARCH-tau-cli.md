@@ -28,9 +28,10 @@ local code execution inputs rather than untrusted data.
 The prompt's right-side context renders `<cwd> <&session-id>` as one
 `prompt.cwd`-styled unit. If prompt input needs that space, terminal overflow
 hides the complete unit. The bottom status line identifies the selected role or
-agent but does not repeat the session id. Its independently hideable elements
-use ascending importance bands: identity `0`, selected-agent work phase and
-context `10`, tool and active side-agent activity `20`, agent description,
+agent but does not repeat the session id. Its mandatory priority-zero selected
+agent identity is the single `<turn-emoji> <work-emoji> @agent` unit. Other
+independently hideable elements use ascending importance bands: context `10`,
+tool and active side-agent activity `20`, agent description,
 selected-agent task title, and model adjustments `30`, watchers `40`, runtime
 estimated API cost and weekly quota `50`, UI-I/O
 diagnostics `60`, and the redraw
@@ -323,6 +324,10 @@ projects width-aware aligned display columns, including each agent's canonical
 self/inclusive creator-subtree estimated cost pair when available and a compact
 emoji projection of its canonical work-status phase and current-turn state,
 plus its canonical title, without changing stable row identity.
+Human selected-agent and watched-agent rows prefix identity with detailed turn
+activity and work-status emoji. Stable `tau agent list` TSV keeps machine-facing
+text and exposes the detailed activity as a textual field rather than adopting
+that visual prefix.
 The presentation omits role and the lifecycle field that is constant for
 picker-eligible rows. Membership and work status
 come from the fresh roster RPC, while cost comes from the input

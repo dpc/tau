@@ -317,3 +317,12 @@ Every supervised extension crosses the fail-closed launch isolation boundary in
 The harness installs user and mount namespaces outside the complete configured
 argv, masks secrets before selecting cwd, and denies Secret authority to
 test-only in-process connections.
+
+## Ambient runtime indicators
+
+Configured Tool/Core extensions may publish a complete bounded set of ambient
+runtime indicators for each live agent. The harness aggregates current
+configured-source contributions by union. It clears a source contribution when
+that connection disconnects, clears an agent's contributions when the agent
+unloads, and clears all contributions on session rollover; these transient
+declarations never enter replay.

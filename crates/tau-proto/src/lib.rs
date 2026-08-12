@@ -962,6 +962,13 @@ impl<'de> serde::Deserialize<'de> for ModelTag {
 #[serde(transparent)]
 pub struct ToolTag(String);
 
+/// Reserved tool tag for calls that may mutate state or cause side effects.
+pub const TURN_MANIPULATOR_TOOL_TAG: &str = "tau:turn:manipulator";
+/// Reserved tool tag for calls that retrieve data without intentional mutation.
+pub const TURN_DATA_FETCH_TOOL_TAG: &str = "tau:turn:data_fetch";
+/// Reserved tool tag for calls whose primary purpose is waiting.
+pub const TURN_WAIT_TOOL_TAG: &str = "tau:turn:wait";
+
 impl ToolTag {
     /// Maximum allowed length for a tool tag, in bytes.
     pub const MAX_LEN: usize = 256;

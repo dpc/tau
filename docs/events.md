@@ -252,7 +252,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   agents watched by one watcher agent. Empty watched sets are valid after a
   disable; late subscribers receive only current non-empty snapshots.
 - **`agent.stats_updated`** — Transient, content-free operational snapshot for
-  one loaded agent: runtime state, current/cumulative tool counters, and latest
+  one loaded agent: binary runtime state, required detailed turn activity,
+  current/cumulative tool counters, and latest
   context usage, plus runtime-only self and inclusive authenticated-creator
   subtree estimated equivalent API costs and current canonical work-status
   phase/title. Creator-subtree membership follows only same-session
@@ -260,6 +261,11 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   `parent_agent`; both costs reset on session/runtime reset. A descendant
   increment publishes a complete snapshot for it and each loaded creator
   ancestor. It replaces the old delegation-specific progress stream.
+- **`agent.runtime_indicators_declared`** *(Tool/Core extension)* — A bounded,
+  transient complete replacement of one configured source's ambient indicators
+  for a live agent. The harness unions source contributions and clears them on
+  source disconnect, agent unload, and session rollover. The only current value
+  is `timer_scheduled`; declarations never enter replay.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
   Canceling exact ordinary checkpointed inference also releases its runtime
@@ -433,6 +439,9 @@ their selected models.
 Tool events separate extension declarations from harness-owned accepted state,
 agent requests, and harness dispatch. The registration lifecycle contract is
 [SPEC-tool-declarations-and-canonical-state](../specs/SPEC-tool-declarations-and-canonical-state.md).
+Tool specs may classify active calls for detailed turn presentation with the
+reserved `tau:turn:manipulator`, `tau:turn:data_fetch`, and `tau:turn:wait`
+tags. Calls without one of these tags conservatively classify as manipulator.
 
 - **`tool.registration_declared`** *(Tool/Core extension)* — A tool provider
   proposes a tool
@@ -957,7 +966,10 @@ context without restarting timers or live fanout.
 
 `agent.stats_updated` is a transient, must-pass, immutable complete operational
 snapshot for one loaded agent. Its required `navigation_mode` is independent of
-`runtime_state`; it also carries the current canonical work-status phase/title,
+`runtime_state`; its required detailed turn activity reduces response generation,
+active manipulator or uncategorized calls, data-fetch calls, wait calls,
+scheduled timers, and idle in that precedence order. It also carries the current
+canonical work-status phase/title,
 self-only `estimated_api_cost`, and inclusive
 `creator_subtree_estimated_api_cost`. The subtree field defaults to zero when
 decoding older peers and, like every stats field, is transient rather than

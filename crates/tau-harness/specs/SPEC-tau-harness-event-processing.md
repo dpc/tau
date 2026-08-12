@@ -109,6 +109,10 @@ the downstream consumer revalidates captured generation/session and private
 route identity. Reports remain outside semantic history; only the harness
 publishes canonical progress/completion. See
 [SPEC-shell-command-reports-and-canonical-facts](../../../specs/SPEC-shell-command-reports-and-canonical-facts.md).
+Tool/Core ambient-indicator declarations likewise cross ordinary interception
+and commit before current-generation and live-agent revalidation updates the
+harness-owned transient per-source contribution. They never enter semantic
+history or replay.
 Dedicated configured-extension notice requests are handled inline and converted
 to harness-authored `extension.notice` events. The request carries only message
 and level; the harness caps critical to warning and fixes source, kind,

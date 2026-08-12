@@ -343,6 +343,9 @@ impl EventName {
     pub const AGENT_WATCHES_UPDATED: Self =
         Self::from_static(EventCategory::Agent, "watches_updated");
     pub const AGENT_STATS_UPDATED: Self = Self::from_static(EventCategory::Agent, "stats_updated");
+    /// Configured-extension complete ambient runtime-indicator declaration.
+    pub const AGENT_RUNTIME_INDICATORS_DECLARED: Self =
+        Self::from_static(EventCategory::Agent, "runtime_indicators_declared");
     /// Durable harness-authored replacement of initialized agent context.
     pub const AGENT_INITIALIZATION_CONTEXT_SET: Self =
         Self::from_static(EventCategory::Agent, "initialization_context_set");

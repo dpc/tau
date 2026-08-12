@@ -771,6 +771,13 @@ fn routed_peer_requests_complete_from_terminal_reports() {
                 })),
             )
             .expect("route peer request");
+        assert_eq!(
+            harness
+                .agent_stats_snapshot(&cid)
+                .expect("stats after route")
+                .turn_activity,
+            tau_proto::AgentTurnActivity::Manipulating
+        );
 
         let report = match outcome {
             "result" => Event::ToolResultReported(tau_proto::ToolResult {
@@ -852,6 +859,14 @@ fn routed_peer_requests_complete_from_terminal_reports() {
                 .contains_key(call_id.as_str())
         );
         assert!(harness.completed_tool_calls.contains(call_id.as_str()));
+        assert_eq!(
+            harness
+                .agent_stats_snapshot(&cid)
+                .expect("stats after terminal")
+                .turn_activity,
+            tau_proto::AgentTurnActivity::Idle,
+            "{outcome} must clear peer-call activity"
+        );
     }
 }
 
@@ -904,6 +919,151 @@ fn routed_peer_request_owner_disconnect_closes_and_cleans_up() {
     );
     assert!(!harness.peer_tool_requests.contains("disconnect-request"));
     assert!(harness.completed_tool_calls.contains("disconnect-request"));
+}
+
+/// Tool/Core ambient declarations must pass ordinary admission, replace one
+/// source contribution, union sources, and update stats without persistence.
+#[test]
+fn ambient_indicator_declarations_replace_and_union_through_protocol_intake() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    for (connection, name) in [("timer-a", "configured-a"), ("timer-b", "configured-b")] {
+        connect_ready_configured_extension(
+            &mut harness,
+            connection,
+            name,
+            tau_proto::ClientKind::Tool,
+        );
+    }
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+    let emit = |indicators| {
+        TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::AgentRuntimeIndicatorsDeclared(
+                tau_proto::AgentRuntimeIndicatorsDeclared {
+                    agent_id: agent_id.clone(),
+                    indicators,
+                },
+            )),
+            persist: true,
+        }))
+    };
+
+    harness
+        .handle_extension_event(
+            "timer-a",
+            emit(vec![tau_proto::AgentRuntimeIndicator::TimerScheduled]),
+        )
+        .expect("first source");
+    harness
+        .handle_extension_event(
+            "timer-b",
+            emit(vec![tau_proto::AgentRuntimeIndicator::TimerScheduled]),
+        )
+        .expect("second source");
+    assert_eq!(
+        harness
+            .agent_stats_snapshot(&cid)
+            .expect("union stats")
+            .turn_activity,
+        tau_proto::AgentTurnActivity::TimerScheduled
+    );
+    let roster = harness
+        .build_session_agent_list(
+            &harness.current_session_id.clone(),
+            tau_proto::SessionAgentListScope::Current,
+        )
+        .expect("live roster");
+    assert_eq!(
+        roster
+            .iter()
+            .find(|entry| entry.agent_id == agent_id)
+            .and_then(|entry| entry.turn_activity),
+        Some(tau_proto::AgentTurnActivity::TimerScheduled)
+    );
+
+    harness
+        .handle_extension_event("timer-a", emit(Vec::new()))
+        .expect("replace first source");
+    assert_eq!(
+        harness
+            .agent_stats_snapshot(&cid)
+            .expect("remaining source stats")
+            .turn_activity,
+        tau_proto::AgentTurnActivity::TimerScheduled
+    );
+    harness
+        .handle_extension_event("timer-b", emit(Vec::new()))
+        .expect("replace second source");
+    assert_eq!(
+        harness
+            .agent_stats_snapshot(&cid)
+            .expect("cleared stats")
+            .turn_activity,
+        tau_proto::AgentTurnActivity::Idle
+    );
+
+    harness
+        .handle_extension_event(
+            "timer-a",
+            emit(vec![tau_proto::AgentRuntimeIndicator::TimerScheduled]),
+        )
+        .expect("restore source contribution");
+    harness.handle_disconnect(&tau_proto::ConnectionId::parse("timer-a").expect("connection"));
+    assert_eq!(
+        harness
+            .agent_stats_snapshot(&cid)
+            .expect("disconnect cleanup stats")
+            .turn_activity,
+        tau_proto::AgentTurnActivity::Idle
+    );
+}
+
+/// Duplicate complete-set entries violate the bounded declaration contract and
+/// disconnect the configured source instead of changing ambient state.
+#[test]
+fn ambient_indicator_declaration_rejects_duplicates() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "timer-source",
+        "configured-timer",
+        tau_proto::ClientKind::Tool,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+    harness
+        .handle_extension_event(
+            "timer-source",
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(Event::AgentRuntimeIndicatorsDeclared(
+                    tau_proto::AgentRuntimeIndicatorsDeclared {
+                        agent_id,
+                        indicators: vec![
+                            tau_proto::AgentRuntimeIndicator::TimerScheduled,
+                            tau_proto::AgentRuntimeIndicator::TimerScheduled,
+                        ],
+                    },
+                )),
+                persist: false,
+            })),
+        )
+        .expect("declaration intake");
+    assert_eq!(
+        harness
+            .agent_stats_snapshot(&cid)
+            .expect("unchanged stats")
+            .turn_activity,
+        tau_proto::AgentTurnActivity::Idle
+    );
+    assert!(
+        harness
+            .extensions
+            .entries
+            .get("timer-source")
+            .is_none_or(|entry| { entry.state == crate::extension::ExtensionState::Disconnected })
+    );
 }
 
 /// Trusted peer-internal requests use loaded-agent runtime correlation for

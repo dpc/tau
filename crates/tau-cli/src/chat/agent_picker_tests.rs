@@ -25,6 +25,7 @@ fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::Session
             )
             .expect("valid status"),
         ),
+        turn_activity: Some(tau_proto::AgentTurnActivity::Idle),
     }
 }
 
@@ -39,10 +40,10 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     let mut other = running.clone();
     other.agent_id = tau_proto::AgentId::parse("other").expect("valid other agent id");
     let pick_auto = |rows: &str| {
-        assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
+        assert!(rows.contains("auto\tlive\trunning\tidle\tactive_auto\t"));
         assert!(
             rows.lines()
-                .all(|row| row.ends_with("\t$.00/$2.1\t🚀\tshipping picker status\t💡"))
+                .all(|row| row.ends_with("\t$.00/$2.1\t🚀\tshipping picker status\t💤"))
         );
         Ok(Some("auto\tlive\trunning\tactive_auto".to_owned()))
     };
@@ -133,7 +134,7 @@ fn picker_launches_for_one_candidate() {
             |_| None,
             |rows| {
                 picker_launched.set(true);
-                assert!(rows.starts_with("auto\tlive\trunning\tactive_auto\t"));
+                assert!(rows.starts_with("auto\tlive\trunning\tidle\tactive_auto\t"));
                 Ok(None)
             },
             || {

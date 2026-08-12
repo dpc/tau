@@ -40,7 +40,8 @@ memory-only daemon runs.
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, user-shell-report, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
-terminal-output, custom-event, attached-UI-liveness, and metadata-request slices
+terminal-output, custom-event, attached-UI-liveness, metadata-request, and
+ambient-runtime-indicator slices
 now use generic `Emit` publication, immutable authenticated
 publisher snapshots, source-aware admission, and downstream processing as
 required by
@@ -155,6 +156,10 @@ This component implements the harness-owned parts of [SPEC-agent-watch](../../..
 The harness owns runtime-only semantic work status for each loaded agent and
 projects each current canonical phase/title through the complete transient
 agent-stats snapshot as well as validated reports durably to current watchers.
+The harness also owns the detailed transient turn-activity reducer. It combines
+provider activity, prompt-frozen static tool categories, and the union of
+configured Tool/Core ambient-indicator contributions without changing binary
+runtime or outer-turn semantics.
 Successful no-tool responses while Working remain durable assistant transcript
 entries but withhold watch, worker-result, and detach projections. Each such
 candidate starts another challenge in the same outer turn, without a challenge
@@ -477,8 +482,8 @@ validated committed membership before runtime restoration and updated only after
 later membership commits. Restore/commit failures invalidate the projection.
 The RPC checks the entry limit before cloning ids, joins live runtime/navigation
 state, then adds shallow bounded creation facts.
-Live rows also copy phase and title directly from each agent's harness-owned
-runtime work status.
+Live rows also copy phase/title and detailed turn activity directly from each
+agent's harness-owned runtime projection.
 Results are correlated and requester-directed; they are not events and never
 enter persistence, interception, publication, subscription replay, or extension
 delivery. Exact wire behavior is specified by
