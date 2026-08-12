@@ -106,8 +106,16 @@ terminal errors, exact cancellation holds with hard timeouts, deliberate
 disconnect, and named barriers whose participants must all submit before any
 lane completes. It also has one narrow adjacent action pair for the allowlisted
 `restart_test_dummy` empty-argument call and exact successful result; arbitrary
-tool names, arguments, and results remain outside the grammar. The one closed
-reactive-recovery sequence requires an ordinary `ContextOverflow` with empty
+tool names, arguments, and results remain outside the grammar. A separate sole
+typed-image lane permits one fixed empty-argument dummy call, its one native 1×1
+PNG result, and one clean-resume continuation. The fake accepts that result only
+when its call identity, type, dimensions, detail, canonical bytes, and BLAKE3
+digest are exact and it accepts the resumed prompt only when that image remains
+once. Its durable snapshot independently checks the same digest and balanced
+call/result round; trace and terminal metadata remain byte-free. The one closed
+image fixture refines the root
+[SPEC-typed-image-tool-results](../../../specs/SPEC-typed-image-tool-results.md).
+The one closed reactive-recovery sequence requires an ordinary `ContextOverflow` with empty
 semantic output and `context_window_exceeded`, immediately followed by
 `ReactiveOpaqueCompaction` and one `ReactiveCompactedOpaqueText` continuation.
 The fake verifies inference versus standalone operation, the rejected prompt's

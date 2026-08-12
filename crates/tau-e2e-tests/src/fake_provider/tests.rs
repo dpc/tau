@@ -193,6 +193,37 @@ fn standalone_compaction_capability_requires_a_dedicated_action() {
     }
 }
 
+/// Rejects a typed-image sequence whose call and result identities differ so
+/// the image fixture cannot become a general-purpose action grammar.
+#[test]
+fn typed_image_scenario_requires_one_correlated_closed_lane() {
+    let scenario = ScenarioV2::new(
+        "invalid-typed-image",
+        vec![ScenarioLaneV2 {
+            ctx_id: "typed-image".to_owned(),
+            actions: vec![
+                ScenarioActionV2::TypedImageToolCall {
+                    user_text: "inspect".to_owned(),
+                    call_id: "call-a".into(),
+                },
+                ScenarioActionV2::TypedImageToolResult {
+                    call_id: "call-b".into(),
+                    response: "live".to_owned(),
+                },
+                ScenarioActionV2::TypedImageReplay {
+                    user_text: "continue".to_owned(),
+                    call_id: "call-a".into(),
+                    response: "replayed".to_owned(),
+                },
+            ],
+        }],
+    );
+    assert!(
+        validation::validate_v2(&scenario).is_err(),
+        "typed-image action identities must remain correlated"
+    );
+}
+
 /// HumanUi fixture matching projects expected typed text and never invents a
 /// decoded semantic value from the intentionally non-injective provider form.
 #[test]

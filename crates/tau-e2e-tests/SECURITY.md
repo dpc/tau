@@ -131,6 +131,13 @@ fixture. Its closed grammar permits only fixed Working, invalid, Done, and
 Blocked reports plus fixed no-side-effect dummy calls. It adds no network,
 shell, arbitrary tool, or provider authority.
 
+The typed-image replay scenario fixes the dummy to one compiled 1×1 PNG and
+permits exactly one provider-authored empty-argument call, one image-bearing
+result, and one post-resume prompt. The fake and durable snapshot compare only
+type, dimensions, detail, and BLAKE3 digest in diagnostics; no image bytes enter
+the bounded provider trace, terminal metadata, or generic fixture observation.
+It adds no image file, decoder, network, shell, or runtime-control input.
+
 The standalone-compaction acceptance actions are the fake's sole
 standalone-compaction opt-in: all other scenarios continue publishing that
 capability as false. They accept a nonempty harness-owned compact transcript,

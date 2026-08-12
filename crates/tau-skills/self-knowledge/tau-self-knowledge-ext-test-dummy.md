@@ -11,10 +11,14 @@ advertise: false
 
 ## Features
 
-- Registers `restart_test_dummy`, a tool that historically either exits the extension process or returns an error at random.
+- Registers `restart_test_dummy`, a tool that historically either exits the extension process or returns an error at random, and disabled-by-default `typed_image_test_dummy`.
 - Can be configured with deterministic `restart_mode` for tests: `random`,
   `success`, `error`, `exit`, `hold_no_side_effect`, or
   `hold_until_success_release`.
+- `typed_image: true` enables `typed_image_test_dummy`, which returns a fixed
+  in-memory 1×1 PNG as typed provider content for
+  the hermetic durable-replay test. It accepts no arguments and does not read or
+  write image files.
 - `hold_no_side_effect` accepts one no-argument invocation, emits correlated
   readiness progress after its bounded worker starts, and performs no
   filesystem, network, environment, or child-process operation. It joins on
@@ -44,6 +48,7 @@ extensions: {
     enable: true,
     config: {
       restart_mode: "success", // also hold_no_side_effect | hold_until_success_release
+      typed_image: false, // enables typed_image_test_dummy
       // Release mode additionally requires:
       // release_socket_path: "/private/fixture/release.sock",
       // release_nonce: "fixture-generated-nonce",

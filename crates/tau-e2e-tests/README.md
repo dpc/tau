@@ -17,7 +17,8 @@ TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p tau-e2e-tests --test core_
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round
-through `tau-ext-test-dummy`, current-status reminders and final gating through
+through `tau-ext-test-dummy`, one typed-image tool round with exact durable
+replay after clean restart, current-status reminders and final gating through
 the real built-in `status` handler in both parallel orders with accepted and
 rejected reports plus Done/Blocked completion, explicit local-only standalone-compaction
 replacement plus terminal provider-error/cancellation recovery and later

@@ -60,8 +60,20 @@ enum FixtureMode {
 struct FixtureToolSurface {
     /// Optional exact deterministic dummy-tool binary.
     dummy_tool_bin: Option<PathBuf>,
+    /// Exact closed deterministic behavior selected for the dummy tool.
+    dummy_mode: FixtureDummyMode,
     /// Whether the role exposes the harness-owned status tool.
     status_policy: bool,
+}
+
+/// One fixture-owned deterministic dummy behavior.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum FixtureDummyMode {
+    /// Return the ordinary successful text result.
+    #[default]
+    Success,
+    /// Return the one fixed typed image result.
+    TypedImage,
 }
 
 impl DeterministicFixture {
@@ -88,6 +100,7 @@ impl DeterministicFixture {
             fake_provider_bin,
             FixtureToolSurface {
                 dummy_tool_bin,
+                dummy_mode: FixtureDummyMode::Success,
                 status_policy: scenario.uses_status_policy(),
             },
             FixtureMode::Standard,
@@ -113,6 +126,34 @@ impl DeterministicFixture {
             scenario.lanes.len(),
             fake_provider_bin,
             FixtureToolSurface::default(),
+            FixtureMode::Standard,
+        )
+    }
+
+    /// Creates the one closed typed-image replay fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact binaries, generated
+    /// configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_typed_image_v2(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+        dummy_tool_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface {
+                dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                dummy_mode: FixtureDummyMode::TypedImage,
+                status_policy: false,
+            },
             FixtureMode::Standard,
         )
     }
@@ -209,6 +250,7 @@ impl DeterministicFixture {
             fake_provider_bin,
             FixtureToolSurface {
                 dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                dummy_mode: FixtureDummyMode::Success,
                 status_policy: false,
             },
             FixtureMode::SessionRestoreInterruptedTool,
@@ -236,6 +278,7 @@ impl DeterministicFixture {
             fake_provider_bin,
             FixtureToolSurface {
                 dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                dummy_mode: FixtureDummyMode::Success,
                 status_policy: false,
             },
             FixtureMode::SessionRestoreMixed,
@@ -291,6 +334,7 @@ impl DeterministicFixture {
         let core_shell_enabled = mode == FixtureMode::CoreShell;
         let FixtureToolSurface {
             dummy_tool_bin,
+            dummy_mode,
             status_policy,
         } = tool_surface;
         let tempdir = TempDir::new()?;
@@ -374,12 +418,15 @@ impl DeterministicFixture {
                             "hold_no_side_effect"
                         } else {
                             "success"
-                        }
+                        },
+                        "typed_image": dummy_mode == FixtureDummyMode::TypedImage,
                     },
                 }),
             );
             if status_policy {
                 serde_json::json!(["status", "restart_test_dummy"])
+            } else if dummy_mode == FixtureDummyMode::TypedImage {
+                serde_json::json!([tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME])
             } else {
                 serde_json::json!(["restart_test_dummy"])
             }

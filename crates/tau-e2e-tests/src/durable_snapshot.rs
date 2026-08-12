@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use tau_core::{AgentStore, PersistedAgentEvent, PersistedSessionEvent, SessionStore};
-use tau_proto::{AgentId, AgentMetadataKey, CborValue, Event, SessionId};
+use tau_proto::{
+    AgentId, AgentMetadataKey, CborValue, Event, SessionId, ToolCallId, ToolResultContentPart,
+};
 
 /// One authoritative session-membership and agent-transcript snapshot.
 #[derive(Clone, Debug, PartialEq)]
@@ -97,5 +99,39 @@ impl DurableSnapshot {
             .metadata()
             .get(&AgentMetadataKey::new(key))
             .map(|entry| entry.value.clone()))
+    }
+
+    /// Returns the BLAKE3 digest for the sole typed image on one canonical tool
+    /// result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless exactly one durable canonical result with
+    /// `call_id` contains exactly one typed image.
+    pub fn image_tool_result_digest(
+        &self,
+        call_id: &ToolCallId,
+    ) -> Result<blake3::Hash, Box<dyn std::error::Error>> {
+        let results = self
+            .agent_events
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ProviderToolResult(result) if &result.call_id == call_id => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [result] = results.as_slice() else {
+            return Err(format!(
+                "expected one canonical tool result for `{call_id}`, found {}",
+                results.len()
+            )
+            .into());
+        };
+        let [ToolResultContentPart::Image(image)] = result.provider_content.as_slice() else {
+            return Err(
+                format!("expected one typed image on canonical tool result `{call_id}`").into(),
+            );
+        };
+        Ok(blake3::hash(&image.data))
     }
 }

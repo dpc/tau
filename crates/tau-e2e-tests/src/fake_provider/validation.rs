@@ -558,6 +558,57 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
             "message scenario requires one closed main call/result lane and one matching inbound lane",
         ));
     }
+    let typed_image_lanes = scenario
+        .lanes
+        .iter()
+        .filter(|lane| {
+            lane.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    ScenarioActionV2::TypedImageToolCall { .. }
+                        | ScenarioActionV2::TypedImageToolResult { .. }
+                        | ScenarioActionV2::TypedImageReplay { .. }
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if !typed_image_lanes.is_empty()
+        && (scenario.lanes.len() != 1
+            || typed_image_lanes.len() != 1
+            || !matches!(
+                typed_image_lanes[0].actions.as_slice(),
+                [
+                    ScenarioActionV2::TypedImageToolCall {
+                        user_text: initial_user_text,
+                        call_id,
+                    },
+                    ScenarioActionV2::TypedImageToolResult {
+                        call_id: result_id,
+                        response: live_response,
+                    },
+                    ScenarioActionV2::TypedImageReplay {
+                        user_text: replay_user_text,
+                        call_id: replay_id,
+                        response: replay_response,
+                    },
+                ] if !initial_user_text.is_empty()
+                    && initial_user_text.len() <= 4 * 1024
+                    && !replay_user_text.is_empty()
+                    && replay_user_text.len() <= 4 * 1024
+                    && !call_id.is_empty()
+                    && call_id.len() <= 256
+                    && call_id == result_id
+                    && call_id == replay_id
+                    && !live_response.is_empty()
+                    && live_response.len() <= 4 * 1024
+                    && !replay_response.is_empty()
+                    && replay_response.len() <= 4 * 1024
+            ))
+    {
+        return Err(ClientError::handler(
+            "typed-image scenario requires one bounded call/result/replay lane",
+        ));
+    }
     if barriers
         .values()
         .any(|(participants, lanes)| *participants != lanes.len())

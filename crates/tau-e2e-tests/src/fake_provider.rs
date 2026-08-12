@@ -111,6 +111,17 @@ impl ScenarioConfig {
                 })
         )
     }
+
+    /// Returns whether the closed scenario needs the typed-image route.
+    fn enables_typed_image(&self) -> bool {
+        matches!(
+            self,
+            Self::V2(scenario)
+                if scenario.lanes.iter().flat_map(|lane| &lane.actions).any(|action| {
+                    matches!(action, ScenarioActionV2::TypedImageToolCall { .. })
+                })
+        )
+    }
 }
 
 /// Mutable validated scenario, lane, hold, barrier, and checkpoint state.
@@ -348,6 +359,7 @@ impl TauExtension for FakeProvider {
                     cx.config.scenario.enables_standalone_compaction();
                 let supports_parallel_tool_calls =
                     cx.config.scenario.supports_parallel_tool_calls();
+                let supports_typed_image = cx.config.scenario.enables_typed_image();
                 cx.state.scenario = Some(cx.config.scenario);
                 cx.state.lane_cursors = restored.cursors;
                 cx.state.agent_lanes = restored.agent_lanes;
@@ -359,6 +371,7 @@ impl TauExtension for FakeProvider {
                         FakeModelCapabilities {
                             standalone_compaction: supports_standalone_compaction,
                             parallel_tool_calls: supports_parallel_tool_calls,
+                            typed_image: supports_typed_image,
                         },
                     )))?;
                 Ok(())
@@ -429,6 +442,8 @@ struct FakeModelCapabilities {
     standalone_compaction: bool,
     /// Whether one provider response may contain parallel calls.
     parallel_tool_calls: bool,
+    /// Whether this route accepts typed image tool-result content.
+    typed_image: bool,
 }
 
 fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared {
@@ -438,8 +453,16 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             display_name: Some("Deterministic test model".to_owned()),
             tags: Vec::new(),
             supported_tool_types: vec![ToolType::Function],
-            input_modalities: vec![InputModality::Text],
-            tool_result_modalities: Vec::new(),
+            input_modalities: if capabilities.typed_image {
+                vec![InputModality::Text, InputModality::Image]
+            } else {
+                vec![InputModality::Text]
+            },
+            tool_result_modalities: if capabilities.typed_image {
+                vec![InputModality::Image]
+            } else {
+                Vec::new()
+            },
             supports_parallel_tool_calls: capabilities.parallel_tool_calls,
             default_affinity: 0,
             context_window: 16_384,
@@ -1489,6 +1512,8 @@ impl FakeState {
             | ScenarioActionV2::CompactedOpaqueText { response, .. }
             | ScenarioActionV2::ReactiveCompactedOpaqueText { response, .. }
             | ScenarioActionV2::DummyToolResult { response, .. }
+            | ScenarioActionV2::TypedImageToolResult { response, .. }
+            | ScenarioActionV2::TypedImageReplay { response, .. }
             | ScenarioActionV2::DummyToolRepair { response, .. }
             | ScenarioActionV2::MessageSenderResult { response, .. }
             | ScenarioActionV2::MessageInbound { response, .. }
@@ -1536,9 +1561,18 @@ impl FakeState {
             ScenarioActionV2::StandaloneCompactionHold { timeout_ms } => {
                 self.emit_hold_until_cancel(prompt, handle, timeout_ms)
             }
-            ScenarioActionV2::DummyToolCall { call_id, .. } => {
-                emit_dummy_tool_call(prompt, handle, call_id)
-            }
+            ScenarioActionV2::DummyToolCall { call_id, .. } => emit_dummy_tool_call(
+                prompt,
+                handle,
+                call_id,
+                tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME,
+            ),
+            ScenarioActionV2::TypedImageToolCall { call_id, .. } => emit_dummy_tool_call(
+                prompt,
+                handle,
+                call_id,
+                tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME,
+            ),
             action @ (ScenarioActionV2::AgentStartCall { .. }
             | ScenarioActionV2::MessageCall { .. }
             | ScenarioActionV2::AgentWatchCall { .. }) => {
@@ -1862,8 +1896,13 @@ impl FakeState {
         action: &ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
-            ScenarioActionV2::DummyToolCall { .. } => {
-                let tool_name = tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME;
+            ScenarioActionV2::DummyToolCall { .. }
+            | ScenarioActionV2::TypedImageToolCall { .. } => {
+                let tool_name = if matches!(action, ScenarioActionV2::TypedImageToolCall { .. }) {
+                    tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+                } else {
+                    tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME
+                };
                 let expected_schema = serde_json::json!({
                     "type": "object",
                     "properties": {},
@@ -1894,6 +1933,11 @@ impl FakeState {
                 {
                     return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
                 }
+            }
+            ScenarioActionV2::TypedImageToolResult { call_id, .. }
+            | ScenarioActionV2::TypedImageReplay { call_id, .. } => {
+                require_typed_image_tool_result(prompt, call_id)
+                    .map_err(|detail| self.mismatch(cursor, detail))?;
             }
             ScenarioActionV2::DummyToolRepair {
                 call_id,
@@ -2459,8 +2503,9 @@ fn emit_dummy_tool_call(
     prompt: &tau_proto::AgentPromptCreated,
     handle: &tau_client::ClientHandle,
     call_id: tau_proto::ToolCallId,
+    tool_name: &str,
 ) -> ClientResult<()> {
-    let tool_name = ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME);
+    let tool_name = ToolName::new(tool_name);
     handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
         prompt,
         vec![ContextItem::ToolCall(ToolCallItem {
@@ -2527,6 +2572,54 @@ fn require_tool_result(
     (matches == 1)
         .then_some(())
         .ok_or("successful tool result mismatch")
+}
+
+/// Requires the one fixed image-bearing dummy result in a provider prompt.
+fn require_typed_image_tool_result(
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: &tau_proto::ToolCallId,
+) -> Result<(), &'static str> {
+    let results = prompt
+        .context
+        .flatten_iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(result) = results.first() else {
+        return Err("typed image result is absent");
+    };
+    if results.len() != 1 {
+        return Err("typed image result count mismatch");
+    }
+    if result.call_id != *call_id {
+        return Err("typed image result call identity mismatch");
+    }
+    if result.tool_type != ToolType::Function {
+        return Err("typed image result tool type mismatch");
+    }
+    if result.status != tau_proto::ToolResultStatus::Success {
+        return Err("typed image result status mismatch");
+    }
+    if result.output.body != "typed image succeeded" {
+        return Err("typed image result text mismatch");
+    }
+    let [tau_proto::ToolResultContentPart::Image(image)] = result.provider_content.as_slice()
+    else {
+        return Err("typed image result content shape mismatch");
+    };
+    if image.media_type != tau_proto::ImageMediaType::Png
+        || image.width != 1
+        || image.height != 1
+        || image.detail != tau_proto::ImageDetail::High
+        || image.data.as_ref() != tau_ext_test_dummy::TYPED_IMAGE_PNG
+        || blake3::hash(&image.data).to_hex().as_str()
+            != "1c22ad7f40a18bbcb1c50dc8a78ac6a1a36b9a0a3c7f9833c965b2ef8100a734"
+    {
+        return Err("typed image canonical content mismatch");
+    }
+    Ok(())
 }
 
 /// Require one rejected tool result without accepting its diagnostic as status.
@@ -2636,6 +2729,8 @@ impl ScenarioActionV2 {
             }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
+            | Self::TypedImageToolCall { user_text, .. }
+            | Self::TypedImageReplay { user_text, .. }
             | Self::DummyToolRepair { user_text, .. }
             | Self::MessageCall { user_text, .. }
             | Self::AgentStartCall { user_text, .. }
@@ -2660,6 +2755,7 @@ impl ScenarioActionV2 {
                 error: _,
             }
             | Self::StandaloneCompactionHold { timeout_ms: _ }
+            | Self::TypedImageToolResult { .. }
             | Self::MessageSenderResult { .. }
             | Self::MessageInbound { .. }
             | Self::WatchNotifications { .. }

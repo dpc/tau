@@ -6,7 +6,8 @@ tests. It is not user-facing functionality.
 The extension is intentionally small:
 
 - it performs the standard stdio extension handshake;
-- it registers `restart_test_dummy` in the `test` tool group;
+- it registers `restart_test_dummy` and the image-only
+  `typed_image_test_dummy` in the `test` tool group;
 - it subscribes to `tool.started` and ignores replay-marked deliveries before
   performing restart/tool-result side effects;
 - it intercepts `agent.prompt_submitted` and rewrites whole-word ASCII `tao` to
@@ -19,6 +20,10 @@ and only change `text`.
 The `restart_mode` config exists to make harness tests deterministic:
 `random` preserves the historical random exit-or-error behavior, while
 `success`, `error`, and `exit` force the corresponding outcome.
+`typed_image: true` enables `typed_image_test_dummy`, which returns one fixed
+in-memory 1×1 PNG as native typed provider content plus a
+bounded text result; it exists only for the deterministic durable-replay
+acceptance and does not read, decode, or write image files.
 `hold_no_side_effect` is a closed lifecycle mode: it acknowledges one live
 invocation with correlated transient progress only after a worker reaches its
 wait point, then waits for exact cancellation or a fixed terminal deadline.
@@ -61,6 +66,8 @@ Security-relevant boundaries:
   write files, persist state, access secrets, open network connections, or spawn
   subprocesses.
 - Config parsing rejects unknown fields and invalid `restart_mode` values.
+- `typed_image_test_dummy` is foreground-only and accepts no arguments or
+  runtime control; it appears only when `typed_image: true`.
 - `hold_no_side_effect` accepts no tool arguments or external control, permits
   one active worker, bounds readiness at one second and terminal waiting at ten
   seconds, and joins that worker on cancellation or shutdown.

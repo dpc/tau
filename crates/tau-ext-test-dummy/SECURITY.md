@@ -16,6 +16,9 @@ cancellation, and disconnect. Configuration rejects unknown fields and invalid
 Replay-marked starts cannot execute tool behavior. Prompt interception may
 replace only text and must preserve identity, routing, class, originator,
 display metadata, and context identity.
+`typed_image` returns only a compiled fixed 1×1 PNG as native typed result
+content. It accepts no arguments or runtime control and adds no image decoding,
+filesystem, network, environment, secret, or child-process authority.
 
 `hold_no_side_effect` owns at most one worker. It publishes correlated readiness
 only after worker startup, accepts cancellation only for the exact active call,

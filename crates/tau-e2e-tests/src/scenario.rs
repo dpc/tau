@@ -158,6 +158,29 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response after the tool result.
         response: String,
     },
+    /// Request the closed dummy mode that returns one fixed typed image.
+    TypedImageToolCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+    },
+    /// Accept the exact typed image from the immediately preceding tool call.
+    TypedImageToolResult {
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant response after the live image result.
+        response: String,
+    },
+    /// Complete only when cold replay retains the exact prior typed image once.
+    TypedImageReplay {
+        /// Exact later user text.
+        user_text: String,
+        /// Exact provider-authored call identity for the retained image.
+        call_id: ToolCallId,
+        /// Complete assistant response after replay validation.
+        response: String,
+    },
     /// Accept the harness's exact synthetic interrupted-tool error and
     /// terminalize the resumed provider continuation.
     DummyToolRepair {

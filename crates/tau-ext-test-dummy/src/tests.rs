@@ -130,6 +130,16 @@ fn invoke_restart_with_id(call_id: &str) -> HarnessOutputMessage {
     }))
 }
 
+fn invoke_typed_image() -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        call_id: "typed-image-call".into(),
+        tool_name: tau_proto::ToolName::new(TYPED_IMAGE_TEST_DUMMY_TOOL_NAME),
+        arguments: tau_proto::CborValue::Map(Vec::new()),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    }))
+}
+
 fn extension_originated_restart() -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
         call_id: "extension-call".into(),
@@ -165,6 +175,21 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
         config: CborValue::Map(vec![(
             CborValue::Text("restart_mode".to_owned()),
             CborValue::Text(mode.to_owned()),
+        )]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
+    })
+}
+
+fn typed_image_config() -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![(
+            CborValue::Text("typed_image".to_owned()),
+            CborValue::Bool(true),
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
@@ -338,6 +363,86 @@ fn restart_tool_can_return_error() {
     };
     assert_eq!(error.message, "restarting failed");
     assert_eq!(frames.len(), 6);
+}
+
+/// Verifies the closed typed-image mode alone declares and completes its fixed
+/// image tool without changing the default dummy tool surface.
+#[test]
+fn typed_image_mode_registers_and_returns_the_fixed_image() {
+    let frames = run_restart_frames(&[typed_image_config(), invoke_typed_image()], 1);
+    let declarations = frames
+        .iter()
+        .filter_map(emitted_event)
+        .filter_map(|event| match event {
+            Event::ToolRegistrationDeclared(declaration) => Some(declaration),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 2);
+    assert_eq!(
+        declarations[1].tool.name.as_str(),
+        TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+    );
+    assert_eq!(
+        declarations[1].tool.tags,
+        vec![tau_proto::ToolTag::new("provider-content:image")]
+    );
+    assert_eq!(
+        declarations[1].tool.background_support,
+        Some(tau_proto::BackgroundSupport::Never)
+    );
+    let result = frames
+        .iter()
+        .filter_map(emitted_event)
+        .find_map(|event| match event {
+            Event::ToolResultReported(result) => Some(result),
+            _ => None,
+        })
+        .expect("typed image result");
+    assert_eq!(result.call_id.as_str(), "typed-image-call");
+    let [tau_proto::ToolResultContentPart::Image(image)] = result.provider_content.as_slice()
+    else {
+        panic!("typed image result");
+    };
+    assert!(
+        image.data.as_ref() == TYPED_IMAGE_PNG,
+        "typed image bytes differ from the fixed canonical fixture"
+    );
+}
+
+/// Verifies an undeclared typed-image call cannot produce a terminal outside
+/// the explicit closed fixture mode.
+#[test]
+fn typed_image_tool_is_inert_when_mode_is_disabled() {
+    let frames = run_restart_frames(&[invoke_typed_image()], 1);
+    assert!(
+        frames.iter().all(|frame| {
+            !matches!(
+                emitted_event(frame),
+                Some(Event::ToolRegistrationDeclared(declaration))
+                    if declaration.tool.name.as_str() == TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+            )
+        }),
+        "disabled typed-image mode must not declare the tool"
+    );
+    assert!(
+        frames.iter().all(|frame| {
+            !matches!(
+                emitted_event(frame),
+                Some(Event::ToolResultReported(result))
+                    if result.call_id.as_str() == "typed-image-call"
+            ) && !matches!(
+                emitted_event(frame),
+                Some(Event::ToolErrorReported(error))
+                    if error.call_id.as_str() == "typed-image-call"
+            ) && !matches!(
+                emitted_event(frame),
+                Some(Event::ToolCancelledReported(cancelled))
+                    if cancelled.call_id.as_str() == "typed-image-call"
+            )
+        }),
+        "disabled typed-image mode must not emit a terminal"
+    );
 }
 
 /// Verifies the historical random restart fixture can exit without replying.

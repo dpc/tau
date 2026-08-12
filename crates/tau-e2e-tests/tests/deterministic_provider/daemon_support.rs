@@ -320,6 +320,7 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
         EventName::AGENT_REPLAY_COMPLETE,
         EventName::SESSION_REPLAY_COMPLETE,
         EventName::TOOL_RESULT,
+        EventName::TOOL_RESULT_DISPLAY,
         EventName::AGENT_STANDALONE_COMPACTION_STARTED,
         EventName::AGENT_STANDALONE_COMPACTION_FAILED,
         EventName::AGENT_COMPACTED,

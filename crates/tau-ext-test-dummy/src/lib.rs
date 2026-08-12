@@ -26,8 +26,9 @@ use tau_client::{
     ClientResult, ExtensionBuilder, InterceptDecision, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
-    AgentPromptSubmitted, Event, EventSelector, InterceptionPriority, NoticeLevel, ToolError,
-    ToolResult, ToolResultKind, ToolSpec,
+    AgentPromptSubmitted, Event, EventSelector, ImageContent, ImageDetail, ImageMediaType,
+    InterceptionPriority, NoticeLevel, ToolError, ToolResult, ToolResultContentPart,
+    ToolResultKind, ToolSpec,
 };
 #[cfg(test)]
 static SATURATION_HOOK: Mutex<Option<(tau_proto::ToolCallId, mpsc::Sender<bool>)>> =
@@ -36,6 +37,20 @@ static SATURATION_HOOK: Mutex<Option<(tau_proto::ToolCallId, mpsc::Sender<bool>)
 /// Tool name registered by this fixture extension for restart-supervision
 /// tests.
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
+
+/// Tool name reserved for the one typed-image deterministic acceptance mode.
+pub const TYPED_IMAGE_TEST_DUMMY_TOOL_NAME: &str = "typed_image_test_dummy";
+
+/// Fixed 1×1 indexed-color PNG emitted only by the deterministic typed-image
+/// fixture mode.
+pub const TYPED_IMAGE_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3, 0,
+    0, 0, 37, 219, 86, 202, 0, 0, 0, 32, 99, 72, 82, 77, 0, 0, 122, 38, 0, 0, 128, 132, 0, 0, 250,
+    0, 0, 0, 128, 232, 0, 0, 117, 48, 0, 0, 234, 96, 0, 0, 58, 152, 0, 0, 23, 112, 156, 186, 81,
+    60, 0, 0, 0, 6, 80, 76, 84, 69, 18, 52, 86, 255, 255, 255, 81, 0, 114, 117, 0, 0, 0, 1, 98, 75,
+    71, 68, 1, 255, 2, 45, 222, 0, 0, 0, 10, 73, 68, 65, 84, 8, 215, 99, 96, 0, 0, 0, 2, 0, 1, 226,
+    33, 188, 51, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
 
 /// Maximum time allowed for the closed hold worker to acknowledge that it
 /// reached its wait point.
@@ -68,6 +83,8 @@ enum RestartMode {
 struct ExtConfig {
     /// Test-only deterministic behavior for `restart_test_dummy`.
     restart_mode: Option<RestartMode>,
+    /// Enables the separate fixed typed-image fixture tool.
+    typed_image: bool,
     /// Fixture-private Unix socket used by `hold_until_success_release`.
     release_socket_path: Option<PathBuf>,
     /// Fixture-generated nonce required by `hold_until_success_release`.
@@ -80,6 +97,9 @@ struct DummyState<T> {
     rng: T,
     /// Active deterministic restart behavior selected by config.
     restart_mode: RestartMode,
+    /// Whether the separate typed-image fixture tool may return its fixed
+    /// image.
+    typed_image: bool,
     /// Sole bounded invocation owned by either deterministic hold mode.
     pending_hold: Option<PendingHold>,
     /// Terminal deadline for the no-side-effect hold worker.
@@ -254,6 +274,24 @@ where
         builder
             .configure::<ExtConfig>(|cx| {
                 cx.state.restart_mode = cx.config().restart_mode.unwrap_or_default();
+                let typed_image = cx.config().typed_image;
+                if typed_image && !cx.state.typed_image {
+                    cx.handle
+                        .register_local_tool(tau_proto::ToolRegistrationDeclared {
+                            tool: typed_image_tool_spec(),
+                            tool_group: Some(tau_proto::ToolGroup {
+                                name: tau_proto::ToolGroupName::new("test"),
+                                prompt_fragment: None,
+                            }),
+                            prompt_fragment: None,
+                        })?;
+                } else if !typed_image && cx.state.typed_image {
+                    cx.handle
+                        .unregister_local_tool(tau_proto::ToolName::new(
+                            TYPED_IMAGE_TEST_DUMMY_TOOL_NAME,
+                        ))?;
+                }
+                cx.state.typed_image = typed_image;
                 if cx.state.restart_mode == RestartMode::HoldUntilSuccessRelease {
                     let Some(socket_path) = cx.config().release_socket_path.clone() else {
                         return Err(tau_client::ClientError::handler(
@@ -317,6 +355,9 @@ where
                 None,
                 |mut cx| handle_restart_invocation(&mut cx),
             )
+            .on::<tau_proto::ToolStarted>(|cx| {
+                handle_typed_image_invocation(cx.state, cx.event, &cx.handle)
+            })
             .ready_message("test dummy tools ready");
     }
 }
@@ -410,6 +451,7 @@ where
     let state = DummyState {
         rng,
         restart_mode: RestartMode::Random,
+        typed_image: false,
         pending_hold: None,
         hold_timeout,
         release_config: None,
@@ -540,6 +582,27 @@ fn restart_tool_spec() -> ToolSpec {
     }
 }
 
+/// Returns the image-capable tool declaration reserved for one E2E fixture.
+fn typed_image_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: tau_proto::ToolName::new(TYPED_IMAGE_TEST_DUMMY_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Test-only tool that returns one fixed typed image in typed_image mode".to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        })),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new("provider-content:image")],
+        enabled_by_default: true,
+        background_support: Some(tau_proto::BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
+}
 fn intercepted_prompt_replacement(event: &Event) -> Option<Event> {
     match event {
         Event::AgentPromptSubmitted(prompt) => correct_tao_to_tau(&prompt.text).map(|fixed| {
@@ -574,6 +637,25 @@ where
         RestartMode::Success => cx.report_result(restart_success(invoke)),
         RestartMode::HoldNoSideEffect => start_no_side_effect_hold(cx, invoke),
         RestartMode::HoldUntilSuccessRelease => start_success_release_hold(cx, invoke),
+    }
+}
+
+/// Dispatches the separate closed fixed-image fixture tool.
+fn handle_typed_image_invocation<T>(
+    state: &DummyState<T>,
+    invoke: &tau_proto::ToolStarted,
+    handle: &tau_client::ClientHandle,
+) -> ClientResult<()>
+where
+    T: Rng,
+{
+    let expected_tool_name = handle
+        .tool_name_scope()?
+        .wire_tool_name(&tau_proto::ToolName::new(TYPED_IMAGE_TEST_DUMMY_TOOL_NAME))?;
+    if state.typed_image && invoke.tool_name == expected_tool_name {
+        handle.report_tool_result(typed_image_success(invoke.clone()))
+    } else {
+        Ok(())
     }
 }
 
@@ -733,6 +815,27 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> ToolResult {
         tool_type: tau_proto::ToolType::Function,
         result: tau_proto::CborValue::Text("restart succeeded".to_owned()),
         provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: invoke.originator,
+    }
+}
+
+/// Returns the fixed image-bearing terminal used only by deterministic E2E.
+fn typed_image_success(invoke: tau_proto::ToolStarted) -> ToolResult {
+    ToolResult {
+        presentation: Default::default(),
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Text("typed image succeeded".to_owned()),
+        provider_content: vec![ToolResultContentPart::Image(ImageContent {
+            media_type: ImageMediaType::Png,
+            data: TYPED_IMAGE_PNG.to_vec().into(),
+            width: 1,
+            height: 1,
+            detail: ImageDetail::High,
+        })],
         kind: ToolResultKind::Final,
         display: None,
         originator: invoke.originator,

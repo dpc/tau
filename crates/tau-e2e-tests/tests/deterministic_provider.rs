@@ -1,10 +1,13 @@
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
-    DeterministicFixture, InitialStatusOutcome, ScenarioActionV2, ScenarioLaneV2, ScenarioV1,
-    ScenarioV2, StatusTerminalPhase, StatusToolOrder,
+    DeterministicFixture, DurableSnapshot, InitialStatusOutcome, ScenarioActionV2, ScenarioLaneV2,
+    ScenarioV1, ScenarioV2, StatusTerminalPhase, StatusToolOrder,
 };
-use tau_proto::{CborValue, Event, ProviderFailureKind, ToolResultKind};
+use tau_proto::{
+    AgentId, AgentRuntimeState, CborValue, ContextItem, Event, ImageDetail, ImageMediaType,
+    ProviderFailureKind, ToolResultContentPart, ToolResultKind,
+};
 
 #[path = "deterministic_provider/daemon_support.rs"]
 mod daemon_support;
@@ -448,6 +451,311 @@ fn deterministic_clean_resume_restores_fake_cursor_without_replay_consumption()
     assert_eq!(trace.matches(" matched ").count(), 2);
     fixture.assert_consumed()?;
     Ok(())
+}
+
+/// Proves a dummy's typed image crosses a complete live tool round, survives a
+/// clean restart as exact durable bytes, and reaches the later provider prompt
+/// once without leaking into generic fixture metadata.
+#[test]
+fn deterministic_typed_image_tool_result_replays_after_clean_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CALL_ID: &str = "typed-image-call";
+    const IMAGE_DIGEST: &str = "1c22ad7f40a18bbcb1c50dc8a78ac6a1a36b9a0a3c7f9833c965b2ef8100a734";
+    let fixture = DeterministicFixture::new_typed_image_v2(
+        "deterministic_typed_image_tool_result_replays_after_clean_restart",
+        &ScenarioV2::new(
+            "typed-image-tool-replay",
+            vec![ScenarioLaneV2 {
+                ctx_id: "typed-image-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::TypedImageToolCall {
+                        user_text: "inspect the deterministic image".to_owned(),
+                        call_id: CALL_ID.into(),
+                    },
+                    ScenarioActionV2::TypedImageToolResult {
+                        call_id: CALL_ID.into(),
+                        response: "live typed image accepted".to_owned(),
+                    },
+                    ScenarioActionV2::TypedImageReplay {
+                        user_text: "continue after typed image restart".to_owned(),
+                        call_id: CALL_ID.into(),
+                        response: "replayed typed image accepted".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+        DUMMY_TOOL,
+    )?;
+    let call_id = CALL_ID.into();
+    let agent_id = {
+        let socket = fixture.socket_path("typed-image-boot-a");
+        let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+        let mut peer = connect_ui(&socket)?;
+        create_agent(
+            &mut peer,
+            "typed-image-lane",
+            "inspect the deterministic image",
+        )?;
+        let created = recv_until_created(&mut peer, Some("typed-image-lane"))?;
+        let display = recv_until_tool_continuation_idle(
+            &mut peer,
+            &created.agent_id,
+            &created.agent_prompt_id,
+            &call_id,
+        )
+        .map_err(|error| format!("wait for live typed-image continuation: {error}"))?;
+        assert_typed_image_display(&display, CALL_ID);
+        disconnect_ui(&mut peer)?;
+        server.finish()?;
+        created.agent_id
+    };
+    let snapshot_a = DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    assert_typed_image_round(&snapshot_a, &call_id, IMAGE_DIGEST)?;
+    assert_durable_assistant(&snapshot_a, "live typed image accepted");
+
+    let socket = fixture.socket_path("typed-image-boot-b");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::Resumed);
+    let mut peer = connect_ui(&socket)?;
+    let replay_display = recv_until_typed_image_display(&mut peer, &agent_id, &call_id)
+        .map_err(|error| format!("wait for byte-free typed-image replay display: {error}"))?;
+    assert_typed_image_display(&replay_display, CALL_ID);
+    submit_prompt(
+        &mut peer,
+        &agent_id,
+        "typed-image-replay",
+        "continue after typed image restart",
+    )?;
+    let created = recv_until_created(&mut peer, Some("typed-image-replay"))?;
+    assert_eq!(created.agent_id, agent_id);
+    let finished = recv_until_finished_for(&mut peer, &created.agent_prompt_id)
+        .map_err(|error| format!("wait for replayed typed-image continuation: {error}"))?;
+    assert_assistant(&finished.output_items, "replayed typed image accepted");
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+
+    let snapshot_b = DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    snapshot_b.require_prefix(&snapshot_a)?;
+    assert_typed_image_round(&snapshot_b, &call_id, IMAGE_DIGEST)?;
+    assert_durable_assistant(&snapshot_b, "replayed typed image accepted");
+    assert_eq!(fixture.trace()?.matches(" configured").count(), 2);
+    assert_eq!(fixture.trace()?.matches(" matched ").count(), 3);
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Requires one complete durable call/result round with the fixed canonical
+/// image, retaining its exact bytes and structural image properties.
+fn assert_typed_image_round(
+    snapshot: &DurableSnapshot,
+    call_id: &tau_proto::ToolCallId,
+    expected_digest: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        snapshot
+            .image_tool_result_digest(call_id)?
+            .to_hex()
+            .as_str(),
+        expected_digest
+    );
+    let events = snapshot
+        .agent_events
+        .iter()
+        .map(|record| &record.event)
+        .collect::<Vec<_>>();
+    let call_positions = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            Event::ProviderResponseFinished(finished)
+                if matches!(
+                    finished.output_items.as_slice(),
+                    [ContextItem::ToolCall(call)]
+                        if &call.call_id == call_id
+                            && call.name.as_str()
+                                == tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+                ) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let generic_results = events
+        .iter()
+        .filter(|event| matches!(event, Event::ToolResult(result) if &result.call_id == call_id))
+        .count();
+    assert_eq!(
+        generic_results, 0,
+        "typed image must remain on the canonical provider tool-result route"
+    );
+    let result_positions = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            Event::ProviderToolResult(result) if &result.call_id == call_id => {
+                Some((index, result))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(call_positions.len(), 1, "typed image call must be unique");
+    assert_eq!(
+        result_positions.len(),
+        1,
+        "typed image result must be unique"
+    );
+    let (result_position, result) = result_positions[0];
+    assert!(
+        call_positions[0] < result_position,
+        "typed image result must close its provider-authored call"
+    );
+    assert!(
+        events[call_positions[0] + 1..result_position]
+            .iter()
+            .all(|event| !matches!(event, Event::ProviderResponseFinished(_))),
+        "no later provider response may interrupt the typed image round"
+    );
+    let [ToolResultContentPart::Image(image)] = result.provider_content.as_slice() else {
+        panic!("typed image result must retain exactly one typed image");
+    };
+    assert_eq!(
+        result.tool_name.as_str(),
+        tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+    );
+    assert_eq!(result.tool_type, tau_proto::ToolType::Function);
+    assert_eq!(result.kind, ToolResultKind::Final);
+    assert_eq!(
+        result.result,
+        CborValue::Text("typed image succeeded".to_owned())
+    );
+    assert_eq!(image.media_type, ImageMediaType::Png);
+    assert_eq!((image.width, image.height), (1, 1));
+    assert_eq!(image.detail, ImageDetail::High);
+    assert!(
+        image.data.len() == tau_ext_test_dummy::TYPED_IMAGE_PNG.len()
+            && image.data.as_ref() == tau_ext_test_dummy::TYPED_IMAGE_PNG,
+        "typed image bytes differ from the fixed canonical fixture"
+    );
+    Ok(())
+}
+
+/// Waits for the provider-authored typed-image call and its agent's later idle
+/// state, avoiding timing-based shutdown.
+fn recv_until_tool_continuation_idle(
+    peer: &mut tau_socket::SocketPeer,
+    agent_id: &AgentId,
+    prompt_id: &tau_proto::AgentPromptId,
+    call_id: &tau_proto::ToolCallId,
+) -> Result<tau_proto::ToolResultDisplay, Box<dyn std::error::Error>> {
+    let mut saw_tool_call = false;
+    let mut saw_continuation = false;
+    let mut display = None;
+    loop {
+        match recv_event(peer)? {
+            Event::ProviderResponseFinished(finished)
+                if &finished.agent_prompt_id == prompt_id
+                    && matches!(
+                        finished.output_items.as_slice(),
+                        [ContextItem::ToolCall(call)]
+                            if call.name.as_str()
+                                == tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+                    ) =>
+            {
+                saw_tool_call = true;
+            }
+            Event::ToolResultDisplay(value) if saw_tool_call && &value.call_id == call_id => {
+                if display.replace(value).is_some() {
+                    return Err("duplicate typed-image display before live continuation".into());
+                }
+            }
+            Event::ToolResult(result) if &result.call_id == call_id => {
+                return Err("generic UI event carried the typed-image result".into());
+            }
+            Event::ProviderPromptSubmitted(submitted)
+                if saw_tool_call && submitted.agent_prompt_id != *prompt_id =>
+            {
+                saw_continuation = true;
+            }
+            Event::AgentStatsUpdated(stats)
+                if saw_continuation
+                    && display.is_some()
+                    && &stats.agent_id == agent_id
+                    && stats.runtime_state == AgentRuntimeState::Idle
+                    && stats.tools.in_flight == 0 =>
+            {
+                return Ok(display.expect("guard retained typed-image display"));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Waits for the historical byte-free UI projection of the typed image result.
+fn recv_until_typed_image_display(
+    peer: &mut tau_socket::SocketPeer,
+    agent_id: &AgentId,
+    call_id: &tau_proto::ToolCallId,
+) -> Result<tau_proto::ToolResultDisplay, Box<dyn std::error::Error>> {
+    let mut display = None;
+    loop {
+        match recv_event(peer)? {
+            Event::ToolResultDisplay(value) if &value.call_id == call_id => {
+                if display.replace(value).is_some() {
+                    return Err("duplicate typed-image display before replay completion".into());
+                }
+            }
+            Event::ToolResult(result) if &result.call_id == call_id => {
+                return Err("historical UI event carried the typed-image result".into());
+            }
+            Event::AgentReplayComplete(replay)
+                if &replay.agent_id == agent_id && replay.error.is_none() =>
+            {
+                return display.ok_or_else(|| {
+                    "typed-image display was absent before agent replay completed".into()
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Requires the generic UI projection to preserve only tool correlation and
+/// presentation metadata, never a typed image buffer.
+fn assert_typed_image_display(display: &tau_proto::ToolResultDisplay, call_id: &str) {
+    assert_eq!(display.call_id.as_str(), call_id);
+    assert_eq!(
+        display.tool_name.as_str(),
+        tau_ext_test_dummy::TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
+    );
+    assert_eq!(display.tool_type, tau_proto::ToolType::Function);
+    assert_eq!(display.kind, ToolResultKind::Final);
+    assert_eq!(display.display, None);
+    assert_eq!(display.originator, tau_proto::PromptOriginator::User);
+}
+
+/// Requires one durable assistant message carrying the expected final text.
+fn assert_durable_assistant(snapshot: &DurableSnapshot, expected: &str) {
+    assert!(snapshot.agent_events.iter().any(|record| {
+        matches!(
+            &record.event,
+            Event::ProviderResponseFinished(finished)
+                if matches!(
+                    finished.output_items.as_slice(),
+                    [ContextItem::Message(message)]
+                        if message.content
+                            == [tau_proto::ContentPart::Text {
+                                text: expected.to_owned()
+                            }]
+                )
+        )
+    }));
 }
 
 fn assert_exact_extensions(events: &[tau_proto::Event], expected: &[&str]) {

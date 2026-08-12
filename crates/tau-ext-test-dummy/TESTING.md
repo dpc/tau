@@ -11,6 +11,11 @@ Regression coverage should include:
 
 - random restart outcomes: tool error and extension exit without reply;
 - deterministic `restart_mode` outcomes: `success`, `error`, and `exit`;
+- `typed_image: true` enabling `typed_image_test_dummy` with its one fixed
+  native image terminal, `provider-content:image` tag, and foreground-only
+  declaration; the owning
+  `deterministic_typed_image_tool_result_replays_after_clean_restart` E2E
+  proves its durable live/replay continuation;
 - `hold_no_side_effect` readiness followed by exact correlated cancellation;
 - wrong-id cancellation leaving the hold active, concurrent-call rejection, and
   exact cancellation of the original call;
