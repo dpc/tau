@@ -80,6 +80,16 @@ Successful `telegram_send` calls emit `message.sent_reported` before returning t
 transient `tool.result_reported`. The sent report uses the original body and a
 bounded ID derived from the unique tool call and extension-owned destination;
 remote routing remains local.
+Mandatory ingress reports, sent reports, and sole tool terminals use checked
+ordered output. While output is blocked, a routed ingress checkpoint retains its
+exact report for replay and only the matching canonical echo advances the cursor.
+Any mandatory output failure stops the current provider batch and retires the
+extension loop under the existing
+process-memory restart semantics so harness disconnect cleanup settles retained
+calls. This includes checked configuration errors. One shared
+publication/shutdown transaction prevents shutdown from missing a late poller
+failure; forced failure joins the poller, while ordinary blocked long polls
+remain detached. Progress and notices remain best effort.
 
 ## Routing
 

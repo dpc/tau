@@ -2,12 +2,13 @@
 
 ## Status
 
-This record describes the current implementation. The confirmed but
-unimplemented
+This record describes the current implementation. The checked mandatory
+publication boundary from
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
-will move readiness off the serialized reader and clamp this 30-second cap to
-one absolute 60-second reservation-to-terminal deadline. Implementation is not
-authorized by that prospective record.
+is current under the approved audit fix. Its prospective executor will move
+readiness off the serialized reader and clamp this 30-second cap to one absolute
+60-second reservation-to-terminal deadline. That remaining implementation is
+not authorized by the prospective record.
 
 ## Record justification
 

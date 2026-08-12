@@ -213,6 +213,9 @@ const MAX_ZULIP_ERROR_CODE_BYTES: usize = 64;
 
 /// Small Zulip HTTP API surface used by the bridge and fake-server tests.
 pub(crate) trait ZulipClient: Send + Sync + 'static {
+    /// Test-observable queue-worker retirement hook.
+    #[cfg(test)]
+    fn worker_exited(&self) {}
     /// Resolve one configured Zulip channel name to its private native ID.
     fn resolve_stream_id(&self, cfg: &RuntimeConfig, name: &str) -> Result<u64, ApiError>;
     /// Subscribe the bot to the named configured all-message channels.

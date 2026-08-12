@@ -2,7 +2,8 @@ use std::io::BufRead;
 use std::net::TcpListener;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::{Condvar, Mutex, atomic as path_std_sync_atomic};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Condvar, Mutex, atomic as path_std_sync_atomic, mpsc};
 use std::{io as path_std_io, sync as path_std_sync, time as path_std_time};
 
 use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, ToolStarted};
@@ -11,6 +12,126 @@ use super::gateway_supervisor::{
     GATEWAY_RECONNECT_INITIAL_DELAY, GATEWAY_RECONNECT_MAX_DELAY, next_gateway_retry_delay,
 };
 use super::*;
+
+static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Clears the correlated production saturation hook even after a test panic.
+struct SaturationHookGuard;
+
+impl Drop for SaturationHookGuard {
+    fn drop(&mut self) {
+        SATURATION_HOOK
+            .lock()
+            .expect("telegram saturation hook")
+            .take();
+    }
+}
+
+/// Production writer that blocks on the first detached saturation filler.
+struct SaturationWriter {
+    /// Serialized protocol output.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Writer gate, initially closed.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Notification that the writer reached the filler frame.
+    entered: mpsc::Sender<()>,
+    /// Notification that the checked ingress report reached the writer.
+    report_written: mpsc::Sender<()>,
+    /// Whether this writer already blocked once.
+    blocked: bool,
+    /// Whether the checked ingress report is awaiting its flush barrier.
+    report_seen: bool,
+}
+
+impl Write for SaturationWriter {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        if !self.blocked && bytes.windows(9).any(|window| window == b"term.bell") {
+            self.blocked = true;
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.gate;
+            let closed = lock.lock().expect("writer gate");
+            drop(
+                wake.wait_while(closed, |closed| *closed)
+                    .expect("wait for writer release"),
+            );
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(bytes);
+        if bytes
+            .windows(b"message.delivered_reported".len())
+            .any(|window| window == b"message.delivered_reported")
+        {
+            self.report_seen = true;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        if self.report_seen {
+            self.report_seen = false;
+            let _ = self.report_written.send(());
+        }
+        Ok(())
+    }
+}
+
+/// Production writer that fails when one selected mandatory frame is written.
+struct FailingWriter {
+    /// Complete bytes written before failure.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Event name whose frame must fail.
+    target: &'static [u8],
+    /// Optional notification that the selected frame reached the writer.
+    failed: Option<mpsc::Sender<()>>,
+}
+
+/// Writer that blocks one checked report until the test releases it.
+struct BlockingReportWriter {
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+impl Write for BlockingReportWriter {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        if bytes
+            .windows(b"message.delivered_reported".len())
+            .any(|window| window == b"message.delivered_reported")
+        {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        if bytes
+            .windows(self.target.len())
+            .any(|window| window == self.target)
+        {
+            if let Some(failed) = self.failed.take() {
+                let _ = failed.send(());
+            }
+            return Err(path_std_io::Error::other("forced Telegram writer failure"));
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
 
 /// HTTP framing emitted by a hermetic Bot API fixture.
 #[derive(Clone, Copy)]
@@ -315,6 +436,19 @@ struct ControlledPollClient {
     webhook_check_gate: Mutex<WebhookCheckGate>,
     /// Signals webhook-check gate transitions.
     webhook_check_changed: Condvar,
+    /// Number of currently executing poll calls.
+    active_polls: AtomicUsize,
+    /// Number of poll-loop exits.
+    poller_exits: AtomicUsize,
+}
+
+/// Decrements the active provider-call count on every return path.
+struct ActivePoll<'a>(&'a AtomicUsize);
+
+impl Drop for ActivePoll<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, AtomicOrdering::SeqCst);
+    }
 }
 
 impl ControlledPollClient {
@@ -327,6 +461,8 @@ impl ControlledPollClient {
             offsets: Mutex::new(Vec::new()),
             webhook_check_gate: Mutex::new(WebhookCheckGate::Open),
             webhook_check_changed: Condvar::new(),
+            active_polls: AtomicUsize::new(0),
+            poller_exits: AtomicUsize::new(0),
         })
     }
 
@@ -383,6 +519,9 @@ impl ControlledPollClient {
 }
 
 impl TelegramClient for ControlledPollClient {
+    fn poller_exited(&self) {
+        self.poller_exits.fetch_add(1, AtomicOrdering::SeqCst);
+    }
     fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         let mut gate = self.webhook_check_gate.lock().expect("lock");
         if matches!(*gate, WebhookCheckGate::BlockNext) {
@@ -402,6 +541,8 @@ impl TelegramClient for ControlledPollClient {
         _cfg: &RuntimeConfig,
         offset: Option<i64>,
     ) -> Result<Vec<TgUpdate>, TelegramApiFailure> {
+        self.active_polls.fetch_add(1, AtomicOrdering::SeqCst);
+        let _active = ActivePoll(&self.active_polls);
         self.offsets.lock().expect("lock").push(offset);
         {
             let mut called = self.called.lock().expect("lock");
@@ -1065,7 +1206,7 @@ fn gateway_delivery_requires_live_local_registration() {
     }
     emit_gateway_deliveries(
         &state,
-        &Output::Channel(tx.clone()),
+        &Output::from(tx.clone()),
         &gateway_cell,
         Arc::clone(&gateway),
         vec![GatewayMessageDelivery {
@@ -1084,7 +1225,7 @@ fn gateway_delivery_requires_live_local_registration() {
     state.lock().registered_agents.insert(agent_id("agent-1"));
     emit_gateway_deliveries(
         &state,
-        &Output::Channel(tx),
+        &Output::from(tx),
         &gateway_cell,
         gateway,
         vec![GatewayMessageDelivery {
@@ -1102,6 +1243,48 @@ fn gateway_delivery_requires_live_local_registration() {
     assert_eq!(delivered.text, "hello again");
     assert_eq!(delivered.sender.stable_id, telegram_sender_ref("7"));
     assert_eq!(delivered.conversation.expect("conversation").stable_id, "1");
+}
+
+/// Gateway delivery stops at the first failed mandatory report without
+/// precommitting its batch suffix.
+#[test]
+fn gateway_report_failure_stops_delivery_suffix() {
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+    let state = SharedState::new();
+    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
+        socket_path: PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
+    }));
+    let gateway_cell = Mutex::new(Some(Arc::clone(&gateway)));
+    {
+        let mut state = state.lock();
+        state.current_session_id = Some("s1".parse().expect("session"));
+        state.publisher_name =
+            Some(tau_proto::ExtensionName::parse("std-telegram").expect("publisher"));
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    let delivery = |request_id: &str| GatewayMessageDelivery {
+        request_id: request_id.to_owned(),
+        session_id: "s1".to_owned(),
+        agent_id: "agent-1".to_owned(),
+        message_id: request_id.to_owned(),
+        sender_id: "7".to_owned(),
+        source: "alice".to_owned(),
+        conversation_id: "1".to_owned(),
+        text: request_id.to_owned(),
+    };
+    assert_eq!(
+        emit_gateway_deliveries(
+            &state,
+            &Output::from(tx),
+            &gateway_cell,
+            gateway,
+            vec![delivery(GATEWAY_REPORT_1), delivery(GATEWAY_REPORT_2)],
+        ),
+        ProcessingControl::Stop
+    );
+    let state = state.lock();
+    assert_eq!(state.gateway_pending_deliveries.len(), 1);
 }
 
 /// Ensures gateway mode ignores a partial canonical collision and sends an
@@ -2905,6 +3088,41 @@ fn reconnect_drain_replays_pending_route_and_discards_unseen_backlog() {
     assert_eq!(ext.state.lock().next_update_offset, Some(update_offset(12)));
 }
 
+/// Retained-drain replay stops before a suffix when mandatory output fails.
+#[test]
+fn drain_report_failure_stops_suffix() {
+    let (ext, rx, _) = extension();
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let update = |id| TgUpdate {
+        update_id: telegram_update_id(id),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("retained".to_owned()),
+        }),
+    };
+    process_update(&ext, update(31));
+    let _ = expect_delivered(&rx);
+    drop(rx);
+    let generation = ext.state.lock().config_generation;
+    assert_eq!(
+        ext.process_draining_batch(vec![update(31), update(32)], generation),
+        ProcessingControl::Stop
+    );
+    let state = ext.state.lock();
+    assert!(matches!(
+        state
+            .live_checkpoints
+            .existing_update(telegram_update_id(32), state.next_update_offset),
+        ExistingUpdate::New
+    ));
+}
+
 /// Local-poll checkpoints are intentionally process-memory state. A fresh
 /// extension after a crash treats an unconfirmed redelivery as startup backlog
 /// rather than claiming durable recovery it does not provide.
@@ -4103,6 +4321,428 @@ fn run_exits_after_register_then_disconnect() {
     .expect("run");
 }
 
+/// A routed ingress report must survive exhaustion of the production detached
+/// FIFO, replay exactly once through checked output, and advance the Telegram
+/// cursor only after the matching canonical echo.
+#[test]
+fn ingress_report_survives_production_fifo_saturation() {
+    let _serial = SATURATION_TEST_LOCK
+        .lock()
+        .expect("telegram saturation test lock");
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (report_written_tx, report_written_rx) = mpsc::channel();
+    let (saturated_tx, saturated_rx) = mpsc::channel();
+    let expected_message_id = telegram_message_ref("123", "41");
+    *SATURATION_HOOK.lock().expect("telegram saturation hook") =
+        Some((expected_message_id.as_str().to_owned(), saturated_tx));
+    let hook = SaturationHookGuard;
+    let client = ControlledPollClient::new();
+    let runner_client: Arc<dyn TelegramClient> = client.clone();
+    let output_bytes = Arc::clone(&bytes);
+    let output_gate = Arc::clone(&gate);
+    let runner = std::thread::spawn(move || {
+        run_with_client(
+            extension_input,
+            SaturationWriter {
+                bytes: output_bytes,
+                gate: output_gate,
+                entered: entered_tx,
+                report_written: report_written_tx,
+                blocked: false,
+                report_seen: false,
+            },
+            runner_client,
+        )
+        .map_err(|error| error.to_string())
+    });
+    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    input
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("extension name"),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret": "bot",
+                "allowed_user_ids": [123],
+                "chat_id": 123,
+                "poll_timeout_seconds": 1,
+            })),
+            state_dir: Some(temp_state_dir()),
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))))
+        .expect("register");
+    input.flush().expect("flush startup");
+
+    client.wait_for_call_count(1);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(2);
+    client.release_first_response(vec![TgUpdate {
+        update_id: telegram_update_id(41),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("sender".to_owned()),
+            text: Some("saturated ingress".to_owned()),
+        }),
+    }]);
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("production writer blocked");
+    saturated_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("detached FIFO exhausted");
+    drop(hook);
+    let (closed, wake) = &*gate;
+    *closed.lock().expect("writer gate") = false;
+    wake.notify_all();
+
+    report_written_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("checked ingress report reached writer");
+    let snapshot = bytes.lock().expect("output bytes").clone();
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(snapshot));
+    let report = std::iter::from_fn(|| reader.read_message().transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode output")
+        .into_iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::MessageDeliveredReported(report)
+                    if report.message_id == expected_message_id =>
+                {
+                    Some(report)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("checked ingress report flushed");
+    client.wait_for_call_count(3);
+    assert_eq!(
+        client.offsets.lock().expect("offsets")[2],
+        None,
+        "cursor advanced before canonical echo"
+    );
+    client.release_first_response(vec![TgUpdate {
+        update_id: telegram_update_id(41),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("changed sender".to_owned()),
+            text: Some("changed recomputation must not win".to_owned()),
+        }),
+    }]);
+    client.wait_for_call_count(4);
+    let replay_snapshot = bytes.lock().expect("output bytes").clone();
+    let mut replay_reader = HarnessInputReader::new(path_std_io::Cursor::new(replay_snapshot));
+    let matching = std::iter::from_fn(|| replay_reader.read_message().transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode replay output")
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::MessageDeliveredReported(candidate)
+                    if candidate.message_id == expected_message_id =>
+                {
+                    Some(candidate)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matching, vec![report.clone(), report.clone()]);
+
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::MessageDelivered(
+            report.with_publisher(
+                tau_proto::MessagePublisherId::parse("test-extension").expect("publisher"),
+            ),
+        )))
+        .expect("canonical echo");
+    input.flush().expect("flush canonical echo");
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(5);
+    assert_eq!(
+        client.offsets.lock().expect("offsets")[4],
+        Some(42),
+        "canonical echo did not advance the Telegram cursor"
+    );
+    input
+        .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("fixture complete".to_owned()),
+        }))
+        .expect("disconnect");
+    input.flush().expect("flush completion");
+    runner.join().expect("runner").expect("clean disconnect");
+
+    let snapshot = bytes.lock().expect("output bytes").clone();
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(snapshot));
+    let exact_reports = std::iter::from_fn(|| reader.read_message().transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode output")
+        .into_iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(), Event::MessageDeliveredReported(report)
+                        if report.text == "saturated ingress")
+            )
+        })
+        .count();
+    assert_eq!(exact_reports, 2);
+}
+
+/// Failure of a checked sent report must exit the production loop and suppress
+/// the send call's paired terminal so harness disconnect cleanup owns
+/// settlement.
+#[test]
+fn sent_report_writer_failure_exits_without_paired_terminal() {
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("extension name"),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret": "bot",
+                "allowed_user_ids": [123],
+                "chat_id": 123,
+                "poll_timeout_seconds": 1,
+            })),
+            state_dir: Some(temp_state_dir()),
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))))
+        .expect("register");
+    let mut send = tool(
+        SEND_TOOL_NAME,
+        "agent-1",
+        message_args("forced report failure"),
+    );
+    send.call_id = "gyf8-telegram-failed-send".into();
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(send)))
+        .expect("send");
+    writer.flush().expect("flush input");
+
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let result = run_with_client(
+        path_std_io::Cursor::new(input),
+        FailingWriter {
+            bytes: Arc::clone(&bytes),
+            target: b"message.sent_reported",
+            failed: Some(failed_tx),
+        },
+        FakeClient::new(),
+    );
+    assert!(
+        result.is_err(),
+        "mandatory writer failure must exit the loop"
+    );
+    failed_rx
+        .try_recv()
+        .expect("selected writer failure occurred");
+
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(
+        bytes.lock().expect("bytes").clone(),
+    ));
+    while let Ok(Some(frame)) = reader.read_message() {
+        assert!(
+            !matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(),
+                        Event::ToolResultReported(result)
+                            if result.call_id.as_str() == "gyf8-telegram-failed-send"
+                    ) || matches!(emit.event.as_ref(),
+                        Event::ToolErrorReported(error)
+                            if error.call_id.as_str() == "gyf8-telegram-failed-send"
+                    )
+            ),
+            "sent-report failure published its paired terminal"
+        );
+    }
+}
+
+/// A poller-origin report failure must wake an otherwise idle protocol loop and
+/// make process shutdown own cleanup.
+#[test]
+fn ingress_report_writer_failure_wakes_idle_production_loop() {
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let client = ControlledPollClient::new();
+    let runner_client: Arc<dyn TelegramClient> = client.clone();
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run_with_client(
+            extension_input,
+            FailingWriter {
+                bytes: Arc::new(Mutex::new(Vec::new())),
+                target: b"message.delivered_reported",
+                failed: Some(failed_tx),
+            },
+            runner_client,
+        )
+        .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    input
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("extension name"),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret": "bot",
+                "allowed_user_ids": [123],
+                "chat_id": 123,
+                "poll_timeout_seconds": 1,
+            })),
+            state_dir: Some(temp_state_dir()),
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))))
+        .expect("register");
+    input.flush().expect("flush startup");
+
+    client.wait_for_call_count(1);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(2);
+    client.release_first_response(vec![TgUpdate {
+        update_id: telegram_update_id(91),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("sender".to_owned()),
+            text: Some("wake idle loop".to_owned()),
+        }),
+    }]);
+    failed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker report reached failing writer");
+    assert!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("idle loop exited")
+            .is_err(),
+        "worker output failure must fail the production runner"
+    );
+    assert_eq!(client.active_polls.load(AtomicOrdering::SeqCst), 0);
+    assert_eq!(client.poller_exits.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// Explicit Disconnect returns promptly while a local poller report remains
+/// blocked in the checked writer.
+#[test]
+fn disconnect_detaches_blocked_local_report() {
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let client = ControlledPollClient::new();
+    let runner_client: Arc<dyn TelegramClient> = client.clone();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run_with_client(
+            extension_input,
+            BlockingReportWriter {
+                entered: entered_tx,
+                release: release_rx,
+            },
+            runner_client,
+        )
+        .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
+    });
+    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    input
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: tau_proto::ExtensionName::parse("test-extension").expect("name"),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret":"bot","allowed_user_ids":[123],"chat_id":123,
+                "poll_timeout_seconds":1
+            })),
+            state_dir: Some(temp_state_dir()),
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))))
+        .expect("register");
+    input.flush().expect("startup");
+    client.wait_for_call_count(1);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(2);
+    client.release_first_response(vec![TgUpdate {
+        update_id: telegram_update_id(92),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("blocked".to_owned()),
+        }),
+    }]);
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("blocked report");
+    input
+        .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
+        .expect("disconnect");
+    input.flush().expect("flush disconnect");
+    result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("prompt runner")
+        .expect("disconnect");
+    release_tx.send(()).expect("release detached writer");
+}
+
 /// Disconnect handling must not wait for an in-flight long poll to release its
 /// channel sender before the extension process can exit.
 #[test]
@@ -4977,6 +5617,43 @@ fn stale_generation_update_processing_does_not_reread_current_config() {
 
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock").is_empty());
+}
+
+/// A failed report stops its provider batch before a later update can acquire
+/// routing/checkpoint state.
+#[test]
+fn failed_report_stops_provider_batch_suffix() {
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+    let ext = test_extension(FakeClient::new(), tx);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+    ext.state
+        .lock()
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let generation = ext.state.lock().config_generation;
+    let update = |id, text: &str| TgUpdate {
+        update_id: telegram_update_id(id),
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("alice".to_owned()),
+            text: Some(text.to_owned()),
+        }),
+    };
+    assert_eq!(
+        ext.process_update_batch(vec![update(71, "first"), update(72, "suffix")], generation),
+        ProcessingControl::Stop
+    );
+    let state = ext.state.lock();
+    assert!(matches!(
+        state
+            .live_checkpoints
+            .existing_update(telegram_update_id(72), state.next_update_offset),
+        ExistingUpdate::New
+    ));
 }
 
 /// Invalid reconfiguration fails closed: previous registrations and chat state

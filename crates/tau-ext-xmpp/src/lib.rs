@@ -9,6 +9,8 @@
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
 
+mod output;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
@@ -19,13 +21,16 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use output::Output;
+#[cfg(test)]
+pub(crate) use output::SATURATION_HOOK;
 use rand::RngCore;
-use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
+use tau_client::{ClientError, ClientResult, ExtensionBuilder, ManualRuntimePoll, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDelivered, MessageFactId, MessageParty, MessageSenderAuth, MessageSent,
-    RawMessagePublisherId, SessionId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
-    ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDelivered,
+    MessageFactId, MessageParty, MessageSenderAuth, MessageSent, RawMessagePublisherId, SessionId,
+    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStatus,
 };
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
 use tokio_xmpp::rustls::crypto as path_tokio_xmpp_rustls_crypto;
@@ -93,86 +98,10 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 /// Run the XMPP extension over an arbitrary transport.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
     run_with_bridge(reader, writer, Arc::new(LiveXmppBridge::default()))
-}
-
-#[derive(Clone)]
-enum Output {
-    /// Test-side output channel preserving existing direct unit-test helpers.
-    Channel(mpsc::Sender<HarnessInputMessage>),
-    /// Tau-client output handle used by the protocol runtime.
-    Client(ClientHandle),
-}
-
-impl From<mpsc::Sender<HarnessInputMessage>> for Output {
-    fn from(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
-        Self::Channel(tx)
-    }
-}
-
-impl From<ClientHandle> for Output {
-    fn from(handle: ClientHandle) -> Self {
-        Self::Client(handle)
-    }
-}
-
-impl Output {
-    /// Sends one protocol frame, intentionally ignoring closed-writer failures.
-    ///
-    /// XMPP worker and tool output is best-effort once the harness has
-    /// disconnected or the tau-client writer has shut down.
-    fn send(&self, message: HarnessInputMessage) {
-        match self {
-            Self::Channel(tx) => {
-                let _ = tx.send(message);
-            }
-            Self::Client(handle) => {
-                let _ = handle.send_detached(message);
-            }
-        }
-    }
-
-    /// Submit one transient tool progress observation.
-    fn report_tool_progress(&self, progress: ToolProgress) {
-        self.send(HarnessInputMessage::emit_with_persist(
-            Event::ToolProgressReported(progress),
-            false,
-        ));
-    }
-
-    /// Submit one terminal tool report through the typed client helper or the
-    /// equivalent explicit transient channel frame.
-    fn report_tool_terminal(&self, event: Event) {
-        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
-            Ok(outcome) => outcome,
-            Err(event) => {
-                tracing::error!(event = %event.name(), "XMPP tool returned non-terminal event");
-                return;
-            }
-        };
-        match self {
-            Self::Client(handle) => {
-                let _ = handle.report_tool_terminal_detached(outcome);
-            }
-            Self::Channel(tx) => {
-                let _ = tx.send(HarnessInputMessage::emit_with_persist(
-                    outcome.into_reported_event(),
-                    false,
-                ));
-            }
-        }
-    }
-
-    /// Emit one transient external-message report for downstream
-    /// canonicalization.
-    fn emit_message_report(&self, event: Event) {
-        // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(event.is_message_report());
-        self.send(HarnessInputMessage::emit_with_persist(event, false));
-    }
 }
 
 /// Shared shutdown state that supports both synchronous checks and async
@@ -801,7 +730,11 @@ impl Extension {
         }
     }
 
-    fn dispatch_scoped_tool(&self, local_tool_name: &tau_proto::ToolName, invoke: ToolStarted) {
+    fn dispatch_scoped_tool(
+        &self,
+        local_tool_name: &tau_proto::ToolName,
+        invoke: ToolStarted,
+    ) -> ClientResult<()> {
         self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -818,13 +751,15 @@ impl Extension {
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown xmpp tool".to_owned()),
         };
-        self.output.report_tool_terminal(event);
+        self.output.check_mandatory_output()?;
+        self.output.report_tool_terminal(event)
     }
 
     #[cfg(test)]
     fn dispatch_tool(&self, invoke: ToolStarted) {
         let local = invoke.tool_name.clone();
-        self.dispatch_scoped_tool(&local, invoke);
+        self.dispatch_scoped_tool(&local, invoke)
+            .expect("test output channel remains connected");
     }
 
     fn handle_register(&self, invoke: ToolStarted) -> Event {
@@ -978,7 +913,8 @@ impl Extension {
                     return tool_error(invoke, error);
                 }
             }
-            self.output
+            let _ = self
+                .output
                 .emit_message_report(Event::MessageSentReported(MessageSent::new(
                     RawMessagePublisherId::new(publisher_name),
                     MessageAgentTarget::new(invoke.agent_id.as_ref()),
@@ -1297,7 +1233,14 @@ async fn xmpp_worker(
                         tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected");
                         worker.handle_disconnected();
                     }
-                    tokio_xmpp::Event::Stanza(stanza) => worker.handle_stanza(stanza),
+                    tokio_xmpp::Event::Stanza(stanza) => {
+                        if worker.handle_stanza(stanza) == WorkerControl::Stop {
+                            worker
+                                .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                                .await;
+                            return;
+                        }
+                    }
                 }
             }
             command = command_rx.recv() => {
@@ -1367,6 +1310,13 @@ where
         () = operation => WorkerRunOutcome::Completed,
         () = wait_for_shutdown(shutdown) => WorkerRunOutcome::Shutdown,
     }
+}
+
+/// Whether the worker may select another stanza or command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerControl {
+    Continue,
+    Stop,
 }
 
 struct WorkerState {
@@ -1671,12 +1621,17 @@ impl WorkerState {
                 match event {
                     tokio_xmpp::Event::Online { bound_jid, .. } => {
                         self.handle_online(bound_jid, client).await;
+                        if self.shutdown.is_requested() {
+                            return Err("xmpp worker stopped during online setup".to_owned());
+                        }
                         return Ok(());
                     }
                     tokio_xmpp::Event::Disconnected(error) => {
                         tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected while waiting for online state");
                     }
-                    tokio_xmpp::Event::Stanza(stanza) => self.handle_stanza(stanza),
+                    tokio_xmpp::Event::Stanza(stanza) => {
+                        self.handle_nested_stanza(stanza, "online state")?;
+                    }
                 }
             }
         };
@@ -1797,7 +1752,9 @@ impl WorkerState {
     /// Refresh connection-dependent state after the XMPP stream comes online.
     async fn handle_online(&mut self, bound_jid: Jid, client: &mut Client) {
         self.refresh_online_state(bound_jid, client).await;
-        self.rejoin_all(client).await;
+        if self.rejoin_all(client).await == WorkerControl::Stop {
+            self.shutdown.request();
+        }
     }
 
     /// Refresh online state without recursively rejoining rooms.
@@ -1926,7 +1883,9 @@ impl WorkerState {
                         self.handle_presence(presence);
                         return Ok(join);
                     }
-                    tokio_xmpp::Event::Stanza(stanza) => self.handle_stanza(stanza),
+                    tokio_xmpp::Event::Stanza(stanza) => {
+                        self.handle_nested_stanza(stanza, "muc join")?;
+                    }
                 }
             }
         };
@@ -1940,7 +1899,7 @@ impl WorkerState {
     }
 
     /// Rejoin all known MUC rooms after an online/reconnect event.
-    async fn rejoin_all(&mut self, client: &mut Client) {
+    async fn rejoin_all(&mut self, client: &mut Client) -> WorkerControl {
         for (room, nick) in self.muc_rooms_to_rejoin() {
             let occupant = MucOccupant::new(room, nick);
             if let Err(error) = join_room(client, &occupant.room, &occupant.nick).await {
@@ -1949,8 +1908,12 @@ impl WorkerState {
             }
             if let Err(error) = self.setup_joined_muc_room(client, &occupant).await {
                 tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to confirm/setup rejoined xmpp muc room");
+                if self.shutdown.is_requested() {
+                    return WorkerControl::Stop;
+                }
             }
         }
+        WorkerControl::Continue
     }
 
     /// Return MUC rooms that should be rejoined after reconnect.
@@ -1964,12 +1927,29 @@ impl WorkerState {
             .collect()
     }
 
-    /// Process an inbound stanza.
-    fn handle_stanza(&mut self, stanza: Stanza) {
+    /// Process an inbound stanza, returning false when the worker must stop
+    /// before selecting any later stanza or command.
+    fn handle_stanza(&mut self, stanza: Stanza) -> WorkerControl {
+        if self.shutdown.is_requested() {
+            return WorkerControl::Stop;
+        }
         match stanza {
             Stanza::Message(message) => self.handle_message(message),
             Stanza::Presence(presence) => self.handle_presence(presence),
             Stanza::Iq(iq) => self.handle_iq(iq),
+        }
+        if self.shutdown.is_requested() {
+            WorkerControl::Stop
+        } else {
+            WorkerControl::Continue
+        }
+    }
+
+    /// Propagate nested readiness/MUC reader shutdown to the owning operation.
+    fn handle_nested_stanza(&mut self, stanza: Stanza, context: &str) -> Result<(), String> {
+        match self.handle_stanza(stanza) {
+            WorkerControl::Continue => Ok(()),
+            WorkerControl::Stop => Err(format!("xmpp worker stopped while waiting for {context}")),
         }
     }
 
@@ -2075,23 +2055,28 @@ impl WorkerState {
             .unwrap_or_else(|| from.to_string());
         let conversation_id = room.to_string();
         let message_id = self.inbound_message_id(&message, &sender_id, &conversation_id);
-        self.route(
-            agent_id,
-            message_id,
-            MessageParty {
-                stable_id: xmpp_sender_ref(&sender_id),
-                display_name: from
-                    .resource()
-                    .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
-                sender_auth: Some(if real.is_some() {
-                    MessageSenderAuth::VerifiedAllowlisted
-                } else {
-                    MessageSenderAuth::TrustedMembership
-                }),
-            },
-            conversation_id,
-            body,
-        );
+        if self
+            .route(
+                agent_id,
+                message_id,
+                MessageParty {
+                    stable_id: xmpp_sender_ref(&sender_id),
+                    display_name: from
+                        .resource()
+                        .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
+                    sender_auth: Some(if real.is_some() {
+                        MessageSenderAuth::VerifiedAllowlisted
+                    } else {
+                        MessageSenderAuth::TrustedMembership
+                    }),
+                },
+                conversation_id,
+                body,
+            )
+            .is_err()
+        {
+            self.shutdown.request();
+        }
     }
 
     /// Process inbound direct chat fallback.
@@ -2127,19 +2112,24 @@ impl WorkerState {
         let sender_id = from.to_bare().to_string();
         let conversation_id = sender_id.clone();
         let message_id = self.inbound_message_id(&message, &sender_id, &conversation_id);
-        self.route(
-            agents[0].clone(),
-            message_id,
-            MessageParty {
-                stable_id: xmpp_sender_ref(&sender_id),
-                display_name: from
-                    .resource()
-                    .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
-                sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
-            },
-            conversation_id,
-            body,
-        );
+        if self
+            .route(
+                agents[0].clone(),
+                message_id,
+                MessageParty {
+                    stable_id: xmpp_sender_ref(&sender_id),
+                    display_name: from
+                        .resource()
+                        .and_then(|resource| bounded_xmpp_display_name(resource.as_str())),
+                    sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+                },
+                conversation_id,
+                body,
+            )
+            .is_err()
+        {
+            self.shutdown.request();
+        }
     }
 
     /// Return whether a MUC message came from our occupant nick.
@@ -2163,7 +2153,7 @@ impl WorkerState {
         sender: MessageParty,
         conversation_id: String,
         text: String,
-    ) {
+    ) -> ClientResult<()> {
         self.output
             .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
                 RawMessagePublisherId::new(
@@ -2181,7 +2171,7 @@ impl WorkerState {
                     alias: None,
                 }),
                 text,
-            )));
+            )))
     }
 
     /// Build a bounded publisher-scoped identity from a stanza id or a
@@ -2487,18 +2477,52 @@ fn run_with_bridge<R, W>(
     bridge: Arc<dyn XmppBridge>,
 ) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let state = tau_client::TauExtensionRunner::new(XmppExtension).run_detached_writer_with_state(
-        reader,
-        writer,
-        move |handle| XmppRuntime {
+    let mut runtime = match tau_client::TauExtensionRunner::new(XmppExtension)
+        .start_manual_loop_with_state(reader, writer, move |handle| XmppRuntime {
             ext: Extension::new(bridge, handle),
-        },
-    )?;
-    state.ext.shutdown.request();
-    Ok(())
+        }) {
+        Ok(runtime) => runtime,
+        Err(ClientError::InitialConfigureRejected) => return Ok(()),
+        Err(error) => return Err(Box::new(error)),
+    };
+    runtime.state().ext.output.install_waker(runtime.waker());
+    let loop_result = run_xmpp_loop(&mut runtime);
+    runtime.state().ext.shutdown.request();
+    match loop_result {
+        Ok(true) => {
+            let _ = runtime.finish_detached();
+            Ok(())
+        }
+        Ok(false) => runtime
+            .finish()
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as Box<dyn Error>),
+        Err(error) => {
+            let _ = runtime.finish();
+            Err(Box::new(error))
+        }
+    }
+}
+
+/// Drive harness input and retire the connection after worker output failure.
+fn run_xmpp_loop(
+    runtime: &mut tau_client::ManualExtensionRuntime<XmppRuntime>,
+) -> ClientResult<bool> {
+    loop {
+        runtime.state().ext.output.check_mandatory_output()?;
+        match runtime.try_recv()? {
+            ManualRuntimePoll::Message(message) => match runtime.dispatch_one(message)? {
+                tau_client::DispatchOutcome::Continue => {}
+                tau_client::DispatchOutcome::StopRequested => break Ok(false),
+                tau_client::DispatchOutcome::Disconnect(_) => break Ok(true),
+            },
+            ManualRuntimePoll::InputClosed => break Ok(false),
+            ManualRuntimePoll::Empty => runtime.wait_for_wake(),
+        }
+    }
 }
 
 struct XmppExtension;
@@ -2617,8 +2641,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, XmppRuntime>) -> Clien
     let local = cx.local_tool_name().clone();
     cx.state
         .ext
-        .dispatch_scoped_tool(&local, cx.invoke().clone());
-    Ok(())
+        .dispatch_scoped_tool(&local, cx.invoke().clone())
 }
 
 fn handle_session_started(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {

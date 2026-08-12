@@ -2,8 +2,13 @@
 
 ## Status
 
-This is the confirmed but unimplemented end state. Implementation is not
-authorized by this record. The current serialized-reader
+This is the confirmed but mostly unimplemented end state. Implementation is not
+authorized by this record. Its checked mandatory publication semantics are now
+implemented under the separately approved mandatory-delivery audit fix:
+accepted inbound reports fail closed, and successful sends attempt
+`message.sent_reported` before their sole terminal while suppressing that
+terminal after report failure. The remaining executor, queue, deadline,
+generation, revocation, and observability lifecycle is prospective. Current
 behavior remains described by [ARCH-tau-ext-xmpp](ARCH-tau-ext-xmpp.md),
 [SPEC-tau-ext-xmpp-readiness-waits](SPEC-tau-ext-xmpp-readiness-waits.md), and
 [SPEC-tau-ext-xmpp-muc-lifecycle](SPEC-tau-ext-xmpp-muc-lifecycle.md).
@@ -151,7 +156,7 @@ tool result.
 
 ## Output and observability
 
-Immediate detached-output submission errors are not ignored. Output unavailable
+Immediate checked-output submission errors are not ignored. Output unavailable
 before an effect terminalizes locally as `output_unavailable`, revokes all
 authority, closes admission, and performs no remote I/O. Failure after an effect
 does the same without retry and records remote ambiguity locally. There is no

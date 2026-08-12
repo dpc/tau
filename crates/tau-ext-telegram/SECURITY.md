@@ -1,5 +1,12 @@
 # tau-ext-telegram security and reliability notes
 
+Mandatory ingress/sent reports and sole tool terminals use checked output.
+Failure stops the current provider batch and retires the extension connection;
+optional progress and notices remain detached and best effort.
+Checked configuration errors use the same sticky failure signal. A shared
+publication/shutdown gate ensures forced output teardown joins the poller,
+while ordinary disconnect does not wait for a provider long poll.
+
 `std-telegram` is a disabled-by-default personal text bridge. The configured
 extension process and optional same-UID gateway socket are cooperative local
 components, not hostile-code sandboxes. Telegram, Bot API endpoints, sender

@@ -1,5 +1,14 @@
 # Telegram testing
 
+Mandatory-output regressions exercise production detached-FIFO saturation.
+They also force checked writer failure from the poller while the protocol loop
+is idle, then prove wakeup exits the loop and completes poller cleanup.
+Forced output-failure teardown owns and joins the local poller. Normal
+disconnect only signals it, preserving prompt shutdown while an existing
+provider long poll returns.
+Tests must synchronize the shared publication/shutdown transaction and cover
+both extension-owned and tau-client-owned checked configuration errors.
+
 Tests are hermetic. Use `FakeClient` for Bot API behavior, loopback TCP for
 production HTTP framing and response-body-limit contracts, and loopback Unix
 sockets for gateway/sidecar behavior; never require credentials, public network

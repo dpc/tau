@@ -2,13 +2,94 @@
 
 use std::io as path_std_io;
 use std::io::Write;
-use std::sync::{Condvar, Mutex};
+use std::os::unix::net::UnixStream;
+use std::sync::{Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 use xmpp_parsers::stanza_error as path_xmpp_parsers_stanza_error;
 
 use super::*;
+
+static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Clears the correlated production saturation hook after each test.
+struct SaturationHookGuard;
+
+impl Drop for SaturationHookGuard {
+    fn drop(&mut self) {
+        SATURATION_HOOK.lock().expect("xmpp saturation hook").take();
+    }
+}
+
+/// Production writer blocked by the first detached saturation filler.
+struct SaturationWriter {
+    /// Serialized protocol output.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Writer gate, initially closed.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Notification that the writer reached the filler.
+    entered: mpsc::Sender<()>,
+    /// Whether this writer already blocked once.
+    blocked: bool,
+}
+
+impl Write for SaturationWriter {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        if !self.blocked && bytes.windows(9).any(|window| window == b"term.bell") {
+            self.blocked = true;
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.gate;
+            let closed = lock.lock().expect("writer gate");
+            drop(
+                wake.wait_while(closed, |closed| *closed)
+                    .expect("wait for writer release"),
+            );
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Production writer that fails when one selected mandatory frame is written.
+struct FailingWriter {
+    /// Complete bytes written before failure.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Event name whose frame must fail.
+    target: &'static [u8],
+    /// Optional notification that the selected frame reached the writer.
+    failed: Option<mpsc::Sender<()>>,
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        if bytes
+            .windows(self.target.len())
+            .any(|window| window == self.target)
+        {
+            if let Some(failed) = self.failed.take() {
+                let _ = failed.send(());
+            }
+            return Err(path_std_io::Error::other("forced XMPP writer failure"));
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Default)]
 struct SharedWriter {
@@ -46,6 +127,8 @@ struct FakeBridge {
     registered: Mutex<HashMap<AgentId, String>>,
     sent: Mutex<Vec<(AgentId, String)>>,
     send_error: Mutex<Option<(usize, String)>>,
+    /// Optional worker-origin report released by a deterministic test gate.
+    worker_report: Mutex<Option<(mpsc::Receiver<()>, Event)>>,
 }
 
 impl FakeBridge {
@@ -88,10 +171,16 @@ impl XmppBridge for FakeBridge {
     fn ensure_started(
         &self,
         _cfg: RuntimeConfig,
-        _output: Output,
+        output: Output,
         _shutdown: Arc<ShutdownSignal>,
     ) -> Result<(), String> {
         *self.started.lock().expect("lock") += 1;
+        if let Some((release, event)) = self.worker_report.lock().expect("lock").take() {
+            std::thread::spawn(move || {
+                let _ = release.recv();
+                let _ = output.emit_message_report(event);
+            });
+        }
         Ok(())
     }
 
@@ -401,6 +490,241 @@ fn run_protocol_messages(
         frames.push(frame);
     }
     frames
+}
+
+/// A successful remote send must survive exhaustion of the production detached
+/// FIFO and flush its mandatory sent report immediately before its sole
+/// terminal.
+#[test]
+fn outbound_report_and_terminal_survive_production_fifo_saturation() {
+    let _serial = SATURATION_TEST_LOCK
+        .lock()
+        .expect("xmpp saturation test lock");
+    let mut input_bytes = Vec::new();
+    let mut input = tau_proto::HarnessOutputWriter::new(&mut input_bytes);
+    for message in [
+        valid_config_message(),
+        session_started_message("session-1"),
+        HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))),
+        HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            SEND_TOOL_NAME,
+            "agent-1",
+            message_args("saturated outbound"),
+        ))),
+        HarnessOutputMessage::Disconnect(Default::default()),
+    ] {
+        input.write_message(&message).expect("write input");
+    }
+    input.flush().expect("flush input");
+
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (saturated_tx, saturated_rx) = mpsc::channel();
+    *SATURATION_HOOK.lock().expect("xmpp saturation hook") =
+        Some(("saturated outbound".to_owned(), saturated_tx));
+    let hook = SaturationHookGuard;
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    let output_bytes = Arc::clone(&bytes);
+    let output_gate = Arc::clone(&gate);
+    let runner = std::thread::spawn(move || {
+        run_with_bridge(
+            path_std_io::Cursor::new(input_bytes),
+            SaturationWriter {
+                bytes: output_bytes,
+                gate: output_gate,
+                entered: entered_tx,
+                blocked: false,
+            },
+            bridge,
+        )
+        .map_err(|error| error.to_string())
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("production writer blocked");
+    saturated_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("detached FIFO exhausted");
+    drop(hook);
+    let (closed, wake) = &*gate;
+    *closed.lock().expect("writer gate") = false;
+    wake.notify_all();
+    runner.join().expect("runner").expect("clean disconnect");
+
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(
+        bytes.lock().expect("bytes").clone(),
+    ));
+    let events = std::iter::from_fn(|| reader.read_message().transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode output")
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => Some(*emit.event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let report_indices = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, Event::MessageSentReported(report) if report.text == "saturated outbound")
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let terminal_indices = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(
+                event,
+                Event::ToolResultReported(result)
+                    if result.call_id.as_str() == format!("call-{SEND_TOOL_NAME}")
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(report_indices.len(), 1);
+    assert_eq!(terminal_indices, vec![report_indices[0] + 1]);
+}
+
+/// Failure of the checked outbound sent report must exit the production loop
+/// and suppress its paired tool terminal.
+#[test]
+fn outbound_report_writer_failure_exits_without_paired_terminal() {
+    let mut input_bytes = Vec::new();
+    let mut input = tau_proto::HarnessOutputWriter::new(&mut input_bytes);
+    let mut send = tool(
+        SEND_TOOL_NAME,
+        "agent-1",
+        message_args("forced XMPP report failure"),
+    );
+    send.call_id = "gyf8-xmpp-failed-send".into();
+    for message in [
+        valid_config_message(),
+        session_started_message("session-1"),
+        HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))),
+        HarnessOutputMessage::deliver(Event::ToolStarted(send)),
+    ] {
+        input.write_message(&message).expect("write input");
+    }
+    input.flush().expect("flush input");
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let result = run_with_bridge(
+        path_std_io::Cursor::new(input_bytes),
+        FailingWriter {
+            bytes: Arc::clone(&bytes),
+            target: b"message.sent_reported",
+            failed: Some(failed_tx),
+        },
+        bridge,
+    );
+    assert!(result.is_err(), "sent-report failure must exit the loop");
+    failed_rx
+        .try_recv()
+        .expect("selected writer failure occurred");
+
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(
+        bytes.lock().expect("bytes").clone(),
+    ));
+    while let Ok(Some(frame)) = reader.read_message() {
+        assert!(
+            !matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(),
+                        Event::ToolResultReported(result)
+                            if result.call_id.as_str() == "gyf8-xmpp-failed-send"
+                    ) || matches!(emit.event.as_ref(),
+                        Event::ToolErrorReported(error)
+                            if error.call_id.as_str() == "gyf8-xmpp-failed-send"
+                    )
+            ),
+            "sent-report failure published its paired terminal"
+        );
+    }
+}
+
+/// A worker-origin report failure must wake an otherwise idle protocol loop and
+/// run bridge cleanup.
+#[test]
+fn ingress_report_writer_failure_wakes_idle_production_loop() {
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    let (release_tx, release_rx) = mpsc::channel();
+    let report = Event::MessageDeliveredReported(MessageDelivered::new(
+        RawMessagePublisherId::new("test-extension"),
+        MessageAgentTarget::new("agent-1"),
+        MessageFactId::new("xmpp-message:worker-failure"),
+        MessageParty {
+            stable_id: "xmpp-sender:worker".to_owned(),
+            display_name: None,
+            sender_auth: Some(MessageSenderAuth::VerifiedAllowlisted),
+        },
+        Some(MessageConversation {
+            stable_id: "xmpp-conversation:worker".to_owned(),
+            display_name: None,
+            alias: None,
+        }),
+        "wake idle loop",
+    ));
+    *bridge.worker_report.lock().expect("worker report lock") = Some((release_rx, report));
+    let runner_bridge: Arc<dyn XmppBridge> = bridge.clone();
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run_with_bridge(
+            extension_input,
+            FailingWriter {
+                bytes: Arc::new(Mutex::new(Vec::new())),
+                target: b"message.delivered_reported",
+                failed: Some(failed_tx),
+            },
+            runner_bridge,
+        )
+        .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+    for message in [
+        valid_config_message(),
+        session_started_message("session-1"),
+        HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))),
+    ] {
+        input.write_message(&message).expect("write input");
+    }
+    input.flush().expect("flush startup");
+    release_tx.send(()).expect("release worker report");
+
+    failed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker report reached failing writer");
+    assert!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("idle loop exited")
+            .is_err(),
+        "worker output failure must fail the production runner"
+    );
+    assert_eq!(*bridge.shutdowns.lock().expect("shutdown count"), 1);
 }
 
 fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
@@ -2287,6 +2611,69 @@ fn direct_message_requires_exact_bound_full_jid() {
         report.conversation.expect("conversation").stable_id,
         "me@example.org"
     );
+}
+
+/// A failed accepted ingress report requests shutdown in the real worker path,
+/// and a later queued stanza cannot route or mutate worker state.
+#[test]
+fn worker_report_failure_stops_before_later_stanza() {
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+    let mut config = cfg();
+    config.routing_mode = RoutingMode::DirectResource;
+    let shutdown = shutdown_signal();
+    let mut worker = WorkerState::new(config, tx, Arc::clone(&shutdown));
+    let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
+    worker.bound_jid = Some(bound.clone());
+    worker.conversations.insert(
+        agent_id("agent-1"),
+        Conversation::Direct {
+            full_jid: bound.clone(),
+        },
+    );
+    let message = || {
+        let mut message = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
+        message.from = Some(Jid::new("me@example.org/dino").expect("jid"));
+        message.to = Some(bound.clone());
+        Stanza::from(message)
+    };
+
+    assert_eq!(worker.handle_stanza(message()), WorkerControl::Stop);
+    assert!(shutdown.is_requested());
+    let ordinal = worker.next_local_message_id;
+    assert_eq!(worker.handle_stanza(message()), WorkerControl::Stop);
+    assert_eq!(worker.next_local_message_id, ordinal);
+}
+
+/// Both nested worker readers propagate mandatory-report shutdown instead of
+/// consuming another readiness or MUC event.
+#[test]
+fn nested_worker_readers_propagate_report_failure() {
+    for context in ["online state", "muc join"] {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let mut config = cfg();
+        config.routing_mode = RoutingMode::DirectResource;
+        let shutdown = shutdown_signal();
+        let mut worker = WorkerState::new(config, tx, shutdown);
+        let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
+        worker.bound_jid = Some(bound.clone());
+        worker.conversations.insert(
+            agent_id("agent-1"),
+            Conversation::Direct {
+                full_jid: bound.clone(),
+            },
+        );
+        let mut message = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
+        message.from = Some(Jid::new("me@example.org/dino").expect("jid"));
+        message.to = Some(bound);
+        assert_eq!(
+            worker
+                .handle_nested_stanza(message.into(), context)
+                .expect_err("mandatory failure stops nested reader"),
+            format!("xmpp worker stopped while waiting for {context}")
+        );
+    }
 }
 
 /// Direct-resource fallback refuses a second registration because one bound JID

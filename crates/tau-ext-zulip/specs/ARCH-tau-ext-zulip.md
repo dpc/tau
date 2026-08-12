@@ -15,3 +15,8 @@ The user approved these persistence, ordering, recovery, and downpath-acknowledg
 The user approved exact Zulip inbound Markdown preservation, including a leading addressed bot mention, for ticket `0rpi`, satisfying [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 Successful remote sends emit `message.sent_reported` before the terminal tool result. There is no remote/local transaction, durable outbox, automatic ambiguous retry, exactly-once guarantee, upload/download authority, or reconstruction of reply authority from replay.
+
+Mandatory message reports and sole tool terminals use checked ordered output.
+The event worker advances its queue cursor only through events whose required
+report was published. Output failure retires the extension loop; progress and
+notices remain best effort.

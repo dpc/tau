@@ -6,10 +6,12 @@ Fail-closed admission and readiness behavior is specified by
 and [SPEC-tau-ext-xmpp-readiness-waits](SPEC-tau-ext-xmpp-readiness-waits.md).
 MUC join, authorization, rollback, and cleanup behavior is
 [SPEC-tau-ext-xmpp-muc-lifecycle](SPEC-tau-ext-xmpp-muc-lifecycle.md).
-The confirmed prospective tool-delivery lifecycle is specified by
+The broader prospective tool-delivery lifecycle is specified by
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md).
-It is not implemented or authorized for implementation; this record describes
-the current architecture.
+Its checked mandatory publication boundary is current under the approved
+mandatory-delivery audit fix. Its executor, FIFO, deadline, generation,
+revocation, and observability design remains unimplemented and unauthorized;
+this record describes the current architecture.
 Current and prospective security and reliability boundaries are documented in
 [the XMPP security notes](../SECURITY.md).
 
@@ -98,6 +100,10 @@ clients cannot silently discard the suffix. Multipart delivery is sequential
 and non-atomic: a later failure leaves earlier parts visible, reports failed,
 total, and completed part counts, and emits no `message.sent_reported`. All-part success
 emits one `message.sent_reported` report containing the original unsplit tool text.
+Accepted inbound reports, outbound sent reports, and sole tool terminals use
+checked ordered output. A successful outbound send publishes its sent report
+immediately before its terminal as one fail-closed sequence. Publication failure
+retires the extension loop, while progress remains best effort.
 
 - The built-in extension is disabled by default and requires an explicit
   password secret plus a non-empty `allowed_jids` allowlist.

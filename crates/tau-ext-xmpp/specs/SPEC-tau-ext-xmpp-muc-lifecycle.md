@@ -2,11 +2,13 @@
 
 ## Status
 
-This record describes current MUC behavior. The confirmed but unimplemented
+This record describes current MUC behavior. The checked mandatory publication
+boundary from
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
-will place registration and remote cleanup in one FIFO, clamp registration to
-the whole-intent deadline, and revoke local routing before best-effort cleanup.
-Implementation is not authorized by that prospective record.
+is current under the approved audit fix. Its prospective executor will place
+registration and remote cleanup in one FIFO, clamp registration to the
+whole-intent deadline, and revoke local routing before best-effort cleanup.
+That remaining implementation is not authorized by the prospective record.
 
 ## Record justification
 

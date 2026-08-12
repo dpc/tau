@@ -1,5 +1,10 @@
 # XMPP testing
 
+Mandatory-output regressions exercise production detached-FIFO saturation.
+They also force checked writer failure while the protocol loop is idle and
+cover the real `WorkerState` stanza path, proving shutdown prevents later
+queued work from producing a side effect.
+
 Tests are unit-first and use fake or state-only XMPP surfaces. They cover config
 validation, opt-in metadata, send-before-register rejection, registration state,
 bounded readiness and timeout propagation, disconnect cache invalidation,
@@ -73,7 +78,7 @@ wall-clock sleeps. Deterministic coverage must establish:
 - explicit unregister succeeds despite cleanup failure, timeout, worker loss, or
   full queue, without restoring authority;
 - output failure before remote I/O, between report and result admission, and
-  after detached admission preserves the documented publication boundary;
+  after checked admission preserves the documented publication boundary;
 - inbound stanzas stop routing immediately after local revocation even if remote
   conversation state remains.
 

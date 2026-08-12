@@ -1,10 +1,108 @@
 use std::collections::BTreeMap;
+use std::io::{Cursor, Error};
 use std::net::TcpListener;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, mpsc};
+
+use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 
 use super::*;
 use crate::api::{MessagePage, RejectedOperation, SentMessage, ZulipClient};
 use crate::config::ConfiguredStreamRoute;
+
+static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Clears the correlated production saturation hook after each test.
+struct SaturationHookGuard;
+
+impl Drop for SaturationHookGuard {
+    fn drop(&mut self) {
+        SATURATION_HOOK
+            .lock()
+            .expect("zulip saturation hook")
+            .take();
+    }
+}
+
+/// Production writer blocked by the first detached saturation filler.
+struct SaturationWriter {
+    /// Serialized protocol output.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Writer gate, initially closed.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Notification that the writer reached the filler.
+    entered: mpsc::Sender<()>,
+    /// Whether this writer already blocked once.
+    blocked: bool,
+}
+
+impl std::io::Write for SaturationWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.blocked && bytes.windows(9).any(|window| window == b"term.bell") {
+            self.blocked = true;
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.gate;
+            let closed = lock.lock().expect("writer gate");
+            drop(
+                wake.wait_while(closed, |closed| *closed)
+                    .expect("wait for writer release"),
+            );
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Production writer that fails when one selected mandatory frame is written.
+struct FailingWriter {
+    /// Complete bytes written before failure.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Event name whose frame must fail.
+    target: &'static [u8],
+    /// Optional notification that the selected frame reached the writer.
+    failed: Option<mpsc::Sender<()>>,
+    /// Matching frames to accept before failing the selected one.
+    skip_matches: usize,
+}
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes
+            .windows(self.target.len())
+            .any(|window| window == self.target)
+        {
+            if 0 < self.skip_matches {
+                self.skip_matches -= 1;
+                self.bytes
+                    .lock()
+                    .expect("output bytes")
+                    .extend_from_slice(bytes);
+                return Ok(bytes.len());
+            }
+            if let Some(failed) = self.failed.take() {
+                let _ = failed.send(());
+            }
+            return Err(Error::other("forced Zulip writer failure"));
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Cloneable in-memory sink used to inspect tracing output.
 #[derive(Clone, Default)]
@@ -61,6 +159,16 @@ struct FakeClient {
     history: Mutex<Vec<serde_json::Value>>,
     /// Events returned by the startup nonblocking queue drain.
     queued_events: Mutex<Vec<serde_json::Value>>,
+    /// One event batch returned by the blocking worker poll.
+    live_events: Mutex<Option<Vec<serde_json::Value>>>,
+    /// Number of currently executing worker polls.
+    active_event_polls: AtomicUsize,
+    /// Number of queue-worker exits.
+    worker_exits: AtomicUsize,
+    /// Notification for deterministic queue-worker retirement assertions.
+    worker_exit_changed: Condvar,
+    /// Mutex paired with the worker-exit condition variable.
+    worker_exit_lock: Mutex<()>,
     /// Requested history page sizes and anchors.
     history_requests: Mutex<Vec<(u64, usize)>>,
     /// Optional server completion marker for deterministic pagination tests.
@@ -70,6 +178,11 @@ struct FakeClient {
 }
 
 impl ZulipClient for FakeClient {
+    fn worker_exited(&self) {
+        let _guard = self.worker_exit_lock.lock().expect("worker exit lock");
+        self.worker_exits.fetch_add(1, AtomicOrdering::SeqCst);
+        self.worker_exit_changed.notify_all();
+    }
     fn resolve_stream_id(&self, _cfg: &RuntimeConfig, name: &str) -> Result<u64, ApiError> {
         self.queue_setup_calls
             .lock()
@@ -140,7 +253,13 @@ impl ZulipClient for FakeClient {
         _last_event_id: i64,
         _request_timeout: Duration,
     ) -> Result<Vec<serde_json::Value>, ApiError> {
-        Err(ApiError::unavailable())
+        self.active_event_polls.fetch_add(1, AtomicOrdering::SeqCst);
+        let _active = ActiveEventPoll(&self.active_event_polls);
+        self.live_events
+            .lock()
+            .expect("live events lock")
+            .take()
+            .ok_or_else(ApiError::unavailable)
     }
 
     fn get_events_now(
@@ -227,6 +346,15 @@ impl ZulipClient for FakeClient {
             add,
         ));
         Ok(())
+    }
+}
+
+/// Decrements the active provider-call count on every return path.
+struct ActiveEventPoll<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveEventPoll<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, AtomicOrdering::SeqCst);
     }
 }
 
@@ -1976,6 +2104,490 @@ fn mutations_emit_immutable_reports_and_delete_revokes() {
             .owners
             .contains_key(message_fact_id(&cfg(), 600).as_str())
     );
+}
+
+/// Checked mutation publication retains the exact owner lock, preventing a
+/// concurrent full-FIFO insert from evicting its source before publication.
+#[test]
+fn mutation_publication_blocks_owner_fifo_eviction() {
+    let (ext, rx, _) = extension();
+    let generation = ext.state.lock().config_generation;
+    let registration = ext.state.lock().registration_generation;
+    ext.process_event(serde_json::json!({"id":20,"type":"message","message":{"id":600,"type":"private","sender_id":42,"content":"base","flags":[],"display_recipient":[{"id":42},{"id":99}]}}), generation, registration, 99);
+    let _ = rx.recv().expect("base report");
+    {
+        let mut state = ext.state.lock();
+        let owner = state.owners.values().next().expect("base owner").clone();
+        for index in 1..REPLY_ROUTE_LIMIT {
+            let mut filler = owner.clone();
+            filler.fact_id = MessageFactId::new(format!("zulip-message:filler-{index}"));
+            filler.native_message_id = 600 + index as u64;
+            state.insert_owner(filler);
+        }
+    }
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *MUTATION_PUBLICATION_HOOK
+        .lock()
+        .expect("mutation publication hook") = Some((entered_tx, release_rx));
+    std::thread::scope(|scope| {
+        let mutation = scope.spawn(|| {
+            ext.process_event(serde_json::json!({"id":21,"type":"update_message","message_id":600,"user_id":42,"message":{"content":"edited"}}), generation, registration, 99);
+        });
+        entered_rx.recv().expect("mutation reached publication");
+        assert!(ext.state.state.try_lock().is_err());
+        release_tx.send(()).expect("release publication");
+        mutation.join().expect("mutation");
+    });
+    assert!(matches!(
+        event_from(rx.recv().expect("edit report")),
+        Event::MessageEditedReported(_)
+    ));
+}
+
+/// Create, edit, delete, and reaction events must leave the source cursor at
+/// the preceding event when their mandatory report cannot be published.
+#[test]
+fn mandatory_report_failure_preserves_cursor_and_message_ownership() {
+    let cases = [
+        serde_json::json!({"id":21,"type":"update_message","message_id":600,"user_id":42,"message":{"content":"edited"}}),
+        serde_json::json!({"id":21,"type":"delete_message","message_id":600,"user_id":42}),
+        serde_json::json!({"id":21,"type":"reaction","message_id":600,"user_id":42,"op":"add","emoji_name":"thumbs_up"}),
+        serde_json::json!({"id":21,"type":"reaction","message_id":600,"user_id":42,"op":"remove","emoji_name":"thumbs_up"}),
+    ];
+    for event in cases {
+        let (ext, rx, _) = extension();
+        let state = ext.state.lock();
+        let generation = state.config_generation;
+        let registration = state.registration_generation;
+        drop(state);
+        ext.process_event(serde_json::json!({"id":20,"type":"message","message":{"id":600,"type":"private","sender_id":42,"content":"base","flags":[],"display_recipient":[{"id":42},{"id":99}]}}), generation, registration, 99);
+        let _ = rx.recv().expect("base report");
+        drop(rx);
+
+        assert_eq!(
+            process_event_batch(&ext, vec![event], 20, generation, registration, 99),
+            20
+        );
+        assert!(
+            ext.state
+                .lock()
+                .owners
+                .contains_key(message_fact_id(&cfg(), 600).as_str()),
+            "failed mutation publication consumed message ownership"
+        );
+    }
+
+    let (ext, rx, _) = extension();
+    drop(rx);
+    let generation = ext.state.lock().config_generation;
+    assert_eq!(
+        process_event_batch(
+            &ext,
+            vec![
+                serde_json::json!({"id":21,"type":"message","message":{"id":601,"type":"private","sender_id":42,"content":"create","flags":[],"display_recipient":[{"id":42},{"id":99}]}})
+            ],
+            20,
+            generation,
+            1,
+            99,
+        ),
+        20,
+        "failed create publication advanced the source cursor"
+    );
+    assert!(
+        !ext.state
+            .lock()
+            .owners
+            .contains_key(message_fact_id(&cfg(), 601).as_str()),
+        "failed create publication retained unusable reply ownership"
+    );
+}
+
+/// A mixed event batch advances through published and safely skipped events,
+/// stops at the first failed mandatory report, and leaves its suffix untouched.
+#[test]
+fn mixed_batch_advances_only_the_exact_published_prefix() {
+    let (tx, rx) = mpsc::channel();
+    let mut config = cfg();
+    config.routes = config
+        .configured_routes
+        .iter()
+        .map(|route| route.resolve(7))
+        .collect();
+    let output = Output::channel_failing_after(tx, 1);
+    let ext = Extension::new(
+        Arc::new(FakeClient::default()),
+        output.clone(),
+        ToolNames::logical(),
+    );
+    ext.apply_config(config, publisher());
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id());
+        state.queue = Some(EventQueue {
+            queue_id: "queue-secret".to_owned(),
+            last_event_id: 0,
+            bot_user_id: 99,
+            poll_request_timeout: Duration::from_secs(100),
+        });
+        state.registration_generation = 1;
+    }
+    let generation = ext.state.lock().config_generation;
+    let registration = ext.state.lock().registration_generation;
+    let first = serde_json::json!({"id":21,"type":"message","message":{"id":610,"type":"private","sender_id":42,"content":"published","flags":[],"display_recipient":[{"id":42},{"id":99}]}});
+    let skipped = serde_json::json!({"id":22,"type":"heartbeat"});
+    let failed = serde_json::json!({"id":23,"type":"message","message":{"id":611,"type":"private","sender_id":42,"content":"failed","flags":[],"display_recipient":[{"id":42},{"id":99}]}});
+    let suffix = serde_json::json!({"id":24,"type":"message","message":{"id":612,"type":"private","sender_id":42,"content":"suffix","flags":[],"display_recipient":[{"id":42},{"id":99}]}});
+    let cursor = process_event_batch(
+        &ext,
+        vec![first, skipped, failed, suffix],
+        20,
+        generation,
+        registration,
+        99,
+    );
+    assert_eq!(cursor, 22);
+    assert_eq!(output.report_attempts(), 2);
+    assert!(rx.try_recv().is_ok(), "prefix report was not published");
+    let state = ext.state.lock();
+    assert!(!state.recent_set.contains("message:612"));
+}
+
+/// A sole synchronous tool terminal must wait behind an exhausted production
+/// detached FIFO and publish exactly once when writer admission resumes.
+#[test]
+fn tool_terminal_survives_production_fifo_saturation() {
+    let _serial = SATURATION_TEST_LOCK
+        .lock()
+        .expect("zulip saturation test lock");
+    let mut input_bytes = Vec::new();
+    let mut input = tau_proto::HarnessOutputWriter::new(&mut input_bytes);
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    input
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: publisher(),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_email_secret":"email",
+                "api_key_secret":"key",
+                "identity_key_secret":"identity",
+                "site":"https://chat.example.test",
+                "allowed_user_ids":[42],
+                "conversations":[{
+                    "name":"ops",
+                    "topic":"deploy",
+                    "receive":"mentions_only"
+                }]
+            })),
+            state_dir: None,
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    let mut invoke = tool(CONVERSATIONS_TOOL_NAME, vec![]);
+    invoke.call_id = "gyf8-zulip-saturation-terminal".into();
+    let call_id = invoke.call_id.clone();
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(invoke)))
+        .expect("invoke");
+    input
+        .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
+        .expect("disconnect");
+    input.flush().expect("flush input");
+
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (saturated_tx, saturated_rx) = mpsc::channel();
+    *SATURATION_HOOK.lock().expect("zulip saturation hook") =
+        Some((call_id.as_str().to_owned(), saturated_tx));
+    let hook = SaturationHookGuard;
+    let output_bytes = Arc::clone(&bytes);
+    let output_gate = Arc::clone(&gate);
+    let runner = std::thread::spawn(move || {
+        run_with_client(
+            Cursor::new(input_bytes),
+            SaturationWriter {
+                bytes: output_bytes,
+                gate: output_gate,
+                entered: entered_tx,
+                blocked: false,
+            },
+            Arc::new(FakeClient::default()),
+        )
+        .map_err(|error| error.to_string())
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("production writer blocked");
+    saturated_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("detached FIFO exhausted");
+    drop(hook);
+    let (closed, wake) = &*gate;
+    *closed.lock().expect("writer gate") = false;
+    wake.notify_all();
+    runner.join().expect("runner").expect("clean disconnect");
+
+    let mut reader =
+        tau_proto::HarnessInputReader::new(Cursor::new(bytes.lock().expect("bytes").clone()));
+    let terminals = std::iter::from_fn(|| reader.read_message().transpose())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode output")
+        .into_iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(),
+                        Event::ToolResultReported(result) if result.call_id == call_id
+                    ) || matches!(emit.event.as_ref(),
+                        Event::ToolErrorReported(error) if error.call_id == call_id
+                    )
+            )
+        })
+        .count();
+    assert_eq!(terminals, 1);
+}
+
+/// Failure of a checked sole terminal must return from the production runner
+/// instead of leaving the configured extension connected without settlement.
+#[test]
+fn tool_terminal_writer_failure_exits_production_loop() {
+    let mut input_bytes = Vec::new();
+    let mut input = tau_proto::HarnessOutputWriter::new(&mut input_bytes);
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    input
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: publisher(),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_email_secret":"email",
+                "api_key_secret":"key",
+                "identity_key_secret":"identity",
+                "site":"https://chat.example.test",
+                "allowed_user_ids":[42],
+                "conversations":[{
+                    "name":"ops",
+                    "topic":"deploy",
+                    "receive":"mentions_only"
+                }]
+            })),
+            state_dir: None,
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    let mut invoke = tool(CONVERSATIONS_TOOL_NAME, vec![]);
+    invoke.call_id = "gyf8-zulip-failed-terminal".into();
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(invoke)))
+        .expect("invoke");
+    input.flush().expect("flush input");
+
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let result = run_with_client(
+        Cursor::new(input_bytes),
+        FailingWriter {
+            bytes: Arc::clone(&bytes),
+            target: b"gyf8-zulip-failed-terminal",
+            failed: Some(failed_tx),
+            skip_matches: 1,
+        },
+        Arc::new(FakeClient::default()),
+    );
+    assert!(
+        result.is_err(),
+        "terminal writer failure must exit the loop"
+    );
+    failed_rx
+        .try_recv()
+        .expect("selected writer failure occurred");
+}
+
+/// A queue-worker report failure must wake an otherwise idle protocol loop and
+/// make disconnect cleanup retire its retained authority.
+#[test]
+fn ingress_report_writer_failure_wakes_idle_production_loop() {
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let client = Arc::new(FakeClient::default());
+    *client.live_events.lock().expect("live events lock") = Some(vec![serde_json::json!({
+        "id": 11, "type": "message", "flags": ["mentioned"], "message": {
+            "id": 501, "sender_id": 42, "content": "wake idle loop",
+            "type": "stream", "stream_id": 7, "subject": "deploy"
+        }
+    })]);
+    let runner_client: Arc<dyn ZulipClient> = client.clone();
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run_with_client(
+            extension_input,
+            FailingWriter {
+                bytes: Arc::new(Mutex::new(Vec::new())),
+                target: b"message.delivered_reported",
+                failed: Some(failed_tx),
+                skip_matches: 0,
+            },
+            runner_client,
+        )
+        .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    input
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: publisher(),
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_email_secret":"email",
+                "api_key_secret":"key",
+                "identity_key_secret":"identity",
+                "site":"https://chat.example.test",
+                "allowed_user_ids":[42],
+                "conversations":[{
+                    "name":"ops",
+                    "topic":"deploy",
+                    "receive":"mentions_only"
+                }]
+            })),
+            state_dir: None,
+            secrets,
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            vec![("enabled", CborValue::Bool(true))],
+        ))))
+        .expect("register");
+    input.flush().expect("flush startup");
+
+    failed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker report reached failing writer");
+    assert!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("idle loop exited")
+            .is_err(),
+        "worker output failure must fail the production runner"
+    );
+    assert_eq!(
+        client.active_event_polls.load(AtomicOrdering::SeqCst),
+        0,
+        "queue worker remained inside a poll after runner cleanup"
+    );
+    let guard = client
+        .worker_exit_lock
+        .lock()
+        .expect("worker exit wait lock");
+    let _ = client
+        .worker_exit_changed
+        .wait_timeout_while(guard, Duration::from_secs(2), |_| {
+            client.worker_exits.load(AtomicOrdering::SeqCst) == 0
+        })
+        .expect("worker exit wait");
+    assert_eq!(client.worker_exits.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// The cleanup path used after worker output failure clears all process-local
+/// routing authority before the runner returns.
+#[test]
+fn output_failure_cleanup_clears_routing_authority() {
+    let (ext, _rx, _) = extension();
+    let generation = ext.state.lock().registration_generation;
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id());
+        state.queue = Some(EventQueue {
+            queue_id: "queue".to_owned(),
+            last_event_id: 1,
+            bot_user_id: 99,
+            poll_request_timeout: Duration::from_secs(1),
+        });
+        state.insert_recent("message:7".to_owned());
+        state.insert_owner(MessageOwner {
+            agent_id: agent_id(),
+            fact_id: MessageFactId::new("zulip-message:test"),
+            native_message_id: 7,
+            conversation: Conversation {
+                route: NativeRoute::Direct(vec![42]),
+                stable_id: "zulip-conversation:test".to_owned(),
+                alias: None,
+            },
+        });
+    }
+    ext.request_shutdown();
+    let state = ext.state.lock();
+    assert!(state.registered_agents.is_empty());
+    assert!(state.queue.is_none());
+    assert!(state.owners.is_empty());
+    assert!(state.owner_order.is_empty());
+    assert!(state.recent_ids.is_empty());
+    assert!(state.recent_set.is_empty());
+    assert!(state.checkpoint.is_none());
+    assert_eq!(state.registration_generation, generation + 1);
+}
+
+/// Authority retirement waits for the dedicated publication gate rather than
+/// racing a canonical report under the mutable state mutex.
+#[test]
+fn reconfigure_waits_for_in_flight_publication_authority() {
+    let (ext, _rx, _) = extension();
+    let generation = ext.state.lock().config_generation;
+    let publication = ext.publication_authority.publish();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let reconfigure = scope.spawn(|| {
+            entered_tx.send(()).expect("entered reconfigure");
+            ext.apply_config(cfg(), publisher());
+            completed_tx.send(()).expect("completed reconfigure");
+        });
+        entered_rx.recv().expect("reconfigure entered");
+        assert!(completed_rx.try_recv().is_err());
+        assert_eq!(ext.state.lock().config_generation, generation);
+        drop(publication);
+        completed_rx.recv().expect("reconfigure completed");
+        reconfigure.join().expect("reconfigure");
+    });
+    assert_eq!(ext.state.lock().config_generation, generation + 1);
 }
 
 /// Read exactly one complete HTTP request from a loopback client connection.

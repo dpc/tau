@@ -8,25 +8,35 @@
 mod api;
 mod checkpoint;
 mod config;
+mod output;
+mod publication_authority;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
-use std::thread::Builder as ThreadBuilder;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::Duration;
 
 use api::{ApiError, EventQueue, HttpZulipClient, NativeRoute, ZulipClient};
 use checkpoint::CheckpointRuntime;
 use config::{DirectRoute, ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
-use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
+#[cfg(test)]
+pub(crate) use output::MUTATION_PUBLICATION_HOOK;
+use output::Output;
+#[cfg(test)]
+pub(crate) use output::SATURATION_HOOK;
+use publication_authority::PublicationAuthority;
+use tau_client::{
+    ClientResult, ExtensionBuilder, ManualRuntimeInput, ManualRuntimePoll, TauExtension,
+};
 use tau_proto::{
-    AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDeleted, MessageDelivered, MessageEdited, MessageFactId, MessageFactRef, MessageParty,
-    MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth, MessageSent, NoticeLevel,
-    RawMessagePublisherId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted,
-    ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDeleted,
+    MessageDelivered, MessageEdited, MessageFactId, MessageFactRef, MessageParty,
+    MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth, MessageSent,
+    RawMessagePublisherId, ToolError, ToolExample, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStatus,
 };
 
 /// Tracing target used by this extension.
@@ -270,86 +280,6 @@ impl SharedState {
     }
 }
 
-/// Output abstraction shared by protocol runtime and direct tests.
-#[derive(Clone)]
-enum Output {
-    /// Test output channel.
-    Channel(mpsc::Sender<HarnessInputMessage>),
-    /// Live tau-client output handle.
-    Client(ClientHandle),
-}
-
-impl From<ClientHandle> for Output {
-    fn from(value: ClientHandle) -> Self {
-        Self::Client(value)
-    }
-}
-
-impl From<mpsc::Sender<HarnessInputMessage>> for Output {
-    fn from(value: mpsc::Sender<HarnessInputMessage>) -> Self {
-        Self::Channel(value)
-    }
-}
-
-impl Output {
-    fn send(&self, message: HarnessInputMessage) -> bool {
-        match self {
-            Self::Channel(tx) => tx.send(message).is_ok(),
-            Self::Client(handle) => handle.send_detached(message).is_ok(),
-        }
-    }
-
-    fn emit_message_report(&self, event: Event) -> bool {
-        // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(event.is_message_report());
-        self.send(HarnessInputMessage::emit_with_persist(event, false))
-    }
-
-    fn notice(&self, message: &str) {
-        let _ = self.send(HarnessInputMessage::ExtensionNoticeRequest(
-            tau_proto::ExtensionNoticeRequest {
-                message: message.to_owned(),
-                level: NoticeLevel::Warning,
-            },
-        ));
-    }
-
-    fn progress(&self, invoke: &ToolStarted) {
-        let _ = self.send(HarnessInputMessage::emit_with_persist(
-            Event::ToolProgressReported(ToolProgress {
-                call_id: invoke.call_id.clone(),
-                tool_name: invoke.tool_name.clone(),
-                message: Some("zulip tool started".to_owned()),
-                progress: None,
-                display: Some(ToolUseState {
-                    status: ToolUseStatus::InProgress,
-                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-                    ..Default::default()
-                }),
-            }),
-            false,
-        ));
-    }
-
-    fn terminal(&self, event: Event) {
-        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
-            Ok(value) => value,
-            Err(_) => return,
-        };
-        match self {
-            Self::Channel(tx) => {
-                let _ = tx.send(HarnessInputMessage::emit_with_persist(
-                    outcome.into_reported_event(),
-                    false,
-                ));
-            }
-            Self::Client(handle) => {
-                let _ = handle.report_tool_terminal_detached(outcome);
-            }
-        }
-    }
-}
-
 /// Zulip bridge runtime and worker dependencies.
 struct Extension {
     /// Shared lifecycle state.
@@ -362,6 +292,10 @@ struct Extension {
     shutdown: Arc<AtomicBool>,
     /// Instance-scoped tools.
     tool_names: ToolNames,
+    /// Serializes authority retirement against canonical report publication.
+    publication_authority: Arc<PublicationAuthority>,
+    /// Join handle used to settle queue-worker cleanup before runner exit.
+    worker_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Extension {
@@ -372,10 +306,13 @@ impl Extension {
             output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
             tool_names,
+            publication_authority: Arc::new(PublicationAuthority::new()),
+            worker_handle: Arc::new(Mutex::new(None)),
         }
     }
 
     fn apply_config(&self, cfg: RuntimeConfig, publisher: tau_proto::ExtensionName) {
+        let _authority = self.publication_authority.retire();
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.wrapping_add(1);
         state.clear_authority();
@@ -385,6 +322,7 @@ impl Extension {
     }
 
     fn clear_config(&self) {
+        let _authority = self.publication_authority.retire();
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.wrapping_add(1);
         state.clear_authority();
@@ -402,22 +340,20 @@ impl Extension {
         .contains(&name)
     }
 
-    fn dispatch_tool(&self, invoke: ToolStarted) {
+    fn dispatch_tool_checked(&self, invoke: ToolStarted) -> ClientResult<()> {
         self.output.progress(&invoke);
         if invoke.tool_name.as_str() == self.tool_names.conversations.as_str() {
             let event = self.handle_conversations(invoke);
-            self.output.terminal(event);
-            return;
+            return self.output.terminal(event);
         }
         let permit = {
             let mut state = self.state.lock();
             if ACTIVE_TOOL_WORKER_LIMIT <= state.active_tool_workers {
                 drop(state);
-                self.output.terminal(tool_error(
+                return self.output.terminal(tool_error(
                     invoke,
                     "zulip network tool concurrency limit reached".to_owned(),
                 ));
-                return;
             }
             state.active_tool_workers += 1;
             ToolWorkerPermit {
@@ -433,6 +369,7 @@ impl Extension {
             .ok()
             .flatten()
             .map(|_enabled| {
+                let _authority = self.publication_authority.retire();
                 let mut state = self.state.lock();
                 state.registration_generation = state.registration_generation.wrapping_add(1);
                 state.unregister_agent(&invoke.agent_id);
@@ -456,14 +393,24 @@ impl Extension {
                 } else {
                     tool_error(invoke, "unknown zulip tool".to_owned())
                 };
-                ext.output.terminal(event);
+                if ext.output.check_mandatory_output().is_ok() {
+                    let _ = ext.output.terminal(event);
+                }
             });
         if spawn_result.is_err() {
-            output.terminal(tool_error(
+            return output.terminal(tool_error(
                 spawn_failure,
                 "zulip network tool worker could not start".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    /// Dispatch one tool for direct unit tests whose channel remains connected.
+    #[cfg(test)]
+    fn dispatch_tool(&self, invoke: ToolStarted) {
+        self.dispatch_tool_checked(invoke)
+            .expect("test output channel remains connected");
     }
 
     fn clone_for_worker(&self) -> Self {
@@ -473,6 +420,8 @@ impl Extension {
             output: self.output.clone(),
             shutdown: Arc::clone(&self.shutdown),
             tool_names: self.tool_names.clone(),
+            publication_authority: Arc::clone(&self.publication_authority),
+            worker_handle: Arc::clone(&self.worker_handle),
         }
     }
 
@@ -584,6 +533,7 @@ impl Extension {
         } else {
             None
         };
+        let _authority = self.publication_authority.retire();
         let mut state = self.state.lock();
         if state.config_generation != generation
             || state.registration_generation != registration_generation
@@ -621,14 +571,21 @@ impl Extension {
         }
         state.worker_started = true;
         let worker = Arc::new(self.clone_for_worker());
-        if ThreadBuilder::new()
+        let mut worker_handle = self
+            .worker_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let handle = match ThreadBuilder::new()
             .name("tau-zulip-events".to_owned())
             .spawn(move || worker_loop(worker))
-            .is_err()
         {
-            state.worker_started = false;
-            return false;
-        }
+            Ok(handle) => handle,
+            Err(_) => {
+                state.worker_started = false;
+                return false;
+            }
+        };
+        *worker_handle = Some(handle);
         true
     }
 
@@ -822,8 +779,9 @@ impl Extension {
             Err(error) => return tool_error(invoke, error.diagnostic()),
         };
         let message_ref = message_fact_id(&cfg, sent.message_id);
-        {
-            let mut state = self.state.lock();
+        let _authority = self.publication_authority.publish();
+        let publisher = {
+            let state = self.state.lock();
             if state.config_generation != generation
                 || state.registration_generation != registration_generation
                 || !state.registered_agents.contains(&invoke.agent_id)
@@ -834,19 +792,31 @@ impl Extension {
                         .to_owned(),
                 );
             }
-            let publisher = state.publisher_name.clone().expect("configured publisher");
-            let report = Event::MessageSentReported(MessageSent::new(
-                RawMessagePublisherId::new(publisher.as_str()),
-                MessageAgentTarget::new(invoke.agent_id.as_ref()),
-                message_ref.clone(),
-                None,
-                Some(conversation.fact()),
-                message.clone(),
-            ));
-            if !self.output.emit_message_report(report) {
+            state.publisher_name.clone().expect("configured publisher")
+        };
+        let report = Event::MessageSentReported(MessageSent::new(
+            RawMessagePublisherId::new(publisher.as_str()),
+            MessageAgentTarget::new(invoke.agent_id.as_ref()),
+            message_ref.clone(),
+            None,
+            Some(conversation.fact()),
+            message.clone(),
+        ));
+        if !self.output.emit_message_report(report) {
+            return tool_error(
+                invoke,
+                "zulip local sent-report submission failed after remote success".to_owned(),
+            );
+        }
+        {
+            let mut state = self.state.lock();
+            if state.config_generation != generation
+                || state.registration_generation != registration_generation
+                || !state.registered_agents.contains(&invoke.agent_id)
+            {
                 return tool_error(
                     invoke,
-                    "zulip local sent-report submission failed after remote success".to_owned(),
+                    "zulip authority changed after sent-report publication".to_owned(),
                 );
             }
             state.insert_owner(MessageOwner {
@@ -941,6 +911,18 @@ impl Extension {
     }
 
     fn process_event(
+        &self,
+        event: serde_json::Value,
+        generation: u64,
+        registration_generation: u64,
+        bot_user_id: u64,
+    ) {
+        let _authority = self.publication_authority.publish();
+        self.process_event_guarded(event, generation, registration_generation, bot_user_id);
+    }
+
+    /// Process an event while the caller owns publication authority.
+    fn process_event_guarded(
         &self,
         event: serde_json::Value,
         generation: u64,
@@ -1069,11 +1051,34 @@ impl Extension {
             native_message_id: native_id,
             conversation: conversation.clone(),
         });
+        drop(state);
+        {
+            let state = self.state.lock();
+            if state.config_generation != generation
+                || state.registration_generation != registration_generation
+                || !state.registered_agents.contains(&agent_id)
+            {
+                return;
+            }
+        }
         if !self.output.emit_message_report(report) {
+            let mut state = self.state.lock();
+            if state.config_generation != generation
+                || state.registration_generation != registration_generation
+                || !state.registered_agents.contains(&agent_id)
+            {
+                return;
+            }
             if let Some(checkpoint) = state.checkpoint.as_mut() {
                 checkpoint.retry(native_id);
             }
-            state.owners.remove(fact_id.as_str());
+            if state
+                .owners
+                .get(fact_id.as_str())
+                .is_some_and(|owner| owner.native_message_id == native_id)
+            {
+                state.owners.remove(fact_id.as_str());
+            }
             state.recent_set.remove(&format!("message:{native_id}"));
             state
                 .recent_ids
@@ -1088,23 +1093,33 @@ impl Extension {
         registration_generation: u64,
         bot_user_id: u64,
     ) {
+        let _authority = self.publication_authority.publish();
         let message = event.get("message").unwrap_or(&event);
         let Some(native_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
-            self.process_event(event, generation, registration_generation, bot_user_id);
+            self.process_event_guarded(event, generation, registration_generation, bot_user_id);
             return;
         };
         {
             let mut state = self.state.lock();
+            if state.config_generation != generation
+                || state.registration_generation != registration_generation
+                || state
+                    .queue
+                    .as_ref()
+                    .is_none_or(|queue| queue.bot_user_id != bot_user_id)
+            {
+                return;
+            }
             let Some(checkpoint) = state.checkpoint.as_mut() else {
                 drop(state);
-                self.process_event(event, generation, registration_generation, bot_user_id);
+                self.process_event_guarded(event, generation, registration_generation, bot_user_id);
                 return;
             };
             if !checkpoint.begin(native_id) {
                 return;
             }
         }
-        self.process_event(event, generation, registration_generation, bot_user_id);
+        self.process_event_guarded(event, generation, registration_generation, bot_user_id);
         let mut state = self.state.lock();
         let fact_id = state
             .owners
@@ -1274,13 +1289,44 @@ impl Extension {
         {
             return;
         }
-        if self.output.emit_message_report(report) && matches!(mutation, Mutation::Delete) {
+        if self.output.emit_message_report(report)
+            && matches!(mutation, Mutation::Delete)
+            && state
+                .owners
+                .get(owner.fact_id.as_str())
+                .is_some_and(|current| {
+                    current.native_message_id == owner.native_message_id
+                        && current.agent_id == owner.agent_id
+                })
+        {
             state.owners.remove(owner.fact_id.as_str());
         }
     }
 
     fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        let _authority = self.publication_authority.retire();
+        let mut state = self.state.lock();
+        state.shutdown_requested = true;
+        state.clear_authority();
+        self.state.changed.notify_all();
+        drop(state);
+        drop(_authority);
+        if let Some(handle) = self
+            .worker_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            let _ = handle.join();
+        }
+    }
+
+    /// Retire authority promptly on normal harness disconnect without waiting
+    /// for the provider's already-running long poll.
+    fn request_shutdown_detached(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _authority = self.publication_authority.retire();
         let mut state = self.state.lock();
         state.shutdown_requested = true;
         state.clear_authority();
@@ -1295,6 +1341,15 @@ impl Extension {
         registration_generation: u64,
     ) -> Result<(), ApiError> {
         const PAGE_SIZE: usize = 100;
+        let state_is_current = || {
+            let state = self.state.lock();
+            state.config_generation == generation
+                && state.registration_generation == registration_generation
+                && state
+                    .queue
+                    .as_ref()
+                    .is_some_and(|current| current.queue_id == queue.queue_id)
+        };
 
         let initial_position = self
             .state
@@ -1312,6 +1367,9 @@ impl Extension {
             let page = self
                 .client
                 .get_messages_after(cfg, retry_position.saturating_sub(1), 1)?;
+            if !state_is_current() {
+                return Ok(());
+            }
             let Some(message) = page.messages.into_iter().find(|message| {
                 message.get("id").and_then(serde_json::Value::as_u64) == Some(retry_position)
             }) else {
@@ -1337,6 +1395,9 @@ impl Extension {
                 return Ok(());
             }
             let page = self.client.get_messages_after(cfg, after, PAGE_SIZE)?;
+            if !state_is_current() {
+                return Ok(());
+            }
             if page.messages.is_empty() && !page.found_newest {
                 return Err(ApiError::MalformedResponse);
             }
@@ -1360,14 +1421,18 @@ impl Extension {
         } else {
             exhausted = true;
             let baseline = self.client.newest_message_id(cfg)?.unwrap_or(0);
+            if !state_is_current() {
+                return Ok(());
+            }
             let events = self
                 .client
                 .get_events_now(cfg, &queue.queue_id, queue.last_event_id)?;
+            if !state_is_current() {
+                return Ok(());
+            }
             let mut last_event_id = queue.last_event_id;
             for event in events {
-                if let Some(event_id) = event.get("id").and_then(serde_json::Value::as_i64) {
-                    last_event_id = last_event_id.max(event_id);
-                }
+                let event_id = event.get("id").and_then(serde_json::Value::as_i64);
                 if event.get("type").and_then(serde_json::Value::as_str) == Some("message") {
                     self.observe_created_message(
                         event,
@@ -1376,8 +1441,23 @@ impl Extension {
                         queue.bot_user_id,
                     );
                 }
+                if self.output.mandatory_output_failed() {
+                    break;
+                }
+                if let Some(event_id) = event_id {
+                    last_event_id = last_event_id.max(event_id);
+                }
             }
             let mut state = self.state.lock();
+            if state.config_generation != generation
+                || state.registration_generation != registration_generation
+                || state
+                    .queue
+                    .as_ref()
+                    .is_none_or(|current| current.queue_id != queue.queue_id)
+            {
+                return Ok(());
+            }
             if let Some(checkpoint) = state.checkpoint.as_mut() {
                 checkpoint.baseline(baseline);
             }
@@ -1395,6 +1475,15 @@ impl Extension {
             }
         }
         let mut state = self.state.lock();
+        if state.config_generation != generation
+            || state.registration_generation != registration_generation
+            || state
+                .queue
+                .as_ref()
+                .is_none_or(|current| current.queue_id != queue.queue_id)
+        {
+            return Ok(());
+        }
         if let Some(checkpoint) = state.checkpoint.as_mut() {
             checkpoint.set_more_history(!exhausted);
         }
@@ -1442,6 +1531,16 @@ enum Mutation {
 }
 
 fn worker_loop(ext: Arc<Extension>) {
+    #[cfg(test)]
+    struct Exit<'a>(&'a dyn ZulipClient);
+    #[cfg(test)]
+    impl Drop for Exit<'_> {
+        fn drop(&mut self) {
+            self.0.worker_exited();
+        }
+    }
+    #[cfg(test)]
+    let _exit = Exit(ext.client.as_ref());
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     loop {
         let (cfg, queue, generation, registration_generation) = {
@@ -1521,30 +1620,16 @@ fn worker_loop(ext: Arc<Extension>) {
         ) {
             Ok(events) => {
                 backoff = INITIAL_RECONNECT_BACKOFF;
-                let mut last_id = queue.last_event_id;
-                for event in events {
-                    let Some(id) = event.get("id").and_then(serde_json::Value::as_i64) else {
-                        continue;
-                    };
-                    if id <= last_id {
-                        continue;
-                    }
-                    last_id = id;
-                    if event.get("type").and_then(serde_json::Value::as_str) == Some("message") {
-                        ext.observe_created_message(
-                            event,
-                            generation,
-                            registration_generation,
-                            queue.bot_user_id,
-                        );
-                    } else {
-                        ext.process_event(
-                            event,
-                            generation,
-                            registration_generation,
-                            queue.bot_user_id,
-                        );
-                    }
+                let last_id = process_event_batch(
+                    &ext,
+                    events,
+                    queue.last_event_id,
+                    generation,
+                    registration_generation,
+                    queue.bot_user_id,
+                );
+                if ext.output.mandatory_output_failed() {
+                    return;
                 }
                 let mut state = ext.state.lock();
                 if state.config_generation == generation
@@ -1573,6 +1658,36 @@ fn worker_loop(ext: Arc<Extension>) {
             }
         }
     }
+}
+
+/// Process one ordered live-event batch and return only its safely published
+/// cursor prefix.
+fn process_event_batch(
+    ext: &Extension,
+    events: Vec<serde_json::Value>,
+    mut last_id: i64,
+    generation: u64,
+    registration_generation: u64,
+    bot_user_id: u64,
+) -> i64 {
+    for event in events {
+        let Some(id) = event.get("id").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        if id <= last_id {
+            continue;
+        }
+        if event.get("type").and_then(serde_json::Value::as_str) == Some("message") {
+            ext.observe_created_message(event, generation, registration_generation, bot_user_id);
+        } else {
+            ext.process_event(event, generation, registration_generation, bot_user_id);
+        }
+        if ext.output.mandatory_output_failed() {
+            break;
+        }
+        last_id = id;
+    }
+    last_id
 }
 
 fn wait_for_lifecycle_change(
@@ -1804,42 +1919,95 @@ where
                 ext: Extension::new(client, handle, ToolNames::logical()),
             }
         })?;
-    let Some(configure) = read_initial_config(&mut runtime)? else {
-        runtime.finish_detached().ext.request_shutdown();
-        return Ok(());
+    runtime.state().ext.output.install_waker(runtime.waker());
+    let configure = match read_initial_config(&mut runtime) {
+        Ok(Some(configure)) => configure,
+        Ok(None) => {
+            runtime.finish_detached().ext.request_shutdown_detached();
+            return Ok(());
+        }
+        Err(error) => {
+            runtime.state().ext.request_shutdown();
+            let _ = runtime.finish();
+            return Err(error);
+        }
     };
     match configure_initial(&configure, &mut runtime) {
-        Ok(names) => send_startup(&mut runtime, &names)?,
+        Ok(names) => {
+            if let Err(error) = send_startup(&mut runtime, &names) {
+                runtime.state().ext.request_shutdown();
+                let _ = runtime.finish();
+                return Err(Box::new(error));
+            }
+        }
         Err(error) => {
             runtime.state().ext.clear_config();
-            runtime.handle().config_error(error.to_string())?;
+            if let Err(client_error) = runtime.handle().config_error(error.to_string()) {
+                runtime.state().ext.request_shutdown();
+                let _ = runtime.finish();
+                return Err(Box::new(client_error));
+            }
         }
     }
-    loop {
-        match runtime.recv()? {
-            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Configure(configure)) => {
-                handle_configure(runtime.state(), configure)
+    let loop_result: ClientResult<bool> = 'drive: loop {
+        if let Err(error) = runtime.state().ext.output.check_mandatory_output() {
+            break Err(error);
+        }
+        let poll = match runtime.try_recv() {
+            Ok(poll) => poll,
+            Err(error) => break Err(error),
+        };
+        match poll {
+            ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Configure(configure)) => {
+                if let Err(error) = handle_configure(runtime.state(), configure) {
+                    break Err(error);
+                }
             }
-            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Deliver(delivery))
+            ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Deliver(delivery))
                 if !delivery.replay =>
             {
                 match *delivery.event {
                     Event::ToolStarted(invoke)
                         if runtime.state().ext.handles_tool(invoke.tool_name.as_str()) =>
                     {
-                        runtime.state().ext.dispatch_tool(invoke)
+                        if let Err(error) = runtime.state().ext.dispatch_tool_checked(invoke) {
+                            break 'drive Err(error);
+                        }
                     }
                     event => handle_live_event(runtime.state(), event),
                 }
             }
-            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Disconnect(_))
-            | ManualRuntimeInput::InputClosed => break,
+            ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Disconnect(_)) => {
+                break Ok(true);
+            }
+            ManualRuntimePoll::InputClosed => break Ok(false),
+            ManualRuntimePoll::Empty => runtime.wait_for_wake(),
             _ => {}
         }
+    };
+    let disconnected = match loop_result {
+        Ok(disconnected) => disconnected,
+        Err(error) => {
+            let mandatory_failed = runtime.state().ext.output.check_mandatory_output().is_err();
+            if mandatory_failed {
+                runtime.state().ext.request_shutdown();
+            } else {
+                runtime.state().ext.request_shutdown_detached();
+            }
+            let _ = runtime.finish();
+            return Err(Box::new(error));
+        }
+    };
+    if disconnected {
+        runtime.finish_detached().ext.request_shutdown_detached();
+        Ok(())
+    } else {
+        runtime.state().ext.request_shutdown_detached();
+        let finish = runtime.finish();
+        finish
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as Box<dyn Error>)
     }
-    let state = runtime.finish_detached();
-    state.ext.request_shutdown();
-    Ok(())
 }
 
 /// Marker registering the message-bridge capability.
@@ -1894,7 +2062,7 @@ fn configure_initial(
     Ok(names)
 }
 
-fn handle_configure(runtime: &ZulipRuntime, configure: tau_proto::Configure) {
+fn handle_configure(runtime: &ZulipRuntime, configure: tau_proto::Configure) -> ClientResult<()> {
     let result = configure
         .config
         .deserialized::<ExtConfig>()
@@ -1908,11 +2076,12 @@ fn handle_configure(runtime: &ZulipRuntime, configure: tau_proto::Configure) {
         Ok(cfg) => runtime.ext.apply_config(cfg, configure.instance_name),
         Err(error) => {
             runtime.ext.clear_config();
-            if let Output::Client(handle) = &runtime.ext.output {
-                let _ = handle.config_error(error);
+            if let Some(handle) = runtime.ext.output.client_handle() {
+                handle.config_error(error)?;
             }
         }
     }
+    Ok(())
 }
 
 fn handle_live_event(runtime: &ZulipRuntime, event: Event) {
@@ -1954,12 +2123,18 @@ fn handle_live_event(runtime: &ZulipRuntime, event: Event) {
             }
         }
         Event::SessionAgentUnloaded(value) => {
+            let _authority = runtime.ext.publication_authority.retire();
             let mut state = runtime.ext.state.lock();
             state.unregister_agent(&value.agent_id);
             state.registration_generation = state.registration_generation.wrapping_add(1);
             runtime.ext.state.changed.notify_all();
         }
-        Event::SessionShutdown(_) => runtime.ext.request_shutdown(),
+        Event::SessionShutdown(_) => {
+            let _authority = runtime.ext.publication_authority.retire();
+            let mut state = runtime.ext.state.lock();
+            state.clear_authority();
+            runtime.ext.state.changed.notify_all();
+        }
         _ => {}
     }
 }

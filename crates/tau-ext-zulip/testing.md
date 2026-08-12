@@ -1,5 +1,13 @@
 # Zulip testing
 
+Mandatory-output regressions exercise production detached-FIFO saturation.
+They also force checked writer failure from the queue worker while the protocol
+loop is idle, then prove wakeup exits the loop and clears routing authority.
+Lifecycle tests hold the publication-authority gate and use entered/completed
+barriers to prove retirement cannot overtake checked report submission. Forced
+output-failure teardown joins the worker; normal disconnect deliberately
+detaches an already-running provider long poll to remain prompt.
+
 Tests are hermetic. Loopback fake Zulip servers assert queue registration and
 event-poll method/path, HTTP Basic headers, raw-Markdown registration, a
 257-event bounded response, and credential nonexposure. They also cover

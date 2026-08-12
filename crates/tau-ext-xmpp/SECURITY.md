@@ -13,7 +13,10 @@ worker-side conversation left after failed cleanup must not retain local routing
 authority.
 
 Current tool delivery still runs readiness, registration, sequential multipart
-send, and unregister waits on the serialized protocol reader. The confirmed
+send, and unregister waits on the serialized protocol reader. Its checked
+mandatory publication boundary is current under the approved audit fix. The
+remaining executor, FIFO, deadline, generation, revocation, and observability
+design in
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](specs/SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
 is prospective and not implemented or authorized for implementation.
 

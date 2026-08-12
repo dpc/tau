@@ -11,7 +11,7 @@ use tau_proto::{AgentId, NoticeLevel};
 
 use super::gateway_client::{GatewayClient, GatewayClientConfig, GatewaySocketResponse};
 use super::{
-    ConfigGeneration, Output, SharedState, State, emit_gateway_deliveries,
+    ConfigGeneration, Output, ProcessingControl, SharedState, State, emit_gateway_deliveries,
     fail_gateway_client_if_current, retry_gateway_acknowledgements,
 };
 
@@ -384,15 +384,22 @@ impl GatewaySupervisorWorker {
             }
             retry_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
             outage_reported = false;
-            emit_gateway_deliveries(
+            if emit_gateway_deliveries(
                 state,
                 output,
                 gateway_cell,
                 Arc::clone(&gateway),
                 deliveries,
-            );
+            ) == ProcessingControl::Stop
+            {
+                gateway.disconnect();
+                break;
+            }
             if !retry_gateway_acknowledgements(state, output, gateway_cell, &gateway) {
                 gateway.disconnect();
+                if output.check_mandatory_output().is_err() {
+                    break;
+                }
                 if !self.wait_for_retry(retry_delay) {
                     break;
                 }
@@ -412,19 +419,27 @@ impl GatewaySupervisorWorker {
                             .as_ref()
                             .is_some_and(|current| Arc::ptr_eq(current, &gateway))
                         {
-                            emit_gateway_deliveries(
+                            if emit_gateway_deliveries(
                                 state,
                                 output,
                                 gateway_cell,
                                 Arc::clone(&gateway),
                                 response.deliveries,
-                            );
+                            ) == ProcessingControl::Stop
+                            {
+                                gateway.disconnect();
+                                return;
+                            }
                             if !retry_gateway_acknowledgements(
                                 state,
                                 output,
                                 gateway_cell,
                                 &gateway,
                             ) {
+                                if output.check_mandatory_output().is_err() {
+                                    gateway.disconnect();
+                                    return;
+                                }
                                 break;
                             }
                         }

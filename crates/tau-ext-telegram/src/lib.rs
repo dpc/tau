@@ -19,6 +19,7 @@ mod gateway_client;
 mod gateway_exit;
 mod gateway_supervisor;
 mod live_checkpoint;
+mod output;
 mod pending_retry_backoff;
 mod stream_owner;
 
@@ -28,7 +29,9 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use gateway_client::{
@@ -39,15 +42,20 @@ use live_checkpoint::{
     ExistingUpdate, LiveCheckpoints, RoutedUpdate, TelegramReportId, TelegramUpdateId,
     TelegramUpdateOffset,
 };
+pub(crate) use output::Output;
+#[cfg(test)]
+pub(crate) use output::SATURATION_HOOK;
 use pending_retry_backoff::PendingRetryBackoff;
 use stream_owner::{
     StreamIdentity, TelegramWebhookInfo, UpdateStreamLock, telegram_contention_diagnostic,
     webhook_active_message,
 };
-use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
+use tau_client::{
+    ClientResult, ExtensionBuilder, ManualRuntimeInput, ManualRuntimePoll, TauExtension,
+};
 use tau_proto::{
-    AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDelivered, MessageFactId, MessageParty, MessageSenderAuth, MessageSent, NoticeLevel,
+    AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDelivered,
+    MessageFactId, MessageParty, MessageSenderAuth, MessageSent, NoticeLevel,
     RawMessagePublisherId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted,
     ToolUseState, ToolUseStatus,
 };
@@ -107,6 +115,9 @@ where
 
 /// Small Bot API surface used by the extension and faked by unit tests.
 trait TelegramClient: Send + Sync + 'static {
+    /// Test-observable poller retirement hook.
+    #[cfg(test)]
+    fn poller_exited(&self) {}
     /// Fetch webhook status without consuming the update stream.
     fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure>;
 
@@ -427,6 +438,15 @@ struct State {
     gateway_pending_deliveries: HashMap<TelegramReportId, GatewayPendingDelivery>,
 }
 
+/// Whether a provider batch may process another delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessingControl {
+    /// Continue with the next provider item.
+    Continue,
+    /// Stop immediately after mandatory output failure.
+    Stop,
+}
+
 /// Exact sidecar correlation retained between gateway report and canonical
 /// fact.
 struct GatewayPendingDelivery {
@@ -450,7 +470,7 @@ fn emit_gateway_deliveries(
     gateway_cell: &Mutex<Option<Arc<GatewayClient>>>,
     gateway: Arc<GatewayClient>,
     deliveries: Vec<GatewayMessageDelivery>,
-) {
+) -> ProcessingControl {
     for delivery in deliveries {
         let Ok(agent_id) = AgentId::parse(&delivery.agent_id) else {
             tracing::warn!(
@@ -466,7 +486,7 @@ fn emit_gateway_deliveries(
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &gateway))
         {
-            return;
+            return ProcessingControl::Continue;
         }
         let publisher_name = (state_guard
             .current_session_id
@@ -530,8 +550,14 @@ fn emit_gateway_deliveries(
             .insert(report_id, pending);
         drop(gateway_guard);
         drop(state_guard);
-        output.emit_message_report(Event::MessageDeliveredReported(report));
+        if output
+            .emit_message_report(Event::MessageDeliveredReported(report))
+            .is_err()
+        {
+            return ProcessingControl::Stop;
+        }
     }
+    ProcessingControl::Continue
 }
 
 /// Retry every validated canonical ACK against the current gateway connection.
@@ -595,13 +621,16 @@ fn retry_gateway_acknowledgements(
         }
         drop(gateway_guard);
         drop(state_guard);
-        emit_gateway_deliveries(
+        if emit_gateway_deliveries(
             state,
             output,
             gateway_cell,
             Arc::clone(gateway),
             response.deliveries,
-        );
+        ) == ProcessingControl::Stop
+        {
+            return false;
+        }
     }
     true
 }
@@ -775,90 +804,6 @@ impl State {
     }
 }
 
-#[derive(Clone)]
-enum Output {
-    /// Test-side output channel preserving existing direct unit-test helpers.
-    Channel(mpsc::Sender<HarnessInputMessage>),
-    /// Tau-client output handle used by the protocol runtime.
-    Client(ClientHandle),
-}
-
-impl From<mpsc::Sender<HarnessInputMessage>> for Output {
-    fn from(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
-        Self::Channel(tx)
-    }
-}
-
-impl From<ClientHandle> for Output {
-    fn from(handle: ClientHandle) -> Self {
-        Self::Client(handle)
-    }
-}
-
-impl Output {
-    /// Sends one protocol frame, intentionally ignoring closed-writer failures.
-    ///
-    /// Telegram poller and tool output is best-effort once the harness has
-    /// disconnected or the tau-client writer has shut down.
-    fn send(&self, message: HarnessInputMessage) {
-        match self {
-            Self::Channel(tx) => {
-                let _ = tx.send(message);
-            }
-            Self::Client(handle) => {
-                let _ = handle.send_detached(message);
-            }
-        }
-    }
-
-    fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
-        self.send(HarnessInputMessage::ExtensionNoticeRequest(
-            tau_proto::ExtensionNoticeRequest {
-                message: message.into(),
-                level,
-            },
-        ));
-    }
-
-    fn report_tool_progress(&self, progress: ToolProgress) {
-        self.send(HarnessInputMessage::emit_with_persist(
-            Event::ToolProgressReported(progress),
-            false,
-        ));
-    }
-
-    /// Submit one terminal tool report through the typed client helper or the
-    /// equivalent explicit transient channel frame.
-    fn report_tool_terminal(&self, event: Event) {
-        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
-            Ok(outcome) => outcome,
-            Err(event) => {
-                tracing::error!(event = %event.name(), "telegram tool returned non-terminal event");
-                return;
-            }
-        };
-        match self {
-            Self::Client(handle) => {
-                let _ = handle.report_tool_terminal_detached(outcome);
-            }
-            Self::Channel(tx) => {
-                let _ = tx.send(HarnessInputMessage::emit_with_persist(
-                    outcome.into_reported_event(),
-                    false,
-                ));
-            }
-        }
-    }
-
-    /// Emit one transient external-message report for downstream
-    /// canonicalization.
-    fn emit_message_report(&self, event: Event) {
-        // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(event.is_message_report());
-        self.send(HarnessInputMessage::emit_with_persist(event, false));
-    }
-}
-
 struct Extension {
     state: Arc<SharedState>,
     client: Arc<dyn TelegramClient>,
@@ -870,6 +815,10 @@ struct Extension {
     output: Output,
     shutdown: Arc<AtomicBool>,
     tool_names: ToolNames,
+    /// Owned local poller, joined only for forced mandatory-output teardown.
+    poller_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Orders shutdown classification against poller report publication.
+    poller_publication: Arc<Mutex<()>>,
 }
 
 impl Extension {
@@ -891,6 +840,8 @@ impl Extension {
             output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
             tool_names,
+            poller_handle: Mutex::new(None),
+            poller_publication: Arc::new(Mutex::new(())),
         }
     }
 
@@ -1091,13 +1042,16 @@ impl Extension {
         {
             return false;
         }
-        emit_gateway_deliveries(
+        if emit_gateway_deliveries(
             &self.state,
             &self.output,
             &self.gateway,
             Arc::clone(gateway),
             response.deliveries,
-        );
+        ) == ProcessingControl::Stop
+        {
+            return false;
+        }
         true
     }
 
@@ -1111,12 +1065,47 @@ impl Extension {
         self.stop_gateway_supervisor();
     }
 
+    /// Signal prompt detached shutdown without joining workers that may be
+    /// blocked in an already-admitted checked write.
+    fn request_shutdown_detached(&self) {
+        let mut state = self.state.lock();
+        state.shutdown_requested = true;
+        state.mark_coordination_changed();
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.state.notify_all();
+        if let Some(gateway) = self.gateway.lock().expect("gateway lock").as_ref() {
+            gateway.disconnect();
+        }
+    }
+
+    /// Settle a forced mandatory-output teardown after signaling shutdown.
+    fn join_poller_after_output_failure(&self) {
+        if let Some(handle) = self.poller_handle.lock().expect("poller handle").take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Signal shutdown without racing a poller that already passed its loop
+    /// check but has not yet published its mandatory report.
+    fn shutdown_after_runtime_error(&self) {
+        let _publication = self
+            .poller_publication
+            .lock()
+            .expect("poller publication gate");
+        self.request_shutdown();
+        let mandatory_failed = self.output.check_mandatory_output().is_err();
+        drop(_publication);
+        if mandatory_failed {
+            self.join_poller_after_output_failure();
+        }
+    }
+
     fn poll_response_matches_config(&self, config_generation: ConfigGeneration) -> bool {
         let state = self.state.lock();
         state.config.is_some() && state.config_generation == config_generation
     }
 
-    fn dispatch_tool(&self, invoke: ToolStarted) {
+    fn dispatch_tool_checked(&self, invoke: ToolStarted) -> ClientResult<()> {
         self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1133,7 +1122,16 @@ impl Extension {
             name if name == self.tool_names.send.as_str() => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown telegram tool".to_owned()),
         };
-        self.output.report_tool_terminal(event);
+        self.output.check_mandatory_output()?;
+        self.output.report_tool_terminal(event)
+    }
+
+    /// Dispatch one tool for direct unit tests whose channel output is
+    /// infallible.
+    #[cfg(test)]
+    fn dispatch_tool(&self, invoke: ToolStarted) {
+        self.dispatch_tool_checked(invoke)
+            .expect("test output channel remains connected");
     }
 
     fn handles_tool(&self, tool_name: &str) -> bool {
@@ -1400,9 +1398,18 @@ impl Extension {
         let client = Arc::clone(&self.client);
         let shutdown = Arc::clone(&self.shutdown);
         let tool_names = self.tool_names.clone();
-        std::thread::spawn(move || {
-            poll_loop_with_tool_names(state_arc, client, output, shutdown, tool_names);
+        let poller_publication = Arc::clone(&self.poller_publication);
+        let handle = std::thread::spawn(move || {
+            poll_loop_with_tool_names(
+                state_arc,
+                client,
+                output,
+                shutdown,
+                tool_names,
+                poller_publication,
+            );
         });
+        *self.poller_handle.lock().expect("poller handle") = Some(handle);
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Event {
@@ -1514,26 +1521,33 @@ impl Extension {
         }
     }
 
-    fn process_update_for_generation(&self, update: TgUpdate, config_generation: ConfigGeneration) {
+    fn process_update_for_generation(
+        &self,
+        update: TgUpdate,
+        config_generation: ConfigGeneration,
+    ) -> ProcessingControl {
         let update_id = update.update_id;
         let existing = {
             let state = self.state.lock();
             if state.config_generation != config_generation || state.config.is_none() {
-                return;
+                return ProcessingControl::Continue;
             }
             state
                 .live_checkpoints
                 .existing_update(update_id, state.next_update_offset)
         };
         match existing {
-            ExistingUpdate::Acknowledged => return,
+            ExistingUpdate::Acknowledged => return ProcessingControl::Continue,
             ExistingUpdate::Routed(report) => {
-                self.output.emit_message_report(*report);
-                return;
+                return if self.output.emit_message_report(*report).is_ok() {
+                    ProcessingControl::Continue
+                } else {
+                    ProcessingControl::Stop
+                };
             }
             ExistingUpdate::NonRouted => {
                 let _ = self.classify_update_for_generation(update, config_generation);
-                return;
+                return ProcessingControl::Continue;
             }
             ExistingUpdate::New => {}
         }
@@ -1542,7 +1556,7 @@ impl Extension {
         let report = {
             let mut state = self.state.lock();
             if state.config_generation != config_generation || state.config.is_none() {
-                return;
+                return ProcessingControl::Continue;
             }
             match disposition {
                 UpdateDisposition::Routed(route) => {
@@ -1561,7 +1575,29 @@ impl Extension {
             }
         };
         if let Some(report) = report {
-            self.output.emit_message_report(report);
+            if self.output.emit_message_report(report).is_ok() {
+                ProcessingControl::Continue
+            } else {
+                ProcessingControl::Stop
+            }
+        } else {
+            ProcessingControl::Continue
+        }
+    }
+
+    /// Process a provider batch only through the first failed mandatory report.
+    fn process_update_batch(
+        &self,
+        updates: Vec<TgUpdate>,
+        config_generation: ConfigGeneration,
+    ) -> ProcessingControl {
+        if updates.into_iter().all(|update| {
+            self.process_update_for_generation(update, config_generation)
+                == ProcessingControl::Continue
+        }) {
+            ProcessingControl::Continue
+        } else {
+            ProcessingControl::Stop
         }
     }
 
@@ -1571,12 +1607,12 @@ impl Extension {
         &self,
         update: TgUpdate,
         config_generation: ConfigGeneration,
-    ) {
+    ) -> ProcessingControl {
         let update_id = update.update_id;
         let existing = {
             let state = self.state.lock();
             if state.config_generation != config_generation || state.config.is_none() {
-                return;
+                return ProcessingControl::Continue;
             }
             state
                 .live_checkpoints
@@ -1584,14 +1620,20 @@ impl Extension {
         };
         match existing {
             ExistingUpdate::Acknowledged => {}
-            ExistingUpdate::Routed(report) => self.output.emit_message_report(*report),
+            ExistingUpdate::Routed(report) => {
+                return if self.output.emit_message_report(*report).is_ok() {
+                    ProcessingControl::Continue
+                } else {
+                    ProcessingControl::Stop
+                };
+            }
             ExistingUpdate::NonRouted => {
                 let _ = self.classify_update_for_generation(update, config_generation);
             }
             ExistingUpdate::New => {
                 let mut state = self.state.lock();
                 if state.config_generation != config_generation || state.config.is_none() {
-                    return;
+                    return ProcessingControl::Continue;
                 }
                 state.live_checkpoints.insert_non_routed(update_id);
                 let next_update_offset = state.next_update_offset;
@@ -1599,6 +1641,23 @@ impl Extension {
                     .live_checkpoints
                     .advance_acknowledged_prefix(next_update_offset);
             }
+        }
+        ProcessingControl::Continue
+    }
+
+    /// Drain retained work only through the first failed mandatory replay.
+    fn process_draining_batch(
+        &self,
+        updates: Vec<TgUpdate>,
+        config_generation: ConfigGeneration,
+    ) -> ProcessingControl {
+        if updates.into_iter().all(|update| {
+            self.process_draining_update_for_generation(update, config_generation)
+                == ProcessingControl::Continue
+        }) {
+            ProcessingControl::Continue
+        } else {
+            ProcessingControl::Stop
         }
     }
 
@@ -2018,7 +2077,8 @@ impl Extension {
         let destination = chat_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "gateway".to_owned());
-        self.output
+        let _ = self
+            .output
             .emit_message_report(Event::MessageSentReported(MessageSent::new(
                 self.publisher_claim(),
                 MessageAgentTarget::new(agent_id.as_ref()),
@@ -2114,7 +2174,7 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
 
 impl Drop for Extension {
     fn drop(&mut self) {
-        self.request_shutdown();
+        self.request_shutdown_detached();
     }
 }
 
@@ -2169,7 +2229,14 @@ fn poll_loop(
     output: Output,
     shutdown: Arc<AtomicBool>,
 ) {
-    poll_loop_with_tool_names(state, client, output, shutdown, ToolNames::logical());
+    poll_loop_with_tool_names(
+        state,
+        client,
+        output,
+        shutdown,
+        ToolNames::logical(),
+        Arc::new(Mutex::new(())),
+    );
 }
 
 fn poll_loop_with_tool_names(
@@ -2178,7 +2245,18 @@ fn poll_loop_with_tool_names(
     output: Output,
     shutdown: Arc<AtomicBool>,
     tool_names: ToolNames,
+    poller_publication: Arc<Mutex<()>>,
 ) {
+    #[cfg(test)]
+    struct Exit(Arc<dyn TelegramClient>);
+    #[cfg(test)]
+    impl Drop for Exit {
+        fn drop(&mut self) {
+            self.0.poller_exited();
+        }
+    }
+    #[cfg(test)]
+    let _exit = Exit(Arc::clone(&client));
     let ext = Extension {
         state,
         client,
@@ -2188,6 +2266,8 @@ fn poll_loop_with_tool_names(
         output,
         shutdown: Arc::clone(&shutdown),
         tool_names,
+        poller_handle: Mutex::new(None),
+        poller_publication,
     };
     let mut pending_retry_backoff = PendingRetryBackoff::new();
     let mut previous_poll_offset = None;
@@ -2257,14 +2337,22 @@ fn poll_loop_with_tool_names(
                 if stale_generation {
                     continue;
                 }
+                let _publication = ext
+                    .poller_publication
+                    .lock()
+                    .expect("poller publication gate");
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
                 if draining {
                     if replaying_pending_during_drain {
-                        for update in updates {
-                            ext.process_draining_update_for_generation(
-                                update,
-                                poll_request.config_generation,
-                            );
+                        if ext.process_draining_batch(updates, poll_request.config_generation)
+                            == ProcessingControl::Stop
+                        {
+                            ext.request_shutdown();
+                            return;
                         }
+                        drop(_publication);
                         wait_for_coordination_change_or_shutdown(
                             &ext.state,
                             &shutdown,
@@ -2275,16 +2363,22 @@ fn poll_loop_with_tool_names(
                     continue;
                 }
                 if updates.is_empty() {
+                    drop(_publication);
                     wait_for_coordination_change_or_shutdown(
                         &ext.state,
                         &shutdown,
                         Duration::from_millis(50),
                         poll_request.coordination_generation,
                     );
+                    continue;
                 }
-                for update in updates {
-                    ext.process_update_for_generation(update, poll_request.config_generation);
+                if ext.process_update_batch(updates, poll_request.config_generation)
+                    == ProcessingControl::Stop
+                {
+                    ext.request_shutdown();
+                    return;
                 }
+                drop(_publication);
                 if !ext.state.lock().live_checkpoints.is_empty() {
                     wait_for_coordination_change_or_shutdown(
                         &ext.state,
@@ -2332,6 +2426,7 @@ where
                 ext: Extension::new(client, handle),
             }
         })?;
+    runtime.state().ext.output.install_waker(runtime.waker());
     let Some(configure) = read_initial_config(&mut runtime)? else {
         let state = runtime.finish()?;
         state.ext.request_shutdown();
@@ -2339,20 +2434,37 @@ where
     };
     match configure_tool_names(&configure, &mut runtime) {
         Ok(tool_names) => {
-            send_startup_declarations(&mut runtime, &tool_names)?;
+            if let Err(error) = send_startup_declarations(&mut runtime, &tool_names) {
+                runtime.state().ext.output.report_known_mandatory_failure();
+                runtime.state().ext.shutdown_after_runtime_error();
+                let _ = runtime.finish();
+                return Err(Box::new(error));
+            }
         }
         Err(error) => {
             runtime.state().ext.clear_config_after_error();
             runtime.handle().config_error(error.to_string())?;
         }
     }
-    let exit = drive_manual_runtime(&mut runtime)?;
-    runtime.state().ext.request_shutdown();
-    let state = match exit {
-        ManualRuntimeExit::Disconnect => runtime.finish_detached(),
-        ManualRuntimeExit::InputClosed => runtime.finish()?,
+    let exit = match drive_manual_runtime(&mut runtime) {
+        Ok(exit) => exit,
+        Err(error) => {
+            runtime.state().ext.shutdown_after_runtime_error();
+            let _ = runtime.finish();
+            return Err(error);
+        }
     };
-    state.ext.request_shutdown();
+    let state = match exit {
+        ManualRuntimeExit::Disconnect => {
+            runtime.state().ext.request_shutdown_detached();
+            runtime.finish_detached()
+        }
+        ManualRuntimeExit::InputClosed => {
+            runtime.state().ext.shutdown_after_runtime_error();
+            runtime.finish()?
+        }
+    };
+    state.ext.request_shutdown_detached();
     Ok(())
 }
 
@@ -2461,11 +2573,23 @@ fn drive_manual_runtime(
     runtime: &mut tau_client::ManualExtensionRuntime<TelegramRuntime>,
 ) -> Result<ManualRuntimeExit, Box<dyn Error>> {
     loop {
-        match runtime.recv()? {
-            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Configure(configure)) => {
-                handle_configure_message(runtime.state_mut(), configure);
+        runtime.state().ext.output.check_mandatory_output()?;
+        let poll = match runtime.try_recv() {
+            Ok(poll) => poll,
+            Err(error) => {
+                runtime
+                    .state()
+                    .ext
+                    .output
+                    .observe_pre_dispatch_error(&error);
+                return Err(Box::new(error));
             }
-            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Deliver(delivery)) => {
+        };
+        match poll {
+            ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Configure(configure)) => {
+                handle_configure_message(runtime.state_mut(), configure)?;
+            }
+            ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Deliver(delivery)) => {
                 if delivery.replay {
                     continue;
                 }
@@ -2473,36 +2597,42 @@ fn drive_manual_runtime(
                     Event::ToolStarted(invoke)
                         if runtime.state().ext.handles_tool(invoke.tool_name.as_str()) =>
                     {
-                        runtime.state().ext.dispatch_tool(invoke);
+                        runtime.state().ext.dispatch_tool_checked(invoke)?;
                     }
                     Event::ToolStarted(_) => {}
                     event => handle_live_event_value(runtime.state(), event),
                 }
             }
-            ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Disconnect(_)) => {
+            ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Disconnect(_)) => {
+                runtime.state().ext.output.check_mandatory_output()?;
                 break Ok(ManualRuntimeExit::Disconnect);
             }
-            ManualRuntimeInput::InputClosed => break Ok(ManualRuntimeExit::InputClosed),
-            ManualRuntimeInput::Timeout => {}
-            ManualRuntimeInput::Message(_) => {}
+            ManualRuntimePoll::InputClosed => {
+                runtime.state().ext.output.check_mandatory_output()?;
+                break Ok(ManualRuntimeExit::InputClosed);
+            }
+            ManualRuntimePoll::Empty => runtime.wait_for_wake(),
+            ManualRuntimePoll::Message(_) => {}
         }
     }
 }
 
 /// Apply a runtime reconfiguration and report errors explicitly to the harness.
-fn handle_configure_message(runtime: &mut TelegramRuntime, configure: tau_proto::Configure) {
+fn handle_configure_message(
+    runtime: &mut TelegramRuntime,
+    configure: tau_proto::Configure,
+) -> ClientResult<()> {
     let publisher_name = configure.instance_name.clone();
     let result = parse_ext_config(&configure.config)
         .and_then(|cfg| cfg.validate(&configure.secrets))
         .and_then(|cfg| runtime.ext.apply_config(cfg, configure.state_dir));
     if let Err(message) = result {
         runtime.ext.clear_config_after_error();
-        if let Output::Client(handle) = &runtime.ext.output {
-            let _ = handle.config_error(message);
-        }
+        runtime.ext.output.config_error(message)?;
     } else {
         runtime.ext.set_publisher_name(publisher_name);
     }
+    Ok(())
 }
 
 /// Handle a delivered live event without tau-client's static handler registry.
