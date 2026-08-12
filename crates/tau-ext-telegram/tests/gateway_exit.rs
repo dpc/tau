@@ -297,19 +297,27 @@ fn webhook_preflight_transient_failures_use_ex_tempfail() {
     assert_exit(gateway, 75);
 }
 
-/// Active webhook and post-preflight getUpdates HTTP 409 are explicit
-/// EX_UNAVAILABLE ownership failures.
+/// Active webhooks and post-preflight getUpdates HTTP 409 are explicit
+/// EX_UNAVAILABLE ownership failures. The active-webhook fixture also prevents
+/// successful remote diagnostics that reflect the bot token from leaking it to
+/// gateway stderr while retaining useful ownership-error context.
 #[test]
 fn webhook_and_runtime_conflict_use_ex_unavailable() {
     let _serial = serial();
     let temp = tempfile::tempdir().expect("tempdir");
     let (base, worker) = server(vec![(
         200,
-        r#"{"ok":true,"result":{"url":"https://example.invalid/hook"}}"#,
+        r#"{"ok":true,"result":{"url":"https://example.invalid/hook","last_error_message":"delivery failed for secret-token after retry"}}"#,
     )]);
     let mut webhook = command(&temp);
     webhook.arg("--api-base").arg(base);
-    assert_exit(webhook, 69);
+    let output = assert_exit(webhook, 69);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("delivery failed for <redacted> after retry"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("secret-token"), "{stderr}");
     worker.join().expect("join webhook server");
 
     let temp = tempfile::tempdir().expect("tempdir");

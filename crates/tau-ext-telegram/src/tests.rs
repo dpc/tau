@@ -2338,6 +2338,39 @@ fn telegram_register_fails_when_webhook_is_active() {
     assert_eq!(ext.state.lock().pending_local_registrations, 0);
 }
 
+/// Successful webhook preflight responses can reflect the request credential,
+/// so production registration must redact it before the active-webhook error
+/// reaches the local tool output.
+#[test]
+fn telegram_register_redacts_token_reflected_by_webhook_diagnostic() {
+    let token = "secret-token-reflected-by-webhook";
+    let body = format!(
+        r#"{{"ok":true,"result":{{"url":"https://example.invalid/hook","last_error_message":"delivery failed for {token} after retry"}}}}"#
+    );
+    let (api_base, fixture) = telegram_response_fixture(
+        HttpResponseFraming::ContentLength,
+        body.into_bytes(),
+        "application/json",
+    );
+    let (tx, rx) = mpsc::channel();
+    let ext = test_extension(Arc::new(HttpTelegramClient::default()), tx);
+    let mut config = cfg();
+    config.api_base = api_base;
+    config.bot_token = token.to_owned();
+    ext.apply_config(config, Some(temp_state_dir()))
+        .expect("apply config");
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+
+    let message = expect_tool_error(&rx);
+    assert!(
+        message.contains("delivery failed for <redacted> after retry"),
+        "{message}"
+    );
+    assert!(!message.contains(token), "{message}");
+    fixture.join().expect("fixture should exit");
+}
+
 /// If webhook status cannot be checked, registration fails closed so the tool
 /// result cannot imply that Tau owns Telegram's singleton update stream.
 #[test]

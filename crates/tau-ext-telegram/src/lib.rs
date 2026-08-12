@@ -3063,7 +3063,7 @@ impl Default for HttpTelegramClient {
 impl TelegramClient for HttpTelegramClient {
     fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         let value = self.post(cfg, "getWebhookInfo", serde_json::json!({}))?;
-        decode_webhook_info(&value).map_err(TelegramApiFailure::Protocol)
+        decode_webhook_info(cfg, &value).map_err(TelegramApiFailure::Protocol)
     }
 
     fn get_updates(
@@ -3169,7 +3169,10 @@ fn bounded_api_diagnostic(text: &str) -> String {
     output
 }
 
-fn decode_webhook_info(value: &serde_json::Value) -> Result<TgWebhookInfo, String> {
+fn decode_webhook_info(
+    cfg: &RuntimeConfig,
+    value: &serde_json::Value,
+) -> Result<TgWebhookInfo, String> {
     let result = value
         .get("result")
         .ok_or_else(|| "Telegram getWebhookInfo response missing result".to_owned())?;
@@ -3184,7 +3187,7 @@ fn decode_webhook_info(value: &serde_json::Value) -> Result<TgWebhookInfo, Strin
     let last_error_message = result
         .get("last_error_message")
         .and_then(|value| value.as_str())
-        .map(str::to_owned);
+        .map(|message| cfg.stream_identity().redact_token(message));
     Ok(TgWebhookInfo {
         url,
         pending_update_count,
