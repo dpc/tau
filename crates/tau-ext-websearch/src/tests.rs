@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, BufReader as IoBufReader, BufWriter, ErrorKind};
+use std::io::{BufRead, BufReader, BufReader as IoBufReader, BufWriter, Cursor, Error, ErrorKind};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::sync::{Condvar, Mutex, mpsc};
@@ -12,6 +12,77 @@ use tau_proto::{
 };
 
 use super::*;
+static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Panic-safe installation of one correlated production saturation hook.
+struct SaturationHookGuard;
+
+impl Drop for SaturationHookGuard {
+    fn drop(&mut self) {
+        SATURATION_HOOK.lock().expect("saturation hook").take();
+    }
+}
+
+/// Production writer blocked on the first saturation filler frame.
+struct SaturationWriter {
+    /// Serialized protocol bytes.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Gate that blocks and releases the writer thread.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Announces that the production writer is blocked.
+    entered: mpsc::Sender<()>,
+    /// Prevents blocking more than once.
+    blocked: bool,
+}
+
+impl std::io::Write for SaturationWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.blocked && bytes.windows(9).any(|window| window == b"term.bell") {
+            self.blocked = true;
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.gate;
+            let mut closed = lock.lock().expect("writer gate");
+            while *closed {
+                closed = wake.wait(closed).expect("writer gate wait");
+            }
+        }
+        self.bytes.lock().expect("output bytes").extend(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writer that fails when a mandatory websearch terminal reaches production
+/// I/O.
+struct TerminalFailureWriter {
+    /// Serialized bytes preceding the failed terminal.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Whether the terminal write must fail on flush.
+    failed: bool,
+}
+
+impl std::io::Write for TerminalFailureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.failed |= [b"tool.result_reported".as_slice(), b"tool.error_reported"]
+            .iter()
+            .any(|needle| bytes.windows(needle.len()).any(|window| window == *needle));
+        if !self.failed {
+            self.bytes.lock().expect("output bytes").extend(bytes);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed {
+            Err(Error::other("forced mandatory websearch output failure"))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// Test-side wrapper around [`HarnessInputReader`] that exposes helpers for
 /// protocol events and selected non-event control messages.
@@ -933,6 +1004,159 @@ fn disconnect_exits_promptly_while_searches_are_in_flight() {
         .expect("extension should exit promptly after disconnect");
     assert!(exited);
     searcher.release();
+}
+
+/// Proves result and error workers survive exhaustion of the real detached FIFO
+/// and publish exactly one checked terminal after writer admission resumes.
+#[test]
+fn worker_terminals_survive_production_fifo_saturation() {
+    let _serial = SATURATION_TEST_LOCK.lock().expect("saturation test lock");
+    for (searcher, expect_result) in [
+        (
+            StubSearcher::ok("saturated result") as Arc<dyn Searcher>,
+            true,
+        ),
+        (
+            StubSearcher::err("saturated error") as Arc<dyn Searcher>,
+            false,
+        ),
+    ] {
+        let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new((Mutex::new(true), Condvar::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (overloaded_tx, overloaded_rx) = mpsc::channel();
+        *SATURATION_HOOK.lock().expect("saturation hook") =
+            Some(("saturated-call".into(), overloaded_tx));
+        let hook = SaturationHookGuard;
+        let output_bytes = Arc::clone(&bytes);
+        let output_gate = Arc::clone(&gate);
+        let runner = thread::spawn(move || {
+            run_with_clients(
+                extension_input,
+                SaturationWriter {
+                    bytes: output_bytes,
+                    gate: output_gate,
+                    entered: entered_tx,
+                    blocked: false,
+                },
+                searcher,
+                StubParallelClient::ok("unused"),
+            )
+            .map_err(|error| error.to_string())
+        });
+        let mut input = EventWriter::new(BufWriter::new(harness_input));
+        input
+            .write_message(&configure_message(serde_json::json!({})))
+            .expect("configure");
+        input
+            .write_event(&exa_started("saturated-call", "query"))
+            .expect("invoke");
+        input.flush().expect("flush invoke");
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("production writer blocked");
+        let ownership_retained = overloaded_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("detached FIFO exhausted");
+        assert!(ownership_retained, "provider permit released before flush");
+        drop(hook);
+        let (closed, wake) = &*gate;
+        *closed.lock().expect("writer gate") = false;
+        wake.notify_all();
+        input
+            .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some("fixture complete".to_owned()),
+            }))
+            .expect("disconnect");
+        input.flush().expect("flush disconnect");
+        runner.join().expect("runner").expect("clean disconnect");
+
+        let mut reader =
+            HarnessInputReader::new(Cursor::new(bytes.lock().expect("output bytes").clone()));
+        let terminals = std::iter::from_fn(|| reader.read_message().transpose())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decode output")
+            .into_iter()
+            .filter_map(|frame| match frame {
+                HarnessInputMessage::Emit(emit) => {
+                    let event = *emit.event;
+                    let correlated = match &event {
+                        Event::ToolResultReported(result) => {
+                            result.call_id.as_str() == "saturated-call"
+                        }
+                        Event::ToolErrorReported(error) => {
+                            error.call_id.as_str() == "saturated-call"
+                        }
+                        Event::ToolCancelledReported(cancelled) => {
+                            cancelled.call_id.as_str() == "saturated-call"
+                        }
+                        _ => false,
+                    };
+                    correlated.then_some(event)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(
+            matches!(terminals[0], Event::ToolResultReported(_)),
+            expect_result
+        );
+        match &terminals[0] {
+            Event::ToolResultReported(result) => {
+                assert_eq!(
+                    result.result,
+                    CborValue::Text(
+                        "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">saturated result</tau_web_content>"
+                            .to_owned()
+                    )
+                );
+                assert_eq!(result.tool_name.as_str(), EXA_TOOL_NAME);
+            }
+            Event::ToolErrorReported(error) => {
+                assert_eq!(error.message, "saturated error");
+                assert_eq!(error.tool_name.as_str(), EXA_TOOL_NAME);
+            }
+            _ => unreachable!("only correlated tool terminals are collected"),
+        }
+    }
+}
+
+/// Proves a checked terminal write failure exits the extension loop instead of
+/// leaving the connected routed call pending.
+#[test]
+fn mandatory_terminal_failure_exits_extension_loop() {
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let output_bytes = Arc::clone(&bytes);
+    let runner = thread::spawn(move || {
+        run_with_clients(
+            extension_input,
+            TerminalFailureWriter {
+                bytes: output_bytes,
+                failed: false,
+            },
+            StubSearcher::ok("result"),
+            StubParallelClient::ok("unused"),
+        )
+        .map_err(|error| error.to_string())
+    });
+    let mut input = EventWriter::new(BufWriter::new(harness_input));
+    input
+        .write_message(&configure_message(serde_json::json!({})))
+        .expect("configure");
+    input
+        .write_event(&exa_started("failed-call", "query"))
+        .expect("invoke");
+    input.flush().expect("flush invoke");
+    assert!(runner.join().expect("runner").is_err());
+    let output = bytes.lock().expect("output bytes");
+    assert!(
+        !output
+            .windows(20)
+            .any(|window| window == b"tool.result_reported")
+    );
 }
 
 /// Ensures endpoint config validation catches conflicting aliases before a

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use tau_client::{ClientError, ClientHandle, ClientResult};
+use tau_client::{ClientError, ClientResult};
 use tau_proto::{ToolError, ToolResult, ToolType};
 
 use super::{HOLD_READY_TIMEOUT, HOLD_TERMINAL_TIMEOUT, HOLD_TERMINAL_TIMEOUT_SECS};
@@ -119,7 +119,7 @@ impl ReleaseHold {
     pub(super) fn start(
         config: ReleaseConfig,
         invoke: tau_proto::ToolStarted,
-        handle: ClientHandle,
+        terminals: super::TerminalSender,
     ) -> ClientResult<Self> {
         let listener = UnixListener::bind(&config.socket_path).map_err(|error| {
             ClientError::handler(format!("failed to bind release socket: {error}"))
@@ -137,7 +137,7 @@ impl ReleaseHold {
                 socket_path,
                 nonce: config.nonce,
                 invoke,
-                handle,
+                terminals,
                 terminal: worker_terminal,
                 input: listener_input,
                 inputs,
@@ -165,24 +165,14 @@ impl ReleaseHold {
         &self.call_id
     }
 
-    /// Returns whether the worker has exited naturally.
-    pub(super) fn is_finished(&self) -> bool {
-        self.join.is_finished()
-    }
-
     /// Arms authenticated release after readiness has been published.
     pub(super) fn arm(&self) {
         let _ = self.signal.send(WorkerInput::Arm);
     }
 
-    /// Claims cancellation, signals the worker, and joins it.
-    pub(super) fn cancel(self) -> ClientResult<()> {
-        if claim(&self.terminal, TerminalOwner::Cancellation) {
-            let _ = self.signal.send(WorkerInput::Cancel);
-        }
-        self.join
-            .join()
-            .map_err(|_| ClientError::handler("deterministic release worker panicked"))
+    /// Claims cancellation and signals the worker.
+    pub(super) fn cancel(&self) {
+        let _ = self.signal.send(WorkerInput::Cancel);
     }
 
     /// Claims shutdown and joins without synthetic output.
@@ -211,8 +201,8 @@ struct ReleaseWorker {
     nonce: String,
     /// Canonical invocation identity and result metadata.
     invoke: tau_proto::ToolStarted,
-    /// Detached terminal publication handle.
-    handle: ClientHandle,
+    /// Worker-to-loop terminal publication adapter.
+    terminals: super::TerminalSender,
     /// Shared exactly-one terminal arbitration state.
     terminal: Arc<Mutex<TerminalOwner>>,
     /// Acceptor-to-worker and lifecycle-input sender.
@@ -231,7 +221,7 @@ impl ReleaseWorker {
             socket_path,
             nonce,
             invoke,
-            handle,
+            terminals,
             terminal,
             input,
             inputs,
@@ -284,12 +274,17 @@ impl ReleaseWorker {
             match next {
                 Ok(WorkerInput::Arm) => armed = true,
                 Ok(WorkerInput::Cancel) => {
-                    let _ = handle.report_tool_cancelled_detached(tau_proto::ToolCancelled {
-                        presentation: Default::default(),
-                        call_id: invoke.call_id.clone(),
-                        tool_name: invoke.tool_name.clone(),
-                        tool_type: ToolType::Function,
-                    });
+                    if claim(&terminal, TerminalOwner::Cancellation) {
+                        terminals.send(
+                            tau_proto::ToolCancelled {
+                                presentation: Default::default(),
+                                call_id: invoke.call_id.clone(),
+                                tool_name: invoke.tool_name.clone(),
+                                tool_type: ToolType::Function,
+                            }
+                            .into(),
+                        );
+                    }
                     break;
                 }
                 Ok(WorkerInput::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -298,10 +293,13 @@ impl ReleaseWorker {
                     let timeout = remaining.min(CLIENT_READ_TIMEOUT);
                     if let Err(error) = configure_client_timeout(&stream, timeout) {
                         if claim(&terminal, TerminalOwner::Worker) {
-                            let _ = handle.report_tool_error_detached(worker_error(
-                                &invoke,
-                                format!("failed to bound release client read: {error}"),
-                            ));
+                            terminals.send(
+                                worker_error(
+                                    &invoke,
+                                    format!("failed to bound release client read: {error}"),
+                                )
+                                .into(),
+                            );
                         }
                         break;
                     }
@@ -311,37 +309,40 @@ impl ReleaseWorker {
                 }
                 Ok(WorkerInput::AcceptError(error)) => {
                     if claim(&terminal, TerminalOwner::Worker) {
-                        let _ = handle.report_tool_error_detached(worker_error(
-                            &invoke,
-                            format!("release socket accept failed: {error}"),
-                        ));
+                        terminals.send(
+                            worker_error(&invoke, format!("release socket accept failed: {error}"))
+                                .into(),
+                        );
                     }
                     break;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if claim(&terminal, TerminalOwner::Worker) {
-                        let _ = handle.report_tool_error_detached(worker_error(
+                        terminals.send(worker_error(
                         &invoke,
                         format!(
                             "deterministic hold reached its {HOLD_TERMINAL_TIMEOUT_SECS} second deadline"
                         ),
-                    ));
+                    ).into());
                     }
                     break;
                 }
             }
             if armed && authenticated && claim(&terminal, TerminalOwner::Release) {
-                let _ = handle.report_tool_result_detached(ToolResult {
-                    presentation: Default::default(),
-                    call_id: invoke.call_id.clone(),
-                    tool_name: invoke.tool_name.clone(),
-                    tool_type: ToolType::Function,
-                    result: tau_proto::CborValue::Text("restart succeeded".to_owned()),
-                    provider_content: Vec::new(),
-                    kind: tau_proto::ToolResultKind::Final,
-                    originator: invoke.originator.clone(),
-                    display: None,
-                });
+                terminals.send(
+                    ToolResult {
+                        presentation: Default::default(),
+                        call_id: invoke.call_id.clone(),
+                        tool_name: invoke.tool_name.clone(),
+                        tool_type: ToolType::Function,
+                        result: tau_proto::CborValue::Text("restart succeeded".to_owned()),
+                        provider_content: Vec::new(),
+                        kind: tau_proto::ToolResultKind::Final,
+                        originator: invoke.originator.clone(),
+                        display: None,
+                    }
+                    .into(),
+                );
                 break;
             }
         }

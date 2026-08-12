@@ -10,6 +10,10 @@ Cover registration/default policy, endpoint parsing, rejection, and
 application, provider argument forwarding and local rejection, no-Authorization
 behavior, JSON/SSE decode, independent response/output/error caps, redaction,
 saturation with responsive control handling, and replay suppression.
+Production output lifecycle coverage blocks the real writer, exhausts the
+64-frame detached FIFO, and requires one exact worker result/error after checked
+admission resumes. Forced mandatory-write failure must exit the extension loop
+without falsely publishing a terminal.
 
 Display-state lifecycle tests must assert the same safe query/fetch target appears
 on progress, success, error, and busy terminals. Exercise the Exa and Parallel

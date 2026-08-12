@@ -32,3 +32,9 @@ Regression coverage should include:
 - ignoring substrings inside ASCII words;
 - passing non-matching prompts through unchanged;
 - preserving prompt identity/routing fields when text is replaced.
+
+Production output lifecycle regressions must block the real writer and exhaust
+the 64-frame detached FIFO before no-side-effect cancellation/deadline and
+release success terminals. They require exactly one terminal after admission
+resumes; forced mandatory-write failure must exit the extension loop while the
+hold remains owned for disconnect cleanup.

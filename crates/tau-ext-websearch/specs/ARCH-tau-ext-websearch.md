@@ -12,6 +12,11 @@ invocation-correlated `tool.result_reported`. The harness publishes the canonica
 terminal/provider projections, so existing transcript, replay, compaction,
 Chat Completions, and Codex/Responses paths therefore retain their normal
 semantics without a websearch-specific protocol or persistence representation.
+Provider workers transfer their sole terminal outcome to the protocol loop over
+an unbounded internal channel. The loop performs checked ordered publication and
+retains the in-flight permit until that write succeeds; output failure exits the
+extension so harness disconnect cleanup can settle the routed call. Optional
+display progress remains detached.
 
 Provider trust, endpoint, transport, and redaction behavior is
 [SPEC-tau-ext-websearch-provider-boundary](SPEC-tau-ext-websearch-provider-boundary.md).

@@ -13,16 +13,19 @@
 use std::error::Error;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
+use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     CborValue, Event, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolStarted,
     ToolUseState, ToolUseStats, ToolUseStatus,
 };
 use ureq::tls as path_ureq_tls;
 use url::Url;
+#[cfg(test)]
+static SATURATION_HOOK: Mutex<Option<(tau_proto::ToolCallId, mpsc::Sender<bool>)>> =
+    Mutex::new(None);
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "websearch";
 
@@ -127,7 +130,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 /// Returns an error if protocol I/O fails before the harness disconnects.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
     run_with_clients(
@@ -200,17 +203,122 @@ fn run_with_clients<R, W>(
     parallel_client: Arc<dyn ParallelClient>,
 ) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
+    let (completed_tx, completed_rx) = mpsc::channel();
     let state = WebsearchState {
         searcher,
         parallel_client,
         sem: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+        completed_tx,
+        completed_rx,
+        waker: None,
     };
-    tau_client::TauExtensionRunner::new(WebsearchExtension)
-        .run_detached_writer(reader, writer, state)?;
-    Ok(())
+    let mut runtime = match tau_client::TauExtensionRunner::new(WebsearchExtension)
+        .start_manual_loop(reader, writer, state)
+    {
+        Ok(runtime) => runtime,
+        Err(ClientError::InitialConfigureRejected) => return Ok(()),
+        Err(error) => return Err(Box::new(error)),
+    };
+    let waker = runtime.waker();
+    runtime.state_mut().waker = Some(waker);
+    let loop_result = run_websearch_loop(&mut runtime);
+    match loop_result {
+        Ok(WebsearchLoopExit::Disconnect) => {
+            let _ = runtime.finish_detached();
+            Ok(())
+        }
+        Ok(WebsearchLoopExit::Graceful) => runtime
+            .finish()
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as Box<dyn Error>),
+        Err(error) => {
+            let _ = runtime.finish();
+            Err(Box::new(error))
+        }
+    }
+}
+
+/// Reason the manual runtime stopped.
+enum WebsearchLoopExit {
+    /// Harness sent a normal protocol disconnect.
+    Disconnect,
+    /// Input closed or a handler requested graceful stop.
+    Graceful,
+}
+
+/// Runs harness dispatch and publishes worker terminals on the ordered writer.
+fn run_websearch_loop(
+    runtime: &mut tau_client::ManualExtensionRuntime<WebsearchState>,
+) -> ClientResult<WebsearchLoopExit> {
+    loop {
+        while let Ok(completed) = runtime.state().completed_rx.try_recv() {
+            let CompletedTool { terminal, _permit } = completed;
+            let terminal = terminal?;
+            #[cfg(test)]
+            let call_id = match &terminal {
+                tau_client::ToolTerminalOutcome::Result(result) => result.call_id.clone(),
+                tau_client::ToolTerminalOutcome::Failure(error) => error.call_id.clone(),
+                tau_client::ToolTerminalOutcome::Cancelled(cancelled) => cancelled.call_id.clone(),
+            };
+            #[cfg(test)]
+            saturate_detached_fifo_for_test(
+                &runtime.handle(),
+                &call_id,
+                runtime.state().sem.available() < MAX_IN_FLIGHT,
+            );
+            runtime.handle().report_tool_terminal(terminal)?;
+            drop(_permit);
+        }
+        match runtime.try_recv()? {
+            tau_client::ManualRuntimePoll::Message(message) => {
+                match runtime.dispatch_one(message)? {
+                    tau_client::DispatchOutcome::Continue => {}
+                    tau_client::DispatchOutcome::StopRequested => {
+                        return Ok(WebsearchLoopExit::Graceful);
+                    }
+                    tau_client::DispatchOutcome::Disconnect(_) => {
+                        return Ok(WebsearchLoopExit::Disconnect);
+                    }
+                }
+            }
+            tau_client::ManualRuntimePoll::InputClosed => {
+                return Ok(WebsearchLoopExit::Graceful);
+            }
+            tau_client::ManualRuntimePoll::Empty => runtime.wait_for_wake(),
+        }
+    }
+}
+
+/// Exhausts the production detached FIFO at the terminal boundary in tests.
+#[cfg(test)]
+fn saturate_detached_fifo_for_test(
+    handle: &tau_client::ClientHandle,
+    call_id: &tau_proto::ToolCallId,
+    ownership_retained: bool,
+) {
+    let hook = SATURATION_HOOK
+        .lock()
+        .expect("websearch saturation hook")
+        .clone();
+    let Some((hook_call_id, notify)) = hook else {
+        return;
+    };
+    if hook_call_id != *call_id {
+        return;
+    };
+    for _ in 0..96 {
+        match handle.emit_transient_detached(Event::TermBell(tau_proto::TermBell {})) {
+            Err(ClientError::Overloaded) => {
+                let _ = notify.send(ownership_retained);
+                return;
+            }
+            Ok(()) => {}
+            Err(_) => return,
+        }
+    }
 }
 
 /// Tau-client declaration for the websearch extension.
@@ -252,6 +360,20 @@ struct WebsearchState {
     parallel_client: Arc<dyn ParallelClient>,
     /// In-flight provider call limiter.
     sem: Arc<Semaphore>,
+    /// Worker-to-loop terminal outcome sender.
+    completed_tx: mpsc::Sender<CompletedTool>,
+    /// Worker-to-loop terminal outcome receiver.
+    completed_rx: mpsc::Receiver<CompletedTool>,
+    /// Manual runtime wake handle installed after startup.
+    waker: Option<tau_client::ManualRuntimeWaker>,
+}
+
+/// One completed provider call whose permit remains owned until publication.
+struct CompletedTool {
+    /// Sole terminal outcome produced by the provider worker.
+    terminal: ClientResult<tau_client::ToolTerminalOutcome>,
+    /// In-flight permit retained through checked ordered publication.
+    _permit: OwnedPermit,
 }
 
 fn validate_endpoint(name: &str, endpoint: &str) -> Result<(), String> {
@@ -390,29 +512,52 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
     let invoke = cx.invoke().clone();
     let local_tool_name = cx.local_tool_name().clone();
     let display_args = display_args(&invoke.arguments, &local_tool_name).unwrap_or_default();
-    let handle = cx.handle();
+    let completed_tx = cx.state.completed_tx.clone();
+    let waker = cx
+        .state
+        .waker
+        .clone()
+        .expect("manual runtime waker installed before dispatch");
     let searcher = Arc::clone(&cx.state.searcher);
     let parallel_client = Arc::clone(&cx.state.parallel_client);
     if let Some(permit) = cx.state.sem.try_acquire() {
+        if let Some(display) = initial_display(&local_tool_name, display_args.clone()) {
+            let _ = cx.handle().report_tool_progress_detached(ToolProgress {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                message: None,
+                progress: None,
+                display: Some(display),
+            });
+        }
         std::thread::spawn(move || {
-            let _permit = permit;
-            dispatch_tool_invoke(
+            let event = dispatch_tool_invoke(
                 invoke,
                 &local_tool_name,
                 searcher.as_ref(),
                 parallel_client.as_ref(),
-                &handle,
                 display_args,
             );
+            let terminal = tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
+                ClientError::handler(format!(
+                    "websearch dispatch returned non-terminal event {}",
+                    event.name()
+                ))
+            });
+            let _ = completed_tx.send(CompletedTool {
+                terminal,
+                _permit: permit,
+            });
+            waker.wake();
         });
     } else {
-        report_terminal_detached(
-            &cx.handle(),
-            tool_error(
+        cx.handle().report_tool_terminal(
+            tau_client::ToolTerminalOutcome::try_from(tool_error(
                 invoke,
                 "websearch is busy; too many searches are already running".to_owned(),
                 display_args,
-            ),
+            ))
+            .map_err(|_| ClientError::handler("busy dispatch returned a non-terminal event"))?,
         )?;
     }
     Ok(())
@@ -423,19 +568,9 @@ fn dispatch_tool_invoke(
     local_tool_name: &ToolName,
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
-    handle: &ClientHandle,
     display_args: String,
-) {
-    if let Some(display) = initial_display(local_tool_name, display_args.clone()) {
-        let _ = handle.report_tool_progress_detached(ToolProgress {
-            call_id: invoke.call_id.clone(),
-            tool_name: invoke.tool_name.clone(),
-            message: None,
-            progress: None,
-            display: Some(display),
-        });
-    }
-    let event = match local_tool_name.as_str() {
+) -> Event {
+    match local_tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher, display_args),
         PARALLEL_SEARCH_TOOL_NAME => dispatch_parallel(
             invoke,
@@ -463,17 +598,7 @@ fn dispatch_tool_invoke(
             details: None,
             originator: invoke.originator,
         }),
-    };
-    let _ = report_terminal_detached(handle, event);
-}
-
-/// Submit one internally constructed terminal outcome through the typed report
-/// helpers while retaining `Event` as the pure dispatch/test return type.
-fn report_terminal_detached(handle: &ClientHandle, event: Event) -> ClientResult<()> {
-    let outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|_| {
-        tau_client::ClientError::handler("websearch dispatch returned a non-terminal tool event")
-    })?;
-    handle.report_tool_terminal_detached(outcome)
+    }
 }
 
 fn initial_display(local_tool_name: &ToolName, args: String) -> Option<ToolUseState> {
@@ -1195,6 +1320,12 @@ impl Semaphore {
         }
         *count -= 1;
         Some(OwnedPermit(Arc::clone(self)))
+    }
+
+    /// Returns the available permit count for lifecycle tests.
+    #[cfg(test)]
+    fn available(&self) -> usize {
+        *self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 }
 

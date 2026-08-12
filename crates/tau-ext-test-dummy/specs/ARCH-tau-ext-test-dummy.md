@@ -38,6 +38,12 @@ Cancellation and shutdown wake the notification-driven worker. Cancellation,
 disconnect, and teardown join all owned threads and remove the socket without
 synthesizing success.
 
+Both hold modes transfer their selected result, error, deadline, or cancellation
+outcome to the protocol loop over an unbounded internal channel. The loop keeps
+the active hold ownership until checked ordered terminal publication succeeds.
+Publication failure exits the extension so harness disconnect cleanup settles
+the retained call. Readiness progress remains optional detached output.
+
 Restart replies (`success` `tool.result_reported` and error
 `tool.error_reported`) must echo the
 incoming `ToolStarted.originator`; they must not synthesize

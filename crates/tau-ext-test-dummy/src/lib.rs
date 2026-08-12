@@ -12,6 +12,8 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -27,6 +29,9 @@ use tau_proto::{
     AgentPromptSubmitted, Event, EventSelector, InterceptionPriority, NoticeLevel, ToolError,
     ToolResult, ToolResultKind, ToolSpec,
 };
+#[cfg(test)]
+static SATURATION_HOOK: Mutex<Option<(tau_proto::ToolCallId, mpsc::Sender<bool>)>> =
+    Mutex::new(None);
 
 /// Tool name registered by this fixture extension for restart-supervision
 /// tests.
@@ -81,6 +86,46 @@ struct DummyState<T> {
     hold_timeout: Duration,
     /// Validated fixture-private release configuration.
     release_config: Option<ReleaseConfig>,
+    /// Worker-to-loop terminal outcomes.
+    terminals: AsyncTerminals,
+}
+
+/// Cloneable worker-to-loop terminal publication adapter.
+#[derive(Clone)]
+struct TerminalSender {
+    /// Unbounded outcome sender, independent of protocol FIFO capacity.
+    sender: mpsc::Sender<PendingTerminal>,
+    /// Manual runtime wake handle.
+    waker: tau_client::ManualRuntimeWaker,
+}
+
+impl TerminalSender {
+    /// Transfers one terminal outcome to the protocol loop.
+    fn send(&self, terminal: tau_client::ToolTerminalOutcome) {
+        let call_id = match &terminal {
+            tau_client::ToolTerminalOutcome::Result(result) => result.call_id.clone(),
+            tau_client::ToolTerminalOutcome::Failure(error) => error.call_id.clone(),
+            tau_client::ToolTerminalOutcome::Cancelled(cancelled) => cancelled.call_id.clone(),
+        };
+        let _ = self.sender.send(PendingTerminal { call_id, terminal });
+        self.waker.wake();
+    }
+}
+
+/// Main-loop side of asynchronous terminal publication.
+struct AsyncTerminals {
+    /// Worker sender installed after manual-runtime startup.
+    sender: Option<TerminalSender>,
+    /// Sole receiver drained by the protocol loop.
+    receiver: mpsc::Receiver<PendingTerminal>,
+}
+
+/// One worker terminal awaiting checked ordered publication.
+struct PendingTerminal {
+    /// Invocation retained in [`DummyState::pending_hold`].
+    call_id: tau_proto::ToolCallId,
+    /// Sole terminal selected by worker arbitration.
+    terminal: tau_client::ToolTerminalOutcome,
 }
 
 /// One bounded deterministic hold worker.
@@ -113,28 +158,12 @@ impl<T> Drop for DummyState<T> {
 }
 
 impl<T> DummyState<T> {
-    /// Reaps any naturally completed hold worker before another invocation.
-    fn reap_finished_hold(&mut self) -> ClientResult<()> {
-        if self.pending_hold.as_ref().is_some_and(|hold| match hold {
-            PendingHold::NoSideEffect { join, .. } => join.is_finished(),
-            PendingHold::Release(hold) => hold.is_finished(),
-        }) {
-            let hold = self
-                .pending_hold
-                .take()
-                .expect("finished hold remains present");
-            match hold {
-                PendingHold::NoSideEffect { join, .. } => join.join().map_err(|_| {
-                    tau_client::ClientError::handler("deterministic hold worker panicked")
-                })?,
-                PendingHold::Release(hold) => hold.join()?,
-            }
-        }
-        Ok(())
-    }
-
     /// Cancels and joins only the exactly correlated active hold.
-    fn cancel_pending_hold(&mut self, target_call_id: &tau_proto::ToolCallId) -> ClientResult<()> {
+    fn cancel_pending_hold(
+        &mut self,
+        target_call_id: &tau_proto::ToolCallId,
+        handle: &tau_client::ClientHandle,
+    ) -> ClientResult<()> {
         if self.pending_hold.as_ref().is_none_or(|hold| match hold {
             PendingHold::NoSideEffect { call_id, .. } => {
                 call_id.as_str() != target_call_id.as_str()
@@ -143,18 +172,45 @@ impl<T> DummyState<T> {
         }) {
             return Ok(());
         }
-        let hold = self
+        match self
             .pending_hold
-            .take()
-            .expect("correlated hold remains present");
-        match hold {
-            PendingHold::NoSideEffect { signal, join, .. } => {
+            .as_ref()
+            .expect("correlated hold remains present")
+        {
+            PendingHold::NoSideEffect { signal, .. } => {
                 let _ = signal.send(HoldSignal::Cancel);
-                join.join().map_err(|_| {
-                    tau_client::ClientError::handler("deterministic hold worker panicked")
-                })
             }
-            PendingHold::Release(hold) => hold.cancel(),
+            PendingHold::Release(hold) => {
+                hold.cancel();
+            }
+        }
+        let pending = self.terminals.receiver.recv().map_err(|_| {
+            tau_client::ClientError::handler("cancelled hold produced no terminal outcome")
+        })?;
+        #[cfg(test)]
+        saturate_detached_fifo_for_test(handle, &pending.call_id, self.pending_hold.is_some());
+        handle.report_tool_terminal(pending.terminal)?;
+        self.complete_pending_hold(&pending.call_id)
+    }
+
+    /// Removes and joins the hold only after its terminal flush succeeds.
+    fn complete_pending_hold(&mut self, call_id: &tau_proto::ToolCallId) -> ClientResult<()> {
+        if self.pending_hold.as_ref().is_none_or(|hold| match hold {
+            PendingHold::NoSideEffect {
+                call_id: active, ..
+            } => active != call_id,
+            PendingHold::Release(hold) => hold.call_id() != call_id,
+        }) {
+            return Err(tau_client::ClientError::handler(
+                "terminal outcome did not own the active deterministic hold",
+            ));
+        }
+        let hold = self.pending_hold.take().expect("matching hold remains");
+        match hold {
+            PendingHold::NoSideEffect { join, .. } => join.join().map_err(|_| {
+                tau_client::ClientError::handler("deterministic hold worker panicked")
+            }),
+            PendingHold::Release(hold) => hold.join(),
         }
     }
 
@@ -230,7 +286,9 @@ where
                     let Event::ToolCancelRequest(cancel) = cx.delivery.event() else {
                         return Ok(());
                     };
-                    cx.state.cancel_pending_hold(&cancel.target_call_id)
+                    let handle = cx.handle();
+                    cx.state
+                        .cancel_pending_hold(&cancel.target_call_id, &handle)
                 },
             )
             .intercept(
@@ -322,16 +380,16 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 /// Runs the dummy extension over the supplied harness protocol streams.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
-    W: Write + Send,
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
 {
     run_with_rng(reader, writer, &mut rand::thread_rng())
 }
 
 fn run_with_rng<R, W, T>(reader: R, writer: W, rng: &mut T) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
-    W: Write + Send,
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
     T: Rng,
 {
     run_with_rng_and_hold_timeout(reader, writer, rng, HOLD_TERMINAL_TIMEOUT)
@@ -344,19 +402,120 @@ fn run_with_rng_and_hold_timeout<R, W, T>(
     hold_timeout: Duration,
 ) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
-    W: Write + Send,
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
     T: Rng,
 {
+    let (terminal_tx, terminal_rx) = mpsc::channel();
     let state = DummyState {
         rng,
         restart_mode: RestartMode::Random,
         pending_hold: None,
         hold_timeout,
         release_config: None,
+        terminals: AsyncTerminals {
+            sender: None,
+            receiver: terminal_rx,
+        },
     };
-    TauExtensionRunner::new(DummyExtension::<&mut T>::default()).run(reader, writer, state)?;
-    Ok(())
+    let mut runtime = match TauExtensionRunner::new(DummyExtension::<&mut T>::default())
+        .start_manual_loop(reader, writer, state)
+    {
+        Ok(runtime) => runtime,
+        Err(tau_client::ClientError::InitialConfigureRejected) => return Ok(()),
+        Err(error) => return Err(Box::new(error)),
+    };
+    runtime.state_mut().terminals.sender = Some(TerminalSender {
+        sender: terminal_tx,
+        waker: runtime.waker(),
+    });
+    let loop_result = run_dummy_loop(&mut runtime);
+    runtime.state_mut().shutdown_pending_hold();
+    match loop_result {
+        Ok(DummyLoopExit::Disconnect) => {
+            let _ = runtime.finish_detached();
+            Ok(())
+        }
+        Ok(DummyLoopExit::Graceful) => runtime
+            .finish()
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as Box<dyn Error>),
+        Err(error) => {
+            let _ = runtime.finish();
+            Err(Box::new(error))
+        }
+    }
+}
+
+/// Reason the manual runtime stopped.
+enum DummyLoopExit {
+    /// Harness sent a normal protocol disconnect.
+    Disconnect,
+    /// Input closed or a handler requested graceful stop.
+    Graceful,
+}
+
+/// Dispatches harness input and serializes worker terminals through checked
+/// output.
+fn run_dummy_loop<T>(
+    runtime: &mut tau_client::ManualExtensionRuntime<DummyState<T>>,
+) -> ClientResult<DummyLoopExit> {
+    loop {
+        while let Ok(pending) = runtime.state().terminals.receiver.try_recv() {
+            #[cfg(test)]
+            let retained = runtime.state().pending_hold.is_some();
+            #[cfg(test)]
+            saturate_detached_fifo_for_test(&runtime.handle(), &pending.call_id, retained);
+            runtime.handle().report_tool_terminal(pending.terminal)?;
+            runtime
+                .state_mut()
+                .complete_pending_hold(&pending.call_id)?;
+        }
+        match runtime.try_recv()? {
+            tau_client::ManualRuntimePoll::Message(message) => {
+                match runtime.dispatch_one(message)? {
+                    tau_client::DispatchOutcome::Continue => {}
+                    tau_client::DispatchOutcome::StopRequested => {
+                        return Ok(DummyLoopExit::Graceful);
+                    }
+                    tau_client::DispatchOutcome::Disconnect(_) => {
+                        return Ok(DummyLoopExit::Disconnect);
+                    }
+                }
+            }
+            tau_client::ManualRuntimePoll::InputClosed => return Ok(DummyLoopExit::Graceful),
+            tau_client::ManualRuntimePoll::Empty => runtime.wait_for_wake(),
+        }
+    }
+}
+
+/// Exhausts the real detached FIFO immediately before worker terminal output.
+#[cfg(test)]
+fn saturate_detached_fifo_for_test(
+    handle: &tau_client::ClientHandle,
+    call_id: &tau_proto::ToolCallId,
+    ownership_retained: bool,
+) {
+    let hook = SATURATION_HOOK
+        .lock()
+        .expect("dummy saturation hook")
+        .clone();
+    let Some((hook_call_id, notify)) = hook else {
+        return;
+    };
+    if hook_call_id != *call_id {
+        return;
+    };
+    for _ in 0..96 {
+        match handle.emit_transient_detached(Event::TermBell(tau_proto::TermBell {})) {
+            Err(tau_client::ClientError::Overloaded) => {
+                let _ = notify.send(ownership_retained);
+                return;
+            }
+            Ok(()) => {}
+            Err(_) => return,
+        }
+    }
 }
 
 fn restart_tool_spec() -> ToolSpec {
@@ -426,7 +585,6 @@ fn start_success_release_hold<T>(
 where
     T: Rng,
 {
-    cx.state.reap_finished_hold()?;
     if cx.state.pending_hold.is_some() {
         return cx.report_error(ToolError {
             presentation: Default::default(),
@@ -447,16 +605,23 @@ where
             .clone()
             .expect("release mode configuration validated"),
         invoke,
-        cx.handle(),
+        cx.state
+            .terminals
+            .sender
+            .clone()
+            .expect("manual runtime terminal sender installed"),
     )?;
     cx.state.pending_hold = Some(PendingHold::Release(hold));
-    if let Err(error) = cx.handle().report_tool_progress(tau_proto::ToolProgress {
-        call_id,
-        tool_name,
-        message: Some("hold_until_success_release ready".to_owned()),
-        progress: None,
-        display: None,
-    }) {
+    if let Err(error) = cx
+        .handle()
+        .report_tool_progress_detached(tau_proto::ToolProgress {
+            call_id,
+            tool_name,
+            message: Some("hold_until_success_release ready".to_owned()),
+            progress: None,
+            display: None,
+        })
+    {
         cx.state.shutdown_pending_hold();
         return Err(error);
     }
@@ -475,7 +640,6 @@ fn start_no_side_effect_hold<T>(
 where
     T: Rng,
 {
-    cx.state.reap_finished_hold()?;
     if cx.state.pending_hold.is_some() {
         return cx.report_error(ToolError {
             presentation: Default::default(),
@@ -494,23 +658,31 @@ where
     let hold_timeout = cx.state.hold_timeout;
     let (signal, signals) = mpsc::channel();
     let (ready, readiness) = mpsc::channel();
-    let handle = cx.handle();
+    let terminals = cx
+        .state
+        .terminals
+        .sender
+        .clone()
+        .expect("manual runtime terminal sender installed");
     let join = thread::spawn(move || {
         if ready.send(()).is_err() {
             return;
         }
         match signals.recv_timeout(hold_timeout) {
             Ok(HoldSignal::Cancel) => {
-                let _ = handle.report_tool_cancelled_detached(tau_proto::ToolCancelled {
-                    presentation: Default::default(),
-                    call_id: invoke.call_id,
-                    tool_name: invoke.tool_name,
-                    tool_type: tau_proto::ToolType::Function,
-                });
+                terminals.send(
+                    tau_proto::ToolCancelled {
+                        presentation: Default::default(),
+                        call_id: invoke.call_id,
+                        tool_name: invoke.tool_name,
+                        tool_type: tau_proto::ToolType::Function,
+                    }
+                    .into(),
+                );
             }
             Ok(HoldSignal::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = handle.report_tool_error_detached(ToolError {
+                terminals.send(ToolError {
                     presentation: Default::default(),
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
@@ -521,7 +693,7 @@ where
                     details: None,
                     originator: invoke.originator,
                     display: None,
-                });
+                }.into());
             }
         }
     });
@@ -537,13 +709,16 @@ where
         signal,
         join,
     });
-    if let Err(error) = cx.handle().report_tool_progress(tau_proto::ToolProgress {
-        call_id,
-        tool_name,
-        message: Some("hold_no_side_effect ready".to_owned()),
-        progress: None,
-        display: None,
-    }) {
+    if let Err(error) = cx
+        .handle()
+        .report_tool_progress_detached(tau_proto::ToolProgress {
+            call_id,
+            tool_name,
+            message: Some("hold_no_side_effect ready".to_owned()),
+            progress: None,
+            display: None,
+        })
+    {
         cx.state.shutdown_pending_hold();
         return Err(error);
     }

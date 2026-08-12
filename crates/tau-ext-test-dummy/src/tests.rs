@@ -1,9 +1,9 @@
 use std::collections as path_std_collections;
 use std::fs::DirBuilder;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Error, Read};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
@@ -13,6 +13,16 @@ use tau_proto::{
 };
 
 use super::*;
+static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Panic-safe installation of one correlated production saturation hook.
+struct SaturationHookGuard;
+
+impl Drop for SaturationHookGuard {
+    fn drop(&mut self) {
+        SATURATION_HOOK.lock().expect("saturation hook").take();
+    }
+}
 
 /// Cloneable output sink used while a release client runs concurrently.
 #[derive(Clone, Default)]
@@ -32,6 +42,77 @@ impl std::io::Write for SharedWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+impl SharedWriter {
+    /// Returns a snapshot of all bytes emitted so far.
+    fn snapshot(&self) -> Vec<u8> {
+        self.bytes.lock().expect("output lock").clone()
+    }
+}
+
+/// Production writer blocked by the first saturation filler frame.
+struct SaturationWriter {
+    /// Serialized output bytes.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Writer release gate.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Announces that production output is blocked.
+    entered: mpsc::Sender<()>,
+    /// Prevents repeated blocking.
+    blocked: bool,
+}
+
+impl std::io::Write for SaturationWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.blocked && bytes.windows(9).any(|window| window == b"term.bell") {
+            self.blocked = true;
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.gate;
+            let mut closed = lock.lock().expect("writer gate");
+            while *closed {
+                closed = wake.wait(closed).expect("writer gate wait");
+            }
+        }
+        self.bytes.lock().expect("output bytes").extend(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writer that rejects the first mandatory hold terminal.
+struct TerminalFailureWriter {
+    /// Bytes preceding the rejected terminal.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Whether terminal output reached the writer.
+    failed: bool,
+}
+
+impl std::io::Write for TerminalFailureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.failed |= [
+            b"tool.result_reported".as_slice(),
+            b"tool.error_reported",
+            b"tool.cancelled_reported",
+        ]
+        .iter()
+        .any(|needle| bytes.windows(needle.len()).any(|window| window == *needle));
+        if !self.failed {
+            self.bytes.lock().expect("output bytes").extend(bytes);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed {
+            Err(Error::other("forced mandatory dummy output failure"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -153,10 +234,10 @@ fn run_restart_frames(
     seed: u64,
 ) -> Vec<HarnessInputMessage> {
     let input = restart_input(input_frames);
-    let mut output = Vec::new();
+    let output = SharedWriter::default();
     let mut rng = StdRng::seed_from_u64(seed);
-    run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
-    decode_output(output)
+    run_with_rng(Cursor::new(input), output.clone(), &mut rng).expect("run");
+    decode_output(output.snapshot())
 }
 
 fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
@@ -551,11 +632,11 @@ fn hold_no_side_effect_deadline_is_terminal() {
         suffix: Cursor::new(suffix),
         delayed: false,
     };
-    let mut output = Vec::new();
+    let output = SharedWriter::default();
     let mut rng = StdRng::seed_from_u64(1);
-    run_with_rng_and_hold_timeout(reader, &mut output, &mut rng, Duration::from_millis(20))
+    run_with_rng_and_hold_timeout(reader, output.clone(), &mut rng, Duration::from_millis(20))
         .expect("run");
-    let frames = decode_output(output);
+    let frames = decode_output(output.snapshot());
     let errors = frames
         .iter()
         .filter_map(|frame| match emitted_event(frame) {
@@ -568,6 +649,198 @@ fn hold_no_side_effect_deadline_is_terminal() {
     assert_eq!(
         errors[0].message,
         "hold_no_side_effect reached its 10 second deadline"
+    );
+}
+
+/// Runs one owned hold terminal after exhausting tau-client's production
+/// detached FIFO, then returns all emitted protocol frames.
+fn saturated_hold_terminal(
+    configure: HarnessOutputMessage,
+    timeout: Duration,
+    action: impl FnOnce(&mut HarnessOutputWriter<UnixStream>) + Send,
+) -> Vec<HarnessInputMessage> {
+    let _serial = SATURATION_TEST_LOCK.lock().expect("saturation test lock");
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (overloaded_tx, overloaded_rx) = mpsc::channel();
+    *SATURATION_HOOK.lock().expect("saturation hook") =
+        Some(("saturated-call".into(), overloaded_tx));
+    let hook = SaturationHookGuard;
+    let output_bytes = Arc::clone(&bytes);
+    let output_gate = Arc::clone(&gate);
+    let runner = thread::spawn(move || {
+        let mut rng = StdRng::seed_from_u64(1);
+        run_with_rng_and_hold_timeout(
+            extension_input,
+            SaturationWriter {
+                bytes: output_bytes,
+                gate: output_gate,
+                entered: entered_tx,
+                blocked: false,
+            },
+            &mut rng,
+            timeout,
+        )
+        .map_err(|error| error.to_string())
+    });
+    let mut input = HarnessOutputWriter::new(harness_input);
+    input.write_message(&configure).expect("configure");
+    input
+        .write_message(&invoke_restart_with_id("saturated-call"))
+        .expect("start deterministic hold");
+    input.flush().expect("flush hold start");
+    action(&mut input);
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("production writer blocked");
+    let ownership_retained = overloaded_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("detached FIFO exhausted");
+    assert!(ownership_retained, "hold ownership released before flush");
+    drop(hook);
+    let (closed, wake) = &*gate;
+    *closed.lock().expect("writer gate") = false;
+    wake.notify_all();
+    input.write_message(&disconnect()).expect("disconnect");
+    input.flush().expect("flush disconnect");
+    runner.join().expect("runner").expect("clean disconnect");
+    decode_output(bytes.lock().expect("output bytes").clone())
+}
+
+/// Proves cancellation and deadline terminals retain hold ownership and survive
+/// saturation of the real detached output FIFO exactly once.
+#[test]
+fn no_side_effect_terminals_survive_production_fifo_saturation() {
+    let cancelled = saturated_hold_terminal(
+        restart_config("hold_no_side_effect"),
+        HOLD_TERMINAL_TIMEOUT,
+        |input| {
+            input
+                .write_message(&cancel_restart("saturated-call"))
+                .expect("cancel hold");
+            input.flush().expect("flush cancellation");
+        },
+    );
+    let deadline = saturated_hold_terminal(
+        restart_config("hold_no_side_effect"),
+        Duration::from_millis(20),
+        |_| {},
+    );
+    for (frames, expect_cancelled) in [(cancelled, true), (deadline, false)] {
+        let terminals = frames
+            .iter()
+            .filter_map(emitted_event)
+            .filter(|event| {
+                matches!(event, Event::ToolCancelledReported(cancelled)
+                    if cancelled.call_id.as_str() == "saturated-call")
+                    || matches!(event, Event::ToolErrorReported(error)
+                        if error.call_id.as_str() == "saturated-call")
+                    || matches!(event, Event::ToolResultReported(result)
+                        if result.call_id.as_str() == "saturated-call")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(
+            matches!(terminals[0], Event::ToolCancelledReported(_)),
+            expect_cancelled
+        );
+        match terminals[0] {
+            Event::ToolCancelledReported(cancelled) => {
+                assert_eq!(cancelled.tool_name.as_str(), RESTART_TEST_DUMMY_TOOL_NAME);
+            }
+            Event::ToolErrorReported(error) => {
+                assert_eq!(
+                    error.message,
+                    "hold_no_side_effect reached its 10 second deadline"
+                );
+                assert_eq!(error.tool_name.as_str(), RESTART_TEST_DUMMY_TOOL_NAME);
+            }
+            _ => panic!("unexpected correlated terminal"),
+        }
+    }
+}
+
+/// Proves authenticated release success survives production FIFO saturation
+/// without giving up the active hold before checked publication.
+#[test]
+fn release_success_survives_production_fifo_saturation() {
+    let socket = unique_socket_path("output-saturation");
+    let socket_for_release = socket.clone();
+    let frames = saturated_hold_terminal(
+        release_config(&socket, "nonce"),
+        HOLD_TERMINAL_TIMEOUT,
+        move |_| {
+            for _ in 0..100 {
+                if UnixStream::connect(&socket_for_release).is_ok() {
+                    send_release_frame(
+                        &socket_for_release,
+                        b"{\"call_id\":\"saturated-call\",\"release_nonce\":\"nonce\"}\n",
+                    );
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            panic!("release socket did not become ready");
+        },
+    );
+    let terminals = frames
+        .iter()
+        .filter_map(emitted_event)
+        .filter(|event| {
+            matches!(event, Event::ToolResultReported(result)
+                if result.call_id.as_str() == "saturated-call")
+                || matches!(event, Event::ToolErrorReported(error)
+                    if error.call_id.as_str() == "saturated-call")
+                || matches!(event, Event::ToolCancelledReported(cancelled)
+                    if cancelled.call_id.as_str() == "saturated-call")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    let Event::ToolResultReported(result) = terminals[0] else {
+        panic!("expected sole correlated release result");
+    };
+    assert_eq!(
+        result.result,
+        CborValue::Text("restart succeeded".to_owned())
+    );
+    assert_eq!(result.call_id.as_str(), "saturated-call");
+    assert_eq!(result.tool_name.as_str(), RESTART_TEST_DUMMY_TOOL_NAME);
+}
+
+/// Proves a mandatory hold terminal write failure tears down the extension loop
+/// and does not falsely publish or retire the retained invocation.
+#[test]
+fn mandatory_hold_terminal_failure_exits_extension_loop() {
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let output_bytes = Arc::clone(&bytes);
+    let runner = thread::spawn(move || {
+        let mut rng = StdRng::seed_from_u64(1);
+        run_with_rng_and_hold_timeout(
+            extension_input,
+            TerminalFailureWriter {
+                bytes: output_bytes,
+                failed: false,
+            },
+            &mut rng,
+            Duration::from_millis(20),
+        )
+        .map_err(|error| error.to_string())
+    });
+    let mut input = HarnessOutputWriter::new(harness_input);
+    input
+        .write_message(&restart_config("hold_no_side_effect"))
+        .expect("configure");
+    input.write_message(&invoke_restart()).expect("invoke");
+    input.flush().expect("flush invocation");
+    assert!(runner.join().expect("runner").is_err());
+    let output = bytes.lock().expect("output bytes");
+    assert!(
+        !output
+            .windows(19)
+            .any(|window| window == b"tool.error_reported")
     );
 }
 
@@ -687,11 +960,11 @@ fn release_hold_saturation_cancels_and_cleans_up_without_success() {
         }
         panic!("release socket never became ready");
     });
-    let mut output = Vec::new();
+    let output = SharedWriter::default();
     let mut rng = StdRng::seed_from_u64(1);
-    run_with_rng(reader, &mut output, &mut rng).expect("run cancellation fixture");
+    run_with_rng(reader, output.clone(), &mut rng).expect("run cancellation fixture");
     client.join().expect("partial release client");
-    let frames = decode_output(output);
+    let frames = decode_output(output.snapshot());
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
         Some(Event::ToolCancelledReported(cancelled)) if cancelled.call_id.as_str() == "call-1"
@@ -844,11 +1117,11 @@ fn run_intercept(
         .expect("write intercepted prompt");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
+    let output = SharedWriter::default();
     let mut rng = StdRng::seed_from_u64(1);
-    run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
+    run_with_rng(Cursor::new(input), output.clone(), &mut rng).expect("run");
 
-    let mut reader = HarnessInputReader::new(Cursor::new(output));
+    let mut reader = HarnessInputReader::new(Cursor::new(output.snapshot()));
     let mut notice_requests = Vec::new();
     let mut replies = Vec::new();
     while let Some(frame) = reader.read_message().expect("read") {
