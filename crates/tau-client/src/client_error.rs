@@ -14,6 +14,8 @@ pub enum ClientError {
     Io(std::io::Error),
     /// A handler rejected the message it was processing.
     Handler(String),
+    /// The initial Configure was rejected cleanly before startup Ready.
+    InitialConfigureRejected,
     /// The writer thread stopped before accepting the outbound frame.
     WriterClosed,
     /// A frame exceeds 8 MiB or detached output exhausted its bounded FIFO.
@@ -60,6 +62,9 @@ impl fmt::Display for ClientError {
             Self::Handler(message) | Self::Builder(message) | Self::NameScope(message) => {
                 f.write_str(message)
             }
+            Self::InitialConfigureRejected => {
+                f.write_str("initial Configure was rejected before Ready")
+            }
             Self::WriterClosed => f.write_str("tau client writer thread is closed"),
             Self::Overloaded => {
                 f.write_str("tau client detached FIFO or frame byte limit is exhausted")
@@ -78,6 +83,7 @@ impl std::error::Error for ClientError {
             Self::Encode(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::Handler(_)
+            | Self::InitialConfigureRejected
             | Self::Builder(_)
             | Self::NameScope(_)
             | Self::WriterClosed

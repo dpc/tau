@@ -1,10 +1,12 @@
 //! Deterministic contract tests for validation and hostile-content projection.
 
+mod lifecycle;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, mpsc};
 use std::time::Instant;
 use std::{fs, thread};
 
@@ -38,6 +40,8 @@ use crate::tools::{ToolFailure, tool_error};
 
 /// Phase-specific scheduling allowance beneath nextest's whole-test watchdog.
 const TEST_GATE_WAIT: Duration = Duration::from_secs(5);
+/// Serializes tests that install the process-global signed-publication gate.
+static SIGNED_PUBLICATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Thread-safe protocol writer used to observe asynchronous extension output.
 #[derive(Clone, Default)]
@@ -209,11 +213,11 @@ fn config_schema_requires_mnemonic_secret_reference() {
     assert!(serde_json::from_value::<ExtConfig>(serde_json::json!({})).is_err());
 }
 
-/// Ensures configuration derives the identity from its Tau secret, leaves the
-/// client unsigned until a signed call, and resets runtime quota state on
-/// successful reconfiguration.
+/// Ensures a failure at the configuration commit boundary preserves the active
+/// client identity/path, notification worker and state, and full quota; a later
+/// accepted replacement still resets runtime quota.
 #[test]
-fn mnemonic_configuration_derives_read_only_identity() {
+fn configuration_commit_failure_preserves_active_runtime() {
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
         .build()
@@ -223,6 +227,7 @@ fn mnemonic_configuration_derives_read_only_identity() {
     let mut state = RostraState {
         client: None,
         identity_secret: None,
+        state_dir: None,
         runtime: Some(runtime),
         running: Arc::new(Mutex::new(HashMap::new())),
         permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS)),
@@ -232,6 +237,7 @@ fn mnemonic_configuration_derives_read_only_identity() {
         notifications: Arc::new(Mutex::new(notification_state::State::default())),
         notifications_wake: Arc::new(Notify::new()),
         notifications_task: None,
+        mandatory_output: MandatoryOutput::disconnected(),
     };
     let mnemonic_secret = "rostra_identity_mnemonic";
     let configure_event = tau_proto::Configure {
@@ -274,7 +280,22 @@ fn mnemonic_configuration_derives_read_only_identity() {
         .expect("post rate-limit state lock")
         .reserve(limit)
         .expect("fill runtime quota");
-    let reconfigure_event = tau_proto::Configure {
+    state
+        .notifications
+        .lock()
+        .expect("notification state lock")
+        .allocate_report_attempt()
+        .expect("allocate notification attempt");
+    let active_client = Arc::clone(state.client.as_ref().expect("active client"));
+    let active_state_dir = state.state_dir.clone();
+    let notification_task = state
+        .runtime
+        .as_ref()
+        .expect("runtime")
+        .spawn(std::future::pending::<()>())
+        .abort_handle();
+    state.notifications_task = Some(notification_task.clone());
+    let mut reconfigure_event = tau_proto::Configure {
         tool_prefix: None,
         config: tau_proto::CborValue::Map(Vec::new()),
         instance_name: tau_proto::ExtensionName::parse("std-rostra").expect("test extension name"),
@@ -285,6 +306,43 @@ fn mnemonic_configuration_derives_read_only_identity() {
         )]),
         settings_files: Default::default(),
     };
+    *FAIL_CONFIGURATION_COMMIT
+        .lock()
+        .expect("configuration commit failure hook") = reconfigure_event.state_dir.clone();
+    configure(
+        &mut state,
+        &reconfigure_event,
+        ExtConfig {
+            identity_mnemonic_secret: mnemonic_secret.to_owned(),
+            post_rate_limit: limit,
+        },
+    )
+    .expect_err("injected commit failure");
+    assert!(Arc::ptr_eq(
+        state.client.as_ref().expect("preserved client"),
+        &active_client
+    ));
+    assert_eq!(state.identity_secret, Some(secret));
+    assert_eq!(state.state_dir, active_state_dir);
+    assert!(!notification_task.is_finished());
+    assert_eq!(
+        state
+            .notifications
+            .lock()
+            .expect("notification state lock")
+            .next_report_attempt(),
+        1
+    );
+    assert!(
+        state
+            .post_rate_limit_window
+            .lock()
+            .expect("post rate-limit state lock")
+            .reserve(limit)
+            .is_err(),
+        "failed candidate must preserve the full active quota"
+    );
+    reconfigure_event.state_dir = Some(temporary.path().join("successful-reconfigured-state"));
     configure(
         &mut state,
         &reconfigure_event,
@@ -681,6 +739,9 @@ fn wait_for_output_event(output: &SharedWriter, predicate: impl Fn(&Event) -> bo
 /// activation scheduling margin beneath nextest's whole-test liveness bound.
 #[test]
 fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
+    let _fixture = SIGNED_PUBLICATION_FIXTURE_LOCK
+        .lock()
+        .expect("signed publication fixture lock");
     let temporary = tempfile::tempdir().expect("temporary directory");
     let secret = RostraIdSecretKey::generate();
     let state_dir = temporary.path().join("state");

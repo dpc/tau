@@ -34,8 +34,9 @@ must be positive. Posts, replies, and emoji reactions share this runtime-only
 guard; follows, unfollows, profile updates, and votes do not consume it. The
 serialized write lane reserves an attempt before signing and does not roll it
 back after dispatch. A full window returns `rate_limited` with
-`retry_after_seconds`. Restarting or reconfiguring the extension resets this
-best-effort guard; synchronized events from other devices do not count.
+`retry_after_seconds`. Restarting or successfully reconfiguring the extension
+resets this best-effort guard; rejected candidates preserve the active runtime
+and quota. Synchronized events from other devices do not count.
 
 The read tools are `rostra_status`, `rostra_list_posts`, `rostra_read_post`,
 and `rostra_get_profile`. The authenticated write tools are `rostra_post`,

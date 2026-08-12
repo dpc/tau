@@ -2063,7 +2063,7 @@ fn static_manual_state_factory_config_error_returns_error_without_ready() {
         Ok(_) => panic!("static manual startup rejection must be terminal"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("rejected before Ready"));
+    assert!(matches!(error, ClientError::InitialConfigureRejected));
 
     let frames = frames_from_writer(&written);
     assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));

@@ -23,7 +23,7 @@ pub(crate) fn handle(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResu
         let event = tools::tool_error(cx.invoke(), tools::ToolFailure::not_ready());
         let outcome = tau_client::ToolTerminalOutcome::try_from(event)
             .map_err(|_| ClientError::handler("internal_failure: invalid terminal event"))?;
-        return cx.handle().report_tool_terminal_detached(outcome);
+        return cx.state.mandatory_output.report_tool_terminal(outcome);
     };
     let agent_id = cx.invoke().agent_id.clone();
     let preference = if args.enabled {
@@ -81,5 +81,5 @@ fn persist_notification_preference(
     );
     let outcome = tau_client::ToolTerminalOutcome::try_from(event)
         .map_err(|_| ClientError::handler("internal_failure: invalid terminal event"))?;
-    cx.handle().report_tool_terminal_detached(outcome)
+    cx.state.mandatory_output.report_tool_terminal(outcome)
 }

@@ -1106,9 +1106,7 @@ where
                 .and_then(|result| result);
             shutdown_result?;
             writer_result?;
-            return Err(ClientError::handler(
-                "initial Configure was rejected before Ready",
-            ));
+            return Err(ClientError::InitialConfigureRejected);
         };
         Ok(ManualExtensionRuntime {
             state,

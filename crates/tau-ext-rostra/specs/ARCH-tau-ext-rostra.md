@@ -104,6 +104,13 @@ other devices can still fork and upstream head merging can sign a merge event.
 Background publication broadcasts changed heads to self/followers and updates
 Pkarr best-effort and periodically.
 
+Every sole Rostra tool result, error, and cancellation uses checked ordered
+protocol output. The extension retains its running-call entry until that write
+succeeds. A mandatory output failure exits the extension loop so harness
+disconnect cleanup settles the still-owned call; optional notification report
+attempts retain their documented detached behavior, while retry diagnostics
+remain ordinary local tracing output.
+
 `post_rate_limit` is an optional strict object and defaults to
 `max_events: 10` and `window_seconds: 3600`; both values must be positive.
 Posts, replies, and reactions share its runtime-only rolling window, while
@@ -119,7 +126,9 @@ bounded `rate_limited` text and fixed structured
 
 Stable error categories are `invalid_argument`, `not_ready`, `not_found_local`,
 `storage_failure`, `timeout`, `rate_limited`, and `internal_failure`. Reconfiguration is
-rejected while queries remain active. Shutdown waits one second before process
+rejected while queries remain active. Rejected malformed or busy
+reconfiguration leaves the previous valid client, notification state, runtime
+quota, and active calls unchanged. Shutdown waits one second before process
 supervision provides the forced-termination boundary. Locked, corrupt, and
 identity-mismatched databases fail closed. Upstream schema migrations are
 forward-only; operators must stop Tau and back up the database before upgrade,
