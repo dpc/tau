@@ -2411,10 +2411,48 @@ fn poll_loop_with_tool_names(
     }
 }
 
+/// Runs the extension with no test-only manual Disconnect observer.
 fn run_with_client<R, W>(
     reader: R,
     writer: W,
     client: Arc<dyn TelegramClient>,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    #[cfg(not(test))]
+    {
+        run_with_client_inner(reader, writer, client)
+    }
+    #[cfg(test)]
+    {
+        run_with_client_inner(reader, writer, client, None)
+    }
+}
+
+/// Runs the extension while observing its manual Disconnect path in a unit
+/// test.
+#[cfg(test)]
+fn run_with_client_observing_disconnect<R, W>(
+    reader: R,
+    writer: W,
+    client: Arc<dyn TelegramClient>,
+    disconnect_observer: mpsc::Sender<()>,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    run_with_client_inner(reader, writer, client, Some(disconnect_observer))
+}
+
+/// Runs the extension with an optional test-only manual Disconnect observer.
+fn run_with_client_inner<R, W>(
+    reader: R,
+    writer: W,
+    client: Arc<dyn TelegramClient>,
+    #[cfg(test)] disconnect_observer: Option<mpsc::Sender<()>>,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
@@ -2446,7 +2484,11 @@ where
             runtime.handle().config_error(error.to_string())?;
         }
     }
-    let exit = match drive_manual_runtime(&mut runtime) {
+    let exit = match drive_manual_runtime(
+        &mut runtime,
+        #[cfg(test)]
+        disconnect_observer,
+    ) {
         Ok(exit) => exit,
         Err(error) => {
             runtime.state().ext.shutdown_after_runtime_error();
@@ -2571,6 +2613,7 @@ enum ManualRuntimeExit {
 /// runner.
 fn drive_manual_runtime(
     runtime: &mut tau_client::ManualExtensionRuntime<TelegramRuntime>,
+    #[cfg(test)] disconnect_observer: Option<mpsc::Sender<()>>,
 ) -> Result<ManualRuntimeExit, Box<dyn Error>> {
     loop {
         runtime.state().ext.output.check_mandatory_output()?;
@@ -2605,6 +2648,10 @@ fn drive_manual_runtime(
             }
             ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Disconnect(_)) => {
                 runtime.state().ext.output.check_mandatory_output()?;
+                #[cfg(test)]
+                if let Some(observer) = disconnect_observer {
+                    let _ = observer.send(());
+                }
                 break Ok(ManualRuntimeExit::Disconnect);
             }
             ManualRuntimePoll::InputClosed => {

@@ -4707,6 +4707,7 @@ fn ingress_report_writer_failure_wakes_idle_production_loop() {
 /// blocked in the checked writer.
 #[test]
 fn disconnect_detaches_blocked_local_report() {
+    let (disconnect_tx, disconnect_rx) = mpsc::channel();
     let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
     let client = ControlledPollClient::new();
     let runner_client: Arc<dyn TelegramClient> = client.clone();
@@ -4714,13 +4715,14 @@ fn disconnect_detaches_blocked_local_report() {
     let (release_tx, release_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = run_with_client(
+        let result = run_with_client_observing_disconnect(
             extension_input,
             BlockingReportWriter {
                 entered: entered_tx,
                 release: release_rx,
             },
             runner_client,
+            disconnect_tx,
         )
         .map_err(|error| error.to_string());
         let _ = result_tx.send(result);
@@ -4769,8 +4771,11 @@ fn disconnect_detaches_blocked_local_report() {
         .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
         .expect("disconnect");
     input.flush().expect("flush disconnect");
+    disconnect_rx
+        .recv()
+        .expect("manual runtime observed disconnect");
     result_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv()
         .expect("prompt runner")
         .expect("disconnect");
     release_tx.send(()).expect("release detached writer");
