@@ -20,9 +20,9 @@ pub use deterministic_fixture::DeterministicFixture;
 pub use durable_session_snapshot::DurableSessionSnapshot;
 pub use durable_snapshot::DurableSnapshot;
 pub use scenario::{
-    AgentWatchResultExpectationV2, FAKE_MODEL_ID, InitialStatusOutcome, ScenarioActionV2,
-    ScenarioLaneV2, ScenarioTurnV1, ScenarioV1, ScenarioV2, StatusTerminalPhase, StatusToolOrder,
-    WatchNotificationV2,
+    AgentWatchResultExpectationV2, CANONICAL_OPAQUE_COMPACTION_JSON, FAKE_MODEL_ID,
+    InitialStatusOutcome, ScenarioActionV2, ScenarioLaneV2, ScenarioTurnV1, ScenarioV1, ScenarioV2,
+    StatusTerminalPhase, StatusToolOrder, WatchNotificationV2,
 };
 use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options};
 use tempfile::TempDir;

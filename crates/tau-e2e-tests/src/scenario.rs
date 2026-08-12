@@ -6,6 +6,11 @@ use tau_proto::{ProviderFailureKind, ToolCallId, ToolName};
 /// Fully-qualified model published by every deterministic scenario.
 pub const FAKE_MODEL_ID: &str = "fake/test";
 
+/// Exact provider-owned syntax emitted by the canonical opaque-compaction
+/// acceptance case.
+pub const CANONICAL_OPAQUE_COMPACTION_JSON: &str =
+    r#"{"type":"compaction","id":"cmp-e2e","encrypted_content":"opaque-e2e"}"#;
+
 /// Version-one deterministic provider scenario.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +67,8 @@ pub enum ScenarioActionV2 {
         /// Exact complete six-section summary returned by the provider.
         summary: String,
     },
+    /// Return one fixed canonical opaque provider compaction item.
+    StandaloneOpaqueCompaction,
     /// Return text only after the prior standalone replacement is visible in
     /// the next ordinary provider prompt.
     CompactedText {
@@ -69,6 +76,16 @@ pub enum ScenarioActionV2 {
         user_text: String,
         /// Exact summary that must survive in replacement context.
         summary: String,
+        /// Earlier user text that the replacement must remove from context.
+        removed_user_text: String,
+        /// Complete assistant response.
+        response: String,
+    },
+    /// Return text only after the exact canonical opaque replacement is visible
+    /// in the next ordinary provider prompt.
+    CompactedOpaqueText {
+        /// Exact latest user text.
+        user_text: String,
         /// Earlier user text that the replacement must remove from context.
         removed_user_text: String,
         /// Complete assistant response.

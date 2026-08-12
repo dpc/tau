@@ -167,6 +167,7 @@ fn standalone_compaction_capability_requires_a_dedicated_action() {
         ScenarioActionV2::StandaloneCompaction {
             summary: "Goal:\nsummary".to_owned(),
         },
+        ScenarioActionV2::StandaloneOpaqueCompaction,
         ScenarioActionV2::StandaloneCompactionError {
             failure_kind: ProviderFailureKind::RequestRejected,
             error: "rejected".to_owned(),

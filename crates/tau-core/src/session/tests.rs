@@ -1462,6 +1462,151 @@ fn provider_compaction_replacement_has_identical_live_and_replay_state() {
     assert_eq!(live.current_branch(), replay.current_branch());
 }
 
+/// Ensures bounded canonical opaque boundaries have the same complete core
+/// projection when appended live or reconstructed cold, while rejected
+/// boundaries cannot partially mutate that projection or consume a sequence.
+#[test]
+fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
+    fn record(seq: u64, event: Event) -> PersistedAgentEvent {
+        PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+            seq: PersistedAgentEventSeq::new(seq),
+            source: None,
+            event,
+            parent: AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::default(),
+        }
+    }
+
+    for case in 0_u8..3 {
+        let raw_json = format!(
+            r#"{{"type":"compaction","id":"cmp-{case}","encrypted_content":"opaque-{case}"}}"#
+        );
+        let replacement = ContextItem::Compaction(tau_proto::OpaqueProviderItem::with_raw_json(
+            tau_proto::CborValue::Map(vec![]),
+            raw_json.clone(),
+        ));
+        let started = compaction_start(&format!("ct-opaque-{case}"));
+        let compacted = tau_proto::AgentCompacted {
+            agent_id: agent_id(),
+            replacement_window: vec![replacement.clone()],
+            transaction_id: Some(started.transaction_id.clone()),
+            cut: Some(started.cut),
+            suffix_end: Some(started.cut),
+            compact_prompt_id: Some(started.compact_prompt_id.clone()),
+            model: Some(started.model.clone()),
+            operation: Some(started.operation),
+        };
+        let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id(),
+            transaction_id: Some(started.transaction_id.clone()),
+            agent_prompt_id: format!("ap-opaque-inference-{case}")
+                .parse()
+                .expect("bounded test prompt id"),
+            through: AgentHead::Root,
+            model: Some(started.model.clone()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(started.cut),
+        };
+        let records = vec![
+            record(0, Event::AgentStandaloneCompactionStarted(started.clone())),
+            record(1, Event::AgentCompacted(compacted)),
+            record(2, Event::AgentInferenceDispatchStarted(checkpoint.clone())),
+        ];
+
+        let mut live = AgentTree::from_events(agent_id(), &[]);
+        for event in &records {
+            live.apply_persisted_record(event)
+                .expect("generated canonical boundary must append");
+        }
+        let replay = AgentTree::from_events(agent_id(), &records);
+
+        assert_eq!(live, replay, "case {case}: live and replay projections");
+        assert_eq!(live.head(), replay.head(), "case {case}: boundary head");
+        assert_eq!(
+            live.standalone_compaction_recovery(),
+            Some(StandaloneCompactionRecovery::DispatchUncertain(checkpoint)),
+            "case {case}: transaction and checkpoint recovery"
+        );
+        assert!(matches!(
+            live.current_branch().last(),
+            Some(AgentEntry::Compaction {
+                replacement_window,
+                ..
+            }) if matches!(
+                replacement_window.as_slice(),
+                [ContextItem::Compaction(item)] if item.raw_json.as_deref() == Some(raw_json.as_str())
+            )
+        ));
+    }
+
+    for (label, replacement_window, transaction_id) in [
+        (
+            "empty replacement",
+            Vec::new(),
+            Some(
+                tau_proto::CompactionTransactionId::parse("ct-invalid-empty")
+                    .expect("bounded test transaction id"),
+            ),
+        ),
+        (
+            "harness trigger",
+            vec![ContextItem::CompactionTrigger],
+            Some(
+                tau_proto::CompactionTransactionId::parse("ct-invalid-trigger")
+                    .expect("bounded test transaction id"),
+            ),
+        ),
+        (
+            "unknown transaction",
+            vec![ContextItem::Compaction(
+                tau_proto::OpaqueProviderItem::with_raw_json(
+                    tau_proto::CborValue::Map(vec![]),
+                    r#"{"type":"compaction","id":"cmp-invalid","encrypted_content":"opaque"}"#,
+                ),
+            )],
+            Some(
+                tau_proto::CompactionTransactionId::parse("ct-other")
+                    .expect("bounded test transaction id"),
+            ),
+        ),
+    ] {
+        let started = compaction_start("ct-invalid");
+        let mut live = AgentTree::from_events(agent_id(), &[]);
+        apply_persisted_test_record(
+            &mut live,
+            AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionStarted(started.clone()),
+        );
+        let before = live.clone();
+        let sequence = live.next_event_seq();
+        let invalid = record(
+            sequence.get(),
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                agent_id: agent_id(),
+                replacement_window,
+                transaction_id,
+                cut: Some(started.cut),
+                suffix_end: Some(started.cut),
+                compact_prompt_id: Some(started.compact_prompt_id),
+                model: Some(started.model),
+                operation: Some(started.operation),
+            }),
+        );
+
+        assert!(
+            live.apply_persisted_record(&invalid).is_err(),
+            "{label} must reject"
+        );
+        assert_eq!(live, before, "{label} must leave the projection unchanged");
+        assert_eq!(
+            live.next_event_seq(),
+            sequence,
+            "{label} must not consume its record sequence"
+        );
+    }
+}
+
 /// Watch provider-status messages must carry their structured payload, while
 /// ordinary messages must not smuggle one into the durable agent transcript.
 #[test]

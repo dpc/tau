@@ -35,3 +35,23 @@
 - Always consult the `tau-commit` skill before making commits.
 - When debugging existing Tau sessions, consult the
   `tau-self-knowledge-debugging` skill.
+
+
+## Compaction prevention checklist
+
+- Before changing `ContextItem`, standalone terminal handling, `AgentCompacted`,
+  compact-request lowering, compact-response parsing, or opaque raw replay,
+  consult `specs/SPEC-compaction-and-context-recovery.md`. For Codex request
+  lowering, response parsing, or opaque replay, also consult
+  `crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md`.
+- Update or run the named oracle coverage that applies: proto
+  `compaction_window_accepts_provider_item_and_rejects_harness_trigger`,
+  harness `standalone_rejections_do_not_mutate_context_or_compaction_authority`,
+  core `standalone_compaction_opaque_windows_match_live_append_and_cold_replay`,
+  and deterministic E2E
+  `deterministic_opaque_standalone_compaction_replays_after_clean_restart`.
+- Compact request lowering must also update or verify the exact
+  `responses-compact-standard.json` and `responses-compact-lite.json` Codex
+  fixtures. Compact-response parsing and opaque raw replay must verify
+  `responses-compact-output.json`. Do not replace these focused rejection and
+  live/replay oracles with broad matrix coverage.

@@ -1,8 +1,92 @@
 //! Standalone local-summary-compaction deterministic acceptance.
 
-use tau_proto::{Event, PromptOperation, ProviderFailureKind, StandaloneCompactionFailureReason};
+use tau_proto::{
+    ContextItem, Event, PromptOperation, ProviderFailureKind, StandaloneCompactionFailureReason,
+};
 
 use super::*;
+
+/// Proves a manual standalone compaction durably preserves one canonical opaque
+/// provider item across a clean restart, and the resumed next inference
+/// receives that exact replacement rather than the removed transcript.
+#[test]
+fn deterministic_opaque_standalone_compaction_replays_after_clean_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_opaque_standalone_compaction_replays_after_clean_restart",
+        &ScenarioV2::new(
+            "standalone-opaque-compaction-restart",
+            vec![ScenarioLaneV2 {
+                ctx_id: "opaque-compact-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::Text {
+                        user_text: "establish opaque compactable history".to_owned(),
+                        response: "initial opaque history".to_owned(),
+                    },
+                    ScenarioActionV2::StandaloneOpaqueCompaction,
+                    ScenarioActionV2::CompactedOpaqueText {
+                        user_text: "continue after opaque restart".to_owned(),
+                        removed_user_text: "establish opaque compactable history".to_owned(),
+                        response: "continued from opaque replacement".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket_a = fixture.socket_path("opaque-compact-boot-a");
+    let server_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
+    let mut peer_a = connect_ui(&socket_a)?;
+    create_agent(
+        &mut peer_a,
+        "opaque-compact-lane",
+        "establish opaque compactable history",
+    )?;
+    let first = recv_until_finished(&mut peer_a)?;
+    request_compaction(&mut peer_a, &first.agent_id)?;
+    let started = recv_until_compaction_started(&mut peer_a)?;
+    let compact_prompt = recv_until_compaction_prompt(&mut peer_a)?;
+    let compacted = recv_until_compacted(&mut peer_a)?;
+    assert_eq!(
+        compacted.transaction_id.as_ref(),
+        Some(&started.transaction_id)
+    );
+    assert_eq!(
+        compacted.compact_prompt_id.as_ref(),
+        Some(&compact_prompt.agent_prompt_id)
+    );
+    assert!(matches!(
+        compacted.replacement_window.as_slice(),
+        [ContextItem::Compaction(item)]
+            if item.raw_json.as_deref()
+                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+    ));
+    disconnect_ui(&mut peer_a)?;
+    server_a.finish()?;
+    assert_durable_opaque_compaction(&fixture, &first.agent_id)?;
+
+    let socket_b = fixture.socket_path("opaque-compact-boot-b");
+    let server_b = spawn_daemon(
+        &fixture,
+        &socket_b,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut peer_b = connect_ui(&socket_b)?;
+    recv_until_session_replay_complete(&mut peer_b)?;
+    submit_prompt(
+        &mut peer_b,
+        &first.agent_id,
+        "opaque-compact-continuation",
+        "continue after opaque restart",
+    )?;
+    let continued = recv_until_finished(&mut peer_b)?;
+    assert_assistant(&continued.output_items, "continued from opaque replacement");
+    disconnect_ui(&mut peer_b)?;
+    server_b.finish()?;
+    assert_durable_opaque_compaction(&fixture, &first.agent_id)?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
 
 /// Proves an explicitly opted-in deterministic model completes the real
 /// standalone transaction: the fake receives its tool-free request, the
@@ -231,6 +315,18 @@ fn recv_until_compaction_started(
     }
 }
 
+/// Waits for the resumed daemon to finish historical delivery before submitting
+/// the continuation whose provider response is the replay oracle.
+fn recv_until_session_replay_complete(
+    peer: &mut tau_socket::SocketPeer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        if matches!(recv_event(peer)?, Event::SessionReplayComplete(_)) {
+            return Ok(());
+        }
+    }
+}
+
 /// Waits for the durable successful transcript replacement fact.
 fn recv_until_compacted(
     peer: &mut tau_socket::SocketPeer,
@@ -313,6 +409,37 @@ fn assert_durable_compaction(
         .any(|value| value.agent_id != *expected_agent_id)
     {
         return Err("durable compaction failure targeted a different agent".into());
+    }
+    Ok(())
+}
+
+/// Checks that durable replay retains the fixed provider-owned raw syntax
+/// without converting it into a summary message.
+fn assert_durable_opaque_compaction(
+    fixture: &DeterministicFixture,
+    expected_agent_id: &tau_proto::AgentId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = tau_e2e_tests::DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    let compacted = snapshot
+        .agent_events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentCompacted(value) if value.agent_id == *expected_agent_id => Some(value),
+            _ => None,
+        });
+    let Some(compacted) = compacted else {
+        return Err("durable AgentCompacted was not recorded".into());
+    };
+    if !matches!(
+        compacted.replacement_window.as_slice(),
+        [ContextItem::Compaction(item)]
+            if item.raw_json.as_deref()
+                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+    ) {
+        return Err("durable opaque replacement bytes changed".into());
     }
     Ok(())
 }

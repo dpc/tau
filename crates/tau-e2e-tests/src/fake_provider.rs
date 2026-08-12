@@ -26,9 +26,9 @@ use tau_proto::{
 use validation::{validate_v1, validate_v2};
 
 use crate::scenario::{
-    AgentWatchResultExpectationV2, FAKE_MODEL_ID, InitialStatusOutcome, ScenarioActionV2,
-    ScenarioTurnV1, ScenarioV1, ScenarioV2, StatusTerminalPhase, StatusToolOrder,
-    WatchNotificationV2,
+    AgentWatchResultExpectationV2, CANONICAL_OPAQUE_COMPACTION_JSON, FAKE_MODEL_ID,
+    InitialStatusOutcome, ScenarioActionV2, ScenarioTurnV1, ScenarioV1, ScenarioV2,
+    StatusTerminalPhase, StatusToolOrder, WatchNotificationV2,
 };
 
 const MAX_TURNS: usize = 8;
@@ -96,6 +96,7 @@ impl ScenarioConfig {
                     matches!(
                         action,
                         ScenarioActionV2::StandaloneCompaction { summary: _ }
+                            | ScenarioActionV2::StandaloneOpaqueCompaction
                             | ScenarioActionV2::StandaloneCompactionError {
                                 failure_kind: _,
                                 error: _,
@@ -1434,6 +1435,7 @@ impl FakeState {
         match action {
             ScenarioActionV2::Text { response, .. }
             | ScenarioActionV2::CompactedText { response, .. }
+            | ScenarioActionV2::CompactedOpaqueText { response, .. }
             | ScenarioActionV2::DummyToolResult { response, .. }
             | ScenarioActionV2::DummyToolRepair { response, .. }
             | ScenarioActionV2::AgentStartResult { response, .. }
@@ -1449,6 +1451,9 @@ impl FakeState {
             }
             ScenarioActionV2::StandaloneCompaction { summary } => {
                 emit_text_response(prompt, handle, summary)
+            }
+            ScenarioActionV2::StandaloneOpaqueCompaction => {
+                emit_opaque_compaction_response(prompt, handle)
             }
             ScenarioActionV2::StandaloneCompactionError {
                 failure_kind,
@@ -1808,6 +1813,7 @@ impl FakeState {
                     .map_err(|detail| self.mismatch(cursor, detail))?;
             }
             ScenarioActionV2::StandaloneCompaction { summary: _ }
+            | ScenarioActionV2::StandaloneOpaqueCompaction
             | ScenarioActionV2::StandaloneCompactionError {
                 failure_kind: _,
                 error: _,
@@ -1837,6 +1843,34 @@ impl FakeState {
                     return Err(self.mismatch(
                         cursor,
                         "replacement window did not replace prior transcript",
+                    ));
+                }
+            }
+            ScenarioActionV2::CompactedOpaqueText {
+                user_text: _,
+                removed_user_text,
+                response: _,
+            } => {
+                let context = serde_json::to_string(&prompt.context)
+                    .map_err(|error| ClientError::handler(error.to_string()))?;
+                let opaque_items = prompt
+                    .context
+                    .flatten_iter()
+                    .filter_map(|item| match item {
+                        ContextItem::Compaction(compaction) => Some(compaction),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !matches!(
+                    opaque_items.as_slice(),
+                    [compaction]
+                        if compaction.raw_json.as_deref()
+                            == Some(CANONICAL_OPAQUE_COMPACTION_JSON)
+                ) || context.contains(removed_user_text)
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "canonical opaque replacement did not replace prior transcript",
                     ));
                 }
             }
@@ -2182,6 +2216,24 @@ fn emit_text_response(
     )))
 }
 
+/// Publishes the fixed raw provider item used to exercise opaque compaction
+/// persistence and replay without interpreting its provider-owned fields.
+fn emit_opaque_compaction_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+) -> ClientResult<()> {
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        vec![ContextItem::Compaction(
+            tau_proto::OpaqueProviderItem::with_raw_json(
+                CborValue::Map(Vec::new()),
+                CANONICAL_OPAQUE_COMPACTION_JSON,
+            ),
+        )],
+        ProviderStopReason::EndTurn,
+    )))
+}
+
 /// Publishes one typed terminal provider failure.
 fn emit_error_response(
     prompt: &tau_proto::AgentPromptCreated,
@@ -2369,6 +2421,11 @@ impl ScenarioActionV2 {
                 removed_user_text: _,
                 response: _,
             }
+            | Self::CompactedOpaqueText {
+                user_text,
+                removed_user_text: _,
+                response: _,
+            }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
             | Self::DummyToolRepair { user_text, .. }
@@ -2386,6 +2443,7 @@ impl ScenarioActionV2 {
             | Self::Disconnect { user_text, .. }
             | Self::BarrierText { user_text, .. } => Some(user_text),
             Self::StandaloneCompaction { summary: _ }
+            | Self::StandaloneOpaqueCompaction
             | Self::StandaloneCompactionError {
                 failure_kind: _,
                 error: _,
@@ -2401,6 +2459,7 @@ impl ScenarioActionV2 {
     fn matches_operation(&self, operation: tau_proto::PromptOperation) -> bool {
         match self {
             Self::StandaloneCompaction { summary: _ }
+            | Self::StandaloneOpaqueCompaction
             | Self::StandaloneCompactionError {
                 failure_kind: _,
                 error: _,
