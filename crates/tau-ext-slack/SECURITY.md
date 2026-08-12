@@ -34,7 +34,8 @@ native-id cache has no restart or cross-agent guarantee.
   configured publisher's matching canonical `message.sent` downpath echo installs
   posted-message/reaction authority and completes the pending ledger. Any confirmed
   writer failure latches output failure, retires the entire Slack session and all
-  receive/send/reaction authority, wakes workers, and requests shutdown. Replay
+  receive/send/reaction authority, wakes workers, and terminates the protocol
+  connection so harness disconnect cleanup settles retained calls. Replay
   coalesces per call id while canonical confirmation is pending and returns the
   retained stable result after confirmation without reposting. Awaiting-submission,
   pending-canonical, completed, definitive, cumulative

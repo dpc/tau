@@ -33,5 +33,12 @@ permission, target, and request rejection are not retried. Errors and
 `Retry-After` are bounded and expose no body, header, token, native ID, mention,
 or text.
 
+Every Slack-owned sole tool terminal uses checked ordered output. Asynchronous
+definitive failure, retry exhaustion, and lifecycle cancellation submit typed
+`tool.error_reported` observations, and the send ledger retains ownership until
+that write succeeds. Mandatory output failure terminates the extension session
+so harness disconnect cleanup settles any routed calls; optional progress and
+notices remain best effort.
+
 Submitted sent reports and downstream canonical facts follow
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).

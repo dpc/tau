@@ -2906,8 +2906,7 @@ impl TauExtension for ReactionRunnerExtension {
             })
             .tool(react_tool_spec(), |cx| {
                 cx.state
-                    .dispatch_scoped_tool(cx.local_tool_name(), cx.invoke().clone());
-                Ok(())
+                    .dispatch_scoped_tool(cx.local_tool_name(), cx.invoke().clone())
             })
             .ready_message("ready");
     }
@@ -3352,7 +3351,8 @@ fn reaction_success_replay_reports_retained_terminal_once() {
         reaction_args(message_ref, "eyes", "add"),
     );
 
-    ext.dispatch_scoped_tool(&tau_proto::ToolName::new(REACT_TOOL_NAME), invoke.clone());
+    ext.dispatch_scoped_tool(&tau_proto::ToolName::new(REACT_TOOL_NAME), invoke.clone())
+        .expect("first reaction dispatch");
     let first = rx
         .try_iter()
         .filter(|message| {
@@ -3363,7 +3363,8 @@ fn reaction_success_replay_reports_retained_terminal_once() {
             )
         })
         .count();
-    ext.dispatch_scoped_tool(&tau_proto::ToolName::new(REACT_TOOL_NAME), invoke);
+    ext.dispatch_scoped_tool(&tau_proto::ToolName::new(REACT_TOOL_NAME), invoke)
+        .expect("replayed reaction dispatch");
     let replayed = rx
         .try_iter()
         .filter(|message| {

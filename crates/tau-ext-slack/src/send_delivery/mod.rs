@@ -198,6 +198,44 @@ pub(super) enum SendFailureDisposition {
     ExhaustedUnknown,
 }
 
+/// Closed set of error terminals a send worker may publish and retain.
+enum SendErrorTerminal {
+    /// A definitive provider failure.
+    Definitive {
+        /// Stable failure category.
+        category: SendFailureCategory,
+        /// Possible remote-copy range.
+        copies: RemoteCopyPossibility,
+    },
+    /// Retry exhaustion after an unresolved attempt.
+    ExhaustedUnknown {
+        /// Stable failure category.
+        category: SendFailureCategory,
+        /// Possible remote-copy range.
+        copies: RemoteCopyPossibility,
+    },
+    /// Lifecycle cancellation.
+    Cancelled {
+        /// Possible remote-copy range.
+        copies: RemoteCopyPossibility,
+    },
+}
+
+impl SendErrorTerminal {
+    /// Convert the checked publication state into the retained ledger state.
+    fn into_ledger(self) -> SendLedgerDisposition {
+        match self {
+            Self::Definitive { category, copies } => {
+                SendLedgerDisposition::DefinitiveFailure { category, copies }
+            }
+            Self::ExhaustedUnknown { category, copies } => {
+                SendLedgerDisposition::ExhaustedUnknown { category, copies }
+            }
+            Self::Cancelled { copies } => SendLedgerDisposition::Cancelled { copies },
+        }
+    }
+}
+
 /// Result of atomically entering one provider attempt.
 enum BeginSendAttempt {
     /// The ledger transitioned to in-flight.
@@ -797,8 +835,6 @@ impl Extension {
     /// Spawn a bounded delivery worker and terminalize safely if the OS
     /// refuses.
     fn spawn_send_worker(&self, prepared: PreparedSend) {
-        let call_id = prepared.invoke.call_id.clone();
-        let token = prepared.authority.token;
         let worker = SendDeliveryWorker::from_extension(self);
         let panic_worker = worker.clone();
         let panic_prepared = prepared.clone();
@@ -821,26 +857,14 @@ impl Extension {
                 worker.release_send_worker(&panic_prepared);
             });
         if spawn.is_err() {
-            let invoke = {
-                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                state.send_ledger.get_mut(&call_id).and_then(|entry| {
-                    if entry.prepared.authority.token != token {
-                        return None;
-                    }
-                    entry.disposition = SendLedgerDisposition::DefinitiveFailure {
-                        category: SendFailureCategory::WorkerUnavailable,
-                        copies: RemoteCopyPossibility::None,
-                    };
-                    Some(entry.prepared.invoke.clone())
-                })
-            };
-            SendDeliveryWorker::from_extension(self).release_send_worker(&spawn_failure_prepared);
-            if let Some(invoke) = invoke {
-                self.output.emit(tool_error(
-                    invoke,
-                    SendFailureCategory::WorkerUnavailable.to_string(),
-                ));
-            }
+            let worker = SendDeliveryWorker::from_extension(self);
+            worker.release_send_worker(&spawn_failure_prepared);
+            worker.finish_send_failure(
+                &spawn_failure_prepared,
+                SendFailureCategory::WorkerUnavailable,
+                SendFailureDisposition::Definitive,
+                RemoteCopyPossibility::None,
+            );
         }
     }
 }
@@ -906,6 +930,16 @@ impl SendDeliveryWorker {
         }
         drop(state);
         self.wake.notify_progress();
+        #[cfg(test)]
+        if let Some(sender) = self
+            .test_hooks
+            .send_worker_released
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            let _ = sender.send(());
+        }
     }
 
     /// Run the initial attempt and at most one retry of the exact frozen body.
@@ -1245,7 +1279,7 @@ impl SendDeliveryWorker {
         );
     }
 
-    /// Store and emit one stable terminal failure.
+    /// Publish one stable failure and only then store its terminal disposition.
     fn finish_send_failure(
         &self,
         prepared: &PreparedSend,
@@ -1253,97 +1287,115 @@ impl SendDeliveryWorker {
         disposition: SendFailureDisposition,
         copies: RemoteCopyPossibility,
     ) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        {
-            let current = state.send_authority_is_current(prepared);
-            let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id) else {
-                return;
-            };
-            if entry.prepared.authority.token != prepared.authority.token {
-                return;
-            }
-            if matches!(
-                entry.disposition,
-                SendLedgerDisposition::Submitting { .. }
-                    | SendLedgerDisposition::PendingCanonical(_)
-                    | SendLedgerDisposition::DefinitiveFailure {
-                        category: _,
-                        copies: _
-                    }
-                    | SendLedgerDisposition::ExhaustedUnknown {
-                        category: _,
-                        copies: _
-                    }
-                    | SendLedgerDisposition::Cancelled { copies: _ }
-                    | SendLedgerDisposition::Completed {
-                        result: _,
-                        copies: _
-                    }
-            ) {
-                return;
-            }
-            let message = if !current {
-                entry.disposition = SendLedgerDisposition::Cancelled { copies };
-                copies.caveat().map_or_else(
-                    || "Slack delivery was cancelled before I/O".to_owned(),
-                    |caveat| format!("Slack delivery was cancelled; {caveat}"),
-                )
-            } else if disposition == SendFailureDisposition::ExhaustedUnknown {
-                entry.disposition = SendLedgerDisposition::ExhaustedUnknown { category, copies };
-                copies.caveat().map_or_else(
-                    || category.to_string(),
-                    |caveat| format!("{category}; {caveat}"),
+        self.publish_send_error(prepared, move |current| {
+            if !current {
+                (
+                    copies.caveat().map_or_else(
+                        || "Slack delivery was cancelled before I/O".to_owned(),
+                        |caveat| format!("Slack delivery was cancelled; {caveat}"),
+                    ),
+                    SendErrorTerminal::Cancelled { copies },
                 )
             } else {
-                entry.disposition = SendLedgerDisposition::DefinitiveFailure { category, copies };
-                copies.caveat().map_or_else(
+                let message = copies.caveat().map_or_else(
                     || category.to_string(),
                     |caveat| format!("{category}; {caveat}"),
-                )
-            };
-            self.output
-                .emit(tool_error(entry.prepared.invoke.clone(), message));
-        }
+                );
+                let terminal = match disposition {
+                    SendFailureDisposition::Definitive => {
+                        SendErrorTerminal::Definitive { category, copies }
+                    }
+                    SendFailureDisposition::ExhaustedUnknown => {
+                        SendErrorTerminal::ExhaustedUnknown { category, copies }
+                    }
+                };
+                (message, terminal)
+            }
+        });
     }
 
-    /// Store stable cancellation without recreating revoked authority.
+    /// Publish stable cancellation and only then store its disposition.
     fn finish_send_cancelled(&self, prepared: &PreparedSend, copies: RemoteCopyPossibility) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        {
-            let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id) else {
-                return;
-            };
-            if entry.prepared.authority.token != prepared.authority.token {
-                return;
-            }
-            if matches!(
-                entry.disposition,
-                SendLedgerDisposition::Submitting { .. }
-                    | SendLedgerDisposition::PendingCanonical(_)
-                    | SendLedgerDisposition::DefinitiveFailure {
-                        category: _,
-                        copies: _
-                    }
-                    | SendLedgerDisposition::ExhaustedUnknown {
-                        category: _,
-                        copies: _
-                    }
-                    | SendLedgerDisposition::Cancelled { copies: _ }
-                    | SendLedgerDisposition::Completed {
-                        result: _,
-                        copies: _
-                    }
-            ) {
-                return;
-            }
-            entry.disposition = SendLedgerDisposition::Cancelled { copies };
-            self.output.emit(tool_error(
-                entry.prepared.invoke.clone(),
+        self.publish_send_error(prepared, move |_| {
+            (
                 copies.caveat().map_or_else(
                     || "Slack delivery was cancelled before I/O".to_owned(),
                     |caveat| format!("Slack delivery was cancelled; {caveat}"),
                 ),
-            ));
+                SendErrorTerminal::Cancelled { copies },
+            )
+        });
+    }
+
+    /// Validate ownership, publish one typed error report, and then commit the
+    /// supplied terminal disposition under the ordered submission gate.
+    fn publish_send_error<F>(&self, prepared: &PreparedSend, classify: F)
+    where
+        F: FnOnce(bool) -> (String, SendErrorTerminal),
+    {
+        #[cfg(test)]
+        run_blocking_test_hook(&self.test_hooks.send_error_submission_boundary);
+        let submission = self
+            .output_submission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (message, terminal) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(entry) = state.send_ledger.get(&prepared.invoke.call_id) else {
+                return;
+            };
+            if entry.prepared.authority.token != prepared.authority.token {
+                return;
+            }
+            if matches!(
+                entry.disposition,
+                SendLedgerDisposition::Submitting { .. }
+                    | SendLedgerDisposition::PendingCanonical(_)
+                    | SendLedgerDisposition::DefinitiveFailure {
+                        category: _,
+                        copies: _
+                    }
+                    | SendLedgerDisposition::ExhaustedUnknown {
+                        category: _,
+                        copies: _
+                    }
+                    | SendLedgerDisposition::Cancelled { copies: _ }
+                    | SendLedgerDisposition::Completed {
+                        result: _,
+                        copies: _
+                    }
+            ) {
+                return;
+            }
+            classify(state.send_authority_is_current(prepared))
+        };
+        let sent = self
+            .output
+            .report_tool_terminal(tool_error(prepared.invoke.clone(), message));
+        if sent.is_ok() {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id)
+                && entry.prepared.authority.token == prepared.authority.token
+                && !matches!(
+                    entry.disposition,
+                    SendLedgerDisposition::Submitting { .. }
+                        | SendLedgerDisposition::PendingCanonical(_)
+                        | SendLedgerDisposition::DefinitiveFailure { .. }
+                        | SendLedgerDisposition::ExhaustedUnknown { .. }
+                        | SendLedgerDisposition::Cancelled { .. }
+                        | SendLedgerDisposition::Completed { .. }
+                )
+            {
+                entry.disposition = terminal.into_ledger();
+            }
+        } else {
+            self.output_failed.store(true, Ordering::Release);
+            #[cfg(test)]
+            run_blocking_test_hook(&self.test_hooks.output_failure_boundary);
+        }
+        drop(submission);
+        if sent.is_err() {
+            self.retire_after_output_failure();
         }
     }
 
@@ -1446,7 +1498,11 @@ impl SendDeliveryWorker {
         if report_sent {
             run_blocking_test_hook(&self.test_hooks.sent_report_boundary);
         }
-        let result_sent = report_sent && self.output.report_tool_result_confirmed(result.clone());
+        let result_sent = report_sent
+            && self
+                .output
+                .report_tool_result_confirmed(result.clone())
+                .is_ok();
         if !result_sent {
             self.output_failed.store(true, Ordering::Release);
             #[cfg(test)]

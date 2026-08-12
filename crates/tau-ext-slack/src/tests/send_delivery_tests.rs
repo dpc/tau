@@ -78,6 +78,79 @@ impl SlackClient for ScriptedPostClient {
     }
 }
 
+impl ReactionClient for ScriptedPostClient {
+    fn react(
+        &self,
+        _cfg: &RuntimeConfig,
+        _action: ReactionActionKind,
+        _channel_id: &str,
+        _message_ts: &str,
+        _emoji: &str,
+    ) -> Result<(), ReactionApiError> {
+        unreachable!("post-only client")
+    }
+}
+
+/// Reader that keeps the harness connection open after delivering fixture
+/// frames, proving fatal shutdown does not rely on harness EOF.
+struct BlockingAfterInputReader {
+    /// Encoded startup and live-delivery frames.
+    input: path_std_io::Cursor<Vec<u8>>,
+    /// Gate released after the production loop exits.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Read for BlockingAfterInputReader {
+    fn read(&mut self, buffer: &mut [u8]) -> path_std_io::Result<usize> {
+        let read = self.input.read(buffer)?;
+        if read != 0 {
+            return Ok(read);
+        }
+        let (lock, condvar) = &*self.gate;
+        let mut blocked = lock.lock().expect("reader gate");
+        while *blocked {
+            blocked = condvar.wait(blocked).expect("wait reader gate");
+        }
+        Ok(0)
+    }
+}
+
+/// Writer that fails the asynchronous typed error report after startup output
+/// has succeeded.
+struct AsyncErrorReportFailureWriter;
+
+impl Write for AsyncErrorReportFailureWriter {
+    fn write(&mut self, buffer: &[u8]) -> path_std_io::Result<usize> {
+        if buffer
+            .windows(b"tool.error_reported".len())
+            .any(|window| window == b"tool.error_reported")
+        {
+            return Err(path_std_io::Error::other(
+                "forced asynchronous terminal failure",
+            ));
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install a causal notification for one bounded send worker's final release.
+fn send_worker_release_notification(ext: &Extension) -> mpsc::Receiver<()> {
+    let (sender, receiver) = mpsc::channel();
+    *ext.test_hooks.send_worker_released.lock().expect("hook") = Some(sender);
+    receiver
+}
+
+/// Wait for one causally observed send-worker release with a finite bound.
+fn wait_for_send_worker(receiver: &mpsc::Receiver<()>) {
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("send worker release deadline");
+}
+
 /// The send tool schema and runtime validation must not allow model-selected
 /// Slack destinations such as channel ids.
 #[test]
@@ -277,6 +350,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
 fn canonical_echo_during_result_submission_is_reconciled() {
     let (ext, rx, _client) = extension();
     apply_test_config(&ext, proactive_cfg());
+    let worker_released = send_worker_release_notification(&ext);
     let (reached_tx, reached_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     *ext.test_hooks.sent_report_boundary.lock().expect("hook") = Some(BlockingTestHook {
@@ -313,6 +387,7 @@ fn canonical_echo_during_result_submission_is_reconciled() {
         HarnessInputMessage::Emit(emit)
             if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
     ));
+    wait_for_send_worker(&worker_released);
     assert!(ext.state.lock().expect("state").reactions.targets.len() == 1);
 }
 
@@ -554,6 +629,8 @@ fn proactive_schema_is_config_independent() {
     }
 }
 
+/// Retry exhaustion must publish exactly one typed report, commit its ledger
+/// disposition afterward, and never perform a late second post.
 #[test]
 fn retry_resuming_after_absolute_horizon_never_posts_again() {
     let client = ScriptedPostClient::new([PostAttemptOutcome::OutcomeUnknown(
@@ -571,6 +648,7 @@ fn retry_resuming_after_absolute_horizon_never_posts_again() {
         }),
     );
     apply_test_config(&ext, proactive_cfg());
+    let worker_released = send_worker_release_notification(&ext);
     let invoke = tool_call(
         SEND_TOOL_NAME,
         "agent-a",
@@ -590,9 +668,273 @@ fn retry_resuming_after_absolute_horizon_never_posts_again() {
     release_tx.send(()).expect("resume late retry");
     assert!(matches!(
         output_rx.recv().expect("terminal error"),
-        HarnessInputMessage::Emit(emit) if matches!(emit.event.as_ref(), Event::ToolError(_))
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ToolErrorReported(_))
+    ));
+    wait_for_send_worker(&worker_released);
+    assert!(
+        output_rx.try_recv().is_err(),
+        "retry exhaustion owns one terminal report"
+    );
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::ExhaustedUnknown { .. })
     ));
     assert_eq!(client.bodies.lock().expect("bodies").len(), 1);
+}
+
+/// A definitive asynchronous provider failure must publish one typed error
+/// report and only then commit the send ledger's terminal disposition.
+#[test]
+fn definitive_send_failure_publishes_one_report_before_terminalizing_ledger() {
+    let client = ScriptedPostClient::new([PostAttemptOutcome::DefinitiveFailure(
+        SendFailureCategory::PermissionDenied,
+    )]);
+    let (output_tx, output_rx) = mpsc::channel();
+    let ext = Extension::new(client.clone(), output_tx);
+    apply_test_config(&ext, proactive_cfg());
+    let worker_released = send_worker_release_notification(&ext);
+    let invoke = tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "definitive-failure",
+        tau_proto::json_to_cbor(&serde_json::json!({"message":"denied","destination":"team-ops"})),
+    );
+
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    assert!(matches!(
+        output_rx.recv().expect("typed error report"),
+        HarnessInputMessage::Emit(emit)
+            if !emit.persist
+                && matches!(emit.event.as_ref(), Event::ToolErrorReported(error)
+                    if error.call_id == invoke.call_id)
+    ));
+    wait_for_send_worker(&worker_released);
+    assert!(
+        output_rx.try_recv().is_err(),
+        "one send owns one terminal report"
+    );
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::DefinitiveFailure { .. })
+    ));
+}
+
+/// Lifecycle cancellation during a retry wait must publish one typed error
+/// report rather than a peer-authored canonical error.
+#[test]
+fn lifecycle_cancelled_send_publishes_one_typed_error_report() {
+    let client = ScriptedPostClient::new([PostAttemptOutcome::OutcomeUnknown(
+        SendFailureCategory::Transport,
+    )]);
+    let (output_tx, output_rx) = mpsc::channel();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let ext = Extension::new_with_scheduler(
+        client,
+        output_tx,
+        Arc::new(StepScheduler {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }),
+    );
+    apply_test_config(&ext, proactive_cfg());
+    let worker_released = send_worker_release_notification(&ext);
+    let invoke = tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "cancelled-send",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message":"cancel me","destination":"team-ops"}),
+        ),
+    );
+
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    entered_rx.recv().expect("retry wait");
+    ext.unload_agent(&invoke.agent_id);
+    release_tx.send(()).expect("release cancelled retry");
+    assert!(matches!(
+        output_rx.recv().expect("typed cancellation error report"),
+        HarnessInputMessage::Emit(emit)
+            if !emit.persist
+                && matches!(emit.event.as_ref(), Event::ToolErrorReported(error)
+                    if error.call_id == invoke.call_id)
+    ));
+    wait_for_send_worker(&worker_released);
+    assert!(output_rx.try_recv().is_err(), "cancellation settles once");
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::Cancelled { .. })
+    ));
+}
+
+/// Revocation before the ordered terminal gate must reclassify a stale
+/// provider failure as one lifecycle cancellation.
+#[test]
+fn lifecycle_revocation_before_terminal_gate_reclassifies_failure() {
+    let client = ScriptedPostClient::new([PostAttemptOutcome::DefinitiveFailure(
+        SendFailureCategory::PermissionDenied,
+    )]);
+    let (output_tx, output_rx) = mpsc::channel();
+    let ext = Extension::new(client, output_tx);
+    apply_test_config(&ext, proactive_cfg());
+    let worker_released = send_worker_release_notification(&ext);
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *ext.test_hooks
+        .send_error_submission_boundary
+        .lock()
+        .expect("hook") = Some(BlockingTestHook {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let invoke = tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "reclassified-failure",
+        tau_proto::json_to_cbor(&serde_json::json!({"message":"denied","destination":"team-ops"})),
+    );
+
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    reached_rx.recv().expect("terminal gate boundary");
+    ext.unload_agent(&invoke.agent_id);
+    release_tx.send(()).expect("release terminal publication");
+    assert!(matches!(
+        output_rx.recv().expect("typed cancellation"),
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ToolErrorReported(error)
+                if error.call_id == invoke.call_id
+                    && error.message.contains("cancelled"))
+    ));
+    wait_for_send_worker(&worker_released);
+    assert!(output_rx.try_recv().is_err());
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::Cancelled { .. })
+    ));
+}
+
+/// Failed mandatory output must leave the live send ledger nonterminal until
+/// fail-closed retirement ends the extension session.
+#[test]
+fn failed_send_terminal_preserves_ledger_ownership_until_retirement() {
+    let client = ScriptedPostClient::new([PostAttemptOutcome::DefinitiveFailure(
+        SendFailureCategory::PermissionDenied,
+    )]);
+    let (output_tx, output_rx) = mpsc::channel();
+    drop(output_rx);
+    let ext = Extension::new(client, output_tx);
+    apply_test_config(&ext, proactive_cfg());
+    let (failed_tx, failed_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (retired_tx, retired_rx) = mpsc::channel();
+    *ext.test_hooks.output_failure_boundary.lock().expect("hook") = Some(BlockingTestHook {
+        reached: failed_tx,
+        release: release_rx,
+    });
+    let invoke = tool_call(
+        SEND_TOOL_NAME,
+        "agent-a",
+        "failed-terminal-ownership",
+        tau_proto::json_to_cbor(&serde_json::json!({"message":"denied","destination":"team-ops"})),
+    );
+
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    failed_rx.recv().expect("mandatory output failure");
+    assert!(matches!(
+        ext.state
+            .lock()
+            .expect("state")
+            .send_ledger
+            .get(&invoke.call_id)
+            .map(|entry| &entry.disposition),
+        Some(SendLedgerDisposition::InFlight { .. })
+    ));
+    assert!(!ext.shutdown.is_requested());
+    release_tx.send(()).expect("release retirement");
+    let watching_shutdown = Arc::clone(&ext.shutdown);
+    std::thread::spawn(move || {
+        path_tokio_runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(watching_shutdown.wait());
+        retired_tx.send(()).expect("announce retirement");
+    });
+    retired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("fatal retirement deadline");
+    assert!(ext.output_failed.load(Ordering::Acquire));
+}
+
+/// An asynchronous mandatory-output failure must wake and terminate the
+/// production protocol loop while harness input remains open.
+#[test]
+fn asynchronous_terminal_failure_stops_production_protocol_loop() {
+    let client = ScriptedPostClient::new([PostAttemptOutcome::DefinitiveFailure(
+        SendFailureCategory::PermissionDenied,
+    )]);
+    let mut input = Vec::new();
+    let mut input_writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    input_writer
+        .write_message(&proactive_config_message())
+        .expect("write config");
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+            tool_call(
+                SEND_TOOL_NAME,
+                "agent-a",
+                "async-output-failure",
+                tau_proto::json_to_cbor(
+                    &serde_json::json!({"message":"denied","destination":"team-ops"}),
+                ),
+            ),
+        )))
+        .expect("write send invocation");
+    input_writer.flush().expect("flush fixture input");
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let reader = BlockingAfterInputReader {
+        input: path_std_io::Cursor::new(input),
+        gate: Arc::clone(&gate),
+    };
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        let result = run_with_client(reader, AsyncErrorReportFailureWriter, client);
+        finished_tx
+            .send(result.is_err())
+            .expect("report runner exit");
+    });
+
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fatal output must stop the production loop"),
+        "writer failure must surface from the runner"
+    );
+    let (lock, condvar) = &*gate;
+    *lock.lock().expect("reader gate") = false;
+    condvar.notify_all();
+    runner.join().expect("runner thread");
 }
 
 #[test]

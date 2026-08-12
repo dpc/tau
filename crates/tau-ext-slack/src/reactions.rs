@@ -214,6 +214,8 @@ enum ReactionExecution {
     Pending(Event),
     /// Reaction completion already submitted this terminal synchronously.
     Submitted(Event),
+    /// Reaction completion retained ownership because terminal output failed.
+    Failed(Event, ClientError),
 }
 
 /// Terminal disposition retained for same-process tool-call replay.
@@ -493,6 +495,10 @@ impl Extension {
                 drop(event);
                 ToolTerminalSubmission::Confirmed
             }
+            ReactionExecution::Failed(event, error) => {
+                drop(event);
+                ToolTerminalSubmission::Failed(error)
+            }
         }
     }
 
@@ -500,7 +506,9 @@ impl Extension {
     #[cfg(test)]
     pub(super) fn handle_react_event(&self, invoke: ToolStarted) -> Event {
         match self.execute_react(invoke) {
-            ReactionExecution::Pending(event) | ReactionExecution::Submitted(event) => event,
+            ReactionExecution::Pending(event)
+            | ReactionExecution::Submitted(event)
+            | ReactionExecution::Failed(event, _) => event,
         }
     }
 
@@ -765,14 +773,14 @@ impl Extension {
         let result_sent = self
             .output
             .report_tool_result_confirmed(tool_result.clone());
-        if !result_sent {
+        if result_sent.is_err() {
             self.output_failed.store(true, Ordering::Release);
         }
         #[cfg(test)]
-        if result_sent {
+        if result_sent.is_ok() {
             run_blocking_test_hook(&self.test_hooks.reaction_result_boundary);
         }
-        if result_sent {
+        if result_sent.is_ok() {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if prepared.is_current(&state, &invoke) {
                 match action {
@@ -799,8 +807,9 @@ impl Extension {
             }
         }
         drop(submission);
-        if !result_sent {
+        if let Err(error) = result_sent {
             self.retire_after_output_failure();
+            return ReactionExecution::Failed(Event::ToolResult(tool_result), error);
         }
         ReactionExecution::Submitted(Event::ToolResult(tool_result))
     }

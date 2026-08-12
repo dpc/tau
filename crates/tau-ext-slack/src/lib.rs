@@ -23,7 +23,10 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine as path_base64_engine};
 use futures_util::{SinkExt, StreamExt};
-use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
+use tau_client::{
+    ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder, ManualRuntimePoll,
+    ManualRuntimeWaker, TauExtension,
+};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
     MessageDeleted, MessageDelivered, MessageEdited, MessageExtensionData, MessageFactId,
@@ -269,7 +272,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 /// Run the Slack extension over an arbitrary transport.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
     run_with_client(reader, writer, Arc::new(HttpSlackClient::default()))
@@ -1415,10 +1418,10 @@ impl Output {
             Self::Channel(_) => tau_proto::ToolName::new(local),
         }
     }
-    /// Sends one protocol frame, intentionally ignoring closed-writer failures.
+    /// Enqueue one optional notice or progress frame.
     ///
-    /// Slack Socket Mode workers and tool output are best-effort once the
-    /// harness has disconnected or the tau-client writer has shut down.
+    /// Sole tool terminals and other mandatory traffic must use the checked
+    /// helpers below instead.
     fn send(&self, message: HarnessInputMessage) -> bool {
         match self {
             Self::Channel(tx) => tx.send(message).is_ok(),
@@ -1432,11 +1435,6 @@ impl Output {
             Self::Channel(tx) => tx.send(message).is_ok(),
             Self::Client(handle) => handle.send(message).is_ok(),
         }
-    }
-
-    /// Emits one event through the harness output channel.
-    fn emit(&self, event: Event) {
-        let _ = self.send(HarnessInputMessage::emit(event));
     }
 
     fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
@@ -1458,37 +1456,34 @@ impl Output {
 
     /// Submit one terminal tool report through the typed client helper or the
     /// equivalent explicit transient channel frame.
-    fn report_tool_terminal(&self, event: Event) {
-        let outcome = match tau_client::ToolTerminalOutcome::try_from(event) {
-            Ok(outcome) => outcome,
-            Err(event) => {
-                tracing::error!(event = %event.name(), "Slack tool returned non-terminal event");
-                return;
-            }
-        };
+    fn report_tool_terminal(&self, event: Event) -> ClientResult<()> {
+        let outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
+            ClientError::handler(format!(
+                "Slack terminal helper received non-terminal {}",
+                event.name()
+            ))
+        })?;
         match self {
-            Self::Client(handle) => {
-                let _ = handle.report_tool_terminal_detached(outcome);
-            }
-            Self::Channel(tx) => {
-                let _ = tx.send(HarnessInputMessage::emit_with_persist(
+            Self::Client(handle) => handle.report_tool_terminal(outcome),
+            Self::Channel(tx) => tx
+                .send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
                     false,
-                ));
-            }
+                ))
+                .map_err(|_| ClientError::WriterClosed),
         }
     }
 
     /// Write and flush one successful terminal report before returning.
-    fn report_tool_result_confirmed(&self, result: ToolResult) -> bool {
+    fn report_tool_result_confirmed(&self, result: ToolResult) -> ClientResult<()> {
         match self {
             Self::Channel(tx) => tx
                 .send(HarnessInputMessage::emit_with_persist(
                     Event::ToolResultReported(result),
                     false,
                 ))
-                .is_ok(),
-            Self::Client(handle) => handle.report_tool_result(result).is_ok(),
+                .map_err(|_| ClientError::WriterClosed),
+            Self::Client(handle) => handle.report_tool_result(result),
         }
     }
 }
@@ -1523,6 +1518,8 @@ enum ToolTerminalSubmission {
     Pending(Box<Event>),
     /// The handler already confirmed this terminal through the protocol writer.
     Confirmed,
+    /// The handler could not publish its mandatory terminal.
+    Failed(ClientError),
 }
 
 impl ToolTerminalSubmission {
@@ -1563,6 +1560,10 @@ struct ExtensionTestHooks {
     output_failure_boundary: Mutex<Option<BlockingTestHook>>,
     /// Runs immediately before deletion acquires the submission gate.
     delete_submission_boundary: Mutex<Option<BlockingTestHook>>,
+    /// Announces each bounded send worker's final slot release.
+    send_worker_released: Mutex<Option<mpsc::Sender<()>>>,
+    /// Runs immediately before a send error acquires the submission gate.
+    send_error_submission_boundary: Mutex<Option<BlockingTestHook>>,
 }
 
 /// Run and consume one installed test boundary.
@@ -1780,7 +1781,11 @@ impl Extension {
     }
 
     /// Dispatch a Tau tool invocation owned by this extension.
-    fn dispatch_scoped_tool(&self, local_tool_name: &tau_proto::ToolName, invoke: ToolStarted) {
+    fn dispatch_scoped_tool(
+        &self,
+        local_tool_name: &tau_proto::ToolName,
+        invoke: ToolStarted,
+    ) -> ClientResult<()> {
         self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1808,14 +1813,20 @@ impl Extension {
                 "unknown slack tool".to_owned(),
             ))),
         };
-        if let Some(ToolTerminalSubmission::Pending(event)) = terminal {
-            let event = *event;
-            if let Event::ToolProgressReported(progress) = event {
-                self.output.report_tool_progress(progress);
-            } else {
-                self.output.report_tool_terminal(event);
+        match terminal {
+            Some(ToolTerminalSubmission::Pending(event)) => {
+                let event = *event;
+                if let Event::ToolProgressReported(progress) = event {
+                    self.output.report_tool_progress(progress);
+                } else if let Err(error) = self.output.report_tool_terminal(event) {
+                    self.retire_after_output_failure();
+                    return Err(error);
+                }
             }
+            Some(ToolTerminalSubmission::Failed(error)) => return Err(error),
+            Some(ToolTerminalSubmission::Confirmed) | None => {}
         }
+        Ok(())
     }
 
     /// Execute one reaction and identify whether its returned terminal still
@@ -4024,6 +4035,8 @@ struct ShutdownSignal {
     requested: AtomicBool,
     /// Wakes the asynchronous Socket Mode worker and backoff sleepers.
     notify: tokio::sync::Notify,
+    /// Wakes the production protocol loop after asynchronous fatal failure.
+    runtime_waker: Mutex<Option<ManualRuntimeWaker>>,
 }
 
 impl ShutdownSignal {
@@ -4032,6 +4045,7 @@ impl ShutdownSignal {
         Self {
             requested: AtomicBool::new(false),
             notify: path_tokio_sync::Notify::new(),
+            runtime_waker: Mutex::new(None),
         }
     }
 
@@ -4044,6 +4058,23 @@ impl ShutdownSignal {
     fn request(&self) {
         self.requested.store(true, Ordering::Relaxed);
         self.notify.notify_waiters();
+        if let Some(waker) = self
+            .runtime_waker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            waker.wake();
+        }
+    }
+
+    /// Install the production manual-runtime wake path before receiving live
+    /// harness traffic.
+    fn install_runtime_waker(&self, waker: ManualRuntimeWaker) {
+        *self
+            .runtime_waker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(waker);
     }
 
     /// Wait until shutdown is requested without polling.
@@ -4948,7 +4979,7 @@ fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
 
 fn run_with_client<R, W, C>(reader: R, writer: W, client: Arc<C>) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
     C: SlackClient + ReactionClient,
 {
@@ -4972,7 +5003,7 @@ fn run_with_clients_and_scheduler<R, W>(
     scheduler: Arc<dyn SendScheduler>,
 ) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
     let boundary = Arc::new(SendReaderBoundary::default());
@@ -4981,8 +5012,8 @@ where
         boundary: Arc::clone(&boundary),
     };
     let install_boundary = Arc::clone(&boundary);
-    let state = tau_client::TauExtensionRunner::new(SlackExtension)
-        .run_detached_writer_with_state(reader, writer, move |handle| {
+    let mut runtime = tau_client::TauExtensionRunner::new(SlackExtension)
+        .start_manual_loop_with_state(reader, writer, move |handle| {
             let ext = Extension::new_with_clients_and_scheduler(
                 client,
                 reaction_client,
@@ -4992,6 +5023,40 @@ where
             install_boundary.install(&ext);
             SlackRuntime { ext }
         })?;
+    runtime
+        .state()
+        .ext
+        .shutdown
+        .install_runtime_waker(runtime.waker());
+    let disconnected = loop {
+        if runtime.state().ext.shutdown.is_requested() {
+            break false;
+        }
+        match runtime.try_recv()? {
+            ManualRuntimePoll::Message(message) => {
+                if matches!(
+                    runtime.dispatch_one(message)?,
+                    DispatchOutcome::Disconnect(_)
+                ) {
+                    break true;
+                }
+            }
+            ManualRuntimePoll::InputClosed => break false,
+            ManualRuntimePoll::Empty => {
+                if runtime.state().ext.shutdown.is_requested() {
+                    break false;
+                }
+                runtime.wait_for_wake();
+            }
+        }
+    };
+    if disconnected {
+        let state = runtime.finish_detached();
+        state.ext.retire_send_authority();
+        state.ext.shutdown.request();
+        return Ok(());
+    }
+    let state = runtime.finish()?;
     state.ext.retire_send_authority();
     state.ext.shutdown.request();
     Ok(())
@@ -5302,8 +5367,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, SlackRuntime>) -> Clie
     let local = cx.local_tool_name().clone();
     cx.state
         .ext
-        .dispatch_scoped_tool(&local, cx.invoke().clone());
-    Ok(())
+        .dispatch_scoped_tool(&local, cx.invoke().clone())
 }
 
 fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> ClientResult<()> {
