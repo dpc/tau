@@ -49,7 +49,7 @@ fn message_args_require_non_empty_recipient_and_message() {
     let ok = CborValue::Map(vec![
         (
             CborValue::Text("recipient_id".to_owned()),
-            CborValue::Text("user".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
         ),
         (
             CborValue::Text("message".to_owned()),
@@ -57,12 +57,12 @@ fn message_args_require_non_empty_recipient_and_message() {
         ),
     ]);
     let parsed = parse_message_args(&ok).expect("valid message args");
-    assert_eq!(parsed.recipient_id, "user");
+    assert_eq!(parsed.recipient_id, "agent-a");
     assert_eq!(parsed.message, "hello");
 
     let missing = CborValue::Map(vec![(
         CborValue::Text("recipient_id".to_owned()),
-        CborValue::Text("user".to_owned()),
+        CborValue::Text("agent-a".to_owned()),
     )]);
     assert_eq!(
         parse_message_args(&missing),

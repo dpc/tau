@@ -2030,7 +2030,9 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
                 message_id: tau_proto::AgentMessageId::parse("test-message")
                     .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("agent-1"),
-                recipient: tau_proto::AgentMessageRecipient::User,
+                recipient: tau_proto::AgentMessageRecipient::Agent {
+                    agent_id: crate::parse_agent_id("recipient-agent"),
+                },
                 kind: tau_proto::AgentMessageKind::Message,
                 message: "persisted hello".to_owned(),
             }),
@@ -2074,7 +2076,10 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             inner,
             TestProtocolItem::Event(Event::AgentMessageSent(message))
                 if message.sender_id.as_str() == "agent-1"
-                    && message.recipient == tau_proto::AgentMessageRecipient::User
+                    && message.recipient
+                        == tau_proto::AgentMessageRecipient::Agent {
+                            agent_id: crate::parse_agent_id("recipient-agent"),
+                        }
                     && message.message == "persisted hello"
         );
     }

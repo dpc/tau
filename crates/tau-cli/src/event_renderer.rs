@@ -4307,7 +4307,7 @@ impl EventRenderer {
                 event,
                 Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
             ) && !inter_agent_message
-                && self.agent_message_visible_on_empty_screen(event, &target_agent_id)
+                && self.agent_message_visible_on_empty_screen(&target_agent_id)
             {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
                 self.update_agent_in_progress();
@@ -4373,7 +4373,7 @@ impl EventRenderer {
                     tau_proto::AgentMessageKind::Message
                         | tau_proto::AgentMessageKind::WatchResponse
                         | tau_proto::AgentMessageKind::WatchPrompt
-                ) && !matches!(message.recipient, tau_proto::AgentMessageRecipient::User) =>
+                ) =>
             {
                 Some(&message.message_id)
             }
@@ -4394,13 +4394,10 @@ impl EventRenderer {
     /// Return whether an event is an agent-to-agent projection that must route
     /// to its owning agent transcript instead of the no-agent fallback.
     fn is_inter_agent_message(event: &Event) -> bool {
-        match event {
-            Event::AgentMessageSent(message) => {
-                !matches!(message.recipient, tau_proto::AgentMessageRecipient::User)
-            }
-            Event::AgentMessageReceived(_) => true,
-            _ => false,
-        }
+        matches!(
+            event,
+            Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
+        )
     }
 
     fn extension_lifecycle_owner(&self, event: &Event) -> Option<UiSnapshotOwner> {
@@ -4523,10 +4520,8 @@ impl EventRenderer {
         self.publish_editor_conversation_context();
     }
 
-    fn agent_message_visible_on_empty_screen(&self, event: &Event, target_agent_id: &str) -> bool {
-        Self::is_user_broadcast_agent_message(event)
-            || !self.awaiting_new_agent_selection
-            || !self.agents_ui_state.contains_key(target_agent_id)
+    fn agent_message_visible_on_empty_screen(&self, target_agent_id: &str) -> bool {
+        !self.awaiting_new_agent_selection || !self.agents_ui_state.contains_key(target_agent_id)
     }
 
     fn event_selects_agent_from_empty(&self, event: &Event, target_agent_id: &str) -> bool {
@@ -4957,11 +4952,6 @@ impl EventRenderer {
 
     fn agent_message_event_agent_id(event: &Event) -> EventAgentIdResolution {
         match event {
-            Event::AgentMessageSent(message)
-                if Self::is_user_broadcast_agent_message_sent(message) =>
-            {
-                EventAgentIdResolution::NoAgent
-            }
             Event::AgentMessageSent(message) => {
                 EventAgentIdResolution::Agent(message.sender_id.to_string())
             }
@@ -5231,7 +5221,7 @@ impl EventRenderer {
                 summary,
             );
         }
-        match Self::message_render_mode(self.show_messages, event) {
+        match Self::message_render_mode(self.show_messages) {
             MessageRenderMode::Hidden => Self::empty_block(),
             MessageRenderMode::Summary => {
                 self.submitted_agent_message_block(event, use_local_names, false)
@@ -5366,13 +5356,11 @@ impl EventRenderer {
                         session_id,
                         agent_id,
                     } => Some(format!("{session_id}/@{agent_id}")),
-                    tau_proto::AgentMessageRecipient::User => None,
                 };
                 let recipient = (recipient, recipient_identity);
                 let local_recipient_id = match &message.recipient {
                     tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
-                    tau_proto::AgentMessageRecipient::ExternalAgent { .. }
-                    | tau_proto::AgentMessageRecipient::User => None,
+                    tau_proto::AgentMessageRecipient::ExternalAgent { .. } => None,
                 };
                 (
                     sender,
@@ -5556,7 +5544,6 @@ impl EventRenderer {
             } => {
                 format!("{session_id}/@{agent_id}")
             }
-            tau_proto::AgentMessageRecipient::User => "user".to_owned(),
         }
     }
 
@@ -5571,58 +5558,22 @@ impl EventRenderer {
         )
     }
 
-    fn is_user_broadcast_agent_message(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::AgentMessageSent(message)
-                if Self::is_user_broadcast_agent_message_sent(message)
-        )
-    }
-
-    fn is_user_broadcast_agent_message_sent(message: &tau_proto::AgentMessageSent) -> bool {
-        matches!(message.recipient, tau_proto::AgentMessageRecipient::User)
-    }
-
     fn agent_message_sent_recipient_agent_id(
         message: &tau_proto::AgentMessageSent,
     ) -> Option<&str> {
         match &message.recipient {
             tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
             tau_proto::AgentMessageRecipient::ExternalAgent { .. } => None,
-            tau_proto::AgentMessageRecipient::User => None,
         }
     }
 
-    fn message_render_mode(
-        show_messages: tau_config::settings::ShowMessages,
-        event: &Event,
-    ) -> MessageRenderMode {
-        if Self::is_user_broadcast_agent_message(event) {
-            return MessageRenderMode::Full;
-        }
-
-        let self_msg = matches!(
-            event,
-            Event::AgentMessageSent(tau_proto::AgentMessageSent {
-                recipient: tau_proto::AgentMessageRecipient::User,
-                ..
-            })
-        );
-        match (show_messages, self_msg) {
-            (path_tau_config_settings::ShowMessages::None, _) => MessageRenderMode::Hidden,
-            (path_tau_config_settings::ShowMessages::SelfSummary, true) => {
-                MessageRenderMode::Summary
-            }
-            (path_tau_config_settings::ShowMessages::SelfSummary, false) => {
-                MessageRenderMode::Hidden
-            }
-            (path_tau_config_settings::ShowMessages::SelfFull, true) => MessageRenderMode::Full,
-            (path_tau_config_settings::ShowMessages::SelfFull, false) => MessageRenderMode::Hidden,
-            (path_tau_config_settings::ShowMessages::AllSummary, true) => MessageRenderMode::Full,
-            (path_tau_config_settings::ShowMessages::AllSummary, false) => {
-                MessageRenderMode::Summary
-            }
-            (path_tau_config_settings::ShowMessages::AllFull, _) => MessageRenderMode::Full,
+    fn message_render_mode(show_messages: tau_config::settings::ShowMessages) -> MessageRenderMode {
+        match show_messages {
+            path_tau_config_settings::ShowMessages::None
+            | path_tau_config_settings::ShowMessages::SelfSummary
+            | path_tau_config_settings::ShowMessages::SelfFull => MessageRenderMode::Hidden,
+            path_tau_config_settings::ShowMessages::AllSummary => MessageRenderMode::Summary,
+            path_tau_config_settings::ShowMessages::AllFull => MessageRenderMode::Full,
         }
     }
 

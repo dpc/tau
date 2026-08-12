@@ -609,7 +609,9 @@ fn strict_replay_rejects_framed_record_with_malformed_agent_message_id() {
         event: Event::AgentMessageSent(tau_proto::AgentMessageSent {
             message_id: tau_proto::AgentMessageId::parse("message-1").expect("message id"),
             sender_id: agent_id.clone(),
-            recipient: tau_proto::AgentMessageRecipient::User,
+            recipient: tau_proto::AgentMessageRecipient::Agent {
+                agent_id: AgentId::parse("recipient-agent").expect("agent id"),
+            },
             kind: tau_proto::AgentMessageKind::Message,
             message: "hello".to_owned(),
         }),

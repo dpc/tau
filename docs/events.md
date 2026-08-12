@@ -674,24 +674,21 @@ transient runtime observations and never enter semantic replay. See
   earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.
 - **`agent.message_sent`** — Harness-owned immutable sender-side projection for
-  a short message an agent sent to another agent or to the user. Carries stable
-  `message_id`, `sender_id`, recipient (`agent_id`, `external_agent
-  { session_id, agent_id }`, or `user`), and `message`.
+  a short message an agent sent to another agent. Carries stable `message_id`,
+  `sender_id`, recipient (`agent_id` or
+  `external_agent { session_id, agent_id }`), and `message`.
 - **`agent.message_received`** — Harness-owned immutable recipient-side
   projection for an agent-to-agent message. Carries the same stable
   `message_id`, the `sender_id`, optional `sender_session_id` for external
-  senders, the receiving `recipient_id`, and `message`; user-recipient messages
-  have no received projection. User-recipient sent projections are human-visible
-  broadcasts that UIs always render fully in the currently visible transcript. UI
-   subscribers filter, summarize, or fully display agent-to-agent message
-   projections according to `:set show-messages`. The received projection is the
-   sole model payload; local senders render in a stable-sender-labelled escaped
-   outer `<tau_internal>` envelope and external senders in an authenticated peer
-   envelope.
-   Live activation is a payload-free runtime wake; replay restores context without
-   waking. If a
-   side/delegate agent is about to finish, teardown waits until the message turn
-   has been dispatched and answered. Interceptors cannot drop or rewrite these
+  senders, the receiving `recipient_id`, and `message`. UI subscribers filter,
+  summarize, or fully display agent-to-agent message projections according to
+  `:set show-messages`. The received projection is the sole model payload; local
+  senders render in a stable-sender-labelled escaped outer `<tau_internal>`
+  envelope and external senders in an authenticated peer envelope. Live
+  activation is a payload-free runtime wake; replay restores context without
+  waking. If a side/delegate agent is about to finish, teardown waits until the
+  message turn has been dispatched and answered. Interceptors cannot drop or
+  rewrite these
    validated projections. Agent display names are deliberately absent from these
    semantic projection fields: UIs may supplement ids from authoritative folded
    metadata without changing message content or routing identity. See

@@ -13,7 +13,7 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Message tool verification plan
 
-Use this plan when asked to verify the `message` tool, especially in multi-agent scenarios. The goal is to prove that messages are routed correctly among the main agent, sub-agents, sibling sub-agents, the special `user` recipient, and completed or invalid recipients. Also verify timing, sender IDs, async delivery, payload escaping in hidden prompts, exact payload preservation in durable `AgentMessage` events, and error behavior.
+Use this plan when asked to verify the `message` tool, especially in multi-agent scenarios. The goal is to prove that messages are routed correctly among the main agent, sub-agents, sibling sub-agents, sessions, and completed or invalid recipients. Also verify timing, sender IDs, async delivery, payload escaping in hidden prompts, exact payload preservation in durable `AgentMessage` events, and error behavior.
 
 Do not rely on memory. Give every sub-agent a self-contained prompt. A delegated agent starts with a clean context and does not know this skill, the parent conversation, or the IDs of other agents unless you include them in its prompt or later messages.
 
@@ -25,7 +25,7 @@ Record all of these observations:
 * Multiple messages to the same live sub-agent.
 * Sub-agent to sibling sub-agent delivery.
 * Sub-agent to the main agent using the main agent recipient ID.
-* Sub-agent to `user` delivery, noting that this may be visible in the UI but may not appear as a model-visible inbound message to the main agent.
+* Exact `user` recipient rejection without sender or recipient projection.
 * Main agent to itself, after the main agent recipient ID is known.
 * Delivery while a sub-agent is sleeping, backgrounded on a long tool, queued behind another tool call, or otherwise between model turns.
 * Delivery order, or any reorderings, especially for parallel `message` calls.
@@ -36,30 +36,37 @@ Record all of these observations:
 * Error for an empty message.
 * `agent_start`, `agent_watch`, and `wait` behavior around long-running sub-agents; in current Tau, sub-agent responses arrive by watch notifications rather than slow `agent_start` results.
 
-#### Phase 1: spawn two peer agents and use `user` for live reports
+#### Phase 1: spawn two peer agents and report to the parent
 
-Start with two shared delegates. Name them Agent A and Agent B. They should stay alive long enough to receive delayed messages, log every inbound message, execute peer-send commands, and report to `user`. Reporting to `user` avoids needing the main agent recipient ID in the first phase.
+Start with two shared delegates. Name them Agent A and Agent B. Their initial
+prompts wait for a bootstrap message because the parent `self_agent_id` is
+returned only after `agent_start` submits those prompts.
 
 Use this prompt for Agent A, replacing only the agent name where needed for Agent B:
 
 ```text
-You are Agent A in a Tau message-tool verification test. Goal: verify cross-agent messaging behavior. You have a clean context; follow these instructions exactly.
+You are Agent A in a Tau message-tool verification test. Goal: verify
+cross-agent messaging behavior. You have a clean context; follow these
+instructions exactly.
 
 Important:
 - Incoming messages from the Tau `message` tool may appear as hidden prompts in your conversation. Treat every new prompt/message you see after starting as an inbound test message.
 - Keep a full log of every inbound message you receive after this initial task prompt. Include exact text, apparent sender/recipient if visible, and when you noticed it.
 - You may use only safe commands. Use short `sleep` commands only to stay alive and give the parent/peer time to send messages.
 - If you receive a message containing `COMMAND: SEND_PEER`, parse `recipient_id={id}` and `text={text}`, then call the `message` tool to send exactly `{text}` to that recipient. Log the tool result.
-- If you receive a message containing `COMMAND: REPORT`, send a `message` to `user` with your current full log.
+- Your first inbound message must be `BOOTSTRAP parent_id={main_agent_id}`.
+  Save that ID and use it as `{main_agent_id}` below.
+- If you receive a message containing `COMMAND: REPORT`, send a `message` to `{main_agent_id}` with your current full log.
 - Do not finish early. Run four observation rounds.
 
 Procedure:
-1. Immediately send a message to `user` with exactly: `READY Agent A: started message-tool test`.
+1. Wait for the `BOOTSTRAP` message, then send a message to `{main_agent_id}`
+   with exactly: `READY Agent A: started message-tool test`.
 2. For rounds 1 through 4:
    a. Run `sleep 3` using the shell tool.
    b. After the sleep result, inspect any new inbound messages/prompts you have received.
    c. Execute any `COMMAND: SEND_PEER` instructions you have newly received.
-   d. Send a message to `user` starting with `REPORT Agent A round {n}:` and include all newly observed inbound messages since the previous report and any message-tool actions/results. If none, say `none`.
+   d. Send a message to `{main_agent_id}` starting with `REPORT Agent A round {n}:` and include all newly observed inbound messages since the previous report and any message-tool actions/results. If none, say `none`.
 3. Final answer: return `FINAL Agent A` plus your complete inbound-message log and all message-tool actions/results.
 
 You are expected to receive messages from the parent and possibly from Agent B. Be precise and do not invent messages.
@@ -67,8 +74,9 @@ You are expected to receive messages from the parent and possibly from Agent B. 
 
 After the `agent_start` results return, note the caller `self_agent_id` and each
 `sub_agent_id`. In legacy/background `agent_start` sessions, also note any
-returned agent_start tool-call ids. Use `sub_agent_id` as the message recipient.
-Send the first batch of messages in parallel:
+returned agent_start tool-call ids. Send
+`BOOTSTRAP parent_id={self_agent_id}` to each `sub_agent_id`, wait for both
+`READY` reports, then send the first batch of messages in parallel:
 
 ```text
 To Agent A:
@@ -99,6 +107,9 @@ To Agent B:
 ```
 
 Also send one message to a clearly invalid recipient such as `engineer_does_not_exist_message_validation`; expect a tool error with the unknown recipient ID and echoed message fields.
+Send one message to exact recipient `user`; expect an unsupported-recipient
+tool error and, when event logs are available, confirm that it creates neither
+a sender nor recipient projection.
 
 Wait for both delegates. In their final logs, verify that:
 
@@ -123,8 +134,8 @@ You are a Tau message-tool verification sub-agent for queued-tool preemption. Go
 Procedure:
 1. Start a long shell command: `sleep 30`.
 2. After Tau returns the background placeholder for that shell call, immediately request another shell command: `sleep 5`.
-3. If you receive any inbound `[tau-internal]` message from the parent, respond to `user` exactly: `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` plus the exact inbound message text and visible sender id.
-4. After sending the user message, final answer exactly: `FINAL queued-tool message probe reported to user`.
+3. If you receive any inbound `[tau-internal]` message from the parent, respond to `{main_agent_id}` exactly: `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` plus the exact inbound message text and visible sender id.
+4. After sending the parent message, final answer exactly: `FINAL queued-tool message probe reported to parent`.
 5. If no inbound message arrives, final answer exactly: `UNEXPECTED queued-tool message missing`.
 
 Do not invent messages. Do not finish before checking for the parent message.
@@ -135,13 +146,13 @@ After the `agent_start` result returns, wait until the delegate has had enough t
 Send a message to the delegate `sub_agent_id`:
 
 ```text
-Parent queued-tool delivery probe. nonce=queued-tool-message-001. Reply via message to user when received.
+Parent queued-tool delivery probe. nonce=queued-tool-message-001. Reply via message to `{main_agent_id}` when received.
 ```
 
 Expected behavior:
 
 * The message call returns `Message sent`.
-* The delegate responds to `user` with `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` instead of remaining stuck behind the queued `sleep 5`.
+* The delegate responds to the parent with `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` instead of remaining stuck behind the queued `sleep 5`.
 * If event logs are available, verify that the `AgentMessage` was recorded, the not-yet-started queued tool call was terminalized with `ToolCancelled`, and a new `AgentPromptCreated` was emitted for the delegate message prompt.
 * The long backgrounded `sleep 30` may still complete later in the delegate conversation. Its completion should not be delivered to the parent conversation or block the message response.
 
@@ -149,9 +160,9 @@ This scenario specifically protects the code path where `agent.message` delivery
 
 #### Phase 3: verify sub-agent to main-agent routing
 
-Use the main agent recipient ID learned from Phase 1. Spawn two fresh shared sub-agents with `agent_start`, Agent C and Agent D. These agents should report back to the main agent recipient ID, not to `user`. This proves that parent-directed messages are delivered as model-visible `[tau-internal]` inbound messages to the main agent.
+Use the main agent recipient ID returned by `agent_start` in Phase 1. Spawn two fresh shared sub-agents with `agent_start`, Agent C and Agent D. These agents should report back to the main agent recipient ID, not to `user`. This proves that parent-directed messages are delivered as model-visible `[tau-internal]` inbound messages to the main agent.
 
-Use this prompt for Agent C, replacing only the agent name where needed for Agent D and filling `{main_agent_id}` with the ID learned in Phase 1:
+Use this prompt for Agent C, replacing only the agent name where needed for Agent D and filling `{main_agent_id}` with the ID returned in Phase 1:
 
 ```text
 You are Agent C in a second Tau message-tool verification test. Parent/main agent recipient_id is `{main_agent_id}`. Goal: verify messages among parent, Agent C, and Agent D.
@@ -223,7 +234,9 @@ Finally, call `message` with an empty string to a valid recipient. Expect a tool
 
 Report concise but complete findings:
 
-* List each tested route and whether it passed: main to child, child to child, child to parent, child to `user`, main to self, invalid recipient, completed recipient, empty payload, rich content payload.
+* List each tested route and whether it passed: main to child, child to child,
+  child to parent, rejected exact `user`, main to self, invalid recipient,
+  completed recipient, empty payload, rich content payload.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed messages, duplicate messages, or ordering uncertainty.
 * Confirm the `message` success output is only `Message sent`; delivery is async, so no delivery receipt is expected.
@@ -270,7 +283,7 @@ If the watching agent repeats the same notification text in a commentary/final r
 
 A watch notification that arrives while the watcher is blocked in `wait` may interrupt the wait with a `tau_internal: true` result saying new input is queued. Treat that as expected: it is the same active-wait interruption behavior used for ordinary agent messages.
 
-Messages sent by a sub-agent to `user` are user-recipient messages. They are not model-visible to the parent agent unless the sub-agent also sends a message to the parent or includes the information in a watched response/final answer. Do not use `message` to `user` as the only proof that the parent observed a notification.
+Calls with exact recipient `user` must fail as unsupported and create no message projection. Use the parent agent ID or a watched response/final answer when proving that the parent observed a notification.
 
 #### What to verify
 
@@ -292,7 +305,7 @@ Record all of these observations:
 
 #### Suggested procedure
 
-1. Start a sub-agent with `agent_start` whose prompt final-answers a nonce, for example `WATCH auto final nonce=watch-auto-001`. Do not ask the sub-agent to also `message` the user with the same nonce in this phase.
+1. Start a sub-agent with `agent_start` whose prompt final-answers a nonce, for example `WATCH auto final nonce=watch-auto-001`. Do not ask the sub-agent to also message the parent with the same nonce in this phase.
 2. Confirm the starter receives an async `[tau-internal]` response notification from the `sub_agent_id` containing that nonce, using a “Watched agent <id> emitted a response” wrapper and a `<response>` block. It must not use the explicit-message “received a message from ...” wrapper or a `<message>` block. Avoid echoing the full notification text in commentary; summarize it when reporting.
 3. Confirm the `agent_start` result exposes `self_agent_id` and `sub_agent_id` without returning the nonce as duplicated tool output.
 4. Start a long-lived sub-agent. Disable watching it with `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`, then cause or wait for a later response. Confirm no watch message is delivered to the starter for that response.
@@ -308,6 +321,6 @@ Report concise but complete findings:
 
 * List each tested route and whether it passed: auto-watch, final response wrapper, user-prompt wrapper, internal/tool-completion non-forwarding, disable, re-enable, validation errors, cancellation/error fallback, and no duplicated `agent_start` output.
 * Include exact notification text, tool results, and unexpected errors. Call out any watch notification that is formatted like an explicit `message` tool delivery.
-* Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both `message` the user and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
+* Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both message the parent and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
 * Include whether `wait` was interrupted by a watch notification while waiting; this is expected if it reports that new input is queued.
 * Include whether `self_agent_id` and `sub_agent_id` made the watcher and watched IDs clear enough.

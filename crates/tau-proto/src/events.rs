@@ -2179,7 +2179,7 @@ pub struct ExtInternalPromptSubmitRequest {
     pub activation_kind: Option<InternalPromptActivationKind>,
 }
 
-/// Recipient of a global agent-to-agent or agent-to-user message.
+/// Recipient of a global agent-to-agent message.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentMessageRecipient {
@@ -2192,8 +2192,6 @@ pub enum AgentMessageRecipient {
         /// Agent id within the target harness.
         agent_id: AgentId,
     },
-    /// Deliver the message to the human user.
-    User,
 }
 
 /// Source semantics for an agent-to-agent delivery.
@@ -2224,7 +2222,7 @@ impl AgentMessageKind {
 }
 
 /// A harness-authored durable sender-side projection of a message sent by one
-/// agent to another agent or to the user.
+/// agent to another agent.
 ///
 /// External clients and extensions must not forge this event. The harness-owned
 /// `message` tool validates the sender and recipient, then publishes this
@@ -2236,7 +2234,7 @@ pub struct AgentMessageSent {
     pub message_id: AgentMessageId,
     /// Agent id of the sender.
     pub sender_id: AgentId,
-    /// Recipient agent or the human user.
+    /// Recipient agent.
     pub recipient: AgentMessageRecipient,
     /// Delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]

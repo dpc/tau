@@ -219,7 +219,7 @@ fn controlled_identifiers_fail_closed_at_protocol_and_journal_boundaries() {
     let invalid_message = serde_json::json!({
         "message_id": "bad.message",
         "sender_id": "agent-sender",
-        "recipient": {"kind": "user"},
+        "recipient": {"kind": "agent", "agent_id": "recipient-agent"},
         "message": "hello"
     });
     assert!(serde_json::from_value::<AgentMessageSent>(invalid_message.clone()).is_err());
@@ -1222,7 +1222,9 @@ fn representative_events() -> Vec<Event> {
             message_id: AgentMessageId::parse("msg-1")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_abcd1234"),
-            recipient: AgentMessageRecipient::User,
+            recipient: AgentMessageRecipient::Agent {
+                agent_id: agent_id("recipient_agent"),
+            },
             kind: AgentMessageKind::Message,
             message: "hello".to_owned(),
         }),
@@ -2801,7 +2803,9 @@ fn agent_message_events_have_names_and_persistence_defaults() {
         message_id: AgentMessageId::parse("msg-1")
             .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
-        recipient: AgentMessageRecipient::User,
+        recipient: AgentMessageRecipient::Agent {
+            agent_id: agent_id("recipient_agent"),
+        },
         kind: AgentMessageKind::Message,
         message: "hello".to_owned(),
     });
@@ -2824,6 +2828,20 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
     assert_eq!(received.name().to_string(), "agent.message_received");
     assert!(received.defaults_to_persist());
+}
+
+/// The removed user recipient must not decode as a durable sender projection;
+/// accepting it would preserve an unsupported routing contract during replay.
+#[test]
+fn agent_message_sent_rejects_user_recipient() {
+    let encoded = serde_json::json!({
+        "message_id": "msg-user-recipient",
+        "sender_id": "engineer_abcd1234",
+        "recipient": {"kind": "user"},
+        "message": "hello"
+    });
+
+    assert!(serde_json::from_value::<AgentMessageSent>(encoded).is_err());
 }
 
 /// Ensures legacy agent-message payloads omit the default message kind but

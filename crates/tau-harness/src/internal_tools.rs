@@ -641,7 +641,7 @@ impl<'a> InternalToolHost<'a> {
         )
     }
 
-    /// Publish an agent-to-agent or agent-to-user message from a conversation.
+    /// Publish an agent-to-agent message from a conversation.
     pub fn publish_agent_message(
         &mut self,
         conversation_id: &AgentId,

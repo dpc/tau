@@ -364,8 +364,8 @@ pub struct CliState {
     /// How tool calls are rendered in the transcript. Controlled by
     /// `:set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
-    /// How messages between the user and agents, or between agents, are
-    /// rendered in the transcript. Controlled by `:set show-messages <mode>`.
+    /// How messages between agents are rendered in the transcript. Controlled
+    /// by `:set show-messages <mode>`.
     pub show_messages: ShowMessages,
     /// Whether to render typed harness-internal prompt facts. Controlled by
     /// `:set show-internal-prompts <on|off>`.
@@ -547,7 +547,7 @@ impl ShowTools {
     }
 }
 
-/// Which inter-agent/user-agent messages are shown in the CLI transcript.
+/// Which inter-agent messages are shown in the CLI transcript.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ShowMessages {
     /// Hide these messages.

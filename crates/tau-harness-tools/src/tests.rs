@@ -918,19 +918,46 @@ fn agent_watch_forwards_terminal_agent_start_result() {
     );
 }
 
-/// Ensures the message tool treats `user`, bare agent ids, and
-/// `<current-session>/<agent>` as local recipients so existing local workflows
-/// are not forced through the external socket path.
+/// Ensures the message tool rejects the removed `user` recipient rather than
+/// treating that reserved value as an ordinary agent identifier.
 #[test]
-fn message_recipient_parser_recognizes_user_local_and_current_session() {
+fn message_recipient_parser_rejects_user() {
     let current: tau_proto::SessionId = "session-a"
         .parse::<tau_proto::SessionId>()
         .expect("known-safe SessionId must be valid");
 
-    assert!(matches!(
-        parse_message_recipient("user", &current),
-        Ok(MessageRecipientAddress::User)
-    ));
+    let error = match parse_message_recipient("user", &current) {
+        Err(error) => error,
+        Ok(_) => panic!("user must be unsupported"),
+    };
+    assert_eq!(error, "unsupported message recipient: `user`");
+}
+
+/// Ensures model-visible message-tool help advertises only agent and session
+/// recipients after removal of the misleading user-delivery form.
+#[test]
+fn message_tool_schema_does_not_advertise_user_recipient() {
+    let spec = message_tool_spec();
+    let description = spec.description.expect("message tool description");
+    let parameters = spec.parameters.expect("message tool parameters");
+
+    assert!(!description.contains("user"));
+    assert!(
+        !parameters["properties"]["recipient_id"]["description"]
+            .as_str()
+            .expect("recipient description")
+            .contains("user")
+    );
+}
+
+/// Ensures bare agent ids and `<current-session>/<agent>` remain local
+/// recipients, so removing `user` does not redirect existing agent workflows.
+#[test]
+fn message_recipient_parser_recognizes_local_and_current_session_agents() {
+    let current: tau_proto::SessionId = "session-a"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
+
     assert!(matches!(
         parse_message_recipient("agent_a", &current),
         Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "agent_a"
@@ -1064,18 +1091,18 @@ fn wait_initial_display_shows_normalized_input_timeout() {
     assert_eq!(state.wait_initial_display_args(&invalid, None), "");
 }
 
-/// The message tool progress display must keep the recipient inline and put
-/// the actual delivered text in the rich payload, so UIs can show it even when
-/// the separate message event scrolls by.
+/// The message tool progress display must keep an agent recipient inline and
+/// put the delivered text in the rich payload, so UIs can show it even when the
+/// separate message event scrolls by.
 #[test]
 fn message_initial_display_includes_message_payload() {
     let state = BuiltinState::default();
 
     let display = state
-        .initial_display(&message_call("user", "please check this"))
+        .initial_display(&message_call("agent-a", "please check this"))
         .expect("message display");
 
-    assert_eq!(display.args, "user");
+    assert_eq!(display.args, "agent-a");
     assert_eq!(display.status, ToolUseStatus::InProgress);
     assert_eq!(
         display.payload,

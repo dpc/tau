@@ -54,7 +54,7 @@ Because `agent_start` now finishes instantly, slow delegate work is normally
 observed through watch notifications and the delegate's own background tool
 results, not through a slow `agent_start` result with `duration_seconds`.
 
-When asked to verify the `agent_start` tool, also verify delayed `message` delivery to a live delegated sub-agent whose own tool turn is parked behind a backgrounded tool. This is a delegate-specific regression path, not only a `message` tool test. Use a delegate prompt that first runs `sleep 30`, then after the background placeholder requests a second shell command `sleep 5`, and asks it to report to `user` if it receives a parent message. After the first shell backgrounds and the second shell request is queued, send `message` to the delegate `sub_agent_id` with a nonce. Expected: `Message sent`, the queued `sleep 5` is terminalized internally, and the delegate promptly reports receiving the nonce instead of staying stuck until `sleep 30` finishes. If event logs are available, confirm `AgentMessage`, `ToolCancelled` for the not-yet-started queued call, and a new `AgentPromptCreated` for the delegate message prompt. Treat omission of this scenario as incomplete `agent_start` verification.
+When asked to verify the `agent_start` tool, also verify delayed `message` delivery to a live delegated sub-agent whose own tool turn is parked behind a backgrounded tool. This is a delegate-specific regression path, not only a `message` tool test. Use a delegate prompt that first runs `sleep 30`, then after the background placeholder requests a second shell command `sleep 5`, and asks it to report to the parent agent ID if it receives a parent message. After the first shell backgrounds and the second shell request is queued, send `message` to the delegate `sub_agent_id` with a nonce. Expected: `Message sent`, the queued `sleep 5` is terminalized internally, and the delegate promptly reports receiving the nonce instead of staying stuck until `sleep 30` finishes. If event logs are available, confirm `AgentMessage`, `ToolCancelled` for the not-yet-started queued call, and a new `AgentPromptCreated` for the delegate message prompt. Treat omission of this scenario as incomplete `agent_start` verification.
 
 Also verify the active-`wait` variant of the same scenario. Use a delegate prompt that starts a long backgroundable tool, then calls `wait` on that tool call ID before it completes. While the delegate is blocked in `wait`, send `message` to the delegate `sub_agent_id` with a nonce. Expected: `Message sent`, the delegate's `wait` returns promptly with a `tau_internal: true` interruption result saying new input is queued, and the delegate receives the hidden message prompt without waiting for the original background tool to complete. If event logs are available, confirm the wait `ToolResult` appears before the message-driven follow-up `AgentPromptCreated`.
 
@@ -126,18 +126,22 @@ tool-call id. In current watch-based `agent_start` sessions it is not applicable
 Start a shared sub-agent with `agent_start` with this prompt:
 
 ```text
-You are a Tau cancel-tool verification sub-agent. Goal: stay alive until the parent cancels this agent_start call.
+You are a Tau cancel-tool verification sub-agent. Goal: stay alive until the
+parent cancels this agent_start call.
 
 Procedure:
-1. Immediately send a message to `user` exactly: `READY cancel-ready-probe: entering long sleep`.
-2. Run `sleep 60` using the shell tool.
-3. If you are not canceled, final answer exactly: `UNEXPECTED cancel-ready-probe completed without cancellation`.
+1. Wait for an inbound `BOOTSTRAP parent_id={main_agent_id}` message.
+2. Send a message to that parent ID exactly: `READY cancel-ready-probe: entering long sleep`.
+3. Run `sleep 60` using the shell tool.
+4. If you are not canceled, final answer exactly: `UNEXPECTED cancel-ready-probe completed without cancellation`.
 
 Do not do anything else.
 ```
 
 After the legacy placeholder result returns, record `self_agent_id`,
-`sub_agent_id`, and the agent_start tool call ID. Call `cancel` with that
+`sub_agent_id`, and the agent_start tool call ID. Send
+`BOOTSTRAP parent_id={self_agent_id}` to `sub_agent_id`, wait for the `READY`
+report, then call `cancel` with that
 agent_start tool call ID. Expect the foreground result to be exactly:
 
 ```text

@@ -12,8 +12,8 @@ unambiguous `@`-prefixed routing id followed by a supplemental display name in
 parentheses when authoritative metadata for that endpoint is known. Sender and
 recipient identities use the bright `agent.message.identity` theme style while
 the surrounding wording and supplemental task-name context remain intact.
-Sender and recipient names are resolved independently. User endpoints remain
-`user`, and unknown local or peer endpoints remain id-only.
+Sender and recipient names are resolved independently. Unknown local or peer
+endpoints remain id-only.
 
 Local names come from the session's folded `agent.started` and
 `agent.display_name_set` metadata, including replayed metadata for restored or

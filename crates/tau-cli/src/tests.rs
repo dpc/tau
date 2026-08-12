@@ -1561,12 +1561,8 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
             .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
-        recipient: if recipient == "user" {
-            tau_proto::AgentMessageRecipient::User
-        } else {
-            tau_proto::AgentMessageRecipient::Agent {
-                agent_id: agent_id(recipient),
-            }
+        recipient: tau_proto::AgentMessageRecipient::Agent {
+            agent_id: agent_id(recipient),
         },
         kind: tau_proto::AgentMessageKind::Message,
         message: message.to_owned(),
@@ -7337,36 +7333,6 @@ fn show_messages_none_leaves_no_visible_message_output() {
 }
 
 #[test]
-fn user_recipient_agent_messages_broadcast_to_visible_agent_even_when_hidden() {
-    // Messages sent to `recipient_id: "user"` are intended for the human, not
-    // just the sender's private transcript. They must render in the visible UI
-    // even when another agent is selected and `show-messages` hides normal
-    // agent-to-agent messages.
-    let (_term, handle, vt) = setup(80, 10);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
-        query_id: "q-visible".to_owned(),
-        agent_id: agent_id("visible-agent"),
-    }));
-    renderer.switch_agent("visible-agent".to_owned());
-    renderer.apply_setting("show-messages", "none");
-    renderer.handle(&agent_message(
-        "sender-agent",
-        "user",
-        "broadcast body for all visible agents",
-    ));
-    sync(&handle);
-
-    assert!(vt.screen_contains(80, "Message from @sender-agent to user:"));
-    assert!(vt.screen_contains(80, "broadcast body for all visible agents"));
-}
-
-#[test]
 fn show_messages_summary_modes_do_not_show_body() {
     let (_term, handle, vt) = setup(80, 8);
     let mut renderer = EventRenderer::new(
@@ -7450,7 +7416,11 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     assert!(vt.screen_contains(100, "Message from @agent-a to @agent-b (late worker):"));
 
     renderer.clear_selected_agent();
-    renderer.handle(&agent_message("agent-a", "user", "broadcast history"));
+    renderer.handle(&agent_message(
+        "agent-a",
+        "agent-c",
+        "overview message history",
+    ));
     renderer.switch_agent("viewer".to_owned());
     renderer.handle(&Event::AgentDisplayNameSet(
         tau_proto::AgentDisplayNameSet {
@@ -7461,9 +7431,12 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     sync(&handle);
     let generation = vt.frame_generation();
     renderer.clear_selected_agent();
-    vt.wait_for_frame_containing_after(generation, "Message from @agent-a (late sender) to user:");
-    assert!(vt.screen_contains(100, "Message from @agent-a (late sender) to user:"));
-    assert!(vt.screen_contains(100, "broadcast history"));
+    vt.wait_for_frame_containing_after(
+        generation,
+        "Message from @agent-a (late sender) to @agent-c:",
+    );
+    assert!(vt.screen_contains(100, "Message from @agent-a (late sender) to @agent-c:"));
+    assert!(vt.screen_contains(100, "overview message history"));
 }
 
 /// Retained history keeps its originating session's name authority when a

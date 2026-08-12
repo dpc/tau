@@ -21,6 +21,11 @@ semantic projection for its direction. Its identity is:
 - `NodeId` for the occurrence's materialized branch position; and
 - peer `request_id` and capability only for live callback authentication.
 
+The harness-owned `message` tool accepts only local agent, local session,
+remote session, and remote agent recipient forms. The exact raw recipient
+`user` is unsupported and fails before routing or creating either durable
+projection.
+
 No delivery-created prompt, tool output, wake, or control event repeats the
 body. A self-send creates outbound then inbound occurrences with distinct
 journal sequences. An accepted retry may create another occurrence with the
@@ -107,8 +112,7 @@ The omission affects provider context only. The sender-owned
 typed UI consumers. It does not alter the original `message` tool call or its
 compact `Message sent` result. An agent recipient retains its authenticated
 inbound user-role projection. UI rendering continues to consume the directional
-facts under its existing message-display policy, including always-full
-user-recipient delivery.
+facts under its existing message-display policy.
 
 ## Live activation and waits
 
@@ -226,10 +230,9 @@ durable head.
 Same-session sender and recipient publications remain separate and
 nontransactional. Same-session `message` success means harness acceptance and
 enqueue, not recipient provider work; a crash may leave sender projection/tool
-result without the recipient projection. User delivery has only the sender
-projection, and success is not proof that a UI observed it. No automatic
-model-level ACK is introduced. Cross-harness callback-bound typed authority and
-bounded admission remain unchanged.
+result without the recipient projection. No automatic model-level ACK is
+introduced. Cross-harness callback-bound typed authority and bounded admission
+remain unchanged.
 
 The target ACK becomes eligible after the exact receive occurrence completes its
 authoritative foreground framed write. It does not wait for background

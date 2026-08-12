@@ -1507,24 +1507,19 @@ impl Harness {
         let sender_id = self
             .ensure_agent_id_for_agent(agent_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
-        if recipient_id != "user" {
-            match self.agent_message_recipient_status(&recipient_id) {
-                AgentMessageRecipientStatus::Live => {}
-                AgentMessageRecipientStatus::Stopped => {
-                    return Err(format!("stopped message recipient: `{recipient_id}`"));
-                }
-                AgentMessageRecipientStatus::Unknown => {
-                    return Err(format!("unknown message recipient: `{recipient_id}`"));
-                }
+        if recipient_id == "user" {
+            return Err("unsupported message recipient: `user`".to_owned());
+        }
+        match self.agent_message_recipient_status(&recipient_id) {
+            AgentMessageRecipientStatus::Live => {}
+            AgentMessageRecipientStatus::Stopped => {
+                return Err(format!("stopped message recipient: `{recipient_id}`"));
+            }
+            AgentMessageRecipientStatus::Unknown => {
+                return Err(format!("unknown message recipient: `{recipient_id}`"));
             }
         }
-        let recipient = if recipient_id == "user" {
-            tau_proto::AgentMessageRecipient::User
-        } else {
-            tau_proto::AgentMessageRecipient::Agent {
-                agent_id: crate::parse_agent_id(&recipient_id),
-            }
-        };
+        let recipient_id = crate::parse_agent_id(&recipient_id);
         let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
         let message_id = next_agent_message_id(&sender_id);
         if kind == tau_proto::AgentMessageKind::Message {
@@ -1534,28 +1529,28 @@ impl Harness {
                 Event::AgentMessageSent(AgentMessageSent {
                     message_id: message_id.clone(),
                     sender_id: sender_id.clone(),
-                    recipient: recipient.clone(),
+                    recipient: tau_proto::AgentMessageRecipient::Agent {
+                        agent_id: recipient_id.clone(),
+                    },
                     kind,
                     message: message.clone(),
                 }),
             );
         }
-        if let tau_proto::AgentMessageRecipient::Agent { agent_id } = recipient {
-            self.publish_event(
-                Some(crate::harness::harness_connection_id()),
-                Event::AgentMessageReceived(AgentMessageReceived {
-                    message_id,
-                    sender_id,
-                    sender_session_id: None,
-                    recipient_id: agent_id,
-                    kind,
-                    watch_provider_status: None,
-                    watch_work_status: None,
-                    watch_long_wait: None,
-                    message,
-                }),
-            );
-        }
+        self.publish_event(
+            Some(crate::harness::harness_connection_id()),
+            Event::AgentMessageReceived(AgentMessageReceived {
+                message_id,
+                sender_id,
+                sender_session_id: None,
+                recipient_id,
+                kind,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                message,
+            }),
+        );
         Ok(())
     }
 

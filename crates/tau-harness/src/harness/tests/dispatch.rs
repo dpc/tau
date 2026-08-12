@@ -31312,10 +31312,10 @@ fn durable_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMes
         .collect()
 }
 
-/// A message addressed to the user records only the sender-side canonical
-/// occurrence and never creates a recipient projection or wake.
+/// The removed `user` recipient must fail before any projection is published,
+/// so a tool call cannot report successful but invisible user delivery.
 #[test]
-fn message_tool_to_user_emits_only_sender_projection() {
+fn message_tool_to_user_is_rejected_without_agent_message() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -31330,24 +31330,22 @@ fn message_tool_to_user_emits_only_sender_projection() {
 
     let sent = session_agent_message_sent_events(&h);
     let received = session_agent_message_received_events(&h);
-    assert_eq!(sent.len(), 1);
-    let sender_agent_id = h
-        .agents
-        .get(&cid)
-        .and_then(|conv| conv.agent_id.as_deref())
-        .expect("sender agent id");
-    assert_eq!(sent[0].sender_id.as_str(), sender_agent_id);
-    assert_role_hex_agent_id(sender_agent_id, "engineer");
-    assert_eq!(sent[0].recipient, tau_proto::AgentMessageRecipient::User);
-    assert_eq!(sent[0].message, "hello user");
+    assert!(sent.is_empty());
     assert!(received.is_empty());
 
     let durable_sent = durable_agent_message_sent_events(&h);
     let durable_received = durable_agent_message_received_events(&h);
-    assert_eq!(durable_sent.len(), 1);
-    assert_eq!(durable_sent[0].message_id, sent[0].message_id);
-    assert_eq!(durable_sent[0].message, "hello user");
+    assert!(durable_sent.is_empty());
     assert!(durable_received.is_empty());
+    let errors: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ToolError(error) if error.call_id.as_str() == "msg-user" => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].message, "unsupported message recipient: `user`");
 
     h.shutdown().expect("shutdown");
 }
@@ -34389,7 +34387,9 @@ fn inbound_agent_message_events_are_ignored() {
         message_id: tau_proto::AgentMessageId::parse("test-message")
             .expect("test identifier must satisfy its grammar"),
         sender_id: crate::parse_agent_id("attacker"),
-        recipient: tau_proto::AgentMessageRecipient::User,
+        recipient: tau_proto::AgentMessageRecipient::Agent {
+            agent_id: crate::parse_agent_id("victim"),
+        },
         kind: tau_proto::AgentMessageKind::Message,
         message: "forged".to_owned(),
     });

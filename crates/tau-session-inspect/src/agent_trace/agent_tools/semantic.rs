@@ -104,8 +104,6 @@ pub(super) enum MessageRecipientRecord {
         /// Historical recipient session identity.
         recipient_session_id: tau_proto::SessionId,
     },
-    /// Human user recipient.
-    User,
 }
 
 /// Canonical sender-side message occurrence.
@@ -202,7 +200,6 @@ pub(super) fn project_message_event(
                     recipient_id: agent_id.clone(),
                     recipient_session_id: session_id.clone(),
                 },
-                AgentMessageRecipient::User => MessageRecipientRecord::User,
             };
             Some(SemanticProjection {
                 record: SemanticRecord::MessageSent(MessageSentRecord {

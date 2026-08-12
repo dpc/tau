@@ -183,7 +183,7 @@ pub enum AgentEntry {
         /// Active session id for an external sender, if this inbound message
         /// originated in another harness session.
         sender_session_id: Option<tau_proto::SessionId>,
-        /// Recipient agent or user.
+        /// Recipient agent.
         recipient: AgentMessageRecipient,
         /// Delivery source semantics.
         kind: AgentMessageKind,

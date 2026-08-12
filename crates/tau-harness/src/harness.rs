@@ -8081,7 +8081,7 @@ impl Harness {
         }
     }
 
-    /// Classify whether a non-user message recipient can receive a hidden
+    /// Classify whether a message recipient can receive a hidden
     /// prompt.
     ///
     /// Historical membership restored on cold resume distinguishes an unloaded

@@ -2002,7 +2002,9 @@ fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
         message_id: tau_proto::AgentMessageId::parse("msg-user")
             .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        recipient: tau_proto::AgentMessageRecipient::User,
+        recipient: tau_proto::AgentMessageRecipient::Agent {
+            agent_id: tau_proto::AgentId::parse("recipient").expect("agent id"),
+        },
         kind: tau_proto::AgentMessageKind::Message,
         message: "CLANK2AE7_PROMPT_PROJECTION_CANARY".to_owned(),
     }));

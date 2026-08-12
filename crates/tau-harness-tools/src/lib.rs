@@ -1279,9 +1279,6 @@ fn handle_message_tool_call(
     host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
     let result = parse_message_args(&call.arguments).and_then(|parsed| {
         match parse_message_recipient(&parsed.recipient_id, &host.current_session_id())? {
-            MessageRecipientAddress::User => host
-                .publish_agent_message(conversation_id, "user".to_owned(), parsed.message)
-                .map(|()| MessageToolFlow::Finished),
             MessageRecipientAddress::LocalAgent(agent_id) => host
                 .publish_agent_message(conversation_id, agent_id.to_string(), parsed.message)
                 .map(|()| MessageToolFlow::Finished),
@@ -1578,7 +1575,6 @@ fn handle_agent_list_tool_call(
 }
 
 enum MessageRecipientAddress {
-    User,
     LocalAgent(tau_proto::AgentId),
     LocalSession,
     OtherSession {
@@ -1592,7 +1588,7 @@ fn parse_message_recipient(
     current_session_id: &tau_proto::SessionId,
 ) -> Result<MessageRecipientAddress, String> {
     if raw == "user" {
-        return Ok(MessageRecipientAddress::User);
+        return Err("unsupported message recipient: `user`".to_owned());
     }
     if let Some(session_address) = raw.strip_prefix('&') {
         let slash_count = session_address.matches('/').count();
@@ -1937,7 +1933,7 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent, another session, or the user. Use recipient_id `user`, a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient `user`, a local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent or another session. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {

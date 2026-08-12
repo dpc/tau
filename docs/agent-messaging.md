@@ -28,7 +28,12 @@ replay does not recreate that private authority.
 These external message facts are separate from the harness-owned inter-session
 and agent-to-agent message events documented below.
 
-The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `:set show-messages`. When shown fully in the no-selection overview, a message renders as:
+The harness-owned `message` tool lets an agent send an asynchronous short text
+note to another agent or session. Every successful send is recorded as an
+`agent.message_sent` sender projection; agent recipients also get a separate
+`agent.message_received` recipient projection with the same `message_id`.
+Agent-to-agent UI display depends on `:set show-messages`. When shown fully in
+the no-selection overview, a message renders as:
 
 ```text
 ■ Message from <sender> to <recipient>:
@@ -45,9 +50,9 @@ Agent endpoint identity always remains visible. When the CLI knows
 authoritative session metadata, it supplements either endpoint independently,
 for example `■ Message from @reviewer-YiBh (research findings) to
 @reviewer-VVSq (final review)`. Unknown agent endpoints and peers without an
-advertised name keep their existing id-only labels; the human endpoint remains
-the literal `user`. Names are escaped and bounded UI metadata; they do not enter
-the message body, change routing, or become identity authority. Historical
+advertised name keep their existing id-only labels. Names are escaped and
+bounded UI metadata; they do not enter the message body, change routing, or
+become identity authority. Historical
 blocks use the latest folded name metadata when re-rendered, while their
 immutable semantic message events remain unchanged. See
 [`SPEC-tau-cli-agent-message-labels`](../crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md).
@@ -63,7 +68,7 @@ The phase emoji use the [agent-status legend](list-agents.md#attached-picker).
 
 `:set show-messages` modes are:
 
-User-recipient messages are human-visible broadcasts: they always render fully in every attached UI's currently visible transcript, regardless of `:set show-messages`. Agent-to-agent message projections still obey `:set show-messages`:
+Agent-to-agent message projections obey `:set show-messages`:
 
 - `none`: no UI indication or history of agent-to-agent messages
 - `self-summary`: no UI indication for agent-to-agent messages
@@ -78,28 +83,13 @@ originating session and `message_id`. Ctrl-K/Ctrl-J cycle through that overview
 and the active agents. Submitting a prompt from the overview still starts a new
 agent. Ordinary `Message` events and watched response/prompt notifications are
 overview content. Structured provider-status, work-status, and long-wait
-records stay in the watcher
-transcript, while messages to `user` retain current-visible broadcast routing
-without an additional overview copy.
+records stay in the watcher transcript.
 
 The overview contains messages observed by that CLI and catch-up projections
 replayed for agents that are loaded when it attaches. It is not a durable
 session-wide message index, so a new CLI does not recover earlier messages after
 both endpoints have unloaded.
 
-## Send to the user
-
-Use the special recipient id `user`:
-
-```text
-message({"recipient_id":"user","message":"I found the root cause and am checking the fix now."})
-```
-
-On success the tool result is:
-
-```text
-Message sent
-```
 
 ## Send to another agent
 
@@ -299,7 +289,7 @@ agent_watch({"agent_id":"engineer_b","enable":false})
 
 ## Invalid recipients and arguments
 
-A non-`user` local recipient must be a live or pending `agent_id`. External
+A local recipient must be a live or pending `agent_id`. External
 recipients must contain exactly one slash and a slash-free valid `agent_id` on
 the right-hand side. Otherwise the tool fails and no `agent.message_sent` or
 `agent.message_received` projection is emitted.

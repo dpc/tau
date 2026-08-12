@@ -62,19 +62,19 @@ const ON_OFF_VALUES: &[SettingValue] = &[
 const SHOW_MESSAGES_VALUES: &[SettingValue] = &[
     SettingValue {
         value: "none",
-        description: "hide agent-agent messages; user messages still show",
+        description: "hide agent-agent messages",
     },
     SettingValue {
         value: "self-summary",
-        description: "hide agent-agent messages; user messages still show",
+        description: "hide agent-agent messages",
     },
     SettingValue {
         value: "self-full",
-        description: "hide agent-agent messages; user messages still show",
+        description: "hide agent-agent messages",
     },
     SettingValue {
         value: "all-summary",
-        description: "show user messages, summarize agent-agent messages",
+        description: "summarize agent-agent messages",
     },
     SettingValue {
         value: "all-full",

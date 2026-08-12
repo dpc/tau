@@ -39,11 +39,10 @@ visible conversation.
 The exception is all-agent overview history. The no-agent screen copies each
 genuine inter-agent message into a session-scoped aggregate, deduplicating sender
 and recipient projections by their originating session and shared message id,
-and continuing to apply the configured `show-messages` mode. User-recipient
-broadcasts retain current-visible global routing without aggregate copying.
-`Message`, `WatchResponse`, and `WatchPrompt` are the only overview content
-kinds; `WatchProviderStatus`, `WatchWorkStatus`, and `WatchLongWait` records stay in the
-watcher's transcript. Once the aggregate has an entry, its
+and continuing to apply the configured `show-messages` mode. `Message`,
+`WatchResponse`, and `WatchPrompt` are the only overview content kinds;
+`WatchProviderStatus`, `WatchWorkStatus`, and `WatchLongWait` records stay in
+the watcher's transcript. Once the aggregate has an entry, its
 snapshot is protected even on the initial screen, and selecting or creating an
 agent restores that agent's own transcript instead of adopting overview history.
 The original sender and recipient projections remain in their respective agent

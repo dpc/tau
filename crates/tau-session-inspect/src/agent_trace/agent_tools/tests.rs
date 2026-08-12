@@ -1956,7 +1956,9 @@ fn toon_frames_control_bearing_payload_fields() {
             message_id: tau_proto::AgentMessageId::parse("message-control")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: root_agent_id.clone(),
-            recipient: AgentMessageRecipient::User,
+            recipient: AgentMessageRecipient::Agent {
+                agent_id: AgentId::parse("agent-recipient").expect("agent"),
+            },
             kind: AgentMessageKind::Message,
             message: "secret\u{7}".into(),
         }),

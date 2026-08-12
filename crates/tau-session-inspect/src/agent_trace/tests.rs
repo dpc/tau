@@ -254,7 +254,9 @@ fn public_compact_exports_project_persisted_explicit_observations() {
             message_id: tau_proto::AgentMessageId::parse("message-semantic")
                 .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
-            recipient: tau_proto::AgentMessageRecipient::User,
+            recipient: tau_proto::AgentMessageRecipient::Agent {
+                agent_id: AgentId::parse("agent-recipient").expect("agent"),
+            },
             kind: tau_proto::AgentMessageKind::Message,
             message: semantic_text.clone(),
         }),

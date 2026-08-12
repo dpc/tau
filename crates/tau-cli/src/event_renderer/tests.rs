@@ -497,12 +497,8 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
             .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
-        recipient: if recipient == "user" {
-            tau_proto::AgentMessageRecipient::User
-        } else {
-            tau_proto::AgentMessageRecipient::Agent {
-                agent_id: agent_id(recipient),
-            }
+        recipient: tau_proto::AgentMessageRecipient::Agent {
+            agent_id: agent_id(recipient),
         },
         kind: tau_proto::AgentMessageKind::Message,
         message: message.to_owned(),
@@ -611,22 +607,20 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
     }
 }
 
-/// User-directed agent messages are broadcasts rendered without an owning
-/// agent transcript. This guards the agent-id resolver's explicit `None`
-/// result so the refactored fallback chain does not accidentally route
-/// broadcasts to the current agent.
+/// Sender projections remain owned by the sending agent instead of falling
+/// back to the currently selected agent after user broadcasts are removed.
 #[test]
-fn agent_id_for_event_preserves_user_broadcast_without_current_agent_fallback() {
+fn agent_id_for_event_routes_sent_message_to_sender() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.current_agent_id = Some("current-agent".to_owned());
 
     let resolved = renderer.agent_id_for_event_for_test(&agent_message(
         "sender-agent",
-        "user",
-        "visible broadcast",
+        "recipient-agent",
+        "visible message",
     ));
 
-    assert_eq!(resolved, None);
+    assert_eq!(resolved, Some("sender-agent".to_owned()));
 }
 
 /// Tool events may be attributed from prior metadata or from the event's
@@ -755,51 +749,36 @@ fn ui_io_rates_format_for_status_bar() {
     assert_eq!(super::format_ui_io_rate(1024 * 1024 + 512 * 1024), "1.5M");
 }
 
-/// `:set show-messages` must hide, summarize, or fully render durable
-/// message events based on whether they involve the user. User-directed
-/// messages are broadcasts and always render fully, while agent-to-agent
-/// messages still respect the privacy modes. This locks the policy down
-/// without needing a terminal renderer fixture.
+/// `:set show-messages` must continue to hide, summarize, or fully render
+/// agent messages after removal of the user-broadcast recipient.
 #[test]
-fn show_messages_modes_map_user_and_agent_messages() {
-    let user_recipient_message = agent_message("agent", "user", "visible body");
-    let agent_message = agent_message("agent-a", "agent-b", "private body");
-
+fn show_messages_modes_map_agent_messages() {
     let cases = [
         (
             path_tau_config_settings::ShowMessages::None,
-            MessageRenderMode::Full,
             MessageRenderMode::Hidden,
         ),
         (
             path_tau_config_settings::ShowMessages::SelfSummary,
-            MessageRenderMode::Full,
             MessageRenderMode::Hidden,
         ),
         (
             path_tau_config_settings::ShowMessages::SelfFull,
-            MessageRenderMode::Full,
             MessageRenderMode::Hidden,
         ),
         (
             path_tau_config_settings::ShowMessages::AllSummary,
-            MessageRenderMode::Full,
             MessageRenderMode::Summary,
         ),
         (
             path_tau_config_settings::ShowMessages::AllFull,
             MessageRenderMode::Full,
-            MessageRenderMode::Full,
         ),
     ];
 
-    for (mode, expected_self, expected_agent) in cases {
+    for (mode, expected_agent) in cases {
         assert_eq!(
-            super::EventRenderer::message_render_mode(mode, &user_recipient_message),
-            expected_self
-        );
-        assert_eq!(
-            super::EventRenderer::message_render_mode(mode, &agent_message),
+            super::EventRenderer::message_render_mode(mode),
             expected_agent
         );
     }
