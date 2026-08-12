@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
-use std::io::{Cursor, Write};
+use std::io::{self, Cursor, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process as path_std_process;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
@@ -13,6 +14,9 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Serializes fixtures that observe the test-only detached-overload latch.
+static SATURATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Default)]
 struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -37,6 +41,78 @@ impl Write for SharedWriter {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Output sink that blocks the first generic bell emission so detached script
+/// output can exhaust tau-client's production FIFO.
+struct SaturationWriter {
+    /// Bytes accepted after the writer gate opens.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Gate held while the extension fills detached output.
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    /// Announces that the first optional frame reached the writer.
+    entered: mpsc::Sender<()>,
+    /// Prevents repeated gate announcements.
+    announced: bool,
+}
+
+impl Write for SaturationWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !self.announced && buf.windows(9).any(|window| window == b"term.bell") {
+            self.announced = true;
+            self.entered.send(()).expect("announce blocked writer");
+            let (lock, condvar) = &*self.gate;
+            let mut blocked = lock.lock().expect("writer gate");
+            while *blocked {
+                blocked = condvar.wait(blocked).expect("wait writer gate");
+            }
+        }
+        self.bytes
+            .lock()
+            .expect("output bytes")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writer that fails when a mandatory intercept reply or terminal report is
+/// flushed.
+struct MandatoryFlushFailureWriter {
+    /// True after startup Ready has passed.
+    ready_seen: bool,
+    /// True when the forced failure was reached.
+    failed: Arc<AtomicBool>,
+}
+
+impl Write for MandatoryFlushFailureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.windows(5).any(|window| window == b"ready") {
+            self.ready_seen = true;
+        }
+        if self.ready_seen
+            && (buf.windows(15).any(|window| window == b"intercept_reply")
+                || buf
+                    .windows(20)
+                    .any(|window| window == b"tool.result_reported")
+                || buf
+                    .windows(19)
+                    .any(|window| window == b"tool.error_reported"))
+        {
+            self.failed.store(true, Ordering::Release);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err(io::Error::other("forced mandatory output failure"));
+        }
         Ok(())
     }
 }
@@ -135,6 +211,58 @@ fn run_frames(input_frames: &[HarnessOutputMessage]) -> Vec<HarnessInputMessage>
         frames.push(frame);
     }
     frames
+}
+
+fn run_saturation_fixture(input_frames: &[HarnessOutputMessage]) -> Vec<HarnessInputMessage> {
+    let _fixture_guard = SATURATION_FIXTURE_LOCK
+        .lock()
+        .expect("saturation fixture lock");
+    DETACHED_OUTPUT_OVERLOADED.store(false, Ordering::Release);
+    let (overloaded_tx, overloaded_rx) = mpsc::channel();
+    *DETACHED_OUTPUT_OVERLOAD_NOTIFY
+        .lock()
+        .expect("detached overload notification") = Some(overloaded_tx);
+    let mut input = Vec::new();
+    let mut input_writer = HarnessOutputWriter::new(&mut input);
+    for frame in input_frames {
+        input_writer
+            .write_message(frame)
+            .expect("write saturation input");
+    }
+    input_writer.flush().expect("flush saturation input");
+
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let writer = SaturationWriter {
+        bytes: Arc::clone(&bytes),
+        gate: Arc::clone(&gate),
+        entered: entered_tx,
+        announced: false,
+    };
+    let runner = std::thread::spawn(move || {
+        run(Cursor::new(input), writer).map_err(|error| error.to_string())
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("optional script output reached blocked writer");
+    overloaded_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("script exhausted detached output");
+    assert!(DETACHED_OUTPUT_OVERLOADED.load(Ordering::Acquire));
+    DETACHED_OUTPUT_OVERLOAD_NOTIFY
+        .lock()
+        .expect("detached overload notification")
+        .take();
+    let (lock, condvar) = &*gate;
+    *lock.lock().expect("writer gate") = false;
+    condvar.notify_all();
+    runner
+        .join()
+        .expect("saturation runner")
+        .expect("mandatory output survived saturation");
+
+    frames_from_bytes_lossy(bytes.lock().expect("output bytes").clone())
 }
 
 fn frames_from_bytes_lossy(bytes: Vec<u8>) -> Vec<HarnessInputMessage> {
@@ -702,6 +830,100 @@ fn intercept_callback_can_drop_event() {
     assert!(matches!(replies[0].action, InterceptAction::Drop));
 }
 
+/// Script-authored best-effort output may exhaust the real detached FIFO, but
+/// the owned interception reply must wait behind it and publish exactly once.
+#[test]
+fn intercept_reply_survives_actual_detached_output_saturation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) {
+                return #{
+                    intercept: [#{
+                        selectors: [#{ kind: "exact", value: "agent.prompt_submitted" }],
+                        priority: 0,
+                    }],
+                };
+            }
+            fn on_intercept(event, persist) {
+                for n in 0..96 {
+                    tau_emit_transient(#{ event: "term.bell", payload: #{} });
+                }
+                return "drop";
+            }
+        "#,
+    );
+    let request = HarnessOutputMessage::InterceptRequest(InterceptRequest {
+        event: Box::new(prompt_event("saturate")),
+        persist: true,
+    });
+
+    let frames = run_saturation_fixture(&[configure_with_script(&script), request]);
+
+    let bell_count = frames
+        .iter()
+        .filter(|frame| matches!(emitted_event(frame), Some(Event::TermBell(_))))
+        .count();
+    assert!(bell_count < 96, "fixture must exhaust the detached FIFO");
+    let replies = frames
+        .iter()
+        .filter(|frame| matches!(frame, HarnessInputMessage::InterceptReply(_)))
+        .count();
+    assert_eq!(replies, 1);
+    assert!(matches!(
+        frames.last(),
+        Some(HarnessInputMessage::InterceptReply(reply))
+            if matches!(reply.action, InterceptAction::Drop)
+    ));
+}
+
+/// Ordered reply failure must leave the manual loop through its error path so
+/// harness disconnect cleanup can release the retained interception.
+#[test]
+fn intercept_reply_flush_failure_terminates_runtime() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) {
+                return #{
+                    intercept: [#{
+                        selectors: [#{ kind: "exact", value: "agent.prompt_submitted" }],
+                        priority: 0,
+                    }],
+                };
+            }
+            fn on_intercept(event, persist) { return "drop"; }
+        "#,
+    );
+    let request = HarnessOutputMessage::InterceptRequest(InterceptRequest {
+        event: Box::new(prompt_event("fail reply")),
+        persist: true,
+    });
+    let mut input = Vec::new();
+    let mut input_writer = HarnessOutputWriter::new(&mut input);
+    for frame in [configure_with_script(&script), request] {
+        input_writer.write_message(&frame).expect("write input");
+    }
+    input_writer.flush().expect("flush input");
+    let failed = Arc::new(AtomicBool::new(false));
+
+    let result = run(
+        Cursor::new(input),
+        MandatoryFlushFailureWriter {
+            ready_seen: false,
+            failed: Arc::clone(&failed),
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "reply flush failure must terminate the loop"
+    );
+    assert!(failed.load(Ordering::Acquire));
+}
+
 #[test]
 fn intercept_callback_can_return_replacement_event() {
     // A script can mutate the JSON-shaped event map and pass the
@@ -945,6 +1167,159 @@ fn tool_handler_throw_emits_tool_error_and_keeps_running() {
         emitted_event(frame),
         Some(Event::ToolResultReported(result)) if result.result == CborValue::Text("ok".to_owned())
     )));
+}
+
+/// Synchronous results, synchronous errors, and shell-owned terminals must all
+/// wait behind saturated optional script output and publish exactly once.
+#[test]
+fn all_rhai_tool_terminals_survive_actual_detached_output_saturation() {
+    let cases = [
+        (
+            "sync_result",
+            r#"
+                fn init(config) { register_tool("owned", #{}, Fn("owned")); }
+                fn owned(args, c) {
+                    for n in 0..96 {
+                        tau_emit_transient(#{ event: "term.bell", payload: #{} });
+                    }
+                    return "ok";
+                }
+            "#,
+            false,
+        ),
+        (
+            "sync_error",
+            r#"
+                fn init(config) { register_tool("owned", #{}, Fn("owned")); }
+                fn owned(args, c) {
+                    for n in 0..96 {
+                        tau_emit_transient(#{ event: "term.bell", payload: #{} });
+                    }
+                    throw "sync boom";
+                }
+            "#,
+            true,
+        ),
+        (
+            "shell_error",
+            r#"
+                fn init(config) { register_tool("owned", #{}, Fn("owned")); }
+                fn owned(args, c) {
+                    let job = shell_spawn(
+                        "printf shell-ok",
+                        #{ timeout: 5, on_complete: Fn("done") },
+                    );
+                    for n in 0..96 {
+                        tau_emit_transient(#{ event: "term.bell", payload: #{} });
+                    }
+                    return job;
+                }
+                fn done(result, job) { throw "shell boom"; }
+            "#,
+            true,
+        ),
+    ];
+
+    for (label, source, expect_error) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = write_script(&dir, source);
+        let started = HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started("owned", CborValue::Map(Vec::new())),
+        );
+
+        let frames = run_saturation_fixture(&[configure_with_script(&script), started]);
+
+        let bell_count = frames
+            .iter()
+            .filter(|frame| matches!(emitted_event(frame), Some(Event::TermBell(_))))
+            .count();
+        assert!(
+            bell_count < 96,
+            "{label} fixture must exhaust the detached FIFO"
+        );
+        let terminals = frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    emitted_event(frame),
+                    Some(Event::ToolResultReported(_) | Event::ToolErrorReported(_))
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 1, "{label} terminal count");
+        assert_eq!(
+            matches!(
+                emitted_event(terminals[0]),
+                Some(Event::ToolErrorReported(_))
+            ),
+            expect_error,
+            "{label} terminal kind"
+        );
+        assert!(
+            matches!(
+                emitted_event(frames.last().expect("last frame")),
+                Some(Event::ToolResultReported(_) | Event::ToolErrorReported(_))
+            ),
+            "{label} terminal must follow optional output"
+        );
+    }
+}
+
+/// A failed checked result, error, or shell terminal must tear down the runtime
+/// instead of leaving its routed call owned by a connected Rhai extension.
+#[test]
+fn all_rhai_tool_terminal_flush_failures_terminate_runtime() {
+    let cases = [
+        r#"
+            fn init(config) { register_tool("owned", #{}, Fn("owned")); }
+            fn owned(args, c) { return "ok"; }
+        "#,
+        r#"
+            fn init(config) { register_tool("owned", #{}, Fn("owned")); }
+            fn owned(args, c) { throw "sync boom"; }
+        "#,
+        r#"
+            fn init(config) { register_tool("owned", #{}, Fn("owned")); }
+            fn owned(args, c) {
+                return shell_spawn(
+                    "printf shell-ok",
+                    #{ timeout: 5, on_complete: Fn("done") },
+                );
+            }
+            fn done(result, job) { throw "shell boom"; }
+        "#,
+    ];
+
+    for source in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = write_script(&dir, source);
+        let started = HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started("owned", CborValue::Map(Vec::new())),
+        );
+        let mut input = Vec::new();
+        let mut input_writer = HarnessOutputWriter::new(&mut input);
+        for frame in [configure_with_script(&script), started] {
+            input_writer.write_message(&frame).expect("write input");
+        }
+        input_writer.flush().expect("flush input");
+        let failed = Arc::new(AtomicBool::new(false));
+
+        let result = run(
+            Cursor::new(input),
+            MandatoryFlushFailureWriter {
+                ready_seen: false,
+                failed: Arc::clone(&failed),
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "terminal flush failure must terminate the loop"
+        );
+        assert!(failed.load(Ordering::Acquire));
+    }
 }
 
 #[test]
@@ -1273,6 +1648,66 @@ fn oversized_shell_timeout_is_rejected_before_pending_job_is_inserted() {
         emitted_event(frame),
         Some(Event::ToolErrorReported(error)) if error.message.contains("timeout must be at most")
     )));
+}
+
+/// A completed job must release its admission slot before its callback spawns
+/// a chained replacement, while its routed tool ownership transfers exactly
+/// once.
+#[test]
+fn shell_callback_can_chain_at_pending_job_admission_cap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let release = dir.path().join("release-waiters");
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+                fn init(config) {{ register_tool("chain_at_cap", #{{}}, Fn("chain_at_cap")); }}
+                fn chain_at_cap(args, c) {{
+                    let owned = shell_spawn(
+                        "sleep 0.1",
+                        #{{ timeout: 5, on_complete: Fn("chain") }},
+                    );
+                    for n in 0..31 {{
+                        shell_spawn(
+                            "while [ ! -e '{}' ]; do sleep 0.01; done",
+                            #{{ timeout: 5 }},
+                        );
+                    }}
+                    return owned;
+                }}
+                fn chain(result, job) {{
+                    return shell_spawn(
+                        "touch '{}'; printf chained",
+                        #{{ timeout: 5 }},
+                    );
+                }}
+            "#,
+            release.display(),
+            release.display(),
+        ),
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("chain_at_cap", CborValue::Map(Vec::new())),
+    );
+
+    let frames = run_frames(&[configure_with_script(&script), started]);
+
+    let terminals = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                emitted_event(frame),
+                Some(Event::ToolResultReported(_) | Event::ToolErrorReported(_))
+            )
+        })
+        .count();
+    assert_eq!(terminals, 1);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| tool_result_has_output(frame, "chained"))
+    );
 }
 
 #[test]

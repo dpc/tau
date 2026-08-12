@@ -20,6 +20,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::mpsc::Sender as TestSender;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -28,8 +32,8 @@ use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, S
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tau_client::{
-    ClientHandle, ExtensionBuilder, ManualExtensionRuntime, ManualRuntimeInput, ManualRuntimePoll,
-    ManualRuntimeWaker, TauExtension, TauExtensionRunner,
+    ClientHandle, ClientResult, ExtensionBuilder, ManualExtensionRuntime, ManualRuntimeInput,
+    ManualRuntimePoll, ManualRuntimeWaker, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
     CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessOutputMessage,
@@ -49,6 +53,14 @@ const MAX_SHELL_TIMEOUT_SECS: i64 = 24 * 60 * 60;
 
 /// Maximum time to wait for a canceled shell worker to finish shutdown.
 const SHELL_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Test-only observation that production detached admission reached overload.
+#[cfg(test)]
+static DETACHED_OUTPUT_OVERLOADED: AtomicBool = AtomicBool::new(false);
+
+/// Test-only notification installed by production FIFO saturation fixtures.
+#[cfg(test)]
+static DETACHED_OUTPUT_OVERLOAD_NOTIFY: Mutex<Option<TestSender<()>>> = Mutex::new(None);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -269,6 +281,21 @@ impl Output {
 
     /// Enqueues one outbound protocol frame without waiting for writer flush.
     fn send(&self, message: HarnessInputMessage) {
+        #[cfg(test)]
+        if matches!(
+            self.handle.send_detached(message),
+            Err(tau_client::ClientError::Overloaded)
+        ) {
+            DETACHED_OUTPUT_OVERLOADED.store(true, Ordering::Release);
+            if let Some(notify) = DETACHED_OUTPUT_OVERLOAD_NOTIFY
+                .lock()
+                .expect("detached overload notification")
+                .as_ref()
+            {
+                let _ = notify.send(());
+            }
+        }
+        #[cfg(not(test))]
         let _ = self.handle.send_detached(message);
     }
 
@@ -282,21 +309,19 @@ impl Output {
         let _ = self.handle.request_notice_detached(message, level);
     }
 
-    /// Enqueue one successful terminal tool report.
-    fn report_tool_result(&self, result: ToolResult) {
-        let _ = self.handle.report_tool_result_detached(result);
+    /// Publishes one successful terminal tool report through ordered output.
+    fn report_tool_result(&self, result: ToolResult) -> ClientResult {
+        self.handle.report_tool_result(result)
     }
 
-    /// Enqueue one failed terminal tool report.
-    fn report_tool_error(&self, error: ToolError) {
-        let _ = self.handle.report_tool_error_detached(error);
+    /// Publishes one failed terminal tool report through ordered output.
+    fn report_tool_error(&self, error: ToolError) -> ClientResult {
+        self.handle.report_tool_error(error)
     }
 
-    /// Sends one intercept reply frame.
-    fn intercept_reply(&self, action: InterceptAction) {
-        self.send(HarnessInputMessage::InterceptReply(
-            tau_proto::InterceptReply { action },
-        ));
+    /// Publishes one intercept reply through ordered output.
+    fn intercept_reply(&self, action: InterceptAction) -> ClientResult {
+        self.handle.intercept_reply(action)
     }
 }
 
@@ -420,7 +445,7 @@ fn drive_runtime_loop(
             &runtime_rx,
             output,
             &mut shell_channel_closed,
-        );
+        )?;
         if should_stop {
             break;
         }
@@ -436,7 +461,7 @@ fn drive_runtime_loop(
             match runtime_rx.recv() {
                 Ok(RuntimeInput::ShellComplete(completion)) => {
                     if let Some(runtime) = runtime.as_mut() {
-                        runtime.on_shell_complete(completion, output);
+                        runtime.on_shell_complete(completion, output)?;
                     }
                 }
                 Err(_) => {
@@ -448,7 +473,7 @@ fn drive_runtime_loop(
 
         if shell_channel_closed {
             let input = manual.recv()?;
-            if handle_runtime_input(&mut runtime, input, output, &mut reader_closed) {
+            if handle_runtime_input(&mut runtime, input, output, &mut reader_closed)? {
                 break;
             }
         } else {
@@ -465,7 +490,7 @@ fn drain_one_harness_input(
     reader_closed: &mut bool,
 ) -> Result<bool, Box<dyn Error>> {
     match manual.try_recv()? {
-        ManualRuntimePoll::Message(message) => Ok(handle_harness_message(runtime, message, output)),
+        ManualRuntimePoll::Message(message) => handle_harness_message(runtime, message, output),
         ManualRuntimePoll::InputClosed => {
             *reader_closed = true;
             Ok(false)
@@ -479,14 +504,14 @@ fn handle_runtime_input(
     input: ManualRuntimeInput,
     output: &Output,
     reader_closed: &mut bool,
-) -> bool {
+) -> Result<bool, Box<dyn Error>> {
     match input {
         ManualRuntimeInput::Message(message) => handle_harness_message(runtime, message, output),
         ManualRuntimeInput::InputClosed => {
             *reader_closed = true;
-            false
+            Ok(false)
         }
-        ManualRuntimeInput::Timeout => false,
+        ManualRuntimeInput::Timeout => Ok(false),
     }
 }
 
@@ -495,18 +520,18 @@ fn drain_shell_completions(
     runtime_rx: &Receiver<RuntimeInput>,
     output: &Output,
     shell_channel_closed: &mut bool,
-) {
+) -> Result<(), Box<dyn Error>> {
     loop {
         match runtime_rx.try_recv() {
             Ok(RuntimeInput::ShellComplete(completion)) => {
                 if let Some(runtime) = runtime.as_deref_mut() {
-                    runtime.on_shell_complete(completion, output);
+                    runtime.on_shell_complete(completion, output)?;
                 }
             }
-            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => {
                 *shell_channel_closed = true;
-                return;
+                return Ok(());
             }
         }
     }
@@ -516,28 +541,28 @@ fn handle_harness_message(
     runtime: &mut Option<ScriptRuntime>,
     message: HarnessOutputMessage,
     output: &Output,
-) -> bool {
+) -> Result<bool, Box<dyn Error>> {
     match message {
         HarnessOutputMessage::Deliver(delivery) => {
             let (event, replay, recorded_at) = delivery.into_parts();
             if let Some(runtime) = runtime.as_mut() {
-                runtime.on_delivered_event(event, replay, recorded_at, output);
+                runtime.on_delivered_event(event, replay, recorded_at, output)?;
             }
-            false
+            Ok(false)
         }
         HarnessOutputMessage::InterceptRequest(req) => {
             let action = runtime
                 .as_mut()
                 .map(|runtime| runtime.on_intercept(*req.event, req.persist, output))
                 .unwrap_or_else(|| InterceptAction::Pass(None));
-            output.intercept_reply(action);
-            false
+            output.intercept_reply(action)?;
+            Ok(false)
         }
         HarnessOutputMessage::Disconnect(_) => {
             if let Some(runtime) = runtime.as_mut() {
                 runtime.cancel_and_join_pending_shell_jobs();
             }
-            true
+            Ok(true)
         }
         HarnessOutputMessage::Configure(_)
         | HarnessOutputMessage::AgentPromptCreatedResult(_)
@@ -550,7 +575,7 @@ fn handle_harness_message(
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
         | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
         | HarnessOutputMessage::PeerSessionProbeResult(_)
-        | HarnessOutputMessage::UiSessionAccepted(_) => false,
+        | HarnessOutputMessage::UiSessionAccepted(_) => Ok(false),
     }
 }
 
@@ -1141,7 +1166,7 @@ impl ScriptRuntime {
         replay: bool,
         recorded_at: Option<UnixMicros>,
         output: &Output,
-    ) {
+    ) -> ClientResult {
         // ToolStarted currently carries no provider/extension identity; the
         // harness-routed globally visible tool name is the only ownership
         // signal available to extensions, so Rhai dispatch is necessarily
@@ -1150,9 +1175,9 @@ impl ScriptRuntime {
             && let Some(local_tool_name) = self.wire_to_local_tools.get(&started.tool_name)
         {
             if !replay {
-                self.on_tool_started(started.clone(), local_tool_name.clone(), output);
+                self.on_tool_started(started.clone(), local_tool_name.clone(), output)?;
             }
-            return;
+            return Ok(());
         }
         let event = match serde_json::to_value(event)
             .map_err(|e| e.to_string())
@@ -1161,18 +1186,18 @@ impl ScriptRuntime {
             Ok(event) => event,
             Err(message) => {
                 report_callback_error(output, format!("preparing on_event: {message}"));
-                return;
+                return Ok(());
             }
         };
         let meta = match json_to_dynamic(&meta_json(replay, recorded_at)) {
             Ok(meta) => meta,
             Err(message) => {
                 report_callback_error(output, format!("preparing on_event metadata: {message}"));
-                return;
+                return Ok(());
             }
         };
         if !self.has_function("on_event", 2) {
-            return;
+            return Ok(());
         }
         match self
             .engine
@@ -1181,6 +1206,7 @@ impl ScriptRuntime {
             Ok(_) => {}
             Err(err) => report_callback_error(output, format!("rhai on_event failed: {err}")),
         }
+        Ok(())
     }
 
     fn on_intercept(&mut self, event: Event, persist: bool, output: &Output) -> InterceptAction {
@@ -1219,9 +1245,9 @@ impl ScriptRuntime {
         started: ToolStarted,
         local_tool_name: ToolName,
         output: &Output,
-    ) {
+    ) -> ClientResult {
         let Some(handler) = self.tools.get(&local_tool_name).cloned() else {
-            return;
+            return Ok(());
         };
         let mut local_started = started.clone();
         local_started.tool_name = local_tool_name;
@@ -1232,8 +1258,8 @@ impl ScriptRuntime {
                     &started,
                     format!("preparing tool arguments: {message}"),
                     output,
-                );
-                return;
+                )?;
+                return Ok(());
             }
         };
         let call = match json_to_dynamic(&tool_call_json(&local_started)) {
@@ -1243,19 +1269,25 @@ impl ScriptRuntime {
                     &started,
                     format!("preparing tool call metadata: {message}"),
                     output,
-                );
-                return;
+                )?;
+                return Ok(());
             }
         };
         match handler.call::<Dynamic>(&self.engine, &self.ast, (args, call)) {
-            Ok(value) => self.handle_tool_value(value, started, output),
+            Ok(value) => self.handle_tool_value(value, started, output)?,
             Err(err) => {
-                self.emit_tool_error(&started, format!("rhai tool handler failed: {err}"), output)
+                self.emit_tool_error(&started, format!("rhai tool handler failed: {err}"), output)?
             }
         }
+        Ok(())
     }
 
-    fn handle_tool_value(&mut self, value: Dynamic, started: ToolStarted, output: &Output) {
+    fn handle_tool_value(
+        &mut self,
+        value: Dynamic,
+        started: ToolStarted,
+        output: &Output,
+    ) -> ClientResult {
         if let Some(job) = value.clone().try_cast::<ShellJob>() {
             let mut state = self.host_state.borrow_mut();
             if let Some(pending) = state.shell_jobs.get_mut(&job.id) {
@@ -1265,8 +1297,8 @@ impl ScriptRuntime {
                         &started,
                         format!("shell job {} was already returned by a tool call", job.id),
                         output,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 pending.tool_claimed = true;
                 pending.tool_call = Some(PendingToolCall {
@@ -1275,53 +1307,54 @@ impl ScriptRuntime {
                     tool_type: ToolType::Function,
                     originator: started.originator,
                 });
-                return;
+                return Ok(());
             }
             drop(state);
-            self.emit_tool_error(&started, format!("unknown shell job {}", job.id), output);
-            return;
+            self.emit_tool_error(&started, format!("unknown shell job {}", job.id), output)?;
+            return Ok(());
         }
         match dynamic_to_json(&value) {
-            Ok(json) => self.emit_tool_result(&started, tau_proto::json_to_cbor(&json), output),
+            Ok(json) => self.emit_tool_result(&started, tau_proto::json_to_cbor(&json), output)?,
             Err(message) => {
-                self.emit_tool_error(&started, format!("invalid tool result: {message}"), output)
+                self.emit_tool_error(&started, format!("invalid tool result: {message}"), output)?
             }
         }
+        Ok(())
     }
 
-    fn on_shell_complete(&mut self, completion: ShellCompletion, output: &Output) {
+    fn on_shell_complete(&mut self, completion: ShellCompletion, output: &Output) -> ClientResult {
         let Some(job) = self
             .host_state
             .borrow_mut()
             .shell_jobs
             .remove(&completion.job_id)
         else {
-            return;
+            return Ok(());
         };
         let result_dynamic = match json_to_dynamic(&completion.result) {
             Ok(value) => value,
             Err(message) => {
-                if let Some(call) = job.tool_call {
+                if let Some(call) = &job.tool_call {
                     emit_pending_tool_error(
                         output,
-                        &call,
+                        call,
                         format!("preparing shell result: {message}"),
-                    );
+                    )?;
                 }
-                return;
+                return Ok(());
             }
         };
         let job_dynamic = match json_to_dynamic(&shell_job_json(completion.job_id, &job)) {
             Ok(value) => value,
             Err(message) => {
-                if let Some(call) = job.tool_call {
+                if let Some(call) = &job.tool_call {
                     emit_pending_tool_error(
                         output,
-                        &call,
+                        call,
                         format!("preparing shell job: {message}"),
-                    );
+                    )?;
                 }
-                return;
+                return Ok(());
             }
         };
         let had_callback = job.on_complete.is_some();
@@ -1343,7 +1376,7 @@ impl ScriptRuntime {
                                 "chained shell job {} was already returned by a tool call",
                                 chained.id
                             ),
-                        );
+                        )?;
                     } else {
                         pending.tool_claimed = true;
                         pending.tool_call = Some(call);
@@ -1353,7 +1386,7 @@ impl ScriptRuntime {
                         output,
                         &call,
                         format!("unknown chained shell job {}", chained.id),
-                    );
+                    )?;
                 }
             }
             (Ok(value), Some(call)) => {
@@ -1367,31 +1400,44 @@ impl ScriptRuntime {
                                 output,
                                 &call,
                                 format!("invalid shell callback result: {message}"),
-                            );
-                            return;
+                            )?;
+                            return Ok(());
                         }
                     }
                 };
-                emit_pending_tool_result(output, &call, tau_proto::json_to_cbor(&json));
+                emit_pending_tool_result(output, &call, tau_proto::json_to_cbor(&json))?;
             }
             (Ok(_), None) => {}
-            (Err(err), Some(call)) => {
-                emit_pending_tool_error(output, &call, format!("rhai shell callback failed: {err}"))
-            }
+            (Err(err), Some(call)) => emit_pending_tool_error(
+                output,
+                &call,
+                format!("rhai shell callback failed: {err}"),
+            )?,
             (Err(err), None) => {
                 report_callback_error(output, format!("rhai shell callback failed: {err}"))
             }
         }
+        Ok(())
     }
 
-    fn emit_tool_result(&self, started: &ToolStarted, result: CborValue, output: &Output) {
+    fn emit_tool_result(
+        &self,
+        started: &ToolStarted,
+        result: CborValue,
+        output: &Output,
+    ) -> ClientResult {
         let call = pending_call_from_started(started);
-        emit_pending_tool_result(output, &call, result);
+        emit_pending_tool_result(output, &call, result)
     }
 
-    fn emit_tool_error(&self, started: &ToolStarted, message: String, output: &Output) {
+    fn emit_tool_error(
+        &self,
+        started: &ToolStarted,
+        message: String,
+        output: &Output,
+    ) -> ClientResult {
         let call = pending_call_from_started(started);
-        emit_pending_tool_error(output, &call, message);
+        emit_pending_tool_error(output, &call, message)
     }
 
     fn has_function(&self, name: &str, params: usize) -> bool {
@@ -1473,7 +1519,11 @@ fn pending_call_from_started(started: &ToolStarted) -> PendingToolCall {
     }
 }
 
-fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: CborValue) {
+fn emit_pending_tool_result(
+    output: &Output,
+    call: &PendingToolCall,
+    result: CborValue,
+) -> ClientResult {
     output.report_tool_result(ToolResult {
         presentation: Default::default(),
         call_id: call.call_id.clone(),
@@ -1484,10 +1534,14 @@ fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: Cbo
         kind: ToolResultKind::Final,
         display: None,
         originator: call.originator.clone(),
-    });
+    })
 }
 
-fn emit_pending_tool_error(output: &Output, call: &PendingToolCall, message: String) {
+fn emit_pending_tool_error(
+    output: &Output,
+    call: &PendingToolCall,
+    message: String,
+) -> ClientResult {
     output.report_tool_error(ToolError {
         presentation: Default::default(),
         call_id: call.call_id.clone(),
@@ -1497,7 +1551,7 @@ fn emit_pending_tool_error(output: &Output, call: &PendingToolCall, message: Str
         details: None,
         display: None,
         originator: call.originator.clone(),
-    });
+    })
 }
 
 fn tool_call_json(started: &ToolStarted) -> serde_json::Value {

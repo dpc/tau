@@ -31,8 +31,11 @@ and fixed completion latency.
 
 Live, non-replayed `tool.started` events whose tool name matches a registered Rhai tool are consumed by the tool dispatcher and not forwarded to raw `on_event`. Replayed owned starts are ignored. Current `ToolStarted` events do not carry provider/extension owner identity, so ownership is inferred from the harness-routed tool name; duplicate provider tool names are unsupported until the protocol grows an owner field or the harness enforces a stronger invariant.
 Rust-owned pending tool and shell completion paths submit transient typed
-terminal reports; the generic script `emit` function remains wire-mechanical and
-does not rewrite event names.
+terminal reports through checked ordered output. Interception replies use the
+same checked path. An output failure terminates the runtime loop so connection
+cleanup can settle the retained interception or tool call. The generic script
+`emit` function remains wire-mechanical and best effort, and does not rewrite
+event names.
 
 `register_tool` currently has no validated `ToolTag` input. Rhai tools therefore
 register without tags and do not match tag-based role or model policy. This is a
