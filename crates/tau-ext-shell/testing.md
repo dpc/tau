@@ -103,7 +103,12 @@ XDG/legacy precedence, collisions through `tau-skills`, supported symlink forms,
 and canonical-directory cycle detection.
 Protocol coverage feeds deterministic complete session and correlated per-agent
 skill/AGENTS.md snapshots and asserts `persist=false` metadata plus
-snapshot-before-context-before-readiness ordering.
+snapshot-before-context-before-readiness ordering. It also covers rapid
+multi-agent initialization, session-only collision diagnostics, and checked
+mandatory-output failure escaping dispatch so connection teardown can release
+waiters. Tau-client tests independently saturate the detached FIFO and prove
+checked synchronous output remains ordered and cannot starve behind continuous
+optional output.
 Harness test-provider fixtures use the `echo-agent`-gated empty discovery policy;
 their child-process regression poisons `HOME` with a user skill and verifies the
 fixture does not discover it. Production extension runners always use environment

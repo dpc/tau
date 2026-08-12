@@ -225,14 +225,14 @@ impl ShellRuntime {
         self.runtime_started = true;
         match event {
             Event::AgentStarted(started) => {
-                apply_started_cwd_metadata(started, &self.tx, &self.cwd_state, is_replay);
+                apply_started_cwd_metadata(started, &self.tx, &self.cwd_state, is_replay)?;
             }
             Event::ToolStarted(invoke) => {
                 let local_tool_name = invoke.tool_name.clone();
                 self.handle_tool_started(invoke, &local_tool_name, is_replay)?;
             }
             Event::SessionStarted(started) => {
-                dispatch_session_started(started, &self.tx, self.discovery_policy);
+                dispatch_session_started(started, &self.tx, self.discovery_policy)?;
             }
             Event::SessionAgentLoaded(loaded) => {
                 dispatch_session_agent_loaded(
@@ -241,16 +241,18 @@ impl ShellRuntime {
                     &self.cwd_state,
                     true,
                     self.discovery_policy,
-                );
+                )?;
             }
             Event::SessionAgentUnloaded(unloaded) => {
                 if !is_replay {
                     self.handle_session_agent_unloaded(unloaded);
                 }
             }
-            Event::AgentMetadataSet(set) => self.handle_agent_metadata_set(set, is_replay),
-            Event::AgentMetadataUnset(unset) => self.handle_agent_metadata_unset(unset, is_replay),
-            Event::AgentReplayComplete(done) => self.handle_agent_replay_complete(done),
+            Event::AgentMetadataSet(set) => self.handle_agent_metadata_set(set, is_replay)?,
+            Event::AgentMetadataUnset(unset) => {
+                self.handle_agent_metadata_unset(unset, is_replay)?
+            }
+            Event::AgentReplayComplete(done) => self.handle_agent_replay_complete(done)?,
             Event::SessionShutdown(_) => self.shutdown_session(),
             Event::StartAgentAccepted(accepted) => {
                 self.start_agent_owners
@@ -320,12 +322,16 @@ impl ShellRuntime {
             .retain(|_, agent_id| agent_id != &unloaded.agent_id);
     }
 
-    fn handle_agent_metadata_set(&mut self, set: tau_proto::AgentMetadataSet, is_replay: bool) {
+    fn handle_agent_metadata_set(
+        &mut self,
+        set: tau_proto::AgentMetadataSet,
+        is_replay: bool,
+    ) -> tau_client::ClientResult<()> {
         if set.key != self.cwd_state.key() {
-            return;
+            return Ok(());
         }
         if self.cwd_state.is_replay_failed(&set.agent_id) {
-            return;
+            return Ok(());
         }
         if let CborValue::Text(path) = set.value {
             self.handle_text_cwd_metadata_set(
@@ -333,9 +339,9 @@ impl ShellRuntime {
                 PathBuf::from(path),
                 set.mutation_id.as_ref(),
                 is_replay,
-            );
+            )
         } else {
-            self.handle_invalid_cwd_metadata_set(set.agent_id, set.mutation_id.as_ref(), is_replay);
+            self.handle_invalid_cwd_metadata_set(set.agent_id, set.mutation_id.as_ref(), is_replay)
         }
     }
 
@@ -345,27 +351,25 @@ impl ShellRuntime {
         cwd: PathBuf,
         mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
         is_replay: bool,
-    ) {
+    ) -> tau_client::ClientResult<()> {
         if !self
             .cwd_state
             .set_metadata_text(agent_id.clone(), cwd.clone())
         {
-            self.handle_invalid_cwd_metadata_set(agent_id, mutation_id, is_replay);
-            return;
+            return self.handle_invalid_cwd_metadata_set(agent_id, mutation_id, is_replay);
         }
         if is_replay {
-            return;
+            return Ok(());
         }
         if let Some((session_id, initialization_id)) = self.cwd_state.initialization(&agent_id) {
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit_transient(cwd_context_event(
+            self.tx
+                .send_checked(HarnessInputMessage::emit_transient(cwd_context_event(
                     session_id,
                     agent_id.clone(),
                     initialization_id,
                     &cwd,
                     &self.cwd_state,
-                )));
+                )))?;
         }
         let pending_workdir =
             self.cwd_state
@@ -377,7 +381,7 @@ impl ShellRuntime {
             )));
         }
         self.complete_pending_workdir_after_text_metadata(pending_workdir, &cwd);
-        self.publish_ready_if_pending(agent_id);
+        self.publish_ready_if_pending(agent_id)
     }
 
     fn complete_pending_workdir_after_text_metadata(
@@ -433,20 +437,20 @@ impl ShellRuntime {
         agent_id: tau_proto::AgentId,
         mutation_id: Option<&tau_proto::AgentMetadataMutationId>,
         is_replay: bool,
-    ) {
+    ) -> tau_client::ClientResult<()> {
         self.cwd_state.set_invalid(agent_id.clone());
         if is_replay {
-            return;
+            return Ok(());
         }
         if let Some((session_id, initialization_id)) = self.cwd_state.initialization(&agent_id) {
-            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+            self.tx.send_checked(HarnessInputMessage::emit_transient(
                 invalid_cwd_context_event(
                     session_id,
                     agent_id.clone(),
                     initialization_id,
                     &self.cwd_state,
                 ),
-            ));
+            ))?;
         }
         if let Some(pending) = self
             .cwd_state
@@ -457,26 +461,26 @@ impl ShellRuntime {
                 "committed workdir metadata is malformed; workdir setter was superseded",
             );
         }
-        self.publish_ready_if_pending(agent_id);
+        self.publish_ready_if_pending(agent_id)
     }
 
     fn handle_agent_metadata_unset(
         &mut self,
         unset: tau_proto::AgentMetadataUnset,
         is_replay: bool,
-    ) {
+    ) -> tau_client::ClientResult<()> {
         if unset.key != self.cwd_state.key() {
-            return;
+            return Ok(());
         }
         if self.cwd_state.is_replay_failed(&unset.agent_id) {
-            return;
+            return Ok(());
         }
         self.cwd_state.unset(&unset.agent_id);
         if is_replay {
-            return;
+            return Ok(());
         }
         if let Ok(cwd) = self.cwd_state.process_default() {
-            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+            self.tx.send_checked(HarnessInputMessage::emit_transient(
                 Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                     agent_id: unset.agent_id,
                     key: self.cwd_state.key(),
@@ -484,8 +488,9 @@ impl ShellRuntime {
                     mutation_id: None,
                     inheritable: true,
                 }),
-            ));
+            ))?;
         }
+        Ok(())
     }
 
     fn send_pending_workdir_error(
@@ -515,24 +520,31 @@ impl ShellRuntime {
         let _ = self.tx.report_tool_terminal(event);
     }
 
-    fn publish_ready_if_pending(&self, agent_id: tau_proto::AgentId) {
+    fn publish_ready_if_pending(
+        &self,
+        agent_id: tau_proto::AgentId,
+    ) -> tau_client::ClientResult<()> {
         if let Some((session_id, agent_initialization_id)) =
             self.cwd_state.take_pending_ready(&agent_id)
         {
-            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+            self.tx.send_checked(HarnessInputMessage::emit_transient(
                 Event::ExtensionContextReady(ExtensionContextReady {
                     session_id,
                     agent_id,
                     agent_initialization_id,
                 }),
-            ));
+            ))?;
         }
+        Ok(())
     }
 
-    fn handle_agent_replay_complete(&self, done: tau_proto::AgentReplayComplete) {
+    fn handle_agent_replay_complete(
+        &self,
+        done: tau_proto::AgentReplayComplete,
+    ) -> tau_client::ClientResult<()> {
         let Some((session_id, initialization_id)) = self.cwd_state.pending_ready(&done.agent_id)
         else {
-            return;
+            return Ok(());
         };
         publish_agent_discovery_snapshot_for(
             session_id.clone(),
@@ -540,42 +552,39 @@ impl ShellRuntime {
             initialization_id.clone(),
             &self.tx,
             self.discovery_policy,
-        );
+        )?;
         if done.error.is_some() {
             self.cwd_state.take_pending_ready(&done.agent_id);
             self.cwd_state.set_replay_failed(done.agent_id);
-            return;
+            return Ok(());
         }
         if let Some(cwd) = self.cwd_state.get(&done.agent_id) {
-            let _ = self
-                .tx
-                .send(HarnessInputMessage::emit_transient(cwd_context_event(
+            self.tx
+                .send_checked(HarnessInputMessage::emit_transient(cwd_context_event(
                     session_id.clone(),
                     done.agent_id.clone(),
                     initialization_id.clone(),
                     &cwd,
                     &self.cwd_state,
-                )));
-            self.publish_ready_if_pending(done.agent_id);
-            return;
+                )))?;
+            return self.publish_ready_if_pending(done.agent_id);
         }
         if self.cwd_state.is_invalid(&done.agent_id) {
-            let _ = self.tx.send(HarnessInputMessage::emit_transient(
+            self.tx.send_checked(HarnessInputMessage::emit_transient(
                 invalid_cwd_context_event(
                     session_id.clone(),
                     done.agent_id.clone(),
                     initialization_id.clone(),
                     &self.cwd_state,
                 ),
-            ));
-            self.publish_ready_if_pending(done.agent_id);
-            return;
+            ))?;
+            return self.publish_ready_if_pending(done.agent_id);
         }
         let Ok(cwd) = self.cwd_state.process_default() else {
             self.cwd_state.take_pending_ready(&done.agent_id);
-            return;
+            return Ok(());
         };
-        let _ = self.tx.send(HarnessInputMessage::emit_transient(
+        self.tx.send_checked(HarnessInputMessage::emit_transient(
             Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                 agent_id: done.agent_id.clone(),
                 key: self.cwd_state.key(),
@@ -583,9 +592,10 @@ impl ShellRuntime {
                 mutation_id: None,
                 inheritable: true,
             }),
-        ));
+        ))?;
         self.cwd_state
             .set_pending_ready(done.agent_id, session_id, initialization_id);
+        Ok(())
     }
 
     fn shutdown_session(&mut self) {

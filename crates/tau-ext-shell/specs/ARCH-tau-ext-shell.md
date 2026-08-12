@@ -62,10 +62,13 @@ session/agent lifecycle cleanup, directory-lock scheduling, tool cancellation,
 and `StartAgentResult` correlation are owned by `ShellRuntime`.
 
 Worker and scheduler output goes through a shell-local `Output` adapter backed
-by `ClientHandle::send_detached` in production. This preserves the historical
-enqueue-to-writer behavior: worker threads do not block on protocol flush, while
-the tau-client writer still reports encode/flush failures during graceful
-shutdown. Configure-time tool re-registration deliberately uses synchronous
+by `ClientHandle::send_detached` in production, so optional progress and
+diagnostics do not block worker threads on protocol flush. Session and per-agent
+discovery, correlated context, prerequisite metadata, and readiness instead use
+checked ordered writes. A failure in that mandatory transaction exits the
+extension loop, allowing disconnect cleanup to release harness waiters rather
+than leaving a connected provider with missing readiness. Configure-time tool
+re-registration deliberately uses synchronous
 `register_local_tool`: tau-client buffers that declaration behind static startup
 defaults and flushes the configured override before `Ready`. Tests can use an
 mpsc-backed adapter for direct state-machine coverage.
@@ -213,6 +216,8 @@ each `session.started`. For every `session.agent_loaded`, it publishes one
 complete snapshot correlated to that load's `agent_initialization_id`, then
 correlated workdir context and readiness. Replay defers this sequence until the
 per-agent replay boundary so restored metadata wins over process defaults.
+Skill collision diagnostics belong to session discovery and are not repeated for
+per-agent snapshots.
 All discovery publications use `persist=false` metadata and the ordering required by
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 Its startup `shell.workdir` prompt-fragment event is a transient declaration that

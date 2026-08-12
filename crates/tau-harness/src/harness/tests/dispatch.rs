@@ -1174,8 +1174,9 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
     h.shutdown().expect("shutdown");
 }
 
-/// An eager initial prompt must wait for its late-installed per-agent context
-/// generation before strict shell-workdir rendering and durable submission.
+/// An eager initial prompt and multiple durable message wakes must wait for
+/// per-agent context, then coalesce into one dispatch with each message
+/// materialized exactly once.
 #[test]
 fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
     let td = TempDir::new().expect("tempdir");
@@ -1230,6 +1231,21 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
             message: "later durable message wake".to_owned(),
         }),
     );
+    h.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("context-race-message-two")
+                .expect("message id"),
+            sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
+            recipient_id: agent_id.clone(),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            message: "second durable message wake".to_owned(),
+        }),
+    );
 
     h.resolving_initial_extension_collisions = false;
     h.try_advance_queue();
@@ -1269,6 +1285,17 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(prompt.ctx_id.as_deref(), Some("prompt-context-race"));
     assert!(prompt.system_prompt.contains("/srv/context-ready"));
+    let context = serde_json::to_string(&prompt.context).expect("serialize provider context");
+    for message in ["later durable message wake", "second durable message wake"] {
+        assert_eq!(context.match_indices(message).count(), 1);
+    }
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        1
+    );
     assert!(event_log_events(&h).iter().all(|event| !matches!(
         event,
         Event::AgentPromptFailed(failed) if failed.request_id == "create-context-race"

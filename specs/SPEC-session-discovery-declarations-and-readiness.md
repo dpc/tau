@@ -43,6 +43,10 @@ selectors match `session.started`. Only matching
 `extension.session_context_ready` releases that exact wait. Registration and
 snapshot declarations settle before readiness through the ordinary FIFO
 interception boundary.
+Registered session-context providers must either publish their mandatory ordered
+discovery and readiness transaction or fail the connection so disconnect
+handling removes their wait source; successful connection handling cannot
+silently omit readiness.
 
 The harness bounds session initialization with a two-second idle deadline and a
 non-renewable thirty-second absolute deadline while registered providers remain

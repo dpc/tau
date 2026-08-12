@@ -1,4 +1,5 @@
 use std::io::{BufReader, BufWriter};
+use std::net::Shutdown;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -1538,6 +1539,67 @@ fn initial_dir_lock_override_is_final_before_ready() {
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
         .expect("Ready");
     assert!(*override_index < ready_index);
+}
+
+/// A mandatory discovery write failure on the production client adapter must
+/// escape the manual loop and terminate the extension connection.
+#[test]
+fn mandatory_discovery_write_failure_exits_production_manual_loop() {
+    let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let runtime_reader = runtime_stream.try_clone().expect("runtime reader");
+    let (done_tx, done_rx) = path_std_sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = run_impl(
+            runtime_reader,
+            runtime_stream,
+            DiscoverySourcePolicy::EmptyFixture,
+            RuntimeCwdSource::Fixture(PathBuf::from("/tmp")),
+        )
+        .map_err(|error| error.to_string());
+        let _ = done_tx.send(result);
+    });
+    let mut input = EventWriter::new(
+        harness_stream
+            .try_clone()
+            .expect("harness input writer clone"),
+    );
+    input
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            tool_prefix: None,
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("extension name"),
+            config: CborValue::Map(Vec::new()),
+            state_dir: None,
+            secrets: Default::default(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    input.flush().expect("flush configure");
+    let mut output = HarnessInputReader::new(
+        harness_stream
+            .try_clone()
+            .expect("harness output reader clone"),
+    );
+    while !matches!(
+        output.read_message().expect("startup output"),
+        Some(HarnessInputMessage::Ready(_))
+    ) {}
+
+    harness_stream
+        .shutdown(Shutdown::Read)
+        .expect("close harness output direction");
+    input
+        .write_event(&Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: tau_proto::SessionId::parse("session-write-failure").expect("session id"),
+            reason: tau_proto::SessionStartReason::New,
+        }))
+        .expect("session start");
+    input.flush().expect("flush session start");
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("extension must exit after mandatory write failure");
+    assert!(result.is_err());
 }
 
 /// Ensures the dispatch path returns a clear bounded-backpressure ToolError
@@ -3156,6 +3218,8 @@ fn configured_allowlist_publishes_effective_prompt_fragment() {
     writer.flush().expect("flush");
 }
 
+/// Agent load publishes its correlated snapshot before requesting workdir
+/// metadata and waits for the committed metadata before context readiness.
 #[test]
 fn session_agent_loaded_publishes_current_directory_context_for_agent() {
     // Agent context is the structured source used by the shell cwd prompt
@@ -3179,7 +3243,8 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         &cwd_state,
         false,
         DiscoverySourcePolicy::Environment,
-    );
+    )
+    .expect("agent load");
 
     loop {
         let message = rx.recv().expect("discovery snapshot");
@@ -3228,6 +3293,56 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
     assert_eq!(publish.value.0["path"], cwd.display().to_string());
     assert_eq!(publish.value.0["label"], "default");
     assert_eq!(publish.value.0["status"], "available");
+}
+
+/// Ensures session-only skill collision notices cannot be copied into a
+/// per-agent discovery transaction ahead of its mandatory snapshot.
+#[test]
+fn per_agent_discovery_excludes_session_collision_diagnostics() {
+    let mut diagnostics = Vec::new();
+    push_skill_diagnostic_requests(
+        &mut diagnostics,
+        vec![tau_skills::SkillDiagnostic {
+            path: PathBuf::from("collision/SKILL.md"),
+            kind: tau_skills::DiagnosticKind::Collision,
+            message: "name collision".to_owned(),
+        }],
+    );
+    let scan = DiscoveryScan {
+        snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+            session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
+            skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+        diagnostics,
+    };
+    assert_eq!(
+        scan.diagnostics.len(),
+        1,
+        "fixture must contain a collision"
+    );
+    let (tx, rx) = path_std_sync::mpsc::channel();
+    publish_agent_discovery_scan(
+        scan,
+        tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        tau_proto::AgentInitializationId::parse("init-1").expect("initialization id"),
+        &Output::channel(tx),
+    )
+    .expect("publish agent discovery");
+
+    let message = rx.recv().expect("agent snapshot");
+    let HarnessInputMessage::Emit(emit) = message else {
+        panic!("agent discovery must be one emitted event");
+    };
+    assert!(matches!(
+        emit.event.as_ref(),
+        Event::ExtensionAgentDiscoverySnapshotDeclared(event)
+            if event.agent_id.as_str() == "agent-1"
+    ));
+    assert!(
+        rx.try_recv().is_err(),
+        "per-agent publication must not emit session diagnostics"
+    );
 }
 
 #[test]

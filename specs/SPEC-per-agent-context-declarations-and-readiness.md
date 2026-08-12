@@ -45,6 +45,9 @@ an initialization.
 The single interception queue preserves declaration-before-readiness order.
 Pre-Ready registrations, context values, and discovery snapshots use bounded
 activation reservations; readiness remains operational traffic behind activation.
+The publishing extension must propagate failure of any mandatory correlated
+snapshot, prerequisite metadata, context, or readiness write to its connection
+lifecycle so disconnect cleanup can release the wait.
 
 All raw events default to `persist=false`, remain excluded from semantic journals,
 and have no cold or historical replay. The durable initialization replacement and

@@ -68,20 +68,26 @@ use crate::tools::{
 
 /// Cloneable shell output adapter.
 ///
-/// Production output uses tau-client's writer thread and detached enqueue
-/// semantics to match the old unbounded response-channel behavior: shell worker
-/// threads should not block on protocol flush. Tests can still use an
+/// Production optional worker, progress, and diagnostic output uses
+/// tau-client's detached enqueue path so shell workers do not block on protocol
+/// flush. Mandatory discovery, context, prerequisite metadata, and readiness
+/// output uses the checked path and waits for writer flush. Tests can use an
 /// mpsc-backed adapter for direct state-machine coverage.
 #[derive(Clone)]
 pub(crate) struct Output {
+    /// Production client or test channel receiving output frames.
     inner: OutputInner,
+    /// Optional local-to-wire tool-name mapping for one scoped invocation.
     tool_name_scope: Option<(tau_proto::ToolName, tau_proto::ToolName)>,
 }
 
+/// Backend used by [`Output`] to publish protocol frames.
 #[derive(Clone)]
 enum OutputInner {
+    /// Production tau-client writer handle.
     Client(tau_client::ClientHandle),
     #[cfg(test)]
+    /// Direct unit-test channel.
     Channel(mpsc::Sender<HarnessInputMessage>),
 }
 
@@ -117,7 +123,30 @@ impl Output {
     }
 
     fn send(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
-        if let HarnessInputMessage::Emit(emit) = &mut message {
+        self.scope_message(&mut message);
+        match &self.inner {
+            OutputInner::Client(handle) => handle.send_detached(message),
+            #[cfg(test)]
+            OutputInner::Channel(tx) => tx
+                .send(message)
+                .map_err(|_| tau_client::ClientError::WriterClosed),
+        }
+    }
+
+    /// Sends mandatory lifecycle traffic in order and waits for writer flush.
+    fn send_checked(&self, mut message: HarnessInputMessage) -> tau_client::ClientResult<()> {
+        self.scope_message(&mut message);
+        match &self.inner {
+            OutputInner::Client(handle) => handle.send(message),
+            #[cfg(test)]
+            OutputInner::Channel(tx) => tx
+                .send(message)
+                .map_err(|_| tau_client::ClientError::WriterClosed),
+        }
+    }
+
+    fn scope_message(&self, message: &mut HarnessInputMessage) {
+        if let HarnessInputMessage::Emit(emit) = message {
             let tool_name = match emit.event.as_mut() {
                 Event::ToolProgressReported(event) => Some(&mut event.tool_name),
                 Event::ToolResultReported(event) => Some(&mut event.tool_name),
@@ -131,13 +160,6 @@ impl Output {
             if let Some(tool_name) = tool_name {
                 self.scope_tool_name(tool_name);
             }
-        }
-        match &self.inner {
-            OutputInner::Client(handle) => handle.send_detached(message),
-            #[cfg(test)]
-            OutputInner::Channel(tx) => tx
-                .send(message)
-                .map_err(|_| tau_client::ClientError::WriterClosed),
         }
     }
 
@@ -230,6 +252,15 @@ enum RuntimeCwdSource {
     Process,
     #[cfg(any(test, feature = "echo-agent"))]
     Fixture(PathBuf),
+}
+
+/// One discovery pass split into mandatory state and optional session-only
+/// diagnostics.
+struct DiscoveryScan {
+    /// Complete discovery state published for the session or one agent.
+    snapshot: ExtensionSessionDiscoverySnapshotDeclared,
+    /// Best-effort diagnostic notices published only during session discovery.
+    diagnostics: Vec<HarnessInputMessage>,
 }
 
 /// Runs the extension on stdin/stdout.
@@ -2286,13 +2317,19 @@ fn dispatch_session_started(
     started: SessionStarted,
     tx: &Output,
     discovery_policy: DiscoverySourcePolicy,
-) {
+) -> tau_client::ClientResult<()> {
     let session_id = started.session_id.clone();
+    let scan = build_discovery_snapshot(started, discovery_policy);
+    for diagnostic in scan.diagnostics {
+        let _ = tx.send(diagnostic);
+    }
     dispatch_session_discovery_messages(
         session_id,
-        build_session_started_messages(started, discovery_policy),
+        vec![HarnessInputMessage::emit_transient(
+            Event::ExtensionSessionDiscoverySnapshotDeclared(scan.snapshot),
+        )],
         tx,
-    );
+    )
 }
 
 /// Publish one ordered session-discovery batch followed by its readiness
@@ -2301,13 +2338,13 @@ fn dispatch_session_discovery_messages(
     session_id: tau_proto::SessionId,
     messages: Vec<HarnessInputMessage>,
     tx: &Output,
-) {
+) -> tau_client::ClientResult<()> {
     for message in messages {
-        let _ = tx.send(message);
+        tx.send_checked(message)?;
     }
-    let _ = tx.send(HarnessInputMessage::emit_transient(
+    tx.send_checked(HarnessInputMessage::emit_transient(
         Event::ExtensionSessionContextReady(ExtensionSessionContextReady { session_id }),
-    ));
+    ))
 }
 
 fn apply_started_cwd_metadata(
@@ -2315,7 +2352,7 @@ fn apply_started_cwd_metadata(
     tx: &Output,
     cwd_state: &CwdState,
     is_replay: bool,
-) {
+) -> tau_client::ClientResult<()> {
     for item in started.metadata {
         if item.key == cwd_state.key() {
             if let CborValue::Text(path) = item.value {
@@ -2325,19 +2362,20 @@ fn apply_started_cwd_metadata(
                     && let Some((session_id, initialization_id)) =
                         cwd_state.initialization(&started.agent_id)
                 {
-                    let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
+                    tx.send_checked(HarnessInputMessage::emit_transient(cwd_context_event(
                         session_id,
                         started.agent_id.clone(),
                         initialization_id,
                         &cwd,
                         cwd_state,
-                    )));
+                    )))?;
                 }
             } else {
                 cwd_state.set_invalid(started.agent_id.clone());
             }
         }
     }
+    Ok(())
 }
 
 fn dispatch_session_agent_loaded(
@@ -2346,32 +2384,32 @@ fn dispatch_session_agent_loaded(
     cwd_state: &CwdState,
     defer_default_until_replay_complete: bool,
     discovery_policy: DiscoverySourcePolicy,
-) {
+) -> tau_client::ClientResult<()> {
     if defer_default_until_replay_complete {
         cwd_state.set_pending_ready(
             loaded.agent_id,
             loaded.session_id,
             loaded.agent_initialization_id,
         );
-        return;
+        return Ok(());
     }
-    publish_agent_discovery_snapshot(&loaded, tx, discovery_policy);
+    publish_agent_discovery_snapshot(&loaded, tx, discovery_policy)?;
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
-        let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
+        tx.send_checked(HarnessInputMessage::emit_transient(cwd_context_event(
             loaded.session_id.clone(),
             loaded.agent_id.clone(),
             loaded.agent_initialization_id.clone(),
             &cwd,
             cwd_state,
-        )));
-        let _ = tx.send(HarnessInputMessage::emit_transient(
+        )))?;
+        tx.send_checked(HarnessInputMessage::emit_transient(
             Event::ExtensionContextReady(ExtensionContextReady {
                 session_id: loaded.session_id,
                 agent_id: loaded.agent_id,
                 agent_initialization_id: loaded.agent_initialization_id,
             }),
-        ));
-        return;
+        ))?;
+        return Ok(());
     }
 
     cwd_state.set_pending_ready(
@@ -2380,9 +2418,9 @@ fn dispatch_session_agent_loaded(
         loaded.agent_initialization_id,
     );
     let Ok(cwd) = cwd_state.process_default() else {
-        return;
+        return Ok(());
     };
-    let _ = tx.send(HarnessInputMessage::emit_transient(
+    tx.send_checked(HarnessInputMessage::emit_transient(
         Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
             agent_id: loaded.agent_id,
             key: cwd_state.key(),
@@ -2390,7 +2428,7 @@ fn dispatch_session_agent_loaded(
             mutation_id: None,
             inheritable: true,
         }),
-    ));
+    ))
 }
 
 fn cwd_context_event(
@@ -2497,16 +2535,15 @@ fn is_echo_tool(_name: &str) -> bool {
     false
 }
 
-fn build_session_started_messages(
+fn build_discovery_snapshot(
     _started: SessionStarted,
     discovery_policy: DiscoverySourcePolicy,
-) -> Vec<HarnessInputMessage> {
-    let mut messages = Vec::new();
-
+) -> DiscoveryScan {
+    let mut diagnostics = Vec::new();
     let (skills, agents_files) = if discovery_policy.reads_environment() {
         let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
         let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
-        push_skill_diagnostic_requests(&mut messages, result.diagnostics);
+        push_skill_diagnostic_requests(&mut diagnostics, result.diagnostics);
         let skills = result
             .skills
             .into_iter()
@@ -2523,17 +2560,14 @@ fn build_session_started_messages(
     } else {
         (Vec::new(), Vec::new())
     };
-    messages.push(HarnessInputMessage::emit_transient(
-        Event::ExtensionSessionDiscoverySnapshotDeclared(
-            ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: _started.session_id,
-                skills,
-                agents_files,
-            },
-        ),
-    ));
-
-    messages
+    DiscoveryScan {
+        snapshot: ExtensionSessionDiscoverySnapshotDeclared {
+            session_id: _started.session_id,
+            skills,
+            agents_files,
+        },
+        diagnostics,
+    }
 }
 
 fn discovery_skill_candidate(skill: tau_skills::Skill) -> DiscoverySkillCandidate {
@@ -2570,14 +2604,14 @@ fn publish_agent_discovery_snapshot(
     loaded: &SessionAgentLoaded,
     tx: &Output,
     discovery_policy: DiscoverySourcePolicy,
-) {
+) -> tau_client::ClientResult<()> {
     publish_agent_discovery_snapshot_for(
         loaded.session_id.clone(),
         loaded.agent_id.clone(),
         loaded.agent_initialization_id.clone(),
         tx,
         discovery_policy,
-    );
+    )
 }
 
 fn publish_agent_discovery_snapshot_for(
@@ -2586,36 +2620,48 @@ fn publish_agent_discovery_snapshot_for(
     agent_initialization_id: tau_proto::AgentInitializationId,
     tx: &Output,
     discovery_policy: DiscoverySourcePolicy,
-) {
+) -> tau_client::ClientResult<()> {
     let session = SessionStarted {
         session_id: session_id.clone(),
         reason: tau_proto::SessionStartReason::Resume,
     };
-    let messages = build_session_started_messages(session, discovery_policy);
-    for message in messages {
-        match message {
-            HarnessInputMessage::Emit(emit) => {
-                if let Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot) = *emit.event {
-                    let _ = tx.send(HarnessInputMessage::emit_transient(
-                        Event::ExtensionAgentDiscoverySnapshotDeclared(
-                            ExtensionAgentDiscoverySnapshotDeclared {
-                                session_id: session_id.clone(),
-                                agent_id: agent_id.clone(),
-                                agent_initialization_id: agent_initialization_id.clone(),
-                                skills: snapshot.skills,
-                                agents_files: snapshot.agents_files,
-                            },
-                        ),
-                    ));
-                } else {
-                    let _ = tx.send(HarnessInputMessage::Emit(emit));
-                }
-            }
-            other => {
-                let _ = tx.send(other);
-            }
-        }
-    }
+    publish_agent_discovery_scan(
+        build_discovery_snapshot(session, discovery_policy),
+        agent_id,
+        agent_initialization_id,
+        tx,
+    )
+}
+
+/// Publishes only the mandatory snapshot from one per-agent discovery scan.
+fn publish_agent_discovery_scan(
+    scan: DiscoveryScan,
+    agent_id: tau_proto::AgentId,
+    agent_initialization_id: tau_proto::AgentInitializationId,
+    tx: &Output,
+) -> tau_client::ClientResult<()> {
+    tx.send_checked(agent_discovery_message(
+        scan.snapshot,
+        agent_id,
+        agent_initialization_id,
+    ))
+}
+
+/// Converts session discovery data into one correlated per-agent declaration.
+fn agent_discovery_message(
+    snapshot: ExtensionSessionDiscoverySnapshotDeclared,
+    agent_id: tau_proto::AgentId,
+    agent_initialization_id: tau_proto::AgentInitializationId,
+) -> HarnessInputMessage {
+    HarnessInputMessage::emit_transient(Event::ExtensionAgentDiscoverySnapshotDeclared(
+        ExtensionAgentDiscoverySnapshotDeclared {
+            session_id: snapshot.session_id,
+            agent_id,
+            agent_initialization_id,
+            skills: snapshot.skills,
+            agents_files: snapshot.agents_files,
+        },
+    ))
 }
 
 fn shell_workdir_prompt_fragment(shell: &config::ShellConfig) -> PromptFragment {

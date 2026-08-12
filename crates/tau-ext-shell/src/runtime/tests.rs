@@ -935,16 +935,18 @@ fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
     runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
         target_call_id: invoke.call_id.clone(),
     });
-    runtime.handle_agent_metadata_set(
-        tau_proto::AgentMetadataSet {
-            agent_id,
-            key: runtime.cwd_state.key(),
-            value: CborValue::Text("/tmp".to_owned()),
-            mutation_id: Some(mutation_id),
-            inheritable: true,
-        },
-        false,
-    );
+    runtime
+        .handle_agent_metadata_set(
+            tau_proto::AgentMetadataSet {
+                agent_id,
+                key: runtime.cwd_state.key(),
+                value: CborValue::Text("/tmp".to_owned()),
+                mutation_id: Some(mutation_id),
+                inheritable: true,
+            },
+            false,
+        )
+        .expect("metadata commit");
     let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(
         events
@@ -985,4 +987,100 @@ fn session_shutdown_keeps_scheduler_for_later_sessions() {
         .expect("session shutdown");
 
     assert!(runtime.scheduler.is_some());
+}
+
+/// Proves rapid per-agent initialization publishes each mandatory transaction
+/// once and in snapshot, context, ready order.
+#[test]
+fn rapid_agent_initialization_publishes_complete_ordered_transactions() {
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::EmptyFixture,
+    );
+    let session_id = tau_proto::SessionId::parse("session-rapid").expect("session id");
+
+    for index in 0..4 {
+        let agent_id = tau_proto::AgentId::parse(format!("agent-{index}")).expect("agent id");
+        runtime
+            .cwd_state
+            .set_metadata_text(agent_id.clone(), PathBuf::from("/tmp"));
+        runtime
+            .handle_event(
+                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
+                        "init-{index}"
+                    ))
+                    .expect("initialization id"),
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    ephemeral: false,
+                }),
+                false,
+            )
+            .expect("agent load");
+        runtime
+            .handle_event(
+                Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+                    agent_id,
+                    session_id: Some(session_id.clone()),
+                    error: None,
+                }),
+                false,
+            )
+            .expect("replay completion");
+    }
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|message| match message {
+            HarnessInputMessage::Emit(emit) => Some(*emit.event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for index in 0..4 {
+        let agent_id = format!("agent-{index}");
+        let sequence = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ExtensionAgentDiscoverySnapshotDeclared(event)
+                    if event.agent_id.as_str() == agent_id =>
+                {
+                    Some("snapshot")
+                }
+                Event::ExtAgentContextPublish(event) if event.agent_id.as_str() == agent_id => {
+                    Some("context")
+                }
+                Event::ExtensionContextReady(event) if event.agent_id.as_str() == agent_id => {
+                    Some("ready")
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequence, ["snapshot", "context", "ready"]);
+    }
+}
+
+/// Proves a mandatory initialization write failure escapes event dispatch so
+/// the manual extension loop can terminate the connection and release waiters.
+#[test]
+fn initialization_output_failure_fails_event_dispatch() {
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+    let mut runtime = ShellRuntime::new(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::EmptyFixture,
+    );
+
+    let error = runtime
+        .handle_event(
+            Event::SessionStarted(tau_proto::SessionStarted {
+                session_id: tau_proto::SessionId::parse("session-failure").expect("session id"),
+                reason: tau_proto::SessionStartReason::New,
+            }),
+            false,
+        )
+        .expect_err("mandatory output failure must fail dispatch");
+    assert!(matches!(error, tau_client::ClientError::WriterClosed));
 }
