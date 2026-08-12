@@ -761,7 +761,7 @@ fn merge_sparse_quota_window(
 }
 
 /// Default number of provider prompts allowed to execute concurrently.
-const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
+const DEFAULT_PROMPT_CONCURRENCY: usize = 8;
 
 /// Environment override for prompt execution concurrency.
 const PROMPT_CONCURRENCY_ENV: &str = "TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY";

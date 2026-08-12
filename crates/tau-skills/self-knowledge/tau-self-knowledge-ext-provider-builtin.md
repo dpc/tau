@@ -345,7 +345,7 @@ five-minute idle watchdog. The timer resets on each provider frame and is not an
 absolute turn-duration cap. If upstream stalls, Tau aborts that finite attempt,
 clears tentative output, and parks the logical prompt for another attempt.
 
-Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures. Trusted later `Retry-After` and reset hints remain lower bounds except for usage-window reset estimates: users or providers may restore access early, so Tau keeps probing at the bounded persistent-failure cadence instead of sleeping until the reported reset. Retry state exists only for the running process/session and is not replayed after cold restart.
+Prompt execution concurrency defaults to 8 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Retry delays release those worker slots for every prompt origin. Policy-generated jittered delays reach about one minute for transient failures and at most about thirty minutes for persistent failures. Trusted later `Retry-After` and reset hints remain lower bounds except for usage-window reset estimates: users or providers may restore access early, so Tau keeps probing at the bounded persistent-failure cadence instead of sleeping until the reported reset. Retry state exists only for the running process/session and is not replayed after cold restart.
 
 
 Provider response streaming note: built-in providers submit explicit transient

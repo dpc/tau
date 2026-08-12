@@ -8,6 +8,13 @@ mod compatibility;
 
 use super::*;
 
+/// Pins the production prompt-worker default so ordinary provider instances
+/// admit eight prompt jobs without an environment override.
+#[test]
+fn provider_prompt_concurrency_defaults_to_eight() {
+    assert_eq!(DEFAULT_PROMPT_CONCURRENCY, 8);
+}
+
 /// Proves conflicting add source flags fail before any interactive or
 /// credential-producing work.
 #[test]
