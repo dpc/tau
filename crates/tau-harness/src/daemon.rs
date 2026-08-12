@@ -807,6 +807,7 @@ pub fn run_daemon_with_internal_tools(
         },
         &mut initial_client_error_stream,
     )?;
+    // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(initial_client_id.is_none());
 
     let tx = harness.tx.clone();

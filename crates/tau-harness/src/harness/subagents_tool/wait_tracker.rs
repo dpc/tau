@@ -273,7 +273,9 @@ impl Default for WaitTracker {
 impl WaitTracker {
     /// Creates a wait tracker with validated inclusive activating-input bounds.
     pub(super) fn with_input_wait_timeout_bounds(input_wait_timeout_bounds: (u64, u64)) -> Self {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(0 < input_wait_timeout_bounds.0);
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(input_wait_timeout_bounds.0 <= input_wait_timeout_bounds.1);
         Self {
             input_wait_timeout_bounds,
@@ -1670,6 +1672,7 @@ impl WaitTracker {
     }
 
     fn record_terminal_state(&mut self, call_id: ToolCallId, state: WaitCallState) {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(matches!(
             state,
             WaitCallState::NormalReturned | WaitCallState::Consumed

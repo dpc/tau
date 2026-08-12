@@ -1,0 +1,26 @@
+id: debug-assert-expression-must-not-mutate
+valid:
+  - debug_assert_eq!(actual, expected);
+  - debug_assert_ne!(actual, expected);
+  - my_debug_assert!(condition);
+  - debug_assertion!(condition);
+  - |
+      wrapper! {
+          debug_assert!(condition);
+      }
+  - stringify!(debug_assert!(condition));
+  - |
+      macro_rules! wrapper {
+          () => { debug_assert!(condition); };
+      }
+invalid:
+  - debug_assert!(condition);
+  - core::debug_assert!(condition);
+  - ::std::debug_assert!(condition);
+  - r#debug_assert!(condition);
+  - std::r#debug_assert!(condition);
+  - "std /* Preserve comments inside the macro path. */ :: debug_assert!(condition);"
+  - |
+      debug_assert!(
+          condition
+      );

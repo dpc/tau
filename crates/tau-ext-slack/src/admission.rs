@@ -140,6 +140,7 @@ impl<T> Drop for Reservation<T> {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(state.outstanding > 0);
             state.outstanding -= 1;
         }
@@ -161,6 +162,7 @@ impl<T> Drop for OutstandingPermit<T> {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(state.outstanding > 0);
         state.outstanding -= 1;
     }

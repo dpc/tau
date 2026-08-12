@@ -134,6 +134,7 @@ impl XmppBridge for FakeBridge {
         if *ready {
             Ok(())
         } else {
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(result.timed_out());
             Err(format!(
                 "xmpp connection did not become online within {}s; retry after the account connects",

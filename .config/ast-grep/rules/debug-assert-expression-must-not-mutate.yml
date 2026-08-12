@@ -1,0 +1,20 @@
+id: debug-assert-expression-must-not-mutate
+language: Rust
+severity: error
+message: >-
+  A debug_assert! expression must not mutate state because release builds do not
+  evaluate it. Acknowledge this at each invocation with
+  `// ast-grep-ignore: debug-assert-expression-must-not-mutate` on the
+  immediately preceding line.
+rule:
+  kind: macro_invocation
+  has:
+    field: macro
+    any:
+      - kind: identifier
+        regex: '^(?:r#)?debug_assert$'
+      - kind: scoped_identifier
+        has:
+          field: name
+          kind: identifier
+          regex: '^(?:r#)?debug_assert$'

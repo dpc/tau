@@ -1,0 +1,94 @@
+id: debug-assert-expression-must-not-mutate
+snapshots:
+  ::std::debug_assert!(condition);:
+    labels:
+    - source: ::std::debug_assert!(condition)
+      style: primary
+      start: 0
+      end: 31
+    - source: debug_assert
+      style: secondary
+      start: 7
+      end: 19
+    - source: ::std::debug_assert
+      style: secondary
+      start: 0
+      end: 19
+  core::debug_assert!(condition);:
+    labels:
+    - source: core::debug_assert!(condition)
+      style: primary
+      start: 0
+      end: 30
+    - source: debug_assert
+      style: secondary
+      start: 6
+      end: 18
+    - source: core::debug_assert
+      style: secondary
+      start: 0
+      end: 18
+  ? |
+    debug_assert!(
+        condition
+    );
+  : labels:
+    - source: |-
+        debug_assert!(
+            condition
+        )
+      style: primary
+      start: 0
+      end: 30
+    - source: debug_assert
+      style: secondary
+      start: 0
+      end: 12
+  debug_assert!(condition);:
+    labels:
+    - source: debug_assert!(condition)
+      style: primary
+      start: 0
+      end: 24
+    - source: debug_assert
+      style: secondary
+      start: 0
+      end: 12
+  r#debug_assert!(condition);:
+    labels:
+    - source: r#debug_assert!(condition)
+      style: primary
+      start: 0
+      end: 26
+    - source: r#debug_assert
+      style: secondary
+      start: 0
+      end: 14
+  'std /* Preserve comments inside the macro path. */ :: debug_assert!(condition);':
+    labels:
+    - source: 'std /* Preserve comments inside the macro path. */ :: debug_assert!(condition)'
+      style: primary
+      start: 0
+      end: 78
+    - source: debug_assert
+      style: secondary
+      start: 54
+      end: 66
+    - source: 'std /* Preserve comments inside the macro path. */ :: debug_assert'
+      style: secondary
+      start: 0
+      end: 66
+  std::r#debug_assert!(condition);:
+    labels:
+    - source: std::r#debug_assert!(condition)
+      style: primary
+      start: 0
+      end: 31
+    - source: r#debug_assert
+      style: secondary
+      start: 5
+      end: 19
+    - source: std::r#debug_assert
+      style: secondary
+      start: 0
+      end: 19

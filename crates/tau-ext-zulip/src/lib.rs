@@ -300,6 +300,7 @@ impl Output {
     }
 
     fn emit_message_report(&self, event: Event) -> bool {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(event.is_message_report());
         self.send(HarnessInputMessage::emit_with_persist(event, false))
     }

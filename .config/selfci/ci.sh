@@ -11,6 +11,9 @@ function job_lint() {
   if ! ast-grep scan --error --config sgconfig.yml; then
     selfci step fail
   fi
+  if ! .config/ast-grep/test-debug-assert-acknowledgments.sh; then
+    selfci step fail
+  fi
   if ! .config/ast-grep/test-path-filters.sh; then
     selfci step fail
   fi

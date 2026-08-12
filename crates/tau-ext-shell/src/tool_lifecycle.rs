@@ -329,6 +329,7 @@ impl ToolLifecycle {
                     true
                 }
                 State::EffectStarted { .. } => {
+                    // ast-grep-ignore: debug-assert-expression-must-not-mutate
                     debug_assert!(false, "pre-effect terminal claimed after effect start");
                     false
                 }

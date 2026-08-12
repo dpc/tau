@@ -675,6 +675,7 @@ impl Extension {
             let remembered = state
                 .reactions
                 .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight);
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(remembered);
             state.config_frozen = true;
             PreparedReaction {
@@ -793,6 +794,7 @@ impl Extension {
                 let remembered = state
                     .reactions
                     .remember_attempt(&invoke, ReactionAttemptDisposition::Success(result));
+                // ast-grep-ignore: debug-assert-expression-must-not-mutate
                 debug_assert!(remembered);
             }
         }

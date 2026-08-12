@@ -169,6 +169,7 @@ impl Output {
     /// Emit one transient external-message report for downstream
     /// canonicalization.
     fn emit_message_report(&self, event: Event) {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(event.is_message_report());
         self.send(HarnessInputMessage::emit_with_persist(event, false));
     }

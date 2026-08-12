@@ -4299,7 +4299,9 @@ async fn socket_worker_once_with_heartbeat(
     connection_generation: u64,
     heartbeat: SocketHeartbeat,
 ) -> Result<WorkerOutcome, String> {
+    // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(!heartbeat.ping_interval.is_zero());
+    // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(heartbeat.ping_interval < heartbeat.pong_timeout);
     let _online_guard = WorkerOnlineGuard {
         state: ext.state.as_ref(),

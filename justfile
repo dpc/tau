@@ -71,6 +71,7 @@ test: build
 # scan the project with ast-grep rules
 ast-grep *ARGS="":
   ast-grep scan --config sgconfig.yml {{ARGS}}
+  .config/ast-grep/test-debug-assert-acknowledgments.sh
 
 
 # run `cargo clippy` on everything

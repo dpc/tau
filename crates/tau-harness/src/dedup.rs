@@ -137,6 +137,7 @@ impl ResultDedupMap {
     /// debug-assertion-only panic so production sessions just keep
     /// the original mapping.
     pub(crate) fn insert(&mut self, hash: ResultHash, call_id: ToolCallId) {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(
             !self.map.contains_key(&hash),
             "dedup map insert called on existing hash; lookup-before-insert was skipped"

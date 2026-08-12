@@ -142,6 +142,7 @@ impl GatewayDurableStore {
         let before = state.clone();
         state.remember_acknowledgement(report_id.clone(), route.clone());
         let acknowledged = state.checkpoints.acknowledge(report_id);
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(acknowledged, "pending delivery must be acknowledgeable");
         let next_update_offset = state.next_update_offset;
         state.next_update_offset = state.checkpoints.advance_prefix(next_update_offset);

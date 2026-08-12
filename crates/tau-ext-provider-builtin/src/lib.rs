@@ -606,6 +606,7 @@ impl QuotaCoordinator {
 /// Wrap one provider quota observation in explicitly transient publication
 /// metadata.
 fn quota_report_message(event: Event) -> HarnessInputMessage {
+    // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(matches!(
         event,
         Event::ProviderQuotaReplaceReported(_)

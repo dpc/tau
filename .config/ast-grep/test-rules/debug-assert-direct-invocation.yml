@@ -1,0 +1,15 @@
+id: debug-assert-direct-invocation
+language: Rust
+severity: hint
+rule:
+  kind: macro_invocation
+  has:
+    field: macro
+    any:
+      - kind: identifier
+        regex: '^(?:r#)?debug_assert$'
+      - kind: scoped_identifier
+        has:
+          field: name
+          kind: identifier
+          regex: '^(?:r#)?debug_assert$'

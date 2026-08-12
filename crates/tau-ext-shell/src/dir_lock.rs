@@ -364,6 +364,7 @@ impl DirLockManager {
                     .fs_backend
                     .lock()
                     .expect("dir lock backend poisoned");
+                // ast-grep-ignore: debug-assert-expression-must-not-mutate
                 debug_assert!(backend.as_ref().is_some_and(|b| b.state_dir == requested));
                 Ok(())
             }
@@ -1101,6 +1102,7 @@ impl LockState {
 
     fn add_manual(&mut self, owner: AgentId, dirs: Vec<PathBuf>, now: Instant) {
         for dir in dirs {
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(
                 self.manual
                     .iter()

@@ -230,6 +230,7 @@ impl JournalSyncWorker {
             let path = path.to_path_buf();
             let is_new = !state.dirty.contains_key(&path);
             let entry = state.dirty.entry(path.clone()).or_default();
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(entry.generation == 0 || entry.kind == kind);
             entry.kind = kind;
             entry.generation = generation;

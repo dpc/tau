@@ -4796,6 +4796,7 @@ impl Harness {
             .expired_startup_connects
             .remove(&connection_id)
         {
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(!expired.require, "required startup timeout returned");
             tracing::warn!(
                 target: "tau_harness::startup",
@@ -5961,6 +5962,7 @@ impl Harness {
             return;
         }
         if event.message_agent_target().is_some() {
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(persist, "canonical message facts must be durable");
             self.commit_message_fact(source, event);
             return;
@@ -7027,6 +7029,7 @@ impl Harness {
         self.pending_external_receive_acks
             .insert(message_id.clone(), pending);
         self.cleanup_uncommitted_peer_auto_start(&old_recipient);
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(matches!(event, Event::AgentMessageReceived(_)));
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
@@ -9502,6 +9505,7 @@ impl Harness {
                 "a connected component is pathologically behind the live event stream ({max_live_lag} pending positions); delivery remains active and retention may grow"
             ));
         }
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(self.long_wait_materialization_budget.is_none());
         self.long_wait_materialization_budget =
             Some(subagents_tool::MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE);

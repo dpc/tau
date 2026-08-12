@@ -175,6 +175,7 @@ impl RendererHandle {
     /// Clones the visible terminal handle for redraw-suppressed selection
     /// scopes.
     pub(crate) fn terminal_handle(&self) -> tau_cli_term::TermHandle {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(self.detached.is_none());
         self.terminal.clone()
     }

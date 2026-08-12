@@ -68,6 +68,7 @@ impl WatchGraphProjection {
         // Keep the forward topology in the constructor contract: it documents
         // that direct facts must belong to live edges and catches bad callers in
         // debug builds without expanding the production projection.
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(direct_edges.iter().all(|(watcher, watched)| {
             watched_agents
                 .get(watcher)
