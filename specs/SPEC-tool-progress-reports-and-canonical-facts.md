@@ -1,5 +1,9 @@
 # SPEC-tool-progress-reports-and-canonical-facts: Tool progress flow
 
+## Record justification
+
+Protocol report authority, client and extension publication, harness post-commit routed-call validation, and the [configured-peer security boundary](../SECURITY.md) jointly implement this progress contract, so no one local artifact can coherently own its provenance, canonical-fact, and process-lifetime rules.
+
 ## Scope
 
 Authenticated configured Tool and Core extensions submit transient

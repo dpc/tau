@@ -1,5 +1,9 @@
 # SPEC-tool-declarations-and-canonical-state: Tool declaration flow
 
+## Record justification
+
+Protocol declaration authority, client and extension publication, harness post-commit validation and registry state, and the [configured-peer security boundary](../SECURITY.md) jointly implement this lifecycle contract, so no one local artifact can coherently own its publisher provenance, canonical state, and process-lifetime rules.
+
 ## Scope
 
 Authenticated configured Tool and Core extensions publish transient
