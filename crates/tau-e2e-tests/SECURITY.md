@@ -2,6 +2,22 @@
 
 The deterministic and VCR fixture families have different trust boundaries.
 
+`ProviderBuiltinRetryFixture` is a separate hermetic production-provider
+acceptance family. It launches only the configured same-UID
+`provider-builtin` extension from an exact Cargo-built path and accepts only a
+keyless local Chat Completions profile below its private configuration root.
+Its sole network peer is a fixture-owned bounded `127.0.0.1` listener; the
+daemon clears inherited proxy settings, sets only loopback `NO_PROXY`, and the
+server bounds request headers, bodies, connection I/O, request count, and
+teardown. The fixture does not read credentials, use provider debug captures
+as an oracle, expose a clock or retry control beyond the normal UI retry
+command, or make its loopback endpoint available to other tests. Captured
+request JSON, generated state, extension stderr, and the durable session's
+ordinary private diagnostics remain below a private temporary root and are
+retained only on failure or explicit opt-in.
+The case is Linux-only because its readiness and process-group cleanup oracles
+depend on Linux notification and lifecycle behavior.
+
 `DeterministicFixture` starts same-UID local subprocesses, which are trusted
 configured extensions rather than a sandbox boundary. It ignores ambient Tau
 startup override variables, checks the exact resolved extension allowlist

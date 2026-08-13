@@ -329,6 +329,27 @@
                      --no-tests=fail \
                      ${nextestReporterArgs} \
                      -E 'package(tau-e2e-tests) & (binary(deterministic_provider) | binary(cancellation_liveness))'
+                 if test "$(uname -s)" = Linux; then
+                   # The provider-builtin retry gate runs its exact Cargo-built
+                   # executable against a fixture-owned loopback HTTP/SSE server.
+                   export TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/$CARGO_PROFILE/tau-ext-provider-builtin"
+                   # The provider's documented additive-CA input accepts only
+                   # certificate PEM blocks. Nix's source bundle also carries
+                   # NSS trust labels, so derive the narrow fixture input here.
+                   export TAU_E2E_PROVIDER_CA_BUNDLE="$TMPDIR/provider-builtin-e2e-ca.pem"
+                   sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p' \
+                     "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" \
+                     > "$TAU_E2E_PROVIDER_CA_BUNDLE"
+                   test -x "$TAU_E2E_PROVIDER_BUILTIN_BIN"
+                   test -s "$TAU_E2E_PROVIDER_CA_BUNDLE"
+                   env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
+                      --workspace \
+                      --cargo-profile $CARGO_PROFILE \
+                      --no-tests=fail \
+                      ${nextestReporterArgs} \
+                      -E 'package(tau-e2e-tests) & binary(provider_builtin_retry)'
+                   unset TAU_E2E_PROVIDER_BUILTIN_BIN TAU_E2E_PROVIDER_CA_BUNDLE
+                 fi
                  # The PTY gate must spawn the exact universal binary from this
                  # Cargo profile rather than discovering a user PATH entry.
                  export TAU_E2E_TAU_BIN="$PWD/target/$CARGO_PROFILE/tau"

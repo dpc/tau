@@ -1,6 +1,6 @@
 # ARCH-tau-e2e-tests: tau-e2e-tests architecture
 
-`tau-e2e-tests` contains two deliberately separate fixture families.
+`tau-e2e-tests` contains three deliberately separate fixture families.
 
 `DeterministicFixture` is always-on and hermetic. It starts an exact
 Cargo-built, test-only provider subprocess through normal extension supervision,
@@ -90,6 +90,22 @@ provider-builtin implementation, ChatGPT request lowering/parsing, WebSocket
 behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's
 bundled core-shell component.
+
+`ProviderBuiltinRetryFixture` is a third, hermetic fixture family for the
+production-provider boundary. It launches the exact Cargo-built
+`tau-ext-provider-builtin` through ordinary Configure/Ready supervision and
+uses only a keyless local Chat Completions profile pointed at its bounded
+`127.0.0.1` HTTP/SSE server. Its sole script parks P1 after a 429
+`rate_limit_exceeded` response with a one-day `Retry-After`, releases it only
+through the ordinary UI retry request, then completes P1 and immediate P2.
+Wire capture owns upstream attempt order and prompt context; live typed events
+own the parked-throttle and accepted-manual-release observations; the durable
+journal owns canonical prompt and terminal uniqueness. Together they require
+one logical P1 terminal and a released cooldown. It has no credentials,
+provider debug-capture oracle, fake-provider retry imitation, clock control,
+automatic-expiry claim, cancellation, restart, or retry-class matrix. Nix
+provides the executable only through `TAU_E2E_PROVIDER_BUILTIN_BIN` after
+checking the exact current-profile path is executable.
 
 The original Unix-only core-resume topology is the deterministic fixture's
 dummy-tool public-UI boundary.

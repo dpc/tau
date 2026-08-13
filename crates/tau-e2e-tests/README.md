@@ -2,6 +2,24 @@
 
 Hermetic deterministic end-to-end tests and separate opt-in VCR tests.
 
+## Provider-builtin retry test
+
+The separate provider-builtin retry acceptance case runs the exact
+`tau-ext-provider-builtin` binary with a keyless loopback Chat Completions
+profile. Build and pin that binary before running it:
+
+```sh
+cargo build -p tau-ext-provider-builtin
+TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/debug/tau-ext-provider-builtin" \
+  cargo nextest run -p tau-e2e-tests --test provider_builtin_retry
+```
+
+It uses a bounded `127.0.0.1` HTTP/SSE server to prove a 429 retry parks,
+ordinary manual retry releases it, P1 becomes one durable turn, and immediate
+P2 is not held by a stale cooldown. It needs no credentials or external
+network. The process-readiness and process-group oracle is Linux-only; other
+targets omit this integration-test case.
+
 ## Deterministic provider tests
 
 The default workspace test run executes a test-only fake provider as a real

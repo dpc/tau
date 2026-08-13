@@ -310,9 +310,10 @@ quiescence boundary is that final EndTurn plus exact durable facts and reaped
 process group/socket; it makes no PTY, core-shell, or crash-exact cancellation
 persistence claim.
 
-`ci.deterministicE2eTests` is a mandatory selfci derivation. Its exact target
-plus `--no-tests=fail` prevents silent filtering, and the Nix build sandbox
-denies network access independently of the fixture implementation.
+`ci.tests` is the mandatory selfci derivation. Its focused fake-provider and
+provider-builtin post-checks pin exact same-profile subprocess paths and use
+`--no-tests=fail` to prevent silent filtering; the Nix build sandbox denies
+external network access independently of either fixture implementation.
 Focused fake-provider unit tests own strict Configure grammar, resource bounds,
 diagnostic truncation, malformed/mismatched checkpoint rejection, binding
 uniqueness, cursor bounds, and barrier structure; the subprocess E2Es own representative lifecycle,
@@ -388,14 +389,49 @@ virtual monotonic time for scheduler retry and cooldown behavior, and temporary
 auth files with injected endpoint outcomes for OAuth and credential-generation
 behavior. Backend protocol matrices remain in the owning adapters.
 
+### Exact provider-builtin retry subprocess acceptance
+
+`provider_builtin_retry` is separate from `DeterministicFixture`: it runs the
+exact Cargo-built `tau-ext-provider-builtin` binary through normal
+Configure/Ready supervision, with a private keyless local Chat Completions
+profile and a bounded joined `127.0.0.1` HTTP/SSE peer. The server scripts one
+429 `rate_limit_exceeded` response with `Retry-After: 86400`, then P1 and
+immediate P2 SSE successes. The test observes P1's typed `Throttle` retry
+state, sends only the ordinary `UiRetryPrompt`, requires acceptance, and
+combines wire capture, live lifecycle facts, and durable journal facts to
+reject extra requests or upstream context drift, duplicate logical prompts or
+terminals, and a stuck cooldown.
+
+Direct workspace runs intentionally skip this test when
+`TAU_E2E_PROVIDER_BUILTIN_BIN` is absent; they must never discover a binary
+from `PATH`. Run it manually only after building and pinning the candidate:
+
+```sh
+cargo build -p tau-ext-provider-builtin
+TAU_E2E_PROVIDER_BUILTIN_BIN="$PWD/target/debug/tau-ext-provider-builtin" \
+  cargo nextest run -p tau-e2e-tests --test provider_builtin_retry
+```
+
+The mandatory Nix post-check verifies that exact current-profile path and
+exports the variable before running the test. It covers manual release of a
+genuinely parked production retry, not automatic expiry, virtual clock
+control, cancellation, restart, credentials, use of provider debug captures as
+an oracle, or a retry-class matrix.
+
+This exact subprocess case runs only on Linux, where it uses inotify for
+non-polling daemon-socket readiness and Linux process-group teardown. Other
+targets omit the case rather than weakening those lifecycle oracles.
+
 The focused ChatGPT WebSocket lane stays inside `tau-provider-codex`.
 Loopback-only finite peers exercise production request lowering and frame
 parsing together with pool reuse, reconnect, cooperative cancellation,
 provider-frame deadlines, typed errors, and the no-HTTP-fallback commitment.
 Peers use synthetic credentials, explicit request/completion signals, bounded
 scripts and socket deadlines, and joined teardown. Provider-builtin retry and
-cooldown tests remain separate on its injected executor and virtual monotonic
-clock. Do not add a harness→provider-builtin→local-WebSocket gate, backend
+cooldown timing tests remain separate on its injected executor and virtual
+monotonic clock; the exact subprocess acceptance above instead uses the ordinary
+manual retry command and no clock control. Do not add a
+harness→provider-builtin→local-WebSocket gate, backend
 resolver, user OAuth URL override, or common scenario language merely to join
 these layers; the deterministic fake provider does not cover upstream ChatGPT
 transport contracts.

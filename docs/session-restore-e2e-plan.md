@@ -173,7 +173,7 @@ Keep the fake provider closed and data-driven:
 Place S0-S7 in the existing `deterministic_provider` integration-test target,
 reusing its daemon support; place S8 in `core_resume`. If implementation instead
 adds a test binary, add that binary explicitly to
-`flake.nix`'s `ci.deterministicE2eTests` selection and update
+`flake.nix`'s focused `ci.tests` post-check selection and update
 `crates/tau-e2e-tests/README.md`.
 
 Before implementing each scenario, record its lane/action/encoded-size budget.
@@ -577,7 +577,7 @@ Every automated scenario must:
 Run focused targets while developing. The final implementation change must pass:
 
 ```sh
-nix build -L .#ci.deterministicE2eTests
+nix build -L .#ci.tests
 selfci check --candidate <commit-id>
 ```
 
