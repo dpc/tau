@@ -60,7 +60,8 @@ pub struct ExtensionStartupDiagnostic {
 pub enum ExtensionStartupDiagnosticKind {
     /// An optional extension could not start and was skipped.
     OptionalSkip,
-    /// A non-default Tau-state recovery policy is active for an extension.
+    /// The ambient `legacy` Tau-state recovery policy is active for an
+    /// extension.
     StateAccess {
         /// Configuration layer that selected the effective policy.
         source: TauStateAccessSource,
@@ -1043,14 +1044,14 @@ fn apply_tau_state_access_force(
     }
 }
 
-/// Append mandatory diagnostics for each Tau-state recovery policy.
+/// Append mandatory diagnostics for each ambient Tau-state recovery policy.
 fn append_tau_state_access_diagnostics(
     config: &mut Config,
     settings: &HarnessSettings,
     tau_state_access_force: Option<path_tau_config_settings::TauStateAccess>,
 ) {
     for extension in config.extensions.values().filter(|extension| {
-        extension.tau_state_access != path_tau_config_settings::TauStateAccess::Hidden
+        extension.tau_state_access == path_tau_config_settings::TauStateAccess::Legacy
     }) {
         let source = match tau_state_access_force {
             Some(_) => TauStateAccessSource::EnvironmentForce,

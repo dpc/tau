@@ -4589,7 +4589,7 @@ fn missing_user_files_load_the_built_in_baseline() {
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
     assert!(harness.roles.contains_key("engineer-junior"));
-    assert_eq!(harness.tau_state_access, TauStateAccess::Hidden);
+    assert_eq!(harness.tau_state_access, TauStateAccess::ReadOnly);
     assert!(harness.roles.contains_key("engineer"));
     assert_eq!(harness.default_role.as_deref(), Some("engineer"));
     assert_eq!(harness.roles["engineer-junior"].enable, Some(true));
@@ -5165,6 +5165,26 @@ fn tau_state_access_supports_global_and_instance_configuration() {
     assert_eq!(
         settings.extensions["shell"].tau_state_access,
         Some(TauStateAccess::ReadOnly)
+    );
+}
+
+/// Ensures an omitted field uses the public read-only default while an explicit
+/// hidden instance policy remains distinguishable for later precedence
+/// handling.
+#[test]
+fn tau_state_access_omission_defaults_to_read_only_and_preserves_explicit_hidden() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "extensions:\n  inherited:\n    command: [demo]\n  hidden:\n    command: [demo]\n    tau_state_access: hidden\n",
+    )
+    .expect("write");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    assert_eq!(settings.tau_state_access, TauStateAccess::ReadOnly);
+    assert_eq!(settings.extensions["inherited"].tau_state_access, None);
+    assert_eq!(
+        settings.extensions["hidden"].tau_state_access,
+        Some(TauStateAccess::Hidden)
     );
 }
 

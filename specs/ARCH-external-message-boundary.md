@@ -56,8 +56,10 @@ egress authority.
 Cross-harness agent messages are local IPC between Tau harness daemons for the
 same user. All of that user's harness instances are cooperative and mutually
 trusted; Tau does not try to stop one harness from deliberately using another
-harness's ordinary UI socket. Together they isolate agent-controlled configured
-components from direct Tau state and runtime socket access by default. Hostile
+harness's ordinary UI socket. Together they prevent agent-controlled configured
+components from mutating unrelated Tau state and hide runtime socket discovery by
+default. A persistent harness exposes its real Tau state tree recursively
+read-only unless `tau_state_access: hidden` is selected explicitly. Hostile
 same-UID, procfs, and ptrace containment remain outside this boundary.
 Harness-owned discovery and messaging retain direct runtime socket access.
 Dedicated external-message connections may send only their cross-harness

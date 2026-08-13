@@ -20,20 +20,23 @@ is defense in depth, not hostile-code containment. `SECURITY.md`,
 Supervised extensions use `tau_state_access`, globally or per instance:
 
 ```yaml
-tau_state_access: hidden
+tau_state_access: read_only
 extensions:
   diagnostics:
-    tau_state_access: read_only
+    tau_state_access: hidden
   legacy-integration:
     tau_state_access: legacy
 ```
 
-`hidden` is the default and presents an empty read-only Tau state tree.
-`read_only` presents the real Tau state tree recursively read-only. `legacy`
-retains the historical ambient state view. The emergency
+`read_only` is the persistent-harness default and presents the real Tau state
+tree recursively read-only. `hidden` presents an empty read-only Tau state
+tree. `legacy` retains the historical ambient state view. Memory-only harnesses
+always force `hidden`, create no host state, and mask an existing state root if
+one exists. The emergency
 `TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only|legacy` environment setting
-forces every supervised extension for one newly started daemon; `tau attach`
-rejects it and Tau removes it before child execution.
+forces every supervised extension for one newly started persistent daemon. A
+memory-only harness still forces `hidden` afterward. `tau attach` rejects the
+setting and Tau removes it before child execution.
 
 A persistent harness restores the exact `<state>/ext/<instance>` directory
 read-write for that instance in restricted modes. This direct state directory

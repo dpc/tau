@@ -4016,7 +4016,7 @@ fn state_access_startup_diagnostic_uses_dedicated_notice_kind() {
 
     h.emit_extension_startup_diagnostics(&[crate::settings::ExtensionStartupDiagnostic {
         extension: "core-shell".to_owned(),
-        message: "extension `core-shell` uses Tau-state access `read_only` from global harness configuration"
+        message: "extension `core-shell` uses Tau-state access `legacy` from global harness configuration"
             .to_owned(),
         kind: ExtensionStartupDiagnosticKind::StateAccess {
             source: TauStateAccessSource::GlobalConfiguration,

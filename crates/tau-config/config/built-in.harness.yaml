@@ -9,8 +9,8 @@ agent_watch_retry_notification_threshold: 5
 provider_cache_refresh:
   enabled: false
   max_idle_seconds: 300
-# Supervised extensions receive an isolated Tau-state view by default.
-tau_state_access: hidden
+# Persistent supervised extensions receive Tau state recursively read-only.
+tau_state_access: read_only
 extensions: {}
 tool_policy:
   rules:

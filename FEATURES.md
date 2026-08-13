@@ -252,9 +252,10 @@ Tau is under heavy development. For the most exact command-line and
 configuration surface, use the installed command's `--help`, generated
 configuration from `tau init`, and the component documentation linked above.
 
-Supervised extensions receive an isolated Tau-state view by default.
-`tau_state_access: read_only` preserves a diagnostic view, and `legacy`
-recovers the historical ambient view when needed.
+Persistent supervised extensions receive the real Tau-state tree recursively
+read-only by default. `tau_state_access: hidden` hides unrelated state, and
+`legacy` recovers the historical ambient writable view when needed. Memory-only
+harnesses always hide Tau state and create no host state.
 
 Persisted activity accounting is available through
 `tau session stats --session <id>`. The versioned TOON report traverses immutable

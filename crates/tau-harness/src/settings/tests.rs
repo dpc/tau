@@ -505,7 +505,7 @@ fn resolve_extensions_builtin_can_start_disabled() {
     assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
-/// Ensures only exceptional policies emit notices and attributes each notice to
+/// Ensures only ambient recovery emits notices and attributes each notice to
 /// the selecting configuration layer.
 #[test]
 fn tau_state_access_recovery_notices_report_the_selecting_layer() {
@@ -513,7 +513,7 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
     settings.extensions.insert(
         "core-shell".to_owned(),
         ExtensionEntry {
-            tau_state_access: Some(path_tau_config_settings::TauStateAccess::ReadOnly),
+            tau_state_access: Some(path_tau_config_settings::TauStateAccess::Hidden),
             ..Default::default()
         },
     );
@@ -528,7 +528,7 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
             .find(|extension| extension.name == "provider-builtin")
             .expect("provider")
             .tau_state_access,
-        path_tau_config_settings::TauStateAccess::Hidden
+        path_tau_config_settings::TauStateAccess::ReadOnly
     );
     assert_eq!(
         resolved
@@ -537,26 +537,14 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
             .find(|extension| extension.name == "core-shell")
             .expect("core shell")
             .tau_state_access,
-        path_tau_config_settings::TauStateAccess::ReadOnly
+        path_tau_config_settings::TauStateAccess::Hidden
     );
 
     let mut config = config_from_resolved_extensions(resolved.clone(), HarnessSettings::built_in());
     append_tau_state_access_diagnostics(&mut config, &settings, None);
-    assert_eq!(config.extension_startup_diagnostics.len(), 1);
-    let shell = config
-        .extension_startup_diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.extension == "core-shell")
-        .expect("core-shell state-access diagnostic");
-    assert_eq!(
-        shell.kind,
-        ExtensionStartupDiagnosticKind::StateAccess {
-            source: TauStateAccessSource::InstanceConfiguration
-        }
-    );
-    assert!(shell.message.contains("extension configuration"));
+    assert!(config.extension_startup_diagnostics.is_empty());
 
-    settings.tau_state_access = path_tau_config_settings::TauStateAccess::ReadOnly;
+    settings.tau_state_access = path_tau_config_settings::TauStateAccess::Legacy;
     let resolved =
         resolve_extensions_with_environment_and_cli_overrides(&settings, builtins(), &[], &[])
             .expect("global recovery policy resolves");
@@ -578,20 +566,20 @@ fn tau_state_access_recovery_notices_report_the_selecting_layer() {
     let mut forced = resolved;
     apply_tau_state_access_force(
         &mut forced,
-        Some(path_tau_config_settings::TauStateAccess::ReadOnly),
+        Some(path_tau_config_settings::TauStateAccess::Legacy),
     );
     assert!(
         forced
             .extensions
             .iter()
             .all(|extension| extension.tau_state_access
-                == path_tau_config_settings::TauStateAccess::ReadOnly)
+                == path_tau_config_settings::TauStateAccess::Legacy)
     );
     let mut forced_config = config_from_resolved_extensions(forced, HarnessSettings::built_in());
     append_tau_state_access_diagnostics(
         &mut forced_config,
         &settings,
-        Some(path_tau_config_settings::TauStateAccess::ReadOnly),
+        Some(path_tau_config_settings::TauStateAccess::Legacy),
     );
     assert!(
         forced_config

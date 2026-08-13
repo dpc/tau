@@ -2,7 +2,7 @@
 
 `tau_state_access` selects `hidden`, `read_only`, or `legacy` for supervised
 extensions, and an extension entry can override it with the same field. The
-shipped default is `hidden`;
+shipped default is `read_only`;
 `TAU_EXTENSION_TAU_STATE_ACCESS` accepts only those exact lowercase values and
 is a final process-wide force after all configuration layers. The CLI rejects
 that force on attach because it cannot change an existing daemon.

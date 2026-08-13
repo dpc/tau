@@ -2,26 +2,33 @@
 
 ## Tau-state access
 
-Supervised extensions receive an empty read-only Tau-state view by default.
-Use `read_only` for trusted diagnostics, or `legacy` to recover the historical
-ambient view:
+Persistent supervised extensions receive the real Tau-state tree recursively
+read-only by default. Use `hidden` to hide unrelated state, or `legacy` to
+recover the historical ambient writable view:
 
 ```yaml
 extensions:
-  core-shell:
-    tau_state_access: read_only
+  narrow-integration:
+    tau_state_access: hidden
   legacy-integration:
     tau_state_access: legacy
 ```
 
 `TAU_EXTENSION_TAU_STATE_ACCESS=hidden|read_only|legacy tau` overrides every
-supervised extension for one new daemon. It is intentionally rejected by
-`tau attach` and never reaches extension child environments. Secrets stay
-masked in every mode. Restricted modes restore only the extension's own
-durable state directory read-write. Providers additionally receive their
-selected credential-free settings read-only. Provider captures cross the
+supervised extension in one new persistent daemon. A memory-only harness still
+forces `hidden` afterward. The setting is intentionally rejected by `tau attach`
+and never reaches extension child environments. Secrets stay masked in every
+mode. Restricted modes restore only the extension's own durable state directory
+read-write. Providers additionally receive their selected credential-free
+settings read-only. Provider captures cross the
 extension protocol as bounded opaque zstd blobs; the harness alone derives and
 writes their session/instance paths.
+
+The read-only default improves debugging and cooperative extension
+introspection. It also means every configured supervised extension in a
+persistent harness can read other Tau session and agent state unless `hidden`
+is selected explicitly. Memory-only harnesses always force `hidden`, create no
+host state, and mask an existing state root if one exists.
 
 The recursive read-only mount operation requires Linux 5.12 or later.
 Tau never weakens a restricted mount to accommodate an older kernel:

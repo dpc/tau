@@ -64,10 +64,10 @@ pub const TAU_EXTENSION_TAU_STATE_ACCESS_ENV: &str = "TAU_EXTENSION_TAU_STATE_AC
 #[serde(rename_all = "snake_case")]
 pub enum TauStateAccess {
     /// Present an empty Tau-state tree, restoring only approved owned paths.
-    #[default]
     Hidden,
     /// Present Tau state read-only, restoring only approved owned writable
     /// paths.
+    #[default]
     ReadOnly,
     /// Retain the historical ambient Tau-state view except for secrets.
     Legacy,

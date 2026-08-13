@@ -105,6 +105,11 @@ same-user executable boundary, not hostile-code containment. `hidden` and
 preserving exact extension-owned state; they do
 not defend against procfs, ptrace, pre-opened descriptors, unrelated host data,
 or authorized secret RPC delivery.
+`read_only` is the persistent-harness default: it improves debugging and
+cooperative extension introspection, but every configured supervised extension
+in a persistent harness can therefore read other Tau session and agent state
+unless its policy is explicitly `hidden`. Memory-only harnesses force `hidden`,
+create no host state, and mask an existing state root if one exists.
 Supervised components also receive an empty bind-mounted harness runtime socket
 directory by default. A per-component `tau_runtime_socket_access: legacy`
 opt-out restores ambient socket discovery for a trusted component without
