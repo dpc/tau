@@ -27,6 +27,23 @@ fn user_entry(text: &str) -> AgentEntry {
     }
 }
 
+fn tool_result_entry(raw_bytes: usize, provider_bytes: usize) -> AgentEntry {
+    AgentEntry::ToolResults {
+        items: vec![ToolResultItem {
+            presentation: Default::default(),
+            call_id: "call-1".into(),
+            tool_type: ToolType::Function,
+            status: ToolResultStatus::Success,
+            output: tau_proto::ToolResponse {
+                raw: CborValue::Text("r".repeat(raw_bytes)),
+                headers: Vec::new(),
+                body: "p".repeat(provider_bytes),
+            },
+            provider_content: Vec::new(),
+        }],
+    }
+}
+
 /// Below-limit agreement exposes hidden overhead or provider drift.
 #[test]
 fn rejection_below_advertised_limit_is_visible() {
@@ -162,6 +179,9 @@ fn typed_image_projection_uses_canonical_bytes_and_patches() {
         unreachable!("fixture is a tool result")
     };
     tau_proto::clear_tool_result_provider_image_bytes(&mut items[0]);
+    items[0].output.body = items[0].output.render();
+    items[0].output.headers.clear();
+    items[0].output.raw = CborValue::Null;
     let metadata_tokens =
         serialized_transcript_entry_bytes(&metadata_only).expect("metadata serializes");
     let patch_tokens = 1280_u64.div_ceil(32) * 900_u64.div_ceil(32);
@@ -181,6 +201,157 @@ fn typed_image_projection_uses_canonical_bytes_and_patches() {
             projected
                 + projected_transcript_entry_tokens(&metadata_only).expect("metadata projection")
         )
+    );
+}
+
+/// Provider-irrelevant raw tool payloads must not inflate proactive compaction
+/// projection when provider lowering sends only the normalized rendering.
+#[test]
+fn tool_result_projection_ignores_raw_payload_size() {
+    let tiny_raw = tool_result_entry(1, 32);
+    let large_raw = tool_result_entry(400_000, 32);
+
+    assert_eq!(
+        projected_transcript_entry_tokens(&tiny_raw),
+        projected_transcript_entry_tokens(&large_raw)
+    );
+    assert!(
+        projected_transcript_entry_tokens(&large_raw).expect("projection") < 1_000,
+        "the provider-visible rendering, not structured consumer data, owns projection"
+    );
+}
+
+/// A two-entry suffix with six duplicated tool payloads must stay below the
+/// threshold while retaining a one-byte-per-provider-JSON-byte upper bound.
+#[test]
+fn duplicated_tool_payloads_do_not_schedule_tiny_context_compaction() {
+    let assistant = user_entry(&"a".repeat(5_000));
+    let results = AgentEntry::ToolResults {
+        items: (0..6)
+            .map(|index| {
+                let AgentEntry::ToolResults { mut items } = tool_result_entry(37_000, 37_000)
+                else {
+                    unreachable!("fixture is a tool result")
+                };
+                items[0].call_id = format!("call-{index}").into();
+                items.pop().expect("one result")
+            })
+            .collect(),
+    };
+    let growth = transcript_growth([&assistant, &results]);
+    let exact = growth.serialized_bytes.expect("exact durable JSON");
+    let projected = projected_input_tokens(Some(8_856), growth.projected_tokens, 4_096)
+        .expect("checked projection");
+
+    assert!(
+        334_800 < exact,
+        "the durable representation must reproduce the historical false trigger"
+    );
+    assert!(
+        projected < 334_800,
+        "provider-visible projection must not schedule the tiny-context compaction"
+    );
+}
+
+/// Error, cancellation, and harness-authenticated presentation must use the
+/// same complete provider text that prompt assembly and adapters lower.
+#[test]
+fn terminal_status_and_presentation_drive_tool_result_projection() {
+    let mut error = tool_result_entry(400_000, 8);
+    let AgentEntry::ToolResults { items } = &mut error else {
+        unreachable!("fixture is a tool result")
+    };
+    items[0].status = ToolResultStatus::Error {
+        message: "error\nmessage".repeat(20),
+    };
+    items[0].presentation = tau_proto::ToolResultPresentation::HarnessDedupPointer;
+    let mut cancelled = error.clone();
+    let AgentEntry::ToolResults { items } = &mut cancelled else {
+        unreachable!("fixture is a tool result")
+    };
+    items[0].status = ToolResultStatus::Cancelled {
+        reason: "cancelled\nreason".repeat(20),
+    };
+
+    for entry in [&error, &cancelled] {
+        let projected = projected_transcript_entry_tokens(entry).expect("projection");
+        assert!(
+            projected < 2_000,
+            "status text and framing must count without retaining raw payloads"
+        );
+    }
+    assert_ne!(
+        projected_transcript_entry_tokens(&error),
+        projected_transcript_entry_tokens(&cancelled),
+        "distinct provider terminal renderings must remain visible"
+    );
+    let ordinary_error = {
+        let mut entry = error.clone();
+        let AgentEntry::ToolResults { items } = &mut entry else {
+            unreachable!("fixture is a tool result")
+        };
+        items[0].presentation = tau_proto::ToolResultPresentation::ToolPayload;
+        entry
+    };
+    assert_ne!(
+        projected_transcript_entry_tokens(&error),
+        projected_transcript_entry_tokens(&ordinary_error),
+        "authenticated pointer framing must change the projected provider text"
+    );
+}
+
+/// An already-materialized compaction replacement must not reinterpret the
+/// durable presentation discriminator or frame its provider text again.
+#[test]
+fn compaction_window_tool_result_uses_provider_projection() {
+    let AgentEntry::ToolResults { mut items } = tool_result_entry(400_000, 32) else {
+        unreachable!("fixture is a tool result")
+    };
+    items[0].presentation = tau_proto::ToolResultPresentation::HarnessDedupPointer;
+    let compacted_pointer = AgentEntry::Compaction {
+        replacement_window: items.into_iter().map(ContextItem::ToolResult).collect(),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
+    };
+    let mut compacted_payload = compacted_pointer.clone();
+    let AgentEntry::Compaction {
+        replacement_window, ..
+    } = &mut compacted_payload
+    else {
+        unreachable!("fixture is a compaction")
+    };
+    let ContextItem::ToolResult(result) = &mut replacement_window[0] else {
+        unreachable!("fixture contains one tool result")
+    };
+    result.presentation = tau_proto::ToolResultPresentation::ToolPayload;
+
+    let pointer_projection =
+        projected_transcript_entry_tokens(&compacted_pointer).expect("pointer projection");
+    let payload_projection =
+        projected_transcript_entry_tokens(&compacted_payload).expect("payload projection");
+    assert!(pointer_projection < 1_000);
+    assert_eq!(
+        pointer_projection, payload_projection,
+        "presentation metadata on materialized items must not reinterpret provider text"
+    );
+}
+
+/// Removing raw structured payloads must not hide a genuinely large
+/// provider-visible tool result from proactive compaction.
+#[test]
+fn large_provider_rendering_still_crosses_compaction_threshold() {
+    let entry = tool_result_entry(1, 400_000);
+    let projected = projected_input_tokens(
+        Some(8_856),
+        Some(projected_transcript_entry_tokens(&entry).expect("projection")),
+        4_096,
+    )
+    .expect("checked projection");
+
+    assert!(
+        334_800 <= projected,
+        "one-byte-per-provider-JSON-byte accounting must remain conservative"
     );
 }
 

@@ -498,6 +498,37 @@ pub struct ToolResultItem {
     pub provider_content: Vec<ToolResultContentPart>,
 }
 
+impl ToolResultItem {
+    /// Renders the common base text provider adapters use for this terminal
+    /// status.
+    #[must_use]
+    pub fn render_provider_text(&self) -> String {
+        match &self.status {
+            ToolResultStatus::Success => self.output.render(),
+            ToolResultStatus::Error { message } => {
+                let mut response = self.output.clone();
+                response.headers.insert(
+                    0,
+                    ToolResponseHeader {
+                        key: "error".to_owned(),
+                        value: message.clone(),
+                    },
+                );
+                response.render()
+            }
+            ToolResultStatus::Cancelled { reason } => ToolResponse {
+                raw: CborValue::Null,
+                headers: vec![ToolResponseHeader {
+                    key: "cancelled".to_owned(),
+                    value: reason.clone(),
+                }],
+                body: String::new(),
+            }
+            .render(),
+        }
+    }
+}
+
 /// Whether displayable reasoning text is a provider-summarized view or the
 /// full reasoning text exposed by a compatible backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

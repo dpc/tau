@@ -306,13 +306,16 @@ Agent-record writes must also satisfy the loader's 64 MiB encoded-record bound.
 Provider request lowering independently enforces its raw-image and data-URL
 aggregate limits.
 
-Proactive context projection serializes byte-free transcript structure under
-the existing one-byte-per-token conservative bound, then adds each image's
+Proactive context projection serializes byte-free provider transcript structure
+under the existing one-byte-per-token conservative bound, then adds each image's
 canonical encoded byte length and one token per rounded-up 32-by-32 patch.
-Exact serialized transcript-growth bytes remain separate telemetry and never
-substitute their JSON byte-array expansion for projected tokens. Threshold-fired
-standalone compaction persists `automatic_threshold`; only explicit UI
-compaction retains the legacy/default `manual` trigger.
+Provider-visible tool-result rendering contributes to this structure, while the
+parallel raw structured payload retained for non-provider consumers does not.
+Exact serialized transcript-growth bytes remain separate telemetry and still
+include that raw payload; they never substitute their JSON representation for
+projected tokens. Threshold-fired standalone compaction persists
+`automatic_threshold`; only explicit UI compaction retains the legacy/default
+`manual` trigger.
 
 Named context-size alerts are advisory and independent of automatic compaction.
 They use provider-reported input-token usage from successful completed ordinary

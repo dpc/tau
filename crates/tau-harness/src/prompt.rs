@@ -1400,7 +1400,7 @@ fn project_user_prompt_items(
 /// presentation authority. Only the harness-stamped dedup discriminator gets
 /// the internal envelope; every ordinary tool payload has an exact close
 /// neutralized before it reaches a provider.
-fn project_tool_result_items(
+pub(crate) fn project_tool_result_items(
     items: &[tau_proto::ToolResultItem],
 ) -> Vec<tau_proto::ToolResultItem> {
     items

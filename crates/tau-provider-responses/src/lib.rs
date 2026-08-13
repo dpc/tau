@@ -12,10 +12,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
+#[cfg(test)]
+use tau_proto::ToolResultStatus;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, Effort, MessageItem, ModelName, ProviderStopReason,
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope,
-    ToolCallItem, ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
+    ToolCallItem, ToolChoice, ToolDefinition, ToolType,
 };
 use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_error_code,
@@ -1773,29 +1775,7 @@ fn lower_tool(tool: &ToolDefinition) -> Result<Value, Error> {
 }
 
 fn render_tool_result(result: &tau_proto::ToolResultItem) -> String {
-    let mut text = match &result.status {
-        ToolResultStatus::Success => result.output.render(),
-        ToolResultStatus::Error { message } => {
-            let mut output = result.output.clone();
-            output.headers.insert(
-                0,
-                ToolResponseHeader {
-                    key: "error".to_owned(),
-                    value: message.clone(),
-                },
-            );
-            output.render()
-        }
-        ToolResultStatus::Cancelled { reason } => tau_proto::ToolResponse {
-            raw: tau_proto::CborValue::Null,
-            headers: vec![ToolResponseHeader {
-                key: "cancelled".to_owned(),
-                value: reason.clone(),
-            }],
-            body: String::new(),
-        }
-        .render(),
-    };
+    let mut text = result.render_provider_text();
     if !result.provider_content.is_empty() {
         text.push('\n');
         text.push_str(IMAGE_OMISSION_MARKER);

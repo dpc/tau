@@ -14,7 +14,7 @@ use serde::Serialize;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, ModelName, OpaqueProviderItem, ProviderStopReason,
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ToolCallItem, ToolChoice,
-    ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
+    ToolDefinition, ToolResultStatus, ToolType,
 };
 use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_reset_hint, parse_retry_after,
@@ -1743,6 +1743,18 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
     }
 }
 
+fn tool_result_text(status: ToolResultStatus, output: &tau_proto::ToolResponse) -> String {
+    tau_proto::ToolResultItem {
+        call_id: String::new().into(),
+        tool_type: ToolType::Function,
+        status,
+        output: output.clone(),
+        presentation: Default::default(),
+        provider_content: Vec::new(),
+    }
+    .render_provider_text()
+}
+
 fn function_call_arguments_json(call: &ToolCallItem) -> String {
     call.raw_arguments_json.clone().unwrap_or_else(|| {
         serde_json::to_string(&cbor_to_json(&call.arguments)).unwrap_or_default()
@@ -1779,32 +1791,6 @@ fn role_wire(role: &ContextRole) -> &'static str {
         ContextRole::Developer => "system",
         ContextRole::User => "user",
         ContextRole::Assistant => "assistant",
-    }
-}
-
-fn tool_result_text(status: ToolResultStatus, output: &tau_proto::ToolResponse) -> String {
-    match status {
-        ToolResultStatus::Success => output.render(),
-        ToolResultStatus::Error { message } => {
-            let mut response = output.clone();
-            response.headers.insert(
-                0,
-                ToolResponseHeader {
-                    key: "error".to_owned(),
-                    value: message,
-                },
-            );
-            response.render()
-        }
-        ToolResultStatus::Cancelled { reason } => tau_proto::ToolResponse {
-            raw: tau_proto::CborValue::Null,
-            headers: vec![ToolResponseHeader {
-                key: "cancelled".to_owned(),
-                value: reason,
-            }],
-            body: String::new(),
-        }
-        .render(),
     }
 }
 

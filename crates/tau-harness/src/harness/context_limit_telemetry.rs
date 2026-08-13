@@ -67,16 +67,19 @@ pub(super) fn serialized_transcript_delta_bytes<'a>(
 
 /// Returns the conservative token projection for one transcript-growth entry.
 ///
-/// Non-image structure retains the existing one-JSON-byte-per-token upper
-/// bound. Canonical images are removed from that JSON representation and
-/// accounted once by encoded byte length plus one token per 32-by-32 image
-/// patch. This avoids the accidental 3-4x expansion from `serde_bytes` JSON
-/// integer arrays while keeping provider media visible to proactive compaction
-/// accounting.
+/// Provider-visible structure retains the existing one-JSON-byte-per-token
+/// upper bound. Raw structured tool payloads retained only for non-provider
+/// consumers are replaced by their normalized provider rendering. Canonical
+/// images are removed from that JSON representation and accounted once by
+/// encoded byte length plus one token per 32-by-32 image patch. This avoids
+/// durable-only duplication and the accidental 3-4x expansion from
+/// `serde_bytes` JSON integer arrays while keeping provider input visible to
+/// proactive compaction accounting.
 pub(super) fn projected_transcript_entry_tokens(entry: &AgentEntry) -> Option<u64> {
-    let mut metadata_only = entry.clone();
-    let image_tokens = strip_and_count_agent_entry_images(&mut metadata_only)?;
-    serialized_transcript_entry_bytes(&metadata_only)?.checked_add(image_tokens)
+    let mut provider_projection = entry.clone();
+    let image_tokens = strip_and_count_agent_entry_images(&mut provider_projection)?;
+    project_tool_result_outputs(&mut provider_projection);
+    serialized_transcript_entry_bytes(&provider_projection)?.checked_add(image_tokens)
 }
 
 /// Derives independent exact-byte telemetry and conservative token projection
@@ -114,20 +117,49 @@ fn strip_and_count_agent_entry_images(entry: &mut AgentEntry) -> Option<u64> {
     Some(total)
 }
 
+fn project_tool_result_outputs(entry: &mut AgentEntry) {
+    if let AgentEntry::ToolResults { items } = entry {
+        *items = crate::prompt::project_tool_result_items(items);
+    }
+    visit_agent_entry_tool_results_mut(entry, |result| {
+        result.output.body = result.render_provider_text();
+        result.output.headers.clear();
+        result.output.raw = tau_proto::CborValue::Null;
+        result.status = tau_proto::ToolResultStatus::Success;
+        result.presentation = tau_proto::ToolResultPresentation::ToolPayload;
+    });
+}
+
 fn visit_agent_entry_images_mut(
     entry: &mut AgentEntry,
     mut visit: impl FnMut(&mut tau_proto::ImageContent) -> Option<()>,
 ) -> Option<()> {
+    let mut result = Some(());
+    visit_agent_entry_tool_results_mut(entry, |tool_result| {
+        if result.is_none() {
+            return;
+        }
+        for part in &mut tool_result.provider_content {
+            let ToolResultContentPart::Image(image) = part;
+            if visit(image).is_none() {
+                result = None;
+                return;
+            }
+        }
+    });
+    result
+}
+
+fn visit_agent_entry_tool_results_mut(
+    entry: &mut AgentEntry,
+    mut visit: impl FnMut(&mut tau_proto::ToolResultItem),
+) {
     let mut visit_items = |items: &mut [ContextItem]| {
         for item in items {
             if let ContextItem::ToolResult(result) = item {
-                for part in &mut result.provider_content {
-                    let ToolResultContentPart::Image(image) = part;
-                    visit(image)?;
-                }
+                visit(result);
             }
         }
-        Some(())
     };
     match entry {
         AgentEntry::UserInput { items, .. }
@@ -141,16 +173,12 @@ fn visit_agent_entry_images_mut(
         } => visit_items(items),
         AgentEntry::ToolResults { items } => {
             for result in items {
-                for part in &mut result.provider_content {
-                    let ToolResultContentPart::Image(image) = part;
-                    visit(image)?;
-                }
+                visit(result);
             }
-            Some(())
         }
         AgentEntry::AgentMessage { .. }
         | AgentEntry::MessageFact { .. }
-        | AgentEntry::CompactionTrigger { .. } => Some(()),
+        | AgentEntry::CompactionTrigger { .. } => {}
     }
 }
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, MessageItem, ResponsesToolCallEnvelope, ToolCallItem,
-    ToolResponseHeader, ToolResultItem, ToolResultStatus,
+    ToolResultItem, ToolResultStatus,
 };
 use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
@@ -2894,11 +2894,7 @@ fn convert_tool_result_output(
     result: &ToolResultItem,
     image_budget: &mut ImageRequestBudget,
 ) -> serde_json::Value {
-    let text = match &result.status {
-        ToolResultStatus::Success => result.output.render(),
-        ToolResultStatus::Error { message } => render_error_tool_result(&result.output, message),
-        ToolResultStatus::Cancelled { reason } => render_cancelled_tool_result(reason),
-    };
+    let text = result.render_provider_text();
     if !matches!(result.status, ToolResultStatus::Success) || result.provider_content.is_empty() {
         return serde_json::Value::String(text);
     }
@@ -2973,30 +2969,6 @@ pub(super) fn redact_image_data_urls(value: &mut serde_json::Value) {
         }
         _ => {}
     }
-}
-
-fn render_error_tool_result(output: &tau_proto::ToolResponse, message: &str) -> String {
-    let mut response = output.clone();
-    response.headers.insert(
-        0,
-        ToolResponseHeader {
-            key: "error".to_owned(),
-            value: message.to_owned(),
-        },
-    );
-    response.render()
-}
-
-fn render_cancelled_tool_result(reason: &str) -> String {
-    tau_proto::ToolResponse {
-        raw: tau_proto::CborValue::Null,
-        headers: vec![ToolResponseHeader {
-            key: "cancelled".to_owned(),
-            value: reason.to_owned(),
-        }],
-        body: String::new(),
-    }
-    .render()
 }
 
 fn duration_micros_u64(duration: Duration) -> u64 {
