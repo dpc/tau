@@ -125,6 +125,26 @@ struct FakeBridge {
     wait_timeouts: Mutex<Vec<Duration>>,
     wait_recorded: Condvar,
     registered: Mutex<HashMap<AgentId, String>>,
+    /// Exact generation currently installed in the fake remote bridge.
+    remote_leases: Mutex<HashMap<AgentId, RegistrationLease>>,
+    /// Every completed remote registration, including later-cleaned
+    /// generations.
+    registrations: Mutex<Vec<(AgentId, String)>>,
+    /// Optional enqueue failure for best-effort unregister cleanup.
+    unregister_error: Mutex<Option<String>>,
+    /// Exact generation passed to each best-effort cleanup enqueue.
+    cleanup_leases: Mutex<Vec<(AgentId, RegistrationLease)>>,
+    /// Whether the next registration must stop at the deterministic test
+    /// barrier.
+    block_next_register: Mutex<bool>,
+    /// Signals that the blocked registration reached its barrier.
+    register_entered: Condvar,
+    /// Whether the blocked registration may complete.
+    register_released: Mutex<bool>,
+    /// Releases the blocked registration without a timing sleep.
+    register_release: Condvar,
+    /// Shared authority captured at startup for cleanup-order assertions.
+    authority: Mutex<Option<Arc<RegistrationAuthority>>>,
     sent: Mutex<Vec<(AgentId, String)>>,
     send_error: Mutex<Option<(usize, String)>>,
     /// Optional worker-origin report released by a deterministic test gate.
@@ -165,6 +185,28 @@ impl FakeBridge {
         );
         calls.clone()
     }
+
+    /// Block exactly the next remote registration completion.
+    fn block_next_registration(&self) {
+        *self.block_next_register.lock().expect("lock") = true;
+        *self.register_released.lock().expect("lock") = false;
+    }
+
+    /// Wait until the selected registration reaches its deterministic barrier.
+    fn wait_for_blocked_registration(&self) {
+        let blocked = self.block_next_register.lock().expect("lock");
+        let (_blocked, result) = self
+            .register_entered
+            .wait_timeout_while(blocked, Duration::from_secs(1), |blocked| *blocked)
+            .expect("lock");
+        assert!(!result.timed_out(), "registration did not reach barrier");
+    }
+
+    /// Release the selected registration completion.
+    fn release_registration(&self) {
+        *self.register_released.lock().expect("lock") = true;
+        self.register_release.notify_all();
+    }
 }
 
 impl XmppBridge for FakeBridge {
@@ -173,7 +215,9 @@ impl XmppBridge for FakeBridge {
         _cfg: RuntimeConfig,
         output: Output,
         _shutdown: Arc<ShutdownSignal>,
+        authority: Arc<RegistrationAuthority>,
     ) -> Result<(), String> {
+        *self.authority.lock().expect("lock") = Some(authority);
         *self.started.lock().expect("lock") += 1;
         if let Some((release, event)) = self.worker_report.lock().expect("lock").take() {
             std::thread::spawn(move || {
@@ -188,8 +232,23 @@ impl XmppBridge for FakeBridge {
         &self,
         cfg: &RuntimeConfig,
         agent_id: &AgentId,
+        lease: RegistrationLease,
         room_localpart: Option<&str>,
     ) -> Result<String, String> {
+        {
+            let mut block = self.block_next_register.lock().expect("lock");
+            if *block {
+                *block = false;
+                self.register_entered.notify_all();
+                drop(block);
+                let released = self.register_released.lock().expect("lock");
+                drop(
+                    self.register_release
+                        .wait_while(released, |released| !*released)
+                        .expect("lock"),
+                );
+            }
+        }
         let address = match cfg.routing_mode {
             RoutingMode::Muc => format!(
                 "{}@conference.example.org",
@@ -201,11 +260,37 @@ impl XmppBridge for FakeBridge {
             .lock()
             .expect("lock")
             .insert(agent_id.clone(), address.clone());
+        self.remote_leases
+            .lock()
+            .expect("lock")
+            .insert(agent_id.clone(), lease);
+        self.registrations
+            .lock()
+            .expect("lock")
+            .push((agent_id.clone(), address.clone()));
         Ok(address)
     }
 
-    fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String> {
-        self.registered.lock().expect("lock").remove(agent_id);
+    fn unregister_agent(&self, agent_id: &AgentId, lease: RegistrationLease) -> Result<(), String> {
+        if let Some(authority) = self.authority.lock().expect("lock").as_ref() {
+            assert_eq!(
+                authority.publish_if_active(agent_id, lease, || ()),
+                None,
+                "cleanup was enqueued before exact local lease revocation"
+            );
+        }
+        self.cleanup_leases
+            .lock()
+            .expect("lock")
+            .push((agent_id.clone(), lease));
+        if let Some(error) = self.unregister_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
+        let mut remote_leases = self.remote_leases.lock().expect("lock");
+        if remote_leases.get(agent_id) == Some(&lease) {
+            remote_leases.remove(agent_id);
+            self.registered.lock().expect("lock").remove(agent_id);
+        }
         Ok(())
     }
 
@@ -725,6 +810,11 @@ fn ingress_report_writer_failure_wakes_idle_production_loop() {
         "worker output failure must fail the production runner"
     );
     assert_eq!(*bridge.shutdowns.lock().expect("shutdown count"), 1);
+    assert_eq!(
+        bridge.cleanup_leases.lock().expect("cleanup leases").len(),
+        1,
+        "output loss must retire the active registration before shutdown"
+    );
 }
 
 fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
@@ -738,6 +828,19 @@ fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
 
 fn shutdown_signal() -> Arc<ShutdownSignal> {
     Arc::new(ShutdownSignal::new())
+}
+
+/// Returns isolated registration authority for state-only worker tests.
+fn test_authority() -> Arc<RegistrationAuthority> {
+    Arc::new(RegistrationAuthority::default())
+}
+
+/// Installs one exact active lease in both worker and shared authority state.
+fn activate_worker_agent(worker: &mut WorkerState, agent_id: AgentId) -> RegistrationLease {
+    let lease = worker.authority.reserve(agent_id.clone());
+    assert!(worker.authority.activate(&agent_id, lease));
+    worker.registration_leases.insert(agent_id, lease);
+    lease
 }
 
 fn extension() -> (
@@ -968,8 +1071,237 @@ fn xmpp_register_true_registers_agent_and_starts_bridge() {
     let _result = rx.recv().expect("result");
     assert_eq!(*bridge.started.lock().expect("lock"), 1);
     let state = ext.state.lock().expect("lock");
-    assert!(state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(state.registered_agents.contains_key(&agent_id("agent-1")));
     assert!(state.conversations.contains_key(&agent_id("agent-1")));
+}
+
+/// Explicit unregister revokes local authority and reports success even when
+/// remote cleanup cannot be enqueued.
+#[test]
+fn unregister_succeeds_after_local_revocation_when_cleanup_fails() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("register progress");
+    let _result = rx.recv().expect("register result");
+    *bridge.unregister_error.lock().expect("lock") = Some("forced cleanup failure".to_owned());
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
+
+    let _progress = rx.recv().expect("unregister progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("unregister result") else {
+        panic!("emit")
+    };
+    assert!(matches!(
+        emit.event.as_ref(),
+        Event::ToolResultReported(result)
+            if result.result == CborValue::Text("unregistered from XMPP messages".to_owned())
+    ));
+    assert!(
+        !ext.state
+            .lock()
+            .expect("lock")
+            .registered_agents
+            .contains_key(&agent_id("agent-1"))
+    );
+}
+
+/// Stale worker cleanup retires only its exact generation and cannot remove a
+/// newer registration for the same agent id.
+#[test]
+fn stale_cleanup_cannot_remove_newer_worker_generation() {
+    let (tx, _rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
+    let agent = agent_id("agent-1");
+    let stale = worker.authority.reserve(agent.clone());
+    worker.registration_leases.insert(agent.clone(), stale);
+    let current = worker.authority.reserve(agent.clone());
+    assert!(worker.authority.activate(&agent, current));
+    worker.registration_leases.insert(agent.clone(), current);
+    worker.conversations.insert(
+        agent.clone(),
+        Conversation::Direct {
+            full_jid: Jid::new("tau@example.org/current").expect("jid"),
+        },
+    );
+
+    assert!(worker.retire_registration(&agent, stale).is_none());
+    assert_eq!(worker.registration_leases.get(&agent), Some(&current));
+    assert!(worker.conversations.contains_key(&agent));
+}
+
+/// A superseded registration completion cannot activate or revoke the newer
+/// generation for the same agent.
+#[test]
+fn stale_registration_completion_cannot_change_newer_generation() {
+    let authority = RegistrationAuthority::default();
+    let agent = agent_id("agent-1");
+    let stale = authority.reserve(agent.clone());
+    let current = authority.reserve(agent.clone());
+
+    assert!(!authority.activate(&agent, stale));
+    assert!(!authority.revoke(&agent, stale));
+    assert!(authority.activate(&agent, current));
+    assert_eq!(
+        authority.publish_if_active(&agent, current, || "published"),
+        Some("published")
+    );
+}
+
+/// A real Extension completion delayed behind a newer registration cannot
+/// install reader state or clean up that newer generation.
+#[test]
+fn stale_extension_registration_completion_cannot_replace_newer_generation() {
+    let (tx, rx) = mpsc::channel();
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    bridge.block_next_registration();
+    let ext = Extension::new(bridge.clone(), tx);
+    ext.apply_config(cfg()).expect("apply config");
+    ext.state.lock().expect("lock").current_session_id = Some(
+        "session-1"
+            .parse()
+            .expect("known-safe SessionId must be valid"),
+    );
+
+    std::thread::scope(|scope| {
+        let stale = scope.spawn(|| {
+            ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+        });
+        let _progress = rx.recv().expect("stale progress");
+        bridge.wait_for_blocked_registration();
+        let current = scope.spawn(|| {
+            ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+        });
+        let _progress = rx.recv().expect("current progress");
+        let _result = rx.recv().expect("current result");
+        current.join().expect("current registration");
+        let current_lease = ext
+            .state
+            .lock()
+            .expect("lock")
+            .registered_agents
+            .get(&agent_id("agent-1"))
+            .copied()
+            .expect("current reader lease");
+
+        bridge.release_registration();
+        stale.join().expect("stale registration");
+        let _stale_result = rx.recv().expect("stale result");
+
+        assert_eq!(
+            ext.state
+                .lock()
+                .expect("lock")
+                .registered_agents
+                .get(&agent_id("agent-1")),
+            Some(&current_lease)
+        );
+        assert_eq!(bridge.cleanup_leases.lock().expect("lock").len(), 1);
+    });
+}
+
+/// Local revocation rejects an inbound stanza even while the worker still has
+/// the old route because its queued cleanup command has not been selected.
+#[test]
+fn revocation_precedes_worker_cleanup_command_selection() {
+    let (tx, rx) = mpsc::channel();
+    let mut config = cfg();
+    config.routing_mode = RoutingMode::DirectResource;
+    let mut worker = WorkerState::new(config, tx, shutdown_signal(), test_authority());
+    let agent = agent_id("agent-1");
+    let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
+    worker.bound_jid = Some(bound.clone());
+    worker.conversations.insert(
+        agent.clone(),
+        Conversation::Direct {
+            full_jid: bound.clone(),
+        },
+    );
+    let lease = activate_worker_agent(&mut worker, agent.clone());
+    assert!(worker.authority.revoke(&agent, lease));
+
+    let mut message = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
+    message.from = Some(Jid::new("me@example.org/dino").expect("jid"));
+    message.to = Some(bound);
+    worker.handle_stanza(message.into());
+
+    assert!(worker.conversations.contains_key(&agent));
+    assert!(rx.try_recv().is_err());
+}
+
+/// Unload and session shutdown remove reader-visible leases before cleanup and
+/// never leave the retired registration locally sendable.
+#[test]
+fn unload_and_session_shutdown_revoke_reader_registration() {
+    let (ext, rx, _bridge) = extension();
+    for agent in ["agent-1", "agent-2"] {
+        ext.dispatch_tool(tool(REGISTER_TOOL_NAME, agent, bool_args(true)));
+        let _progress = rx.recv().expect("register progress");
+        let _result = rx.recv().expect("register result");
+    }
+    unload_agent(&ext, agent_id("agent-1"));
+    shutdown_session(
+        &ext,
+        "session-1"
+            .parse()
+            .expect("known-safe SessionId must be valid"),
+    );
+
+    let state = ext.state.lock().expect("lock");
+    assert!(state.registered_agents.is_empty());
+    assert!(state.conversations.is_empty());
+}
+
+/// Every lifecycle retirement path revokes the active lease before enqueueing
+/// cleanup and passes that same exact lease to the bridge.
+#[test]
+fn lifecycle_retirement_paths_revoke_and_enqueue_exact_lease() {
+    for retire in ["unload", "shutdown", "rollover", "disconnect"] {
+        let (ext, rx, bridge) = extension();
+        ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+        let _progress = rx.recv().expect("register progress");
+        let _result = rx.recv().expect("register result");
+        let agent = agent_id("agent-1");
+        let lease = ext
+            .state
+            .lock()
+            .expect("lock")
+            .registered_agents
+            .get(&agent)
+            .copied()
+            .expect("active lease");
+
+        match retire {
+            "unload" => unload_agent(&ext, agent.clone()),
+            "shutdown" => shutdown_session(
+                &ext,
+                "session-1"
+                    .parse()
+                    .expect("known-safe SessionId must be valid"),
+            ),
+            "rollover" => {
+                ext.revoke_all();
+                ext.state.lock().expect("lock").current_session_id = Some(
+                    "session-2"
+                        .parse()
+                        .expect("known-safe SessionId must be valid"),
+                );
+            }
+            "disconnect" => ext.revoke_all(),
+            _ => unreachable!("known test case"),
+        }
+
+        assert_eq!(
+            ext.authority.publish_if_active(&agent, lease, || ()),
+            None,
+            "{retire} retained local publication authority"
+        );
+        assert_eq!(
+            *bridge.cleanup_leases.lock().expect("lock"),
+            vec![(agent, lease)],
+            "{retire} enqueued the wrong cleanup generation"
+        );
+    }
 }
 
 /// Before the worker starts, a new invalid `Configure` replaces the previous
@@ -1212,7 +1544,7 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
     assert_eq!(bridge.wait_for_wait_calls(1), vec![Duration::from_secs(30)]);
     assert!(bridge.registered.lock().expect("lock").is_empty());
     let state = ext.state.lock().expect("lock");
-    assert!(!state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(!state.registered_agents.contains_key(&agent_id("agent-1")));
     assert!(!state.conversations.contains_key(&agent_id("agent-1")));
 }
 
@@ -1565,14 +1897,61 @@ fn online_readiness_wait_is_bounded_to_thirty_seconds() {
 #[test]
 fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
     let bridge = FakeBridge::new();
+    bridge.set_ready(true);
     run_protocol_messages(
-        &[HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
-            reason: Some("test shutdown".to_owned()),
-        })],
+        &[
+            valid_config_message(),
+            session_started_message("session-1"),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+            HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+                reason: Some("test shutdown".to_owned()),
+            }),
+        ],
         bridge.clone(),
     );
 
     assert_eq!(*bridge.shutdowns.lock().expect("lock"), 1);
+    assert_eq!(bridge.cleanup_leases.lock().expect("lock").len(), 1);
+}
+
+/// A new live session id retires every registration from the previous session
+/// before later tools can observe it.
+#[test]
+fn session_rollover_revokes_active_registration() {
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            session_started_message("session-1"),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+            session_started_message("session-2"),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                SEND_TOOL_NAME,
+                "agent-1",
+                message_args("must fail"),
+            ))),
+        ],
+        bridge.clone(),
+    );
+
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolErrorReported(error) if error.message.contains("registration tool")
+            )
+    )));
+    assert_eq!(bridge.cleanup_leases.lock().expect("lock").len(), 1);
 }
 
 /// A disconnect must clear the cached online marker so later register/send
@@ -1580,7 +1959,7 @@ fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
 #[test]
 fn disconnected_state_requires_fresh_online_readiness() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     worker.bound_jid = Some(Jid::new("tau@example.org/tau-resource").expect("jid"));
     worker.occupant_real_jids.insert(
         Jid::new("room@conference.example.org/alice").expect("jid"),
@@ -1625,7 +2004,7 @@ fn worker_with_muc_agent() -> (
     Jid,
 ) {
     let (tx, rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")
         .to_bare();
@@ -1640,6 +2019,7 @@ fn worker_with_muc_agent() -> (
             nick: "tau-self".to_owned(),
         },
     );
+    activate_worker_agent(&mut worker, agent_id("agent-1"));
     (worker, rx, room, occupant)
 }
 
@@ -1742,7 +2122,7 @@ fn instant_room_config_query_uses_owner_submit_form() {
 #[test]
 fn pending_muc_join_is_not_routable_and_can_be_removed() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")
         .to_bare();
@@ -1795,7 +2175,7 @@ fn muc_join_presence_correlation_requires_exact_room_and_nick() {
 #[test]
 fn muc_message_without_real_jid_is_not_routed() {
     let (tx, rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     worker.room_to_agent.insert(
         Jid::new("tau-agent-1@conference.example.org")
             .expect("jid")
@@ -1811,6 +2191,7 @@ fn muc_message_without_real_jid_is_not_routed() {
             nick: "tau-self".to_owned(),
         },
     );
+    activate_worker_agent(&mut worker, agent_id("agent-1"));
     let mut message =
         Message::groupchat(Jid::new("tau-agent-1@conference.example.org").expect("jid"))
             .with_body(Lang::new(), "hello".to_owned());
@@ -1824,7 +2205,7 @@ fn muc_message_without_real_jid_is_not_routed() {
 #[test]
 fn muc_room_identity_uses_only_stable_agent_id() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let room = default_muc_room(&worker, &agent_id("agent-1"));
     assert_eq!(room.to_string(), "agent-1-4zqfxb1k@conference.example.org");
 }
@@ -2049,13 +2430,11 @@ fn replayed_role_metadata_populates_muc_room_template() {
     );
 
     assert_eq!(
-        bridge
-            .registered
-            .lock()
-            .expect("lock")
-            .get(&agent_id("agent-1"))
-            .map(String::as_str),
-        Some("engineer-engineering-agent-1@conference.example.org")
+        bridge.registrations.lock().expect("lock").last(),
+        Some(&(
+            agent_id("agent-1"),
+            "engineer-engineering-agent-1@conference.example.org".to_owned()
+        ))
     );
 }
 
@@ -2065,7 +2444,7 @@ fn replayed_role_metadata_populates_muc_room_template() {
 #[test]
 fn muc_room_identity_hashes_full_long_agent_ids() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let first = agent_id(&format!("{}{}", "a".repeat(48), "b".repeat(16)));
     let second = agent_id(&format!("{}{}", "a".repeat(48), "c".repeat(16)));
 
@@ -2088,7 +2467,7 @@ fn muc_room_identity_hashes_full_long_agent_ids() {
 #[test]
 fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let uppercase = default_muc_room(&worker, &agent_id("AgentA"));
     let lowercase = default_muc_room(&worker, &agent_id("agenta"));
 
@@ -2108,7 +2487,7 @@ fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
 #[test]
 fn muc_room_identity_keeps_full_generated_agent_id() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
 
     let room = default_muc_room(&worker, &agent_id("manager-Y3KG"));
 
@@ -2123,7 +2502,7 @@ fn muc_room_identity_keeps_full_generated_agent_id() {
 #[test]
 fn muc_room_collision_does_not_overwrite_existing_routing() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let room = default_muc_room(&worker, &agent_id("agent-1"));
     worker
         .room_to_agent
@@ -2142,7 +2521,7 @@ fn muc_room_collision_does_not_overwrite_existing_routing() {
 #[test]
 fn muc_room_collision_does_not_overwrite_pending_join() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let room = default_muc_room(&worker, &agent_id("agent-1"));
     worker.pending_muc_joins.insert(
         agent_id("agent-2"),
@@ -2170,7 +2549,7 @@ fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
     let (tx, _rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.muc.room_prefix = "x".repeat(48);
-    let worker = WorkerState::new(cfg, tx, shutdown_signal());
+    let worker = WorkerState::new(cfg, tx, shutdown_signal(), test_authority());
 
     let room = default_muc_room(&worker, &agent_id(&"a".repeat(64))).to_string();
     let localpart = room
@@ -2258,7 +2637,7 @@ async fn best_effort_helper_operations_are_cancelled_by_shutdown() {
     let (tx, _rx) = mpsc::channel();
     let shutdown = shutdown_signal();
     shutdown.request();
-    let worker = WorkerState::new(cfg(), tx, Arc::clone(&shutdown));
+    let worker = WorkerState::new(cfg(), tx, Arc::clone(&shutdown), test_authority());
 
     let err = worker
         .until_shutdown(async {
@@ -2296,7 +2675,7 @@ fn muc_invite_message_contains_mediated_invite_payload() {
 #[test]
 fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let mut native = Message::chat(Jid::new("tau@example.org").expect("jid"))
         .with_body(Lang::new(), "hello".to_owned());
     native.id = Some(xmpp_parsers::message::Id("native-1".to_owned()));
@@ -2333,7 +2712,7 @@ fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
 #[test]
 fn allowed_muc_message_submits_replay_stable_report() {
     let (tx, rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")
         .to_bare();
@@ -2352,6 +2731,7 @@ fn allowed_muc_message_submits_replay_stable_report() {
             nick: "tau-self".to_owned(),
         },
     );
+    activate_worker_agent(&mut worker, agent_id("agent-1"));
     let mut message =
         Message::groupchat(Jid::new("tau-agent-1@conference.example.org").expect("jid"))
             .with_body(Lang::new(), "hello".to_owned());
@@ -2513,7 +2893,7 @@ fn online_state_updates_direct_resource_full_jid() {
     let (tx, _rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.routing_mode = RoutingMode::DirectResource;
-    let mut worker = WorkerState::new(cfg, tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg, tx, shutdown_signal(), test_authority());
     worker.conversations.insert(
         agent_id("agent-1"),
         Conversation::Direct {
@@ -2575,7 +2955,7 @@ fn direct_message_requires_exact_bound_full_jid() {
     let (tx, rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.routing_mode = RoutingMode::DirectResource;
-    let mut worker = WorkerState::new(cfg, tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg, tx, shutdown_signal(), test_authority());
     let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
     worker.bound_jid = Some(bound.clone());
     worker.conversations.insert(
@@ -2584,6 +2964,7 @@ fn direct_message_requires_exact_bound_full_jid() {
             full_jid: bound.clone(),
         },
     );
+    activate_worker_agent(&mut worker, agent_id("agent-1"));
 
     let mut wrong_to = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
     wrong_to.from = Some(Jid::new("me@example.org/dino").expect("jid"));
@@ -2613,6 +2994,39 @@ fn direct_message_requires_exact_bound_full_jid() {
     );
 }
 
+/// The final inbound authority check rejects a stanza when revocation occurs
+/// after route selection but immediately before publication.
+#[test]
+fn inbound_publication_revalidates_exact_lease_at_last_local_point() {
+    let (tx, rx) = mpsc::channel();
+    let mut config = cfg();
+    config.routing_mode = RoutingMode::DirectResource;
+    let authority = test_authority();
+    let mut worker = WorkerState::new(config, tx, shutdown_signal(), Arc::clone(&authority));
+    let agent = agent_id("agent-1");
+    let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
+    worker.bound_jid = Some(bound.clone());
+    worker.conversations.insert(
+        agent.clone(),
+        Conversation::Direct {
+            full_jid: bound.clone(),
+        },
+    );
+    let lease = activate_worker_agent(&mut worker, agent.clone());
+    worker.before_inbound_publication = Some(Box::new(move || {
+        assert!(authority.revoke(&agent, lease));
+    }));
+    let mut message = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
+    message.from = Some(Jid::new("me@example.org/dino").expect("jid"));
+    message.to = Some(bound);
+
+    assert_eq!(
+        worker.handle_stanza(message.into()),
+        WorkerControl::Continue
+    );
+    assert!(rx.try_recv().is_err());
+}
+
 /// A failed accepted ingress report requests shutdown in the real worker path,
 /// and a later queued stanza cannot route or mutate worker state.
 #[test]
@@ -2622,7 +3036,7 @@ fn worker_report_failure_stops_before_later_stanza() {
     let mut config = cfg();
     config.routing_mode = RoutingMode::DirectResource;
     let shutdown = shutdown_signal();
-    let mut worker = WorkerState::new(config, tx, Arc::clone(&shutdown));
+    let mut worker = WorkerState::new(config, tx, Arc::clone(&shutdown), test_authority());
     let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
     worker.bound_jid = Some(bound.clone());
     worker.conversations.insert(
@@ -2631,6 +3045,7 @@ fn worker_report_failure_stops_before_later_stanza() {
             full_jid: bound.clone(),
         },
     );
+    activate_worker_agent(&mut worker, agent_id("agent-1"));
     let message = || {
         let mut message = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
         message.from = Some(Jid::new("me@example.org/dino").expect("jid"));
@@ -2655,7 +3070,7 @@ fn nested_worker_readers_propagate_report_failure() {
         let mut config = cfg();
         config.routing_mode = RoutingMode::DirectResource;
         let shutdown = shutdown_signal();
-        let mut worker = WorkerState::new(config, tx, shutdown);
+        let mut worker = WorkerState::new(config, tx, shutdown, test_authority());
         let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
         worker.bound_jid = Some(bound.clone());
         worker.conversations.insert(
@@ -2664,6 +3079,7 @@ fn nested_worker_readers_propagate_report_failure() {
                 full_jid: bound.clone(),
             },
         );
+        activate_worker_agent(&mut worker, agent_id("agent-1"));
         let mut message = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
         message.from = Some(Jid::new("me@example.org/dino").expect("jid"));
         message.to = Some(bound);
@@ -2683,7 +3099,7 @@ async fn direct_registration_rejects_second_agent() {
     let (tx, _rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.routing_mode = RoutingMode::DirectResource;
-    let mut worker = WorkerState::new(cfg, tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg, tx, shutdown_signal(), test_authority());
     worker.bound_jid = Some(Jid::new("tau@example.org/tau-resource").expect("jid"));
     worker.conversations.insert(
         agent_id("agent-1"),
@@ -2708,7 +3124,7 @@ async fn direct_registration_rejects_second_agent() {
 #[test]
 fn removing_muc_conversation_tracks_leave_and_clears_routing() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     let agent = agent_id("agent-1");
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")

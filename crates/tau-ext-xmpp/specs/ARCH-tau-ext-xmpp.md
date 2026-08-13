@@ -9,8 +9,12 @@ MUC join, authorization, rollback, and cleanup behavior is
 The broader prospective tool-delivery lifecycle is specified by
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md).
 Its checked mandatory publication boundary is current under the approved
-mandatory-delivery audit fix. Its executor, FIFO, deadline, generation,
-revocation, and observability design remains unimplemented and unauthorized;
+mandatory-delivery audit fix. Its executor, FIFO, deadline, generalized
+generation, and observability design remains unimplemented and unauthorized.
+Its approved registration-revocation subset is current: the reader and worker
+share an exact process-local lease, lifecycle retirement denies inbound
+publication before best-effort remote cleanup, and stale cleanup cannot affect
+a newer lease;
 this record describes the current architecture.
 Current and prospective security and reliability boundaries are documented in
 [the XMPP security notes](../SECURITY.md).

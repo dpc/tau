@@ -7,8 +7,13 @@ authorized by this record. Its checked mandatory publication semantics are now
 implemented under the separately approved mandatory-delivery audit fix:
 accepted inbound reports fail closed, and successful sends attempt
 `message.sent_reported` before their sole terminal while suppressing that
-terminal after report failure. The remaining executor, queue, deadline,
-generation, revocation, and observability lifecycle is prospective. Current
+terminal after report failure. The remaining executor, queue, deadline, and
+observability lifecycle is prospective. The approved local-revocation subset is
+current: each registration has a process-local lease, lifecycle retirement
+revokes the exact lease before asynchronous best-effort cleanup, and inbound
+publication revalidates that lease at its final local point. Generalized
+generation checks outside registration and the executor lifecycle remain
+prospective. Current
 behavior remains described by [ARCH-tau-ext-xmpp](ARCH-tau-ext-xmpp.md),
 [SPEC-tau-ext-xmpp-readiness-waits](SPEC-tau-ext-xmpp-readiness-waits.md), and
 [SPEC-tau-ext-xmpp-muc-lifecycle](SPEC-tau-ext-xmpp-muc-lifecycle.md).

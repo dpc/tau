@@ -10,6 +10,7 @@
 //! `ARCH-tau-ext-xmpp`.
 
 mod output;
+mod registration_authority;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
@@ -25,6 +26,7 @@ use output::Output;
 #[cfg(test)]
 pub(crate) use output::SATURATION_HOOK;
 use rand::RngCore;
+use registration_authority::{RegistrationAuthority, RegistrationLease};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, ManualRuntimePoll, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDelivered,
@@ -156,6 +158,7 @@ trait XmppBridge: Send + Sync + 'static {
         cfg: RuntimeConfig,
         output: Output,
         shutdown: Arc<ShutdownSignal>,
+        authority: Arc<RegistrationAuthority>,
     ) -> Result<(), String>;
 
     /// Register one agent conversation and return its XMPP address.
@@ -163,11 +166,12 @@ trait XmppBridge: Send + Sync + 'static {
         &self,
         cfg: &RuntimeConfig,
         agent_id: &AgentId,
+        lease: RegistrationLease,
         room_localpart: Option<&str>,
     ) -> Result<String, String>;
 
-    /// Remove one registered agent conversation from the bridge.
-    fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String>;
+    /// Enqueue best-effort remote cleanup for one exact registration lease.
+    fn unregister_agent(&self, agent_id: &AgentId, lease: RegistrationLease) -> Result<(), String>;
 
     /// Wait for the underlying XMPP stream to be online and authenticated.
     fn wait_until_ready(&self, timeout: Duration) -> Result<(), String>;
@@ -631,7 +635,7 @@ struct State {
     /// Validated runtime config.
     config: Option<RuntimeConfig>,
     /// Agents currently registered with the bridge.
-    registered_agents: HashSet<AgentId>,
+    registered_agents: HashMap<AgentId, RegistrationLease>,
     /// XMPP conversation address per agent.
     conversations: HashMap<AgentId, String>,
     /// Current Tau session id used to scope registration lifecycle cleanup.
@@ -693,6 +697,8 @@ struct Extension {
     output: Output,
     /// Shared shutdown signal.
     shutdown: Arc<ShutdownSignal>,
+    /// Generation-bound authority shared with worker inbound routing.
+    authority: Arc<RegistrationAuthority>,
 }
 
 impl Extension {
@@ -702,6 +708,7 @@ impl Extension {
             bridge,
             output: output.into(),
             shutdown: Arc::new(ShutdownSignal::new()),
+            authority: Arc::new(RegistrationAuthority::default()),
         }
     }
 
@@ -727,6 +734,33 @@ impl Extension {
             state.config = None;
             state.registered_agents.clear();
             state.conversations.clear();
+            self.authority.revoke_all();
+        }
+    }
+
+    /// Revoke one agent's local authority before enqueueing remote cleanup.
+    fn revoke_agent(&self, agent_id: &AgentId) {
+        let lease = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.registered_agents.remove(agent_id);
+            state.conversations.remove(agent_id);
+            self.authority.revoke_current(agent_id)
+        };
+        if let Some(lease) = lease {
+            let _ = self.bridge.unregister_agent(agent_id, lease);
+        }
+    }
+
+    /// Revoke all local authority before enqueueing remote cleanup.
+    fn revoke_all(&self) {
+        let leases = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.registered_agents.clear();
+            state.conversations.clear();
+            self.authority.revoke_all()
+        };
+        for (agent_id, lease) in leases {
+            let _ = self.bridge.unregister_agent(&agent_id, lease);
         }
     }
 
@@ -771,7 +805,7 @@ impl Extension {
             Err(message) => return tool_error(invoke, message),
         };
         if enabled {
-            let (cfg, room_localpart) = {
+            let (cfg, room_localpart, lease) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(cfg) = state.config.clone() else {
                     return tool_error(invoke, "xmpp extension is not configured".to_owned());
@@ -796,26 +830,43 @@ impl Extension {
                         cfg.clone(),
                         self.output.clone(),
                         Arc::clone(&self.shutdown),
+                        Arc::clone(&self.authority),
                     ) {
                         return tool_error(invoke, message);
                     }
                     state.bridge_started = true;
                 }
-                (cfg, room_localpart)
+                let lease = self.authority.reserve(invoke.agent_id.clone());
+                (cfg, room_localpart, lease)
             };
             if let Err(message) = self.bridge.wait_until_ready(ONLINE_WAIT_TIMEOUT) {
+                self.authority.revoke(&invoke.agent_id, lease);
                 return tool_error(invoke, message);
             }
-            let address =
-                match self
-                    .bridge
-                    .register_agent(&cfg, &invoke.agent_id, room_localpart.as_deref())
-                {
-                    Ok(address) => address,
-                    Err(message) => return tool_error(invoke, message),
-                };
+            let address = match self.bridge.register_agent(
+                &cfg,
+                &invoke.agent_id,
+                lease,
+                room_localpart.as_deref(),
+            ) {
+                Ok(address) => address,
+                Err(message) => {
+                    self.authority.revoke(&invoke.agent_id, lease);
+                    return tool_error(invoke, message);
+                }
+            };
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.registered_agents.insert(invoke.agent_id.clone());
+            if !self.authority.activate(&invoke.agent_id, lease) {
+                drop(state);
+                let _ = self.bridge.unregister_agent(&invoke.agent_id, lease);
+                return tool_error(
+                    invoke,
+                    "xmpp registration was revoked before completion".to_owned(),
+                );
+            }
+            state
+                .registered_agents
+                .insert(invoke.agent_id.clone(), lease);
             state
                 .conversations
                 .insert(invoke.agent_id.clone(), address.clone());
@@ -826,10 +877,7 @@ impl Extension {
                 ),
             )
         } else {
-            let _ = self.bridge.unregister_agent(&invoke.agent_id);
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.registered_agents.remove(&invoke.agent_id);
-            state.conversations.remove(&invoke.agent_id);
+            self.revoke_agent(&invoke.agent_id);
             tool_result(invoke, "unregistered from XMPP messages")
         }
     }
@@ -871,7 +919,7 @@ impl Extension {
                     "`message` exceeds xmpp max_message_bytes".to_owned(),
                 );
             }
-            if !state.registered_agents.contains(&invoke.agent_id) {
+            if !state.registered_agents.contains_key(&invoke.agent_id) {
                 return tool_error(
                     invoke,
                     "The XMPP send tool requires the registration tool with enabled=true first"
@@ -980,6 +1028,7 @@ fn outbound_message_parts(agent_id: &AgentId, message: &str) -> Result<Vec<Strin
 
 impl Drop for Extension {
     fn drop(&mut self) {
+        self.revoke_all();
         self.shutdown.request();
         if let Err(error) = self.bridge.shutdown(SHUTDOWN_TIMEOUT) {
             tracing::warn!(target: LOG_TARGET, %error, "xmpp bridge shutdown did not finish cleanly");
@@ -1009,6 +1058,8 @@ enum XmppCommand {
     Register {
         /// Agent to register.
         agent_id: AgentId,
+        /// Exact registration generation being installed.
+        lease: RegistrationLease,
         /// Rendered MUC room localpart, absent in direct-resource mode.
         room_localpart: Option<String>,
         /// Response channel carrying the conversation address.
@@ -1017,8 +1068,8 @@ enum XmppCommand {
     Unregister {
         /// Agent to unregister.
         agent_id: AgentId,
-        /// Response channel after leave/unregister cleanup has been attempted.
-        response: mpsc::Sender<()>,
+        /// Exact stale generation eligible for cleanup.
+        lease: RegistrationLease,
     },
     Send {
         /// Sending agent.
@@ -1042,6 +1093,7 @@ impl XmppBridge for LiveXmppBridge {
         cfg: RuntimeConfig,
         output: Output,
         shutdown: Arc<ShutdownSignal>,
+        authority: Arc<RegistrationAuthority>,
     ) -> Result<(), String> {
         let mut guard = self.command_tx.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
@@ -1054,7 +1106,7 @@ impl XmppBridge for LiveXmppBridge {
         let join = path_std_thread::Builder::new()
             .name("tau-ext-xmpp".to_owned())
             .spawn(move || {
-                xmpp_thread(cfg, command_rx, output, worker_shutdown);
+                xmpp_thread(cfg, command_rx, output, worker_shutdown, authority);
                 let _ = done_tx.send(());
             })
             .map_err(|e| format!("failed to spawn xmpp worker: {e}"))?;
@@ -1069,12 +1121,14 @@ impl XmppBridge for LiveXmppBridge {
         &self,
         _cfg: &RuntimeConfig,
         agent_id: &AgentId,
+        lease: RegistrationLease,
         room_localpart: Option<&str>,
     ) -> Result<String, String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
         tx.send(XmppCommand::Register {
             agent_id: agent_id.clone(),
+            lease,
             room_localpart: room_localpart.map(ToOwned::to_owned),
             response: response_tx,
         })
@@ -1084,17 +1138,13 @@ impl XmppBridge for LiveXmppBridge {
             .map_err(|_| "timed out waiting for xmpp registration".to_owned())?
     }
 
-    fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String> {
+    fn unregister_agent(&self, agent_id: &AgentId, lease: RegistrationLease) -> Result<(), String> {
         let tx = self.command_sender()?;
-        let (response_tx, response_rx) = mpsc::channel();
         tx.send(XmppCommand::Unregister {
             agent_id: agent_id.clone(),
-            response: response_tx,
+            lease,
         })
-        .map_err(|_| "xmpp worker is not running".to_owned())?;
-        response_rx
-            .recv_timeout(COMMAND_TIMEOUT)
-            .map_err(|_| "timed out waiting for xmpp unregister".to_owned())
+        .map_err(|_| "xmpp worker is not running".to_owned())
     }
 
     fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
@@ -1169,12 +1219,13 @@ fn xmpp_thread(
     command_rx: mpsc::Receiver<XmppCommand>,
     output: Output,
     shutdown: Arc<ShutdownSignal>,
+    authority: Arc<RegistrationAuthority>,
 ) {
     match path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(xmpp_worker(cfg, command_rx, output, shutdown)),
+        Ok(runtime) => runtime.block_on(xmpp_worker(cfg, command_rx, output, shutdown, authority)),
         Err(error) => tracing::warn!(target: LOG_TARGET, %error, "failed to create xmpp runtime"),
     }
 }
@@ -1184,6 +1235,7 @@ async fn xmpp_worker(
     command_rx: mpsc::Receiver<XmppCommand>,
     output: Output,
     shutdown: Arc<ShutdownSignal>,
+    authority: Arc<RegistrationAuthority>,
 ) {
     if let Err(error) = path_tokio_xmpp_rustls_crypto::ring::default_provider().install_default() {
         tracing::debug!(target: LOG_TARGET, ?error, "rustls provider was already installed or unavailable");
@@ -1198,7 +1250,7 @@ async fn xmpp_worker(
     };
     let mut client = Client::new(login_jid, cfg.password.clone());
     let mut command_rx = std_to_tokio(command_rx);
-    let mut worker = WorkerState::new(cfg, output, Arc::clone(&shutdown));
+    let mut worker = WorkerState::new(cfg, output, Arc::clone(&shutdown), authority);
     loop {
         if shutdown.is_requested() {
             worker
@@ -1326,10 +1378,14 @@ struct WorkerState {
     output: Output,
     /// Shared shutdown signal used to cancel long best-effort operations.
     shutdown: Arc<ShutdownSignal>,
+    /// Generation-bound authority checked at inbound publication.
+    authority: Arc<RegistrationAuthority>,
     /// Server-returned bound JID.
     bound_jid: Option<Jid>,
     /// Registered conversations.
     conversations: HashMap<AgentId, Conversation>,
+    /// Exact registration generation owning each worker conversation.
+    registration_leases: HashMap<AgentId, RegistrationLease>,
     /// MUC joins that have been sent but are not yet routable conversations.
     pending_muc_joins: HashMap<AgentId, MucOccupant>,
     /// MUC room to agent mapping.
@@ -1340,24 +1396,36 @@ struct WorkerState {
     message_id_nonce: [u8; 16],
     /// Monotonic ordinal for inbound stanzas that omit a stanza id.
     next_local_message_id: u64,
+    /// Deterministic test barrier immediately before the final authority check.
+    #[cfg(test)]
+    before_inbound_publication: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl WorkerState {
     /// Create a worker state.
-    fn new(cfg: RuntimeConfig, output: impl Into<Output>, shutdown: Arc<ShutdownSignal>) -> Self {
+    fn new(
+        cfg: RuntimeConfig,
+        output: impl Into<Output>,
+        shutdown: Arc<ShutdownSignal>,
+        authority: Arc<RegistrationAuthority>,
+    ) -> Self {
         let mut message_id_nonce = [0_u8; 16];
         rand::thread_rng().fill_bytes(&mut message_id_nonce);
         Self {
             cfg,
             output: output.into(),
             shutdown,
+            authority,
             bound_jid: None,
             conversations: HashMap::new(),
+            registration_leases: HashMap::new(),
             pending_muc_joins: HashMap::new(),
             room_to_agent: HashMap::new(),
             occupant_real_jids: HashMap::new(),
             message_id_nonce,
             next_local_message_id: 1,
+            #[cfg(test)]
+            before_inbound_publication: None,
         }
     }
 
@@ -1366,9 +1434,11 @@ impl WorkerState {
         match command {
             XmppCommand::Register {
                 agent_id,
+                lease,
                 room_localpart,
                 response,
             } => {
+                self.registration_leases.insert(agent_id.clone(), lease);
                 let result = match tokio::time::timeout(
                     REGISTER_TIMEOUT,
                     self.register_agent(agent_id.clone(), room_localpart, client),
@@ -1377,20 +1447,19 @@ impl WorkerState {
                 {
                     Ok(result) => result,
                     Err(_) => {
-                        self.unregister_agent(&agent_id, client).await;
+                        self.unregister_agent(&agent_id, lease, client).await;
                         Err("timed out registering xmpp conversation".to_owned())
                     }
                 };
                 if self
-                    .finish_register_response(&agent_id, result, response, client)
+                    .finish_register_response(&agent_id, lease, result, response, client)
                     .await
                 {
                     self.send_post_register_notice(&agent_id, client).await;
                 }
             }
-            XmppCommand::Unregister { agent_id, response } => {
-                self.unregister_agent(&agent_id, client).await;
-                let _ = response.send(());
+            XmppCommand::Unregister { agent_id, lease } => {
+                self.unregister_agent(&agent_id, lease, client).await;
             }
             XmppCommand::Send {
                 agent_id,
@@ -1413,14 +1482,18 @@ impl WorkerState {
     async fn finish_register_response(
         &mut self,
         agent_id: &AgentId,
+        lease: RegistrationLease,
         result: Result<String, String>,
         response: mpsc::Sender<Result<String, String>>,
         client: &mut Client,
     ) -> bool {
         let registered = result.is_ok();
         if response.send(result).is_err() && registered {
-            self.unregister_agent(agent_id, client).await;
+            self.unregister_agent(agent_id, lease, client).await;
             return false;
+        }
+        if !registered {
+            self.registration_leases.remove(agent_id);
         }
         registered
     }
@@ -1653,13 +1726,37 @@ impl WorkerState {
         self.occupant_real_jids.clear();
     }
 
-    /// Unregister one agent and leave its MUC room when applicable.
-    async fn unregister_agent(&mut self, agent_id: &AgentId, client: &mut Client) {
-        self.leave_pending_muc_join(agent_id, client).await;
-        if let Some(conversation) = self.conversations.get(agent_id).cloned() {
-            self.leave_conversation(&conversation, client).await;
-            self.remove_conversation(agent_id);
+    /// Revoke an exact worker route before best-effort remote cleanup.
+    async fn unregister_agent(
+        &mut self,
+        agent_id: &AgentId,
+        lease: RegistrationLease,
+        client: &mut Client,
+    ) {
+        let Some((pending, conversation)) = self.retire_registration(agent_id, lease) else {
+            return;
+        };
+        if let Some(occupant) = pending {
+            self.leave_muc_occupant(&occupant, client).await;
         }
+        if let Some(conversation) = conversation {
+            self.leave_conversation(&conversation, client).await;
+        }
+    }
+
+    /// Retire an exact worker generation without touching a newer registration.
+    fn retire_registration(
+        &mut self,
+        agent_id: &AgentId,
+        lease: RegistrationLease,
+    ) -> Option<(Option<MucOccupant>, Option<Conversation>)> {
+        if self.registration_leases.get(agent_id) != Some(&lease) {
+            return None;
+        }
+        self.registration_leases.remove(agent_id);
+        let pending = self.pending_muc_joins.remove(agent_id);
+        let conversation = self.remove_conversation(agent_id);
+        Some((pending, conversation))
     }
 
     /// Remove one registered conversation and its room mapping.
@@ -1694,6 +1791,7 @@ impl WorkerState {
         }
         self.room_to_agent.clear();
         self.occupant_real_jids.clear();
+        self.registration_leases.clear();
     }
 
     /// Send leave presence for a MUC conversation. Direct conversations require
@@ -2035,6 +2133,9 @@ impl WorkerState {
         let Some(agent_id) = self.room_to_agent.get(&room).cloned() else {
             return;
         };
+        let Some(lease) = self.registration_leases.get(&agent_id).copied() else {
+            return;
+        };
         if self.is_own_muc_message(&agent_id, &from) {
             return;
         }
@@ -2058,6 +2159,7 @@ impl WorkerState {
         if self
             .route(
                 agent_id,
+                lease,
                 message_id,
                 MessageParty {
                     stable_id: xmpp_sender_ref(&sender_id),
@@ -2109,12 +2211,16 @@ impl WorkerState {
             tracing::warn!(target: LOG_TARGET, sender = %from, "dropping direct xmpp message with no registered direct-resource agent; in MUC mode, send messages in the agent room instead of replying to direct notices");
             return;
         }
+        let Some(lease) = self.registration_leases.get(&agents[0]).copied() else {
+            return;
+        };
         let sender_id = from.to_bare().to_string();
         let conversation_id = sender_id.clone();
         let message_id = self.inbound_message_id(&message, &sender_id, &conversation_id);
         if self
             .route(
                 agents[0].clone(),
+                lease,
                 message_id,
                 MessageParty {
                     stable_id: xmpp_sender_ref(&sender_id),
@@ -2149,29 +2255,38 @@ impl WorkerState {
     fn route(
         &self,
         agent_id: AgentId,
+        lease: RegistrationLease,
         message_id: MessageFactId,
         sender: MessageParty,
         conversation_id: String,
         text: String,
     ) -> ClientResult<()> {
-        self.output
-            .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
-                RawMessagePublisherId::new(
-                    self.cfg
-                        .instance_name
-                        .as_deref()
-                        .expect("configured XMPP worker retains its instance name"),
-                ),
-                MessageAgentTarget::new(agent_id.as_ref()),
-                message_id,
-                sender,
-                Some(MessageConversation {
-                    stable_id: conversation_id,
-                    display_name: None,
-                    alias: None,
-                }),
-                text,
-            )))
+        #[cfg(test)]
+        if let Some(hook) = self.before_inbound_publication.as_ref() {
+            hook();
+        }
+        self.authority
+            .publish_if_active(&agent_id, lease, || {
+                self.output
+                    .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
+                        RawMessagePublisherId::new(
+                            self.cfg
+                                .instance_name
+                                .as_deref()
+                                .expect("configured XMPP worker retains its instance name"),
+                        ),
+                        MessageAgentTarget::new(agent_id.as_ref()),
+                        message_id,
+                        sender,
+                        Some(MessageConversation {
+                            stable_id: conversation_id,
+                            display_name: None,
+                            alias: None,
+                        }),
+                        text,
+                    )))
+            })
+            .unwrap_or(Ok(()))
     }
 
     /// Build a bounded publisher-scoped identity from a stanza id or a
@@ -2490,6 +2605,7 @@ where
     };
     runtime.state().ext.output.install_waker(runtime.waker());
     let loop_result = run_xmpp_loop(&mut runtime);
+    runtime.state().ext.revoke_all();
     runtime.state().ext.shutdown.request();
     match loop_result {
         Ok(true) => {
@@ -2646,6 +2762,18 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, XmppRuntime>) -> Clien
 
 fn handle_session_started(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {
     if let Event::SessionStarted(started) = cx.event() {
+        let rollover = cx
+            .state
+            .ext
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_session_id
+            .as_ref()
+            .is_some_and(|current| current != &started.session_id);
+        if rollover {
+            cx.state.ext.revoke_all();
+        }
         let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_session_id = Some(started.session_id.clone());
     }
@@ -2702,32 +2830,24 @@ fn immutable_config_error() -> String {
 }
 
 fn unload_agent(ext: &Extension, agent_id: AgentId) {
-    let _ = ext.bridge.unregister_agent(&agent_id);
+    ext.revoke_agent(&agent_id);
     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-    state.registered_agents.remove(&agent_id);
-    state.conversations.remove(&agent_id);
     if state.ephemeral_agent_roles.remove(&agent_id) {
         state.agent_roles.remove(&agent_id);
     }
 }
 
 fn shutdown_session(ext: &Extension, session_id: SessionId) {
-    let agents: Vec<_> = {
+    {
         let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-        let agents = state.registered_agents.iter().cloned().collect::<Vec<_>>();
-        state.registered_agents.clear();
-        state.conversations.clear();
         for agent_id in state.ephemeral_agent_roles.drain().collect::<Vec<_>>() {
             state.agent_roles.remove(&agent_id);
         }
         if state.current_session_id.as_ref() == Some(&session_id) {
             state.current_session_id = None;
         }
-        agents
-    };
-    for agent in agents {
-        let _ = ext.bridge.unregister_agent(&agent);
     }
+    ext.revoke_all();
 }
 
 fn xmpp_tool_group() -> tau_proto::ToolGroup {

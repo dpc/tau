@@ -55,8 +55,10 @@ wake.
 
 The confirmed
 [XMPP tool-delivery lifecycle](specs/SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
-is not implemented or authorized for implementation, and the coverage below is
-not present. Its implementation must use a fake monotonic clock, explicitly
+is only implemented for the approved registration-revocation subset. That subset
+has deterministic exact-lease, stale-cleanup, cleanup-failure, lifecycle, and
+last-point inbound checks. The remaining coverage below is prospective and not
+authorized for implementation. Its implementation must use a fake monotonic clock, explicitly
 stepped executor, fake bridge/transport, and controllable output, without
 wall-clock sleeps. Deterministic coverage must establish:
 

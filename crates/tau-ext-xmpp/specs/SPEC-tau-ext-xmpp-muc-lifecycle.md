@@ -5,10 +5,12 @@
 This record describes current MUC behavior. The checked mandatory publication
 boundary from
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
-is current under the approved audit fix. Its prospective executor will place
-registration and remote cleanup in one FIFO, clamp registration to the
-whole-intent deadline, and revoke local routing before best-effort cleanup.
-That remaining implementation is not authorized by the prospective record.
+is current under the approved audit fix. Exact process-local registration leases
+now revoke local routing before best-effort cleanup, and stale cleanup cannot
+remove a newer route. The prospective executor will place registration and
+remote cleanup in one FIFO and clamp registration to the whole-intent deadline.
+That remaining executor/deadline implementation is not authorized by the
+prospective record.
 
 ## Record justification
 

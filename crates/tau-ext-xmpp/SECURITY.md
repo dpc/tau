@@ -12,10 +12,13 @@ authorization boundary. Incoming text remains untrusted external input. A
 worker-side conversation left after failed cleanup must not retain local routing
 authority.
 
-Current tool delivery still runs readiness, registration, sequential multipart
-send, and unregister waits on the serialized protocol reader. Its checked
+Current tool delivery still runs readiness, registration, and sequential multipart
+send waits on the serialized protocol reader. Unregister and lifecycle retirement
+instead revoke the exact process-local registration lease first, enqueue bounded
+best-effort remote cleanup without waiting, and revalidate the lease immediately
+before inbound publication. Its checked
 mandatory publication boundary is current under the approved audit fix. The
-remaining executor, FIFO, deadline, generation, revocation, and observability
+remaining executor, FIFO, deadline, generalized generation, and observability
 design in
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](specs/SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
 is prospective and not implemented or authorized for implementation.
@@ -26,9 +29,11 @@ Register and send reservations have one absolute 60-second deadline including
 queue time. These limits bound memory and head-of-line denial of service but do
 not bound `tau-client`'s separate output queue.
 
-Prospective configuration, session, registration, and output generations revoke
-local authority synchronously before remote cleanup. Cleanup is best effort and
-may fail or be dropped without restoring routes. Frozen plaintext bodies remain
+Registration generations now revoke local authority synchronously before remote
+cleanup for explicit unregister, unload, session rollover/shutdown, disconnect,
+and output-loss retirement. Cleanup is best effort and may fail without
+restoring routes. Configuration and generalized output/executor generations
+remain prospective. Frozen plaintext bodies remain
 in memory until terminal disposition and are then dropped promptly. No
 persistent outbox or allocator zeroization is claimed.
 
