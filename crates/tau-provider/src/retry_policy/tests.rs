@@ -90,3 +90,13 @@ fn classifies_account_and_unknown_errors() {
         RetryClass::Unknown
     );
 }
+
+/// Ensures the current Codex overload identifier uses the short, prompt-local
+/// overload cadence rather than the persistent unknown-failure cadence.
+#[test]
+fn classifies_current_codex_overload_identifier() {
+    assert_eq!(
+        classify_error_code("server_is_overloaded"),
+        RetryClass::Overload
+    );
+}

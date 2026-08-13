@@ -4762,3 +4762,178 @@ fn response_failed_context_rejection_is_typed_terminal() {
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
 }
+
+/// Ensures incomplete Responses terminals close the prompt instead of
+/// repeatedly scheduling an unchanged incomplete request.
+#[test]
+fn response_incomplete_is_a_typed_terminal_rejection() {
+    let event = serde_json::json!({
+        "type": "response.incomplete",
+        "response": {
+            "incomplete_details": { "reason": "max_output_tokens" }
+        }
+    });
+    let error = response_incomplete_error(
+        &event,
+        path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+    );
+
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+}
+
+/// Ensures only Codex's direct canonical policy and invalid-request codes
+/// terminalize a failed Responses request before the scheduler sees it.
+#[test]
+fn response_failed_canonical_policy_codes_are_typed_terminal_rejections() {
+    for code in ["cyber_policy", "invalid_prompt", "bio_policy"] {
+        let event = serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": code,
+                    "message": "request rejected"
+                }
+            }
+        });
+        let error = response_failed_error(
+            &event,
+            path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+        );
+
+        assert_eq!(error.retry_decision(), None, "{code} must not retry");
+        assert_eq!(
+            error.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::RequestRejected),
+            "{code} must be a typed rejection"
+        );
+    }
+}
+
+/// Ensures the direct legacy `type` fallback remains terminal while a direct
+/// `code` keeps precedence over a conflicting fallback value.
+#[test]
+fn response_failed_policy_rejection_preserves_direct_code_type_precedence() {
+    let typed = serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "type": "cyber_policy",
+                "message": "request rejected"
+            }
+        }
+    });
+    let typed_error = response_failed_error(
+        &typed,
+        path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+    );
+    assert_eq!(
+        typed_error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+
+    let conflicting = serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "code": "unrecognized_failure",
+                "type": "bio_policy",
+                "message": "request rejected"
+            }
+        }
+    });
+    let conflicting_error = response_failed_error(
+        &conflicting,
+        path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+    );
+    assert_eq!(
+        conflicting_error
+            .retry_decision()
+            .map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Unknown)
+    );
+    assert_eq!(conflicting_error.failure_kind(), None);
+}
+
+/// Prevents provider prose or nested lookalikes from impersonating the direct
+/// canonical Responses error identifier that terminalizes a request.
+#[test]
+fn response_failed_policy_rejection_requires_direct_canonical_code() {
+    for error in [
+        serde_json::json!({
+            "code": "unrecognized_failure",
+            "message": "cyber_policy"
+        }),
+        serde_json::json!({
+            "code": "unrecognized_failure",
+            "metadata": { "code": "invalid_prompt" }
+        }),
+    ] {
+        let event = serde_json::json!({
+            "type": "response.failed",
+            "response": { "error": error }
+        });
+        let error = response_failed_error(
+            &event,
+            path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+        );
+
+        assert_eq!(
+            error.retry_decision().map(|decision| decision.class),
+            Some(tau_provider::retry_policy::RetryClass::Unknown)
+        );
+        assert_eq!(error.failure_kind(), None);
+    }
+}
+
+/// Ensures the exact current Codex overload identifier selects overload retry,
+/// while prose and nested lookalikes remain unknown rather than authoritative.
+#[test]
+fn response_failed_overload_code_requires_direct_canonical_identifier() {
+    let canonical = serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "code": "server_is_overloaded",
+                "message": "try later"
+            }
+        }
+    });
+    let canonical_error = response_failed_error(
+        &canonical,
+        path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+    );
+    assert_eq!(
+        canonical_error
+            .retry_decision()
+            .map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Overload)
+    );
+
+    for error in [
+        serde_json::json!({
+            "code": "unrecognized_failure",
+            "message": "server_is_overloaded"
+        }),
+        serde_json::json!({
+            "code": "unrecognized_failure",
+            "metadata": { "code": "server_is_overloaded" }
+        }),
+    ] {
+        let event = serde_json::json!({
+            "type": "response.failed",
+            "response": { "error": error }
+        });
+        let error = response_failed_error(
+            &event,
+            path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
+        );
+        assert_eq!(
+            error.retry_decision().map(|decision| decision.class),
+            Some(tau_provider::retry_policy::RetryClass::Unknown)
+        );
+    }
+}

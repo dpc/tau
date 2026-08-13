@@ -1847,12 +1847,17 @@ fn response_incomplete_error(
         .and_then(|r| r["incomplete_details"]["reason"].as_str())
         .unwrap_or("unknown reason");
     let reason = bounded_remote_text(reason, 64);
-    LlmError::StreamError {
-        body: format!("response incomplete: {reason}"),
-        code: None,
-        retry_after: None,
-    }
+    LlmError::ProviderFailure(
+        tau_proto::ProviderFailureKind::RequestRejected,
+        format!("response incomplete: {reason}"),
+    )
     .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+}
+
+/// Returns whether the direct Responses error code proves an unchanged request
+/// cannot succeed.
+fn is_terminal_request_rejection_code(code: Option<&str>) -> bool {
+    matches!(code, Some("cyber_policy" | "invalid_prompt" | "bio_policy"))
 }
 
 fn response_failed_error(
@@ -1885,6 +1890,12 @@ fn response_failed_error(
         .observed(
             path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
         );
+    }
+    if is_terminal_request_rejection_code(code.as_deref()) {
+        return LlmError::ProviderFailure(tau_proto::ProviderFailureKind::RequestRejected, body)
+            .observed(
+                path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+            );
     }
     LlmError::StreamError {
         body,
