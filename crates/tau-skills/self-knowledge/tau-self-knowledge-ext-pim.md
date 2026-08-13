@@ -23,6 +23,9 @@ Email:
 - send, trash, star/unstar, mark read/unread
 - queue unsafe incoming reads and outgoing sends for `:email` approval actions
 - Gmail IMAP/SMTP Google OAuth2/XOAUTH2 via installed-app PKCE: `:email auth google start <account>` and `:email auth google finish <account> <copied-url>`
+- explicit `smtp_outcome_unknown` errors when SMTP may have accepted a direct
+  email; do not retry automatically, and reconcile with the account/provider
+  first
 - append sanitized audit logs under the extension state directory
 
 Calendar:

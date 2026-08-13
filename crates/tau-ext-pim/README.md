@@ -97,6 +97,15 @@ Outgoing `from` cannot be spoofed. It must match the configured account identity
 
 Queued outgoing approvals persist the full draft for user review. Bcc recipients are hidden from model-facing status output, but visible to the user in `:email out open <id>` before approval. Approved drafts enter a `sending` state and are revalidated against the current account and policy before SMTP delivery to reduce duplicate sends and stale approval abuse. Denied drafts move out of the pending queue and the denied approval id cannot later be approved or sent.
 
+SMTP setup and explicit rejection failures are ordinary send errors because the
+server did not accept the message. A disconnect, timeout, or malformed reply
+after submission begins instead returns `smtp_outcome_unknown`: the server may
+have accepted the email, so do not retry automatically and reconcile with the
+account or provider first. Tau never resubmits message data internally.
+Approved drafts retain their existing conservative `sending` state after either
+failure class. Direct allowlisted sends have no durable identity, so a new tool
+call can still repeat an ambiguously accepted message.
+
 ### Approval state and allowlists
 
 Approval files are validated on load and written atomically without overwriting existing records on id collision. Incoming and outgoing approval ids should still be treated as sensitive user-interface tokens: do not ask the model to invent or reuse them.

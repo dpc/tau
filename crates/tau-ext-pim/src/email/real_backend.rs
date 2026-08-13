@@ -9,6 +9,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,12 +17,12 @@ use async_imap::imap_proto::types::NameAttribute;
 use async_imap::types::Flag;
 use async_imap::{Authenticator, Client, Session};
 use futures_util::TryStreamExt;
+use lettre::Message;
 use lettre::message::Mailbox;
 use lettre::message::header::ContentType as LettreContentType;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
-use lettre::transport::smtp::client::{AsyncSmtpConnection, CertificateStore, Tls, TlsParameters};
+use lettre::transport::smtp::client::{AsyncSmtpConnection, CertificateStore, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_parser::{Address as ParsedAddress, MessageParser, MimeHeaders};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
@@ -34,9 +35,9 @@ use tokio_rustls::client::TlsStream;
 
 use super::{
     AuthMethod, AuthenticationResultsEvidence, BackendAttachment, BackendFolder, BackendMessage,
-    BackendMessagePage, EmailBackend, EmailOauth2Provider, MessageFlagMutation, OutgoingMessage,
-    READ_BODY_MAX_BYTES, StateStore, TlsMode, ValidatedAuthConfig, ValidatedConfig,
-    ValidatedImapConfig, ValidatedSmtpConfig,
+    BackendMessagePage, EmailBackend, EmailOauth2Provider, EmailSendFailure, MessageFlagMutation,
+    OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode, ValidatedAuthConfig,
+    ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig,
 };
 use crate::google_oauth::{GoogleOauthClient, GoogleOauthSecretConfig};
 
@@ -52,6 +53,29 @@ pub struct RealEmailBackend {
     accounts: BTreeMap<String, RealAccount>,
     runtime: Runtime,
     oauth: Arc<GoogleOauthClient>,
+}
+
+#[derive(Clone, Default)]
+/// Shared marker for whether one SMTP attempt crossed into message submission.
+struct SmtpSubmissionStage {
+    /// True after the production path enters lettre's SMTP transaction call.
+    submission_started: Arc<AtomicBool>,
+}
+
+impl SmtpSubmissionStage {
+    fn mark_submission_started(&self) {
+        self.submission_started.store(true, Ordering::SeqCst);
+    }
+
+    fn timeout_failure(&self) -> EmailSendFailure {
+        if self.submission_started.load(Ordering::SeqCst) {
+            EmailSendFailure::OutcomeUnknown("network_error: SMTP submission timed out".to_owned())
+        } else {
+            EmailSendFailure::NotDispatched(
+                "network_error: SMTP setup timed out before submission".to_owned(),
+            )
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -240,12 +264,27 @@ impl EmailBackend for RealEmailBackend {
         })
     }
 
-    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String> {
-        let account = self.account(&message.account)?;
-        let timeout_seconds = account.smtp_config()?.timeout_seconds;
+    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, EmailSendFailure> {
+        let account = self
+            .account(&message.account)
+            .map_err(EmailSendFailure::NotDispatched)?;
+        let timeout_seconds = account
+            .smtp_config()
+            .map_err(EmailSendFailure::NotDispatched)?
+            .timeout_seconds;
         let message = clone_outgoing_message(message);
-        self.block_with_timeout(timeout_seconds, async move {
-            send_message_async(&account, &message).await
+        let send_stage = SmtpSubmissionStage::default();
+        let timeout_stage = send_stage.clone();
+        self.runtime.block_on(async move {
+            match time::timeout(
+                Duration::from_secs(timeout_seconds),
+                send_message_async(&account, &message, send_stage),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(timeout_stage.timeout_failure()),
+            }
         })
     }
 
@@ -775,83 +814,137 @@ fn is_likely_trash_folder(name: &str, delimiter: &str) -> bool {
 async fn send_message_async(
     account: &RealAccount,
     outgoing: &OutgoingMessage,
-) -> Result<String, String> {
-    let smtp = account.smtp_config()?;
+    submission_stage: SmtpSubmissionStage,
+) -> Result<String, EmailSendFailure> {
+    let smtp = account
+        .smtp_config()
+        .map_err(EmailSendFailure::NotDispatched)?;
     let message_id = generate_message_id(&smtp.host, outgoing);
-    let email = build_lettre_message(outgoing, &message_id)?;
+    let email =
+        build_lettre_message(outgoing, &message_id).map_err(EmailSendFailure::NotDispatched)?;
     if matches!(
         account.auth.as_ref().map(|auth| auth.method),
         Some(AuthMethod::Oauth2)
     ) {
-        send_message_oauth2_async(account, &email).await?;
+        send_message_oauth2_async(account, &email, &submission_stage).await?;
         return Ok(message_id);
     }
-    let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host)
-        .port(smtp.port)
-        .timeout(Some(Duration::from_secs(smtp.timeout_seconds)))
-        .tls(smtp_tls(&smtp.host, smtp.tls)?);
-    if let Some(password) = resolve_password(account.auth.as_ref(), &account.secrets).await? {
-        builder = builder.credentials(Credentials::new(smtp.login.clone(), password));
-    }
-    let mailer = builder.build();
-    mailer.send(email).await.map_err(|error| {
-        format!(
-            "smtp_error: SMTP send via {}:{} failed: {error}",
-            smtp.host, smtp.port
-        )
+    let mut conn = connect_smtp_for_auth(account).await.map_err(|error| {
+        EmailSendFailure::NotDispatched(format!(
+            "smtp_error: SMTP connection to {}:{} failed: {}",
+            smtp.host,
+            smtp.port,
+            sanitized_backend_error(&error)
+        ))
     })?;
+    if let Some(password) = resolve_password(account.auth.as_ref(), &account.secrets)
+        .await
+        .map_err(EmailSendFailure::NotDispatched)?
+    {
+        conn.auth(
+            &[Mechanism::Plain, Mechanism::Login],
+            &Credentials::new(smtp.login.clone(), password),
+        )
+        .await
+        .map_err(|error| {
+            EmailSendFailure::NotDispatched(format!(
+                "auth_error: SMTP authentication failed for {}: {}",
+                smtp.login,
+                sanitized_backend_error(&error.to_string())
+            ))
+        })?;
+    }
+    submit_smtp_message(&mut conn, &email, smtp, &submission_stage).await?;
+    let _ = conn.quit().await;
     Ok(message_id)
 }
 
-async fn send_message_oauth2_async(account: &RealAccount, email: &Message) -> Result<(), String> {
-    let smtp = account.smtp_config()?;
-    let mut access_token = account.google_access_token()?;
+async fn send_message_oauth2_async(
+    account: &RealAccount,
+    email: &Message,
+    submission_stage: &SmtpSubmissionStage,
+) -> Result<(), EmailSendFailure> {
+    let access_token = account
+        .google_access_token()
+        .map_err(EmailSendFailure::NotDispatched)?;
+    send_message_oauth2_with_token_refresh(account, email, submission_stage, access_token, || {
+        account.invalidate_google_access_token()?;
+        account.google_access_token()
+    })
+    .await
+}
+
+async fn send_message_oauth2_with_token_refresh(
+    account: &RealAccount,
+    email: &Message,
+    submission_stage: &SmtpSubmissionStage,
+    mut access_token: String,
+    mut refresh_access_token: impl FnMut() -> Result<String, String>,
+) -> Result<(), EmailSendFailure> {
+    let smtp = account
+        .smtp_config()
+        .map_err(EmailSendFailure::NotDispatched)?;
     let mut conn = match connect_smtp_for_auth(account).await {
         Ok(conn) => conn,
         Err(error) => {
-            return Err(format!(
+            return Err(EmailSendFailure::NotDispatched(format!(
                 "smtp_error: SMTP connection to {}:{} failed: {}",
                 smtp.host,
                 smtp.port,
                 sanitized_backend_error(&error.to_string())
-            ));
+            )));
         }
     };
     if smtp_auth_xoauth2(&mut conn, smtp, &access_token)
         .await
         .is_err()
     {
-        account.invalidate_google_access_token()?;
-        access_token = account.google_access_token()?;
+        access_token = refresh_access_token().map_err(EmailSendFailure::NotDispatched)?;
         conn = connect_smtp_for_auth(account).await.map_err(|error| {
-            format!(
+            EmailSendFailure::NotDispatched(format!(
                 "smtp_error: SMTP connection to {}:{} failed after auth retry: {}",
                 smtp.host,
                 smtp.port,
                 sanitized_backend_error_redacting(&error.to_string(), &access_token)
-            )
+            ))
         })?;
         smtp_auth_xoauth2(&mut conn, smtp, &access_token)
             .await
             .map_err(|retry_error| {
-                format!(
+                EmailSendFailure::NotDispatched(format!(
                     "auth_error: SMTP XOAUTH2 authentication failed for {}: {}",
                     smtp.login,
                     sanitized_backend_error_redacting(&retry_error.to_string(), &access_token)
-                )
+                ))
             })?;
     }
+    submit_smtp_message(&mut conn, email, smtp, submission_stage).await?;
+    let _ = conn.quit().await;
+    Ok(())
+}
+
+async fn submit_smtp_message(
+    conn: &mut AsyncSmtpConnection,
+    email: &Message,
+    smtp: &ValidatedSmtpConfig,
+    submission_stage: &SmtpSubmissionStage,
+) -> Result<(), EmailSendFailure> {
+    submission_stage.mark_submission_started();
     conn.send(email.envelope(), &email.formatted())
         .await
         .map_err(|error| {
-            format!(
+            let diagnostic = format!(
                 "smtp_error: SMTP send via {}:{} failed: {}",
                 smtp.host,
                 smtp.port,
                 sanitized_backend_error(&error.to_string())
-            )
+            );
+            if error.is_transient() || error.is_permanent() {
+                EmailSendFailure::NotDispatched(diagnostic)
+            } else {
+                EmailSendFailure::OutcomeUnknown(diagnostic)
+            }
         })?;
-    let _ = conn.quit().await;
     Ok(())
 }
 
@@ -1004,20 +1097,6 @@ async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>,
         .connect(server_name, tcp)
         .await
         .map_err(|error| format!("tls_error: TLS handshake with {host} failed: {error}"))
-}
-
-fn smtp_tls(host: &str, mode: TlsMode) -> Result<Tls, String> {
-    let params = || {
-        TlsParameters::builder(host.to_owned())
-            .certificate_store(CertificateStore::WebpkiRoots)
-            .build()
-            .map_err(|_| "tls_error: failed to configure SMTP TLS".to_owned())
-    };
-    match mode {
-        TlsMode::Required => Ok(Tls::Wrapper(params()?)),
-        TlsMode::StartTls => Ok(Tls::Required(params()?)),
-        TlsMode::None => Ok(Tls::None),
-    }
 }
 
 fn validated_uid_arg(uid: &str) -> Result<u32, String> {

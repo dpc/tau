@@ -120,8 +120,16 @@ accounts use Google access tokens:
 - SMTP authenticates with `lettre`'s XOAUTH2 mechanism before message data is
   submitted.
 - SMTP OAuth retry is bounded to pre-submission authentication. Message
-  submission itself is not retried after provider SMTP errors, so Tau does not
-  risk duplicate outgoing email after a server has accepted a message.
+  submission itself is never retried internally.
+- Setup failures and complete negative SMTP replies are `NotDispatched`. Once
+  message submission begins, every failure without a complete negative reply is
+  `OutcomeUnknown`; direct sends return the dedicated
+  `smtp_outcome_unknown` do-not-retry diagnostic.
+
+Approved email claims retain `sending` after either SMTP failure class and
+continue to refuse redispatch. Direct allowlisted sends have no durable
+operation identity; a separate caller invocation can repeat an ambiguously
+accepted message despite the diagnostic.
 
 Folder ids and message ids exposed to models are opaque. Tool outputs use the
 standard Tau header/payload list format documented in `AGENTS.md`. Email content remains hostile prompt input even when sender authentication passes. Raw `Authentication-Results` is not model-visible; trusted provider-added evidence may inform policy, but Tau does not itself verify DKIM. Backend errors are bounded and redact concrete token values.

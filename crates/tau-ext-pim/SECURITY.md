@@ -61,3 +61,30 @@ direct-write residual state, and bounded sanitized diagnostics. Revisit this
 boundary whenever the HTTP client, request construction, success parsing/body
 cap, approval states, error-code mapping, direct-write policy, or Google
 mutation APIs change.
+
+
+## SMTP submission outcomes
+
+SMTP connection, TLS, authentication, message construction, and other proven
+pre-submission failures are `NotDispatched`. Complete negative SMTP replies also
+prove rejection. Once Tau enters message submission, a timeout, disconnect,
+malformed response, or other failure without a complete negative reply is
+`OutcomeUnknown`. Direct sends return the fixed `smtp_outcome_unknown`
+diagnostic: the server may have accepted the email, automatic retry is unsafe,
+and the account or provider needs reconciliation. Provider detail, message body,
+and Bcc recipients are absent from that terminal.
+
+Tau never retries SMTP message submission internally. OAuth may retry only
+authentication before submission. Approved drafts retain `sending` after
+either failure class and refuse later redispatch; direct allowlisted sends have
+no durable identity, so a separate invocation can still repeat an unknown
+outcome.
+
+Deterministic scripted SMTP tests in `src/email/real_backend/tests.rs` exercise
+the production connection, authentication, and submission path with explicit
+replies and EOF. They cover pre-DATA rejection, password authentication
+rejection, complete acceptance, complete post-DATA rejection, accepted DATA
+followed by lost final reply, and exactly one observed DATA block. Revisit this
+boundary whenever SMTP connection/authentication flow, lettre error
+classification, timeouts, approval lifecycle, direct-send policy, or error-code
+mapping changes.

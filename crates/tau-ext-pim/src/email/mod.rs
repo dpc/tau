@@ -2304,6 +2304,16 @@ impl MessageFlagMutation {
     }
 }
 
+/// Classified failure from one SMTP submission attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EmailSendFailure {
+    /// Tau can prove the SMTP server did not accept the message for delivery.
+    NotDispatched(String),
+    /// SMTP submission began but Tau did not receive a conclusive acceptance or
+    /// rejection result.
+    OutcomeUnknown(String),
+}
+
 /// Minimal backend abstraction used by command handlers.
 pub trait EmailBackend {
     /// List folders known to the backend for an account.
@@ -2368,7 +2378,7 @@ pub trait EmailBackend {
         uid: &str,
     ) -> Result<String, String>;
     /// Send one already-approved outgoing message.
-    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String>;
+    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, EmailSendFailure>;
     /// Start Google OAuth installed-app authorization and return
     /// authorization_url, state, pkce_verifier, redirect_uri, and
     /// expires_in_secs.
@@ -4251,7 +4261,10 @@ impl<B: EmailBackend> Engine<B> {
     fn send_allowed_outgoing_message(&mut self, message: &OutgoingMessage) -> CborValue {
         match self.backend.send_message(message) {
             Ok(_id) => ok_envelope("send", "sent", cbor_map(vec![])),
-            Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
+            Err(EmailSendFailure::NotDispatched(message)) => {
+                backend_error_envelope(Some("send"), "smtp_error", &message)
+            }
+            Err(EmailSendFailure::OutcomeUnknown(_message)) => smtp_outcome_unknown_envelope(),
         }
     }
 
@@ -4567,10 +4580,16 @@ impl<B: EmailBackend> Engine<B> {
             let approval = self.state.claim_outgoing(id)?;
             self.validate_outgoing_approval_for_send(&approval)?;
             let message = outgoing_approval_message(&approval);
-            let message_id = self
-                .backend
-                .send_message(&message)
-                .map_err(|message| backend_error_text(&message))?;
+            let message_id =
+                self.backend
+                    .send_message(&message)
+                    .map_err(|failure| match failure {
+                        EmailSendFailure::NotDispatched(message) => backend_error_text(&message),
+                        EmailSendFailure::OutcomeUnknown(message) => format!(
+                            "{SMTP_OUTCOME_UNKNOWN_MESSAGE} Detail: {}",
+                            backend_error_text(&message)
+                        ),
+                    })?;
             let display_message_id = safe_display_line(&message_id);
             return match self.state.complete_outgoing(id, &message_id) {
                 Ok(()) => Ok(format!(
@@ -6756,6 +6775,18 @@ fn backend_error_envelope(command: Option<&str>, default_code: &str, message: &s
             ),
         ),
     ])
+}
+
+const SMTP_OUTCOME_UNKNOWN_MESSAGE: &str = "SMTP may have accepted this email; do not retry \
+automatically; reconcile with the account or provider before sending again.";
+
+fn smtp_outcome_unknown_envelope() -> CborValue {
+    error_envelope_with_details(
+        Some("send"),
+        "smtp_outcome_unknown",
+        SMTP_OUTCOME_UNKNOWN_MESSAGE,
+        CborValue::Map(Vec::new()),
+    )
 }
 fn backend_error_code<'a>(message: &'a str, default_code: &'a str) -> &'a str {
     for code in [

@@ -22,6 +22,7 @@ struct FakeBackend {
     folders: BTreeMap<String, Vec<BackendFolder>>,
     messages: BTreeMap<(String, String), Vec<BackendMessage>>,
     sent: RefCell<Vec<OutgoingMessage>>,
+    send_failure: Option<EmailSendFailure>,
 }
 
 impl FakeBackend {
@@ -132,7 +133,7 @@ impl EmailBackend for OAuthBackend {
         Ok("Trash".to_owned())
     }
 
-    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, String> {
+    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, EmailSendFailure> {
         Ok("message-id".to_owned())
     }
 
@@ -231,7 +232,7 @@ impl EmailBackend for SpyBackend {
         Ok("Trash".to_owned())
     }
 
-    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, String> {
+    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, EmailSendFailure> {
         Ok("spy-message-id".to_owned())
     }
 }
@@ -315,7 +316,7 @@ impl EmailBackend for FakeBackend {
         Ok("Trash".to_owned())
     }
 
-    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String> {
+    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, EmailSendFailure> {
         self.sent.borrow_mut().push(OutgoingMessage {
             account: message.account.clone(),
             from: message.from.clone(),
@@ -327,6 +328,9 @@ impl EmailBackend for FakeBackend {
             reply_to: message.reply_to.clone(),
             in_reply_to: message.in_reply_to.clone(),
         });
+        if let Some(failure) = &self.send_failure {
+            return Err(failure.clone());
+        }
         Ok("fake-message-id".to_owned())
     }
 }
@@ -2994,6 +2998,139 @@ fn outgoing_approve_all_accepts_every_pending_id() {
             .expect("pending")
             .is_empty()
     );
+}
+
+/// A provably rejected direct SMTP attempt stays on the ordinary bounded error
+/// path and does not tell callers that provider acceptance is possible.
+#[test]
+fn direct_send_not_dispatched_uses_ordinary_smtp_error() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    engine.backend.send_failure = Some(EmailSendFailure::NotDispatched(
+        "smtp_error: rejected before DATA".to_owned(),
+    ));
+
+    let result = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "subject".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+
+    assert_eq!(
+        cbor_nested_text_field(&result, "error", "code"),
+        Some("smtp_error")
+    );
+    assert!(!email_error_message(&result).contains("may have accepted"));
+    assert_eq!(engine.backend.sent.borrow().len(), 1);
+}
+
+/// An ambiguous direct SMTP attempt returns the dedicated fixed do-not-retry
+/// terminal, bounds hostile backend detail, and performs no internal resend.
+#[test]
+fn direct_send_outcome_unknown_is_dedicated_bounded_terminal() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let hostile = format!(
+        "smtp_error: token-secret body-secret bcc-secret\x1b[31m{}",
+        "x".repeat(MAX_BACKEND_ERROR_CHARS * 2)
+    );
+    engine.backend.send_failure = Some(EmailSendFailure::OutcomeUnknown(hostile));
+
+    let details = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["bob@company.com".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["bob@company.com".to_owned()],
+        subject: "subject".to_owned(),
+        body_text: "body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let audit = engine.state.recent_email_log(1).expect("email audit entry");
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].status, "smtp_outcome_unknown");
+    assert_eq!(
+        audit[0].reason.as_deref(),
+        Some(SMTP_OUTCOME_UNKNOWN_MESSAGE)
+    );
+    assert!(!format!("{:?}", audit[0]).contains("body-secret"));
+    assert!(!format!("{:?}", audit[0]).contains("bcc-secret"));
+    assert_eq!(
+        cbor_nested_text_field(&details, "error", "message"),
+        Some(SMTP_OUTCOME_UNKNOWN_MESSAGE)
+    );
+    assert_eq!(
+        cbor_field(cbor_field(&details, "error").expect("error"), "details"),
+        Some(&CborValue::Map(Vec::new()))
+    );
+    let Event::ToolError(error) =
+        finish_tool_result(split_tool_started("email_send", Vec::new()), details)
+    else {
+        panic!("unknown SMTP outcome must be a tool error");
+    };
+    let details = error.details.expect("error details");
+
+    assert_eq!(
+        cbor_nested_text_field(&details, "error", "code"),
+        Some("smtp_outcome_unknown")
+    );
+    assert_eq!(
+        error.message,
+        format!("email_send failed (smtp_outcome_unknown): {SMTP_OUTCOME_UNKNOWN_MESSAGE}")
+    );
+    assert!(error.message.chars().count() <= MAX_HEADER_VALUE_CHARS);
+    assert!(!error.message.chars().any(char::is_control));
+    assert!(!format!("{details:?}").contains("token-secret"));
+    assert!(!format!("{details:?}").contains("body-secret"));
+    assert!(!format!("{details:?}").contains("bcc-secret"));
+    assert_eq!(engine.backend.sent.borrow().len(), 1);
+}
+
+/// Either SMTP failure class after an approved draft is claimed leaves it in
+/// `sending`; retrying the same approval performs no second backend call.
+#[test]
+fn approved_send_failure_classes_preserve_sending_claim() {
+    for failure in [
+        EmailSendFailure::NotDispatched("smtp_error: rejected".to_owned()),
+        EmailSendFailure::OutcomeUnknown("network_error: disconnected".to_owned()),
+    ] {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let mut initial = engine(&temp);
+        let _queued = initial.dispatch(EmailCommand::Send {
+            account: Some("work".to_owned()),
+            from: None,
+            to: vec!["external@example.net".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "subject".to_owned(),
+            body_text: "body".to_owned(),
+            reply_to: None,
+            in_reply_to: None,
+        });
+        let id = pending_outgoing_id(&initial, 0);
+        initial.backend.send_failure = Some(failure);
+
+        initial
+            .dispatch_action("email.out.approve", std::slice::from_ref(&id))
+            .expect_err("backend failure");
+        assert!(initial.state.outgoing_sending_exists(&id).expect("sending"));
+        assert_eq!(initial.backend.sent.borrow().len(), 1);
+
+        drop(initial);
+        let mut restarted = engine(&temp);
+        let retry = restarted
+            .dispatch_action("email.out.approve", &[id])
+            .expect_err("sending claim refuses retry");
+        assert!(retry.contains("manual recovery"));
+        assert!(restarted.backend.sent.borrow().is_empty());
+    }
 }
 
 #[test]

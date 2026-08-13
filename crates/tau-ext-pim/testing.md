@@ -37,3 +37,11 @@ all mutation methods, response body/status/parser failures, complete success,
 durable `sending` restart and same-ID refusal, direct-write residual state, and
 bounded sanitized diagnostics. Do not replace these cross-layer oracles with
 state-only tests or timing sleeps.
+
+SMTP outcome tests use a deterministic scripted loopback server through the
+production email backend. They classify setup/authentication and complete
+negative replies as not dispatched, classify accepted DATA followed by EOF as
+unknown, preserve complete success, count DATA blocks to prove no internal
+resend, and use no timing sleeps. Runtime fake-backend tests pin the dedicated
+bounded `smtp_outcome_unknown` terminal, absence of dynamic provider/message
+detail, ordinary pre-dispatch errors, and approved-draft `sending` retention.

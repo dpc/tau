@@ -169,6 +169,9 @@ Advice:
 - Avoid broad patterns for domains where many people can send mail.
 - Remember incoming allow only controls read exposure; outgoing allow controls delivery without approval.
 - `reply_to` is also checked for outgoing sends.
+- If `email_send` returns `smtp_outcome_unknown`, SMTP may already have accepted
+  the email. Do not retry automatically; reconcile with the account or provider
+  before sending again. Tau does not internally resend message data.
 - Bcc is checked for policy and visible to the user while a draft is pending via `:email out open <id>`, but hidden from model-facing send status and denied status output.
 
 
