@@ -3666,10 +3666,10 @@ fn interception_rejects_steered_submission_source_forgery() {
     h.shutdown().expect("shutdown");
 }
 
-/// Interceptors cannot add or remove the harness-owned context-alert tag, and a
-/// tagged alert keeps its configured text on both durable prompt shapes.
+/// Interceptors cannot add, remove, or rewrite harness-owned internal prompt
+/// provenance, while ordinary untagged prompt text remains replaceable.
 #[test]
-fn interception_preserves_context_alert_tag_and_text() {
+fn interception_preserves_internal_prompt_kind_and_text() {
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
     let tagged_cases = [
         (
@@ -3698,6 +3698,21 @@ fn interception_preserves_context_alert_tag_and_text() {
                 trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::Internal,
                 internal_kind: Some(tau_proto::InternalPromptKind::ContextSizeAlert),
+                ctx_id: None,
+            }),
+        ),
+        (
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                text: "Tool call `completed` is complete.".to_owned(),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+                internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+                display_name: None,
                 ctx_id: None,
             }),
         ),

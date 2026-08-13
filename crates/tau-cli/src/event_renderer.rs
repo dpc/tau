@@ -5721,7 +5721,7 @@ impl EventRenderer {
             self.handle.redraw();
             return;
         }
-        if self.handle_visible_internal_prompt(
+        if self.handle_typed_internal_prompt_projection(
             prompt.message_class,
             prompt.internal_kind,
             &prompt.text,
@@ -5750,16 +5750,23 @@ impl EventRenderer {
         self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
     }
 
-    fn handle_visible_internal_prompt(
+    /// Apply typed internal-prompt UI treatment.
+    ///
+    /// Returns `true` when the typed category consumed the projection, whether
+    /// it rendered a block or deliberately suppressed the prompt.
+    fn handle_typed_internal_prompt_projection(
         &mut self,
         message_class: tau_proto::PromptMessageClass,
         internal_kind: Option<tau_proto::InternalPromptKind>,
         text: &str,
     ) -> bool {
-        if !message_class.is_internal()
-            || internal_kind != Some(tau_proto::InternalPromptKind::ContextSizeAlert)
-        {
+        if !message_class.is_internal() {
             return false;
+        }
+        match internal_kind {
+            Some(tau_proto::InternalPromptKind::BackgroundToolCompletion) => return true,
+            Some(tau_proto::InternalPromptKind::ContextSizeAlert) => {}
+            None => return false,
         }
         let block = self.marked_plain_block(
             tau_themes::names::SYSTEM_INFO,
@@ -5964,7 +5971,7 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_steered(&mut self, steered: &tau_proto::AgentPromptSteered) {
-        if self.handle_visible_internal_prompt(
+        if self.handle_typed_internal_prompt_projection(
             steered.message_class,
             steered.internal_kind,
             &steered.text,

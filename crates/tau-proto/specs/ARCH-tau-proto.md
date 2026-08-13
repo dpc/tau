@@ -129,7 +129,9 @@ text. The summary projection contract is
 Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry an
 optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
 which that harness-owned alert reaches model context; it has specialized
-presentation. The contract is
+presentation. `background_tool_completion` identifies the harness lifecycle
+notice for a completed background tool so human UIs can suppress it without
+classifying prompt prose. The contract is
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 Both prompt facts also carry required harness-stamped
 `PromptSubmissionSource` provenance while retaining raw accepted prompt text.

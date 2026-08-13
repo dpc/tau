@@ -639,8 +639,27 @@ impl PendingPrompt {
     /// Durable internal-prompt subtype stamped when this prompt is delivered.
     #[must_use]
     pub(crate) fn internal_kind(&self) -> Option<tau_proto::InternalPromptKind> {
-        self.is_context_size_alert()
-            .then_some(tau_proto::InternalPromptKind::ContextSizeAlert)
+        match self.source {
+            PendingPromptSource::ContextSizeAlert => {
+                Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+            }
+            // Self-compaction shares completion-driven scheduling but owns a
+            // distinct diagnostic projection, not the generic tool notice.
+            PendingPromptSource::ActivatingBackgroundCompletion
+                if self.self_compaction_terminal.is_none() =>
+            {
+                Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+            }
+            PendingPromptSource::PassiveBackgroundCompletion => {
+                Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+            }
+            PendingPromptSource::General
+            | PendingPromptSource::WatchNotifiedUser
+            | PendingPromptSource::LoopGuard
+            | PendingPromptSource::Timer
+            | PendingPromptSource::ActivatingBackgroundCompletion
+            | PendingPromptSource::PassiveRestoreNotice => None,
+        }
     }
 
     /// Whether this prompt is a passive background-completion notice.

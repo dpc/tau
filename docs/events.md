@@ -169,9 +169,11 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   into a concrete agent transcript. Carries `agent_id`, text, originator, and
   user/internal message class. Its harness-owned `inference_activation` flag
   distinguishes checkpoint-governed work from passive or legacy history;
-  steered and injected facts use the same default-false marker. The optional
-   harness-owned `internal_kind=context_size_alert` marks an alert delivery for
-   exact-position live and replay UI history. Harness-stamped
+   steered and injected facts use the same default-false marker. The optional
+    harness-owned `internal_kind` marks specialized prompt presentation:
+    `context_size_alert` identifies an alert delivery for exact-position live
+    and replay UI history, while `background_tool_completion` identifies a
+    harness lifecycle notice that human UIs suppress. Harness-stamped
     `submission_source` selects routing and source-aware CLI presentation:
    `Extension { name }` renders once as an attributed message,
    `HarnessInternal` is controlled by the default-off internal-prompt setting,
@@ -187,7 +189,7 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   Its immutable harness-owned `inference_activation` marker is true for
    checkpoint-governed work; missing/default-false values are passive or legacy
    and cannot independently wake replay. It carries the same optional
-   `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`
+   `internal_kind` delivery tag as `agent.prompt_submitted`
     and requires the same harness-stamped `submission_source` and
     `trusted_internal_spans`. The optional typed
    `self_compaction_terminal` is immutable one-shot delivery authority for self

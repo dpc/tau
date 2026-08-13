@@ -4151,7 +4151,8 @@ pub struct AgentPromptSubmitted {
     /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
-    /// Harness-owned subtype for internal prompts with visible presentation.
+    /// Harness-owned subtype selecting specialized internal-prompt UI
+    /// treatment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_kind: Option<InternalPromptKind>,
     /// Who initiated the prompt.
@@ -4465,7 +4466,8 @@ pub struct AgentPromptSteered {
     /// prompt resumes a model after its own `compact` call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_compaction_terminal: Option<SelfCompactionTerminal>,
-    /// Harness-owned subtype for internal prompts with visible presentation.
+    /// Harness-owned subtype selecting specialized internal-prompt UI
+    /// treatment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_kind: Option<InternalPromptKind>,
     /// Echo of the original queued prompt correlation id, when present.

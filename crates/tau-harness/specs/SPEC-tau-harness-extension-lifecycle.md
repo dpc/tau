@@ -69,8 +69,8 @@ conservative: protected facts may be observed, but drops and forbidden rewrites
 publish the original event so routing identities and durable folds stay aligned.
 Mutable prompt-text events may be rewritten only without changing their routing
 identity. The `internal_kind` tag is part of that identity, and tagged
-context-size alert text is also immutable so the committed fact retains the
-configured advisory.
+context-size alert and background-tool completion text is also immutable so the
+committed fact retains the exact harness-authored advisory or lifecycle notice.
 
 “Less-trusted” here concerns protocol authority and integrity: extensions cannot
 author harness/provider-owned facts or bypass ownership and lifecycle validation.

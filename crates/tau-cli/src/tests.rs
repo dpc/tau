@@ -10282,51 +10282,108 @@ fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
     );
 }
 
+/// Harness-typed active and passive background completion notices stay out of
+/// the terminal even when the operator enables other internal prompt
+/// diagnostics.
 #[test]
-fn internal_prompt_events_are_hidden() {
+fn typed_background_completion_prompts_are_always_hidden() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    // Background tool completion prompts are delivered to the model as
-    // prompt-like events, but they are internal control text and must not show
-    // up in the user's transcript or queued prompt area.
-    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "[tau-internal] Tool call `bg` is complete.".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("main"),
+        text: "Tool call `idle` is complete.".into(),
+        trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
         originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        display_name: None,
         ctx_id: None,
     }));
-    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
-        text: "[tau-internal] Tool call `queued` is complete.".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        message_class: tau_proto::PromptMessageClass::Internal,
-    }));
+    renderer.apply_setting("show-internal-prompts", "on");
+    renderer.apply_setting("show-internal-prompts", "off");
+    renderer.apply_setting("show-internal-prompts", "on");
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-        text: "[tau-internal] Tool call `steered` is complete.".into(),
+        text: "Tool call `steered` is complete.".into(),
         trusted_internal_spans: Vec::new(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
-        internal_kind: None,
+        internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
         ctx_id: None,
     }));
     sync(&handle);
 
-    assert!(!vt.screen_contains(80, "Tool call"));
+    assert!(!vt.screen_contains(80, "Tool call `idle`"));
+    assert!(!vt.screen_contains(80, "Tool call `steered`"));
     assert!(
         vt.screen_text(80)
             .iter()
             .all(|row| !row.contains("Tool call"))
     );
+
+    let (_cold_term, cold_handle, cold_vt) = setup(80, 24);
+    let mut cold = EventRenderer::new(
+        cold_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    cold.apply_setting("show-internal-prompts", "on");
+    cold.handle_recorded_at(
+        &Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id("main"),
+            text: "Tool call `replayed` is complete.".into(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+            display_name: None,
+            ctx_id: None,
+        }),
+        tau_proto::UnixMicros::new(1),
+    );
+    sync(&cold_handle);
+    assert!(!cold_vt.screen_contains(80, "Tool call `replayed`"));
+}
+
+/// UI suppression relies on authenticated typed provenance rather than prose:
+/// an ordinary harness-internal prompt with identical text remains available
+/// when internal prompt diagnostics are enabled.
+#[test]
+fn untyped_internal_prompt_matching_completion_prose_remains_visible() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-internal-prompts", "on");
+
+    let mut prompt = AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        text: "Tool call `same-prose` is complete.".into(),
+        trusted_internal_spans: Vec::new(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),
+        ctx_id: None,
+    };
+    prompt.internal_kind = None;
+    renderer.handle(&Event::AgentPromptSteered(prompt));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "[tau-internal]: Tool call `same-prose` is complete."));
 }
 
 #[test]

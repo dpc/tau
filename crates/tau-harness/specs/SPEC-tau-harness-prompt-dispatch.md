@@ -170,6 +170,11 @@ replays at its original position; no second notice or synthetic replay entry is
 created. This implements
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
+Harness-generated active and passive background-tool completion prompts carry
+`internal_kind=background_tool_completion` when they reach model context. The
+tag changes only UI classification: activation, prompt delivery, wait
+suppression, retained-result consumption, and replay position remain unchanged.
+
 ## Prompt dispatch lifecycle split
 
 Prompt dispatch first completes the foreground append of a lightweight, harness-authored

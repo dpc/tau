@@ -66,6 +66,10 @@ The `internal_kind=context_size_alert` presentation takes precedence and always
 renders its exact text once. Missing tags, `ctx_id`, and prompt text never
 imply trusted provenance or special presentation. This behavior is confirmed by
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
+The `internal_kind=background_tool_completion` lifecycle notice never
+renders in the human transcript, even when `show_internal_prompts` is enabled.
+This suppression does not apply to untyped or differently typed internal text,
+including text with the same spelling.
 
 Visible prompt facts, prompt recall/history, and transcript snapshots render the
 raw accepted canonical text. The provider-only `<user>` projection derived from

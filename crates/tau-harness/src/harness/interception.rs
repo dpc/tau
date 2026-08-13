@@ -572,8 +572,13 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
                 || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
                 || original.internal_kind != replacement.internal_kind
-                || (original.internal_kind == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
-                    && original.text != replacement.text)
+                || (matches!(
+                    original.internal_kind,
+                    Some(
+                        tau_proto::InternalPromptKind::ContextSizeAlert
+                            | tau_proto::InternalPromptKind::BackgroundToolCompletion
+                    )
+                ) && original.text != replacement.text)
                 || original.originator != replacement.originator
                 || original.submission_source != replacement.submission_source
         }
@@ -594,8 +599,13 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
                 || original.self_compaction_terminal != replacement.self_compaction_terminal
                 || (original.self_compaction_terminal.is_some()
                     && original.text != replacement.text)
-                || (original.internal_kind == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
-                    && original.text != replacement.text)
+                || (matches!(
+                    original.internal_kind,
+                    Some(
+                        tau_proto::InternalPromptKind::ContextSizeAlert
+                            | tau_proto::InternalPromptKind::BackgroundToolCompletion
+                    )
+                ) && original.text != replacement.text)
         }
         _ => false,
     }

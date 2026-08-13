@@ -5037,10 +5037,10 @@ fn steered_prompt_requires_submission_source() {
     );
 }
 
-/// Context-size alerts keep a typed optional tag on both durable prompt shapes
-/// while untagged legacy payloads retain their absent-field compatibility.
+/// Harness-owned prompt kinds keep stable wire spellings while the alert tag
+/// remains available on both durable prompt shapes.
 #[test]
-fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
+fn internal_prompt_kinds_round_trip_on_durable_prompts() {
     let submitted = AgentPromptSubmitted {
         inference_activation: true,
         agent_id: agent_id("worker"),
@@ -5086,6 +5086,18 @@ fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
             .expect("deserialize steered alert")
             .internal_kind,
         Some(InternalPromptKind::ContextSizeAlert)
+    );
+
+    let completion_kind = serde_json::to_value(InternalPromptKind::BackgroundToolCompletion)
+        .expect("serialize background completion kind");
+    assert_eq!(
+        completion_kind,
+        serde_json::json!("background_tool_completion")
+    );
+    assert_eq!(
+        serde_json::from_value::<InternalPromptKind>(completion_kind)
+            .expect("deserialize background completion kind"),
+        InternalPromptKind::BackgroundToolCompletion
     );
 }
 

@@ -4,12 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::ExtensionName;
 
-/// Harness-owned subtype for internal prompts with distinct UI presentation.
+/// Harness-owned subtype selecting specialized UI treatment for an internal
+/// prompt, including mandatory display or lifecycle suppression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InternalPromptKind {
     /// Advisory prompt delivered after a named context-size threshold crossing.
     ContextSizeAlert,
+    /// Harness lifecycle notice emitted for a completed background tool.
+    BackgroundToolCompletion,
 }
 
 /// Prompt submission provenance stamped by the harness boundary.

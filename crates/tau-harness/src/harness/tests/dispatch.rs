@@ -15,8 +15,8 @@ use crate::harness::{
     RestoredCheckpointAuthority, STATUS_REMINDER, agent_message_activation_class,
     background_completion_prompt, extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
-    restore_notice_prompt_for_elapsed, self_compaction_terminal_prompt,
-    unavailable_tool_error_message, working_status_reminder,
+    restore_notice_prompt_for_elapsed, self_compaction_terminal_pending_prompt,
+    self_compaction_terminal_prompt, unavailable_tool_error_message, working_status_reminder,
 };
 use crate::{
     AgentId, agent as path_crate_agent, discovery as path_crate_discovery,
@@ -293,7 +293,9 @@ fn assert_session_manifest_refreshed(path: &Path) {
 }
 
 /// Self-compaction envelopes expose only closed bounded status and exact
-/// durable correlation for every terminal class.
+/// durable correlation for every terminal class. They must also stay outside
+/// generic background-completion UI classification so their distinct diagnostic
+/// projection cannot disappear with tool lifecycle notices.
 #[test]
 fn self_compaction_terminal_envelopes_are_literal_and_bounded() {
     let request_id = tau_proto::CompactionRequestId::parse("cr-envelope").expect("request");
@@ -322,14 +324,17 @@ fn self_compaction_terminal_envelopes_are_literal_and_bounded() {
         ),
     ];
     for (outcome, transaction_id, expected) in cases {
+        let terminal = tau_proto::SelfCompactionTerminal {
+            request_id: request_id.clone(),
+            tool_call_id: call_id.clone(),
+            transaction_id,
+            outcome,
+        };
+        assert_eq!(self_compaction_terminal_prompt(&terminal), expected);
         assert_eq!(
-            self_compaction_terminal_prompt(&tau_proto::SelfCompactionTerminal {
-                request_id: request_id.clone(),
-                tool_call_id: call_id.clone(),
-                transaction_id,
-                outcome,
-            }),
-            expected
+            self_compaction_terminal_pending_prompt(terminal).internal_kind(),
+            None,
+            "self-compaction terminals are not generic background-tool completion notices"
         );
     }
 }
@@ -6685,6 +6690,13 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     })
     .expect("background completion follow-up prompt");
     assert!(second_error_seq < prompt_after_first_error_seq);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == background_completion_prompt(&"a-bg-idle".into())
+                && submitted.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+    )));
 
     h.shutdown().expect("shutdown");
 }
@@ -7514,9 +7526,11 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     assert_eq!(submission, PromptSubmission::Dispatched);
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::AgentPromptSubmitted(submitted)
+            Event::AgentPromptSubmitted(submitted)
             if submitted.text == completion_prompt
                 && submitted.message_class == tau_proto::PromptMessageClass::Internal
+                && submitted.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
     )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -12377,6 +12391,35 @@ fn context_size_alert_waits_for_tool_round_completion() {
                 && steered.message_class == tau_proto::PromptMessageClass::Internal
                 && steered.internal_kind
                     == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// An active tool round folds the real background completion notice into a
+/// typed steering fact rather than relying on text classification in the UI.
+#[test]
+fn active_background_completion_steering_carries_typed_provenance() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id = ToolCallId::from("typed-active-completion");
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::ToolsRunning {
+            remaining_calls: vec![call_id.clone()],
+        },
+    );
+
+    h.queue_background_completion_prompt_without_advancing(&cid, &call_id);
+    h.maybe_complete_agent_turn_for(&cid, call_id.as_str());
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.text == background_completion_prompt(&call_id)
+                && steered.message_class == tau_proto::PromptMessageClass::Internal
+                && steered.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
     )));
     h.shutdown().expect("shutdown");
 }
