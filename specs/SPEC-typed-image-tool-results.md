@@ -1,5 +1,8 @@
 # SPEC-typed-image-tool-results: Typed local image tool results
 
+## Record justification
+
+Extension preparation, protocol/harness persistence and byte-free projections, the [security disclosure boundary](../SECURITY.md), and [audited provider lowering](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md) jointly implement this contract, so no one local artifact can coherently own its end-to-end typed-content, retention, and disclosure rules.
 
 Local image inspection is a native tool-result capability, not text containing
 base64 and not a synthesized user message. A successful image-producing
