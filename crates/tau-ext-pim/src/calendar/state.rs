@@ -458,7 +458,7 @@ impl StateStore {
         Ok(approval)
     }
 
-    /// Restore a claimed calendar change to pending after execution failed.
+    /// Restore a claim only after proving mutation dispatch did not begin.
     pub(crate) fn release_claimed_change(&self, id: &str) -> Result<(), String> {
         let mut approval = self.load_change_approval("sending", id)?;
         if self.change_denied_exists(id)? {

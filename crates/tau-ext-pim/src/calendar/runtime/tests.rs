@@ -1,11 +1,13 @@
+mod google_write_outcomes;
+
 use std::collections::VecDeque;
 
 use time::format_description as path_time_format_description;
 
 use super::*;
 use crate::calendar::config::{
-    CalendarAccountConfig, CalendarBackendConfig, CalendarSelectionConfig, ValidatedReadPolicy,
-    ValidatedWritePolicy,
+    CalendarAccountConfig, CalendarBackendConfig, CalendarPolicyConfig, CalendarSelectionConfig,
+    CalendarWritePolicyConfig, ValidatedReadPolicy, ValidatedWritePolicy,
 };
 
 #[test]

@@ -118,7 +118,11 @@ PIM list-style tool results should follow Tau's standard header-then-payload sha
 
 ICS feed accounts should use `https://` or `webcal://` URLs, especially for private feed tokens. Non-loopback `http://` ICS feed URLs are rejected unless the account backend sets `allow_plain_http: true`; loopback HTTP remains available for local tests.
 
-Calendar writes should normally return `approval_required`; then the agent should wait for the user to inspect and approve with `:calendar change list`, `:calendar change open <id>`, and `:calendar change approve <id>`. Existing Google event writes use internally cached ETags; if the event changed, the agent should re-read it and retry.
+Calendar writes should normally return `approval_required`; then the agent should wait for the user to inspect and approve with `:calendar change list`, `:calendar change open <id>`, and `:calendar change approve <id>`. Existing Google event writes use internally cached ETags. A provider rejection after dispatch, including an ETag mismatch, has an unknown remote outcome and requires manual reconciliation rather than an automatic retry.
+If an approved or direct Google write says the change may have applied, do not
+retry it. Reconcile the result manually in Google Calendar. Approved changes
+with unknown outcomes remain in `sending`, and later approval attempts stay
+blocked to avoid repeating a mutation Google may already have accepted.
 
 ## Email policies and output safety
 

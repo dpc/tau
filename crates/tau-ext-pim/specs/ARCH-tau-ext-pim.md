@@ -138,6 +138,12 @@ source:
 
 Calendar ids exposed to models are opaque. Provider-specific identifiers,
 approval state, and cached metadata stay behind the calendar runtime boundary. Writes keep provider concurrency tokens such as ETags internal and require approval by default. ICS feed URLs are private bearer-like URLs; non-loopback plaintext HTTP requires explicit configuration.
+Google writes restore a claimed approval from `sending` to `pending` only when
+the backend proves mutation dispatch did not begin. Once dispatch begins, only
+a complete trusted success result completes the approval; every other outcome
+leaves it in `sending` for manual provider reconciliation. Another approval of
+that same ID performs no provider request, so it cannot repeat a mutation that
+Google may already have applied.
 The distributed calendar-query lifecycle contract is specified by
 [SPEC-calendar-query-lifecycle](SPEC-calendar-query-lifecycle.md).
 

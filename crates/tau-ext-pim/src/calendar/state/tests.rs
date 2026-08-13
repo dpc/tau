@@ -63,11 +63,10 @@ fn pending_calendar_changes_are_deduplicated_and_private() {
 }
 
 #[test]
-fn claimed_calendar_change_can_be_released_after_provider_failure() {
-    // Provider failures, including stale Google ETags, happen after the
-    // approval record is claimed. The failed approval must become pending
-    // again so the user can retry or deny it instead of requiring manual
-    // filesystem recovery.
+fn claimed_calendar_change_can_be_released_before_dispatch() {
+    // Local preparation can fail after the approval record is claimed. When
+    // the caller proves mutation dispatch did not begin, the claim must become
+    // pending again so the user can retry or deny it.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let state = StateStore::open(temp.path().join("state")).expect("state");
     let mut change = CalendarChangeApproval::pending("update_event", "google", "primary");

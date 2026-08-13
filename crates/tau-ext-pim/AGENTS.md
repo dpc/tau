@@ -1,7 +1,9 @@
 # tau-ext-pim
 
-Read [`SECURITY.md`](SECURITY.md) before changing or reviewing provider reads,
-pagination, parsing, or other externally sourced PIM data.
+Read [`SECURITY.md`](SECURITY.md) before changing or reviewing provider reads
+or writes, response parsing or bounds, mutation-failure classification,
+approval recovery, persistent PIM state, pagination, or other externally
+sourced PIM data.
 
 Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
 

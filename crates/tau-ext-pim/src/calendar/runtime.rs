@@ -16,7 +16,9 @@ use super::config::{
     ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
 };
 use super::cursor::{CalendarCursor, CalendarCursorQuery, CalendarCursorSelector};
-use super::google::{GoogleBackend, GoogleEvent, GoogleEventListQuery, GoogleEventWrite};
+use super::google::{
+    GoogleBackend, GoogleEvent, GoogleEventListQuery, GoogleEventWrite, GoogleWriteError,
+};
 use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, normalize_feed_url};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
 use super::tool::{
@@ -738,16 +740,13 @@ impl Engine {
             let pending = self.state.pending_change_by_id(id)?;
             self.validate_persisted_change(&pending)?;
             let change = self.state.claim_change(id)?;
-            self.validate_persisted_change(&change)?;
             let result = match self.execute_change(&change) {
                 Ok(result) => result,
-                Err(error) => {
-                    return match self.state.release_claimed_change(id) {
-                        Ok(()) => Err(error),
-                        Err(recovery_error) => Err(format!(
-                            "{error}; additionally failed to restore approval to pending: {recovery_error}"
-                        )),
-                    };
+                Err(GoogleWriteError::NotDispatched(error)) => {
+                    return self.release_not_dispatched_change(id, error);
+                }
+                Err(GoogleWriteError::OutcomeUnknown) => {
+                    return Err(calendar_outcome_unknown_error());
                 }
             };
             let result_event_id = result.event_id();
@@ -771,6 +770,17 @@ impl Engine {
             safe_display_line(&approved.account),
             safe_display_line(&approved.calendar)
         ))
+    }
+
+    fn release_not_dispatched_change(&self, id: &str, error: String) -> Result<String, String> {
+        let error = safe_display_line(&error);
+        match self.state.release_claimed_change(id) {
+            Ok(()) => Err(error),
+            Err(recovery_error) => Err(format!(
+                "{error}; additionally failed to restore approval to pending: {}",
+                safe_display_line(&recovery_error)
+            )),
+        }
     }
 
     fn action_change_deny_many(&self, ids: &[String]) -> Result<String, String> {
@@ -1243,7 +1253,9 @@ impl Engine {
             let id = self.state.pending_change(&change)?;
             return Ok(format_change_queued(&id, &change));
         }
-        let result = self.execute_change(&change)?;
+        let result = self
+            .execute_change(&change)
+            .map_err(google_write_error_for_user)?;
         Ok(format_mutation_result_envelope("direct", &change, &result))
     }
 
@@ -1505,71 +1517,74 @@ impl Engine {
     fn execute_change(
         &self,
         change: &CalendarChangeApproval,
-    ) -> Result<CalendarMutationResult, String> {
-        let account = self.account_by_id(&change.account)?;
-        self.ensure_calendar_allowed(account, &change.calendar)?;
-        let stored_refresh_token = self.google_refresh_token(account)?;
+    ) -> Result<CalendarMutationResult, GoogleWriteError> {
+        let account = self
+            .account_by_id(&change.account)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        self.ensure_calendar_allowed(account, &change.calendar)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let stored_refresh_token = self
+            .google_refresh_token(account)
+            .map_err(GoogleWriteError::NotDispatched)?;
         let result = match change.command.as_str() {
             "create_event" => {
-                let event = self
-                    .google
-                    .create_event(
-                        account,
-                        stored_refresh_token.as_deref(),
-                        &change.calendar,
-                        &google_write_from_change(change),
-                    )
-                    .map_err(calendar_write_error)?;
+                let event = self.google.create_event_classified(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    &change.calendar,
+                    &google_write_from_change(change),
+                )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
             }
             "update_event" => {
-                let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
-                let etag = required_change_field(change.etag.as_deref(), "etag")?;
-                let event = self
-                    .google
-                    .update_event(
-                        account,
-                        stored_refresh_token.as_deref(),
-                        &change.calendar,
-                        event_id,
-                        etag,
-                        &google_write_from_change(change),
-                    )
-                    .map_err(calendar_write_error)?;
+                let event_id = required_change_field(change.event_id.as_deref(), "event_id")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                let etag = required_change_field(change.etag.as_deref(), "etag")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                let event = self.google.update_event_classified(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    &change.calendar,
+                    event_id,
+                    etag,
+                    &google_write_from_change(change),
+                )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
             }
             "delete_event" => {
-                let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
-                let etag = required_change_field(change.etag.as_deref(), "etag")?;
-                self.google
-                    .delete_event(
-                        account,
-                        stored_refresh_token.as_deref(),
-                        &change.calendar,
-                        event_id,
-                        etag,
-                    )
-                    .map_err(calendar_write_error)?;
+                let event_id = required_change_field(change.event_id.as_deref(), "event_id")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                let etag = required_change_field(change.etag.as_deref(), "etag")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                self.google.delete_event_classified(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    &change.calendar,
+                    event_id,
+                    etag,
+                )?;
                 Ok(CalendarMutationResult::Deleted)
             }
             "respond_invite" => {
-                let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
-                let etag = required_change_field(change.etag.as_deref(), "etag")?;
-                let response = required_change_field(change.response.as_deref(), "response")?;
-                let event = self
-                    .google
-                    .respond_invite(
-                        account,
-                        stored_refresh_token.as_deref(),
-                        &change.calendar,
-                        event_id,
-                        etag,
-                        response,
-                    )
-                    .map_err(calendar_write_error)?;
+                let event_id = required_change_field(change.event_id.as_deref(), "event_id")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                let etag = required_change_field(change.etag.as_deref(), "etag")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                let response = required_change_field(change.response.as_deref(), "response")
+                    .map_err(GoogleWriteError::NotDispatched)?;
+                let event = self.google.respond_invite_classified(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    &change.calendar,
+                    event_id,
+                    etag,
+                    response,
+                )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
             }
-            other => Err(format!("unsupported calendar change command `{other}`")),
+            other => Err(GoogleWriteError::NotDispatched(format!(
+                "unsupported calendar change command `{other}`"
+            ))),
         }?;
         self.remember_mutation_result(change, &result);
         Ok(result)
@@ -2031,12 +2046,15 @@ fn required_text(value: Option<&str>, name: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-fn calendar_write_error(error: String) -> String {
-    if error.contains("HTTP 412") || error.contains("Precondition Failed") {
-        "calendar event changed since it was last read; re-read the event and retry".to_owned()
-    } else {
-        error
+fn google_write_error_for_user(error: GoogleWriteError) -> String {
+    match error {
+        GoogleWriteError::NotDispatched(error) => error,
+        GoogleWriteError::OutcomeUnknown => calendar_outcome_unknown_error(),
     }
+}
+
+pub(super) fn calendar_outcome_unknown_error() -> String {
+    super::google::outcome_unknown_message().to_owned()
 }
 
 fn required_change_field<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, String> {
@@ -3126,7 +3144,9 @@ fn calendar_error_envelope(command: Option<&str>, message: &str) -> CborValue {
 }
 
 fn calendar_error_code(message: &str) -> &'static str {
-    if (message.starts_with("Google calendar account") && message.contains("not authorized"))
+    if message == calendar_outcome_unknown_error() {
+        "network_error"
+    } else if (message.starts_with("Google calendar account") && message.contains("not authorized"))
         || (message.starts_with("refreshing Google access token")
             && (message.contains("invalid_grant")
                 || message.contains("invalid_client")

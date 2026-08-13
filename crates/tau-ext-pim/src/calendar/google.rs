@@ -22,14 +22,24 @@ const GOOGLE_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const GOOGLE_CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const GOOGLE_SEND_UPDATES: &str = "all";
 const MAX_ERROR_BODY_BYTES: usize = 4096;
-const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 const MAX_PAGE_TOKEN_CHARS: usize = 4096;
 const GOOGLE_CURSOR_PREFIX: &str = "google:";
+const OUTCOME_UNKNOWN_MESSAGE: &str =
+    "Calendar change may have applied; do not retry. Reconcile manually with the provider.";
 
 /// Read/write-capable Google Calendar API backend.
 pub struct GoogleBackend {
     agent: ureq::Agent,
     oauth: GoogleOauthClient,
+}
+
+/// Failure phase for one side-effecting Google Calendar request.
+pub(crate) enum GoogleWriteError {
+    /// The backend proved that mutation dispatch did not begin.
+    NotDispatched(String),
+    /// Mutation dispatch began, but no complete trusted success result arrived.
+    OutcomeUnknown,
 }
 
 /// One Google calendar visible to the account.
@@ -284,9 +294,24 @@ impl GoogleBackend {
         calendar_id: &str,
         event: &GoogleEventWrite<'_>,
     ) -> Result<GoogleEvent, String> {
-        ensure_google_calendar_allowed(account, calendar_id)?;
-        let token = self.access_token(account, stored_refresh_token)?;
-        let api_base = api_base(account)?;
+        self.create_event_classified(account, stored_refresh_token, calendar_id, event)
+            .map_err(GoogleWriteError::into_string)
+    }
+
+    /// Create one Google event while preserving mutation-dispatch authority.
+    pub(crate) fn create_event_classified(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+        calendar_id: &str,
+        event: &GoogleEventWrite<'_>,
+    ) -> Result<GoogleEvent, GoogleWriteError> {
+        ensure_google_calendar_allowed(account, calendar_id)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let token = self
+            .access_token(account, stored_refresh_token)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let api_base = api_base(account).map_err(GoogleWriteError::NotDispatched)?;
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let url = format!(
@@ -294,8 +319,9 @@ impl GoogleBackend {
             encode_path_segment(calendar_id),
             query.finish()
         );
-        parse_event(&self.post_json(&url, &token, &google_event_body(event)?)?)
-            .ok_or_else(|| "Google create event response was missing required fields".to_owned())
+        let body = google_event_body(event).map_err(GoogleWriteError::NotDispatched)?;
+        parse_event(&self.post_json_write(&url, &token, &body)?)
+            .ok_or(GoogleWriteError::OutcomeUnknown)
     }
 
     /// Patch one Google event using an ETag precondition.
@@ -308,9 +334,33 @@ impl GoogleBackend {
         etag: &str,
         event: &GoogleEventWrite<'_>,
     ) -> Result<GoogleEvent, String> {
-        ensure_google_calendar_allowed(account, calendar_id)?;
-        let token = self.access_token(account, stored_refresh_token)?;
-        let api_base = api_base(account)?;
+        self.update_event_classified(
+            account,
+            stored_refresh_token,
+            calendar_id,
+            event_id,
+            etag,
+            event,
+        )
+        .map_err(GoogleWriteError::into_string)
+    }
+
+    /// Patch one Google event while preserving mutation-dispatch authority.
+    pub(crate) fn update_event_classified(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+        calendar_id: &str,
+        event_id: &str,
+        etag: &str,
+        event: &GoogleEventWrite<'_>,
+    ) -> Result<GoogleEvent, GoogleWriteError> {
+        ensure_google_calendar_allowed(account, calendar_id)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let token = self
+            .access_token(account, stored_refresh_token)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let api_base = api_base(account).map_err(GoogleWriteError::NotDispatched)?;
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let url = format!(
@@ -319,8 +369,9 @@ impl GoogleBackend {
             encode_path_segment(event_id),
             query.finish()
         );
-        parse_event(&self.patch_json(&url, &token, Some(etag), &google_event_body(event)?)?)
-            .ok_or_else(|| "Google update event response was missing required fields".to_owned())
+        let body = google_event_body(event).map_err(GoogleWriteError::NotDispatched)?;
+        parse_event(&self.patch_json_write(&url, &token, Some(etag), &body)?)
+            .ok_or(GoogleWriteError::OutcomeUnknown)
     }
 
     /// Delete one Google event using an ETag precondition.
@@ -332,9 +383,25 @@ impl GoogleBackend {
         event_id: &str,
         etag: &str,
     ) -> Result<(), String> {
-        ensure_google_calendar_allowed(account, calendar_id)?;
-        let token = self.access_token(account, stored_refresh_token)?;
-        let api_base = api_base(account)?;
+        self.delete_event_classified(account, stored_refresh_token, calendar_id, event_id, etag)
+            .map_err(GoogleWriteError::into_string)
+    }
+
+    /// Delete one Google event while preserving mutation-dispatch authority.
+    pub(crate) fn delete_event_classified(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+        calendar_id: &str,
+        event_id: &str,
+        etag: &str,
+    ) -> Result<(), GoogleWriteError> {
+        ensure_google_calendar_allowed(account, calendar_id)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let token = self
+            .access_token(account, stored_refresh_token)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let api_base = api_base(account).map_err(GoogleWriteError::NotDispatched)?;
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let url = format!(
@@ -343,19 +410,15 @@ impl GoogleBackend {
             encode_path_segment(event_id),
             query.finish()
         );
-        let mut response = self
+        let response = self
             .agent
             .delete(&url)
             .header("Authorization", format!("Bearer {token}"))
             .header("If-Match", google_if_match_header(etag))
             .call()
-            .map_err(|error| format!("Google Calendar API delete failed: {error}"))?;
+            .map_err(|_| GoogleWriteError::OutcomeUnknown)?;
         if !response.status().is_success() {
-            return Err(format!(
-                "Google Calendar API returned HTTP {}: {}",
-                response.status().as_u16(),
-                read_error_body(&mut response)
-            ));
+            return Err(GoogleWriteError::OutcomeUnknown);
         }
         Ok(())
     }
@@ -371,21 +434,48 @@ impl GoogleBackend {
         etag: &str,
         response_status: &str,
     ) -> Result<GoogleEvent, String> {
-        ensure_google_calendar_allowed(account, calendar_id)?;
-        let token = self.access_token(account, stored_refresh_token)?;
-        let api_base = api_base(account)?;
+        self.respond_invite_classified(
+            account,
+            stored_refresh_token,
+            calendar_id,
+            event_id,
+            etag,
+            response_status,
+        )
+        .map_err(GoogleWriteError::into_string)
+    }
+
+    /// Respond to an invitation while preserving mutation-dispatch authority.
+    pub(crate) fn respond_invite_classified(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+        calendar_id: &str,
+        event_id: &str,
+        etag: &str,
+        response_status: &str,
+    ) -> Result<GoogleEvent, GoogleWriteError> {
+        ensure_google_calendar_allowed(account, calendar_id)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let token = self
+            .access_token(account, stored_refresh_token)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let api_base = api_base(account).map_err(GoogleWriteError::NotDispatched)?;
         let event_url = format!(
             "{api_base}/calendars/{}/events/{}",
             encode_path_segment(calendar_id),
             encode_path_segment(event_id)
         );
-        let current = self.get_json(&event_url, &token)?;
-        let patch = attendee_response_patch(&current, response_status)?;
+        let current = self
+            .get_json(&event_url, &token)
+            .map_err(GoogleWriteError::NotDispatched)?;
+        let patch = attendee_response_patch(&current, response_status)
+            .map_err(GoogleWriteError::NotDispatched)?;
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let patch_url = format!("{event_url}?{}", query.finish());
-        parse_event(&self.patch_json(&patch_url, &token, Some(etag), &patch)?)
-            .ok_or_else(|| "Google invite response response was missing required fields".to_owned())
+        parse_event(&self.patch_json_write(&patch_url, &token, Some(etag), &patch)?)
+            .ok_or(GoogleWriteError::OutcomeUnknown)
     }
 
     fn access_token(
@@ -410,9 +500,17 @@ impl GoogleBackend {
         self.parse_json_response(&mut response)
     }
 
-    fn post_json(&self, url: &str, access_token: &str, body: &Value) -> Result<Value, String> {
-        let json_body = serde_json::to_string(body)
-            .map_err(|error| format!("serializing Google Calendar request failed: {error}"))?;
+    fn post_json_write(
+        &self,
+        url: &str,
+        access_token: &str,
+        body: &Value,
+    ) -> Result<Value, GoogleWriteError> {
+        let json_body = serde_json::to_string(body).map_err(|error| {
+            GoogleWriteError::NotDispatched(format!(
+                "serializing Google Calendar request failed: {error}"
+            ))
+        })?;
         let mut response = self
             .agent
             .post(url)
@@ -420,17 +518,17 @@ impl GoogleBackend {
             .header("Accept", "application/json")
             .content_type("application/json")
             .send(json_body)
-            .map_err(|error| format!("Google Calendar API request failed: {error}"))?;
-        self.parse_json_response(&mut response)
+            .map_err(|_| GoogleWriteError::OutcomeUnknown)?;
+        Self::parse_json_write_response(&mut response)
     }
 
-    fn patch_json(
+    fn patch_json_write(
         &self,
         url: &str,
         access_token: &str,
         if_match: Option<&str>,
         body: &Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, GoogleWriteError> {
         let mut request = self
             .agent
             .patch(url)
@@ -439,13 +537,27 @@ impl GoogleBackend {
         if let Some(etag) = if_match {
             request = request.header("If-Match", google_if_match_header(etag));
         }
-        let json_body = serde_json::to_string(body)
-            .map_err(|error| format!("serializing Google Calendar request failed: {error}"))?;
+        let json_body = serde_json::to_string(body).map_err(|error| {
+            GoogleWriteError::NotDispatched(format!(
+                "serializing Google Calendar request failed: {error}"
+            ))
+        })?;
         let mut response = request
             .content_type("application/json")
             .send(json_body)
-            .map_err(|error| format!("Google Calendar API request failed: {error}"))?;
-        self.parse_json_response(&mut response)
+            .map_err(|_| GoogleWriteError::OutcomeUnknown)?;
+        Self::parse_json_write_response(&mut response)
+    }
+
+    fn parse_json_write_response(
+        response: &mut ureq::http::Response<ureq::Body>,
+    ) -> Result<Value, GoogleWriteError> {
+        if !response.status().is_success() {
+            return Err(GoogleWriteError::OutcomeUnknown);
+        }
+        let text = read_limited_body(response, "Google Calendar API response")
+            .map_err(|_| GoogleWriteError::OutcomeUnknown)?;
+        serde_json::from_str(&text).map_err(|_| GoogleWriteError::OutcomeUnknown)
     }
 
     fn parse_json_response(
@@ -463,6 +575,21 @@ impl GoogleBackend {
         serde_json::from_str(&text)
             .map_err(|error| format!("Google Calendar API response was not JSON: {error}"))
     }
+}
+
+impl GoogleWriteError {
+    fn into_string(self) -> String {
+        match self {
+            Self::NotDispatched(error) => error,
+            Self::OutcomeUnknown => outcome_unknown_message().to_owned(),
+        }
+    }
+}
+
+/// Return the fixed diagnostic for a dispatched mutation without trusted
+/// success.
+pub(super) fn outcome_unknown_message() -> &'static str {
+    OUTCOME_UNKNOWN_MESSAGE
 }
 
 /// Build the Google event-list query with explicit cancellation visibility.

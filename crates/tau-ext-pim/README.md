@@ -256,6 +256,14 @@ For Google accounts, `calendars.allow` entries are exact Google calendar IDs; us
 
 Calendar tool reads and write requests append sanitized audit entries to `logs/calendar.jsonl` under the extension state directory. Review them with `:calendar log last [number]`. Entries include command, status, account, calendar, event id, time bounds, and result counts; they do not persist event titles or descriptions. Pending calendar mutations are stored separately for `:calendar change` review.
 
+An approved mutation moves to `sending` before Google dispatch. If Tau cannot
+prove that dispatch did not begin, the change stays `sending` across restart
+and approving that same ID again sends nothing. A diagnostic that the change
+may have applied means: do not retry it; reconcile the result manually in
+Google Calendar. Direct writes with `require_approval: false` return the same
+diagnostic but have no durable deduplication, so a new invocation can repeat an
+unknown mutation.
+
 Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secret file is read as trimmed text, not as a structured YAML document.
 
 ```sh

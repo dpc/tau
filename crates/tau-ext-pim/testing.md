@@ -30,3 +30,10 @@ lifecycle and blocking filters, semantic page filling, provider budgets, and
 cursor reconstruction; tool tests cover schemas; model-visible output tests
 cover headers and row shape. Keep these layers deterministic and use loopback
 feeds or scripted provider pages rather than live accounts.
+
+Google Calendar mutation tests use deterministic loopback HTTP servers through
+the real runtime and backend. They cover the pre-dispatch/unknown-outcome cut,
+all mutation methods, response body/status/parser failures, complete success,
+durable `sending` restart and same-ID refusal, direct-write residual state, and
+bounded sanitized diagnostics. Do not replace these cross-layer oracles with
+state-only tests or timing sleeps.
