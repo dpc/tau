@@ -12475,6 +12475,221 @@ fn cold_resume_restores_usage_for_first_activation_compaction_projection() {
     h.shutdown().expect("shutdown");
 }
 
+/// Rewinding a large branch to root must discard its provider usage baseline,
+/// so a tiny replacement branch and a fresh adjacent agent start with ordinary
+/// inference instead of sending invalid near-empty standalone compactions.
+#[test]
+fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(10_000);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id.clone(),
+            text: "old large branch".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let old_branch = h.agents[&cid].head.expect("old branch head");
+    {
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(10_000);
+        agent.context_cached_tokens = Some(5_000);
+        agent.context_usage_head = Some(old_branch);
+        agent.context_usage_model = Some("test/model".into());
+    }
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agents[&cid].context_usage_head, None);
+    assert!(event_log_events(&h).iter().rev().any(|event| {
+        matches!(
+            event,
+            Event::HarnessAgentContextUsageChanged(usage)
+                if usage.agent_id == cid
+                    && usage.input_tokens.is_none()
+                    && usage.cached_tokens.is_none()
+                    && usage.context_window.is_none()
+                    && usage.percent_used.is_none()
+        )
+    }));
+    assert!(event_log_events(&h).iter().rev().any(|event| {
+        matches!(event, Event::AgentStatsUpdated(stats) if stats.agent_id == cid)
+    }));
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("tiny branch".to_owned()))
+        .expect("dispatch tiny replacement branch");
+    assert_eq!(
+        read_nth_prompt_created(&h, 0).operation,
+        tau_proto::PromptOperation::Inference
+    );
+
+    let fresh = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    h.dispatch_prompt_for_agent(&fresh, PendingPrompt::user("first tiny turn".to_owned()))
+        .expect("dispatch fresh agent");
+    assert_eq!(
+        read_nth_prompt_created(&h, 1).operation,
+        tau_proto::PromptOperation::Inference
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| { !matches!(event, Event::AgentStandaloneCompactionStarted(_)) })
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// The proactive scheduler and context-limit telemetry must both reject a
+/// same-model usage baseline whose producing node belongs to a sibling branch.
+#[test]
+fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(10_000);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    for text in ["branch A", "branch B"] {
+        h.publish_for_agent(
+            &cid,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
+                agent_id: agent_id.clone(),
+                text: text.to_owned(),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        );
+        if text == "branch A" {
+            let branch_a = h.agents[&cid].head.expect("branch A");
+            h.publish_for_agent(
+                &cid,
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                    agent_id: agent_id.clone(),
+                    head: tau_proto::AgentHead::Root,
+                }),
+            );
+            h.agents.get_mut(&cid).expect("agent").context_usage_head = Some(branch_a);
+        }
+    }
+    {
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(10_000);
+        agent.context_cached_tokens = Some(5_000);
+        agent.context_usage_model = Some("test/model".into());
+    }
+
+    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    let snapshot = h.prompt_context_limit_snapshot(
+        &cid,
+        &"test/model".into(),
+        tau_proto::PromptOperation::Inference,
+    );
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = None;
+    let without_baseline = h.prompt_context_limit_snapshot(
+        &cid,
+        &"test/model".into(),
+        tau_proto::PromptOperation::Inference,
+    );
+    assert_eq!(
+        snapshot.projected_input_tokens, without_baseline.projected_input_tokens,
+        "off-branch 10,000-token baseline must not enter telemetry",
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Live navigation must restore the same selected-branch provider usage that a
+/// cold restart derives, including after leaving and reselecting the branch.
+#[test]
+fn navigation_reconciles_usage_from_selected_branch_response() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("measured branch".to_owned()))
+        .expect("dispatch measured branch");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let mut response = provider_text_response(
+        &prompt.agent_prompt_id,
+        prompt.agent_id,
+        "measured response",
+    );
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: Some("test/model".into()),
+        prompt_sent_tokens: 900,
+        prompt_cached_tokens: 450,
+        prompt_cache_read_ceiling_tokens: None,
+        cache: None,
+        response_received_tokens: 10,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("finish measured response");
+    let measured_head = h.agents[&cid].head.expect("measured response head");
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: tau_proto::AgentHead::Node(measured_head),
+        }),
+    );
+    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+    assert_eq!(h.agents[&cid].context_cached_tokens, Some(450));
+    assert_eq!(
+        h.agents[&cid].context_usage_model.as_ref(),
+        Some(&tau_proto::ModelId::from("test/model"))
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Staggered provider discovery must preserve a qualified baseline while its
 /// model is unresolved, validate it when that provider appears, and use it for
 /// the first resumed activation's compaction projection.

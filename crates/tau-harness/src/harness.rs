@@ -8086,6 +8086,7 @@ impl Harness {
         if let Event::AgentHeadMoved(moved) = event
             && let Some(cid) = self.runtime_agent_id_for_target_agent(Some(moved.agent_id.as_str()))
         {
+            self.reconcile_agent_context_usage_for_selected_branch(&cid);
             self.resolve_materialized_message_wakes(&cid);
             self.retry_pending_agent_publish_completion(&cid);
             self.retry_standalone_inference_checkpoint(&cid);
@@ -20597,6 +20598,9 @@ impl Harness {
         if conv.context_usage_model.as_ref() != Some(&model) {
             return false;
         }
+        if !self.context_usage_baseline_applies(conv) {
+            return false;
+        }
         let Some(info) = self.provider_model_info.get(&model) else {
             return false;
         };
@@ -24463,7 +24467,18 @@ impl Harness {
         agent_id: &str,
     ) -> Option<(ModelId, u64, u64, Option<tau_proto::NodeId>)> {
         let tree = self.agent_store.agent(agent_id)?;
-        for node_id in tree.branch_node_ids_from(tree.head()).into_iter().rev() {
+        self.agent_context_usage_at(agent_id, tree.head())
+    }
+
+    /// Returns the newest model-qualified usage on one selected branch without
+    /// crossing a compaction boundary.
+    fn agent_context_usage_at(
+        &self,
+        agent_id: &str,
+        head: Option<tau_proto::NodeId>,
+    ) -> Option<(ModelId, u64, u64, Option<tau_proto::NodeId>)> {
+        let tree = self.agent_store.agent(agent_id)?;
+        for node_id in tree.branch_node_ids_from(head).into_iter().rev() {
             let node = tree.node(node_id)?;
             match &node.entry {
                 tau_core::AgentEntry::Compaction { .. } => return None,
@@ -26864,9 +26879,10 @@ impl Harness {
             .agents
             .get(cid)
             .map_or((None, Some(0), Some(0)), |agent| {
-                let baseline = (agent.context_usage_model.as_ref() == Some(model))
-                    .then_some(agent.context_input_tokens)
-                    .flatten();
+                let baseline = (agent.context_usage_model.as_ref() == Some(model)
+                    && self.context_usage_baseline_applies(agent))
+                .then_some(agent.context_input_tokens)
+                .flatten();
                 let growth = self.transcript_growth_since(
                     agent.agent_id.as_deref(),
                     agent.head,
@@ -28593,6 +28609,93 @@ impl Harness {
         self.emit_agent_stats_updated_from(cid, source);
     }
 
+    fn clear_agent_context_usage(&mut self, cid: &AgentId) {
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.context_input_tokens = None;
+            conv.context_usage_head = None;
+            conv.context_usage_model = None;
+            conv.context_cached_tokens = None;
+            conv.context_percent_used = None;
+            conv.fired_context_size_alerts.clear();
+            conv.pending_prompts
+                .retain(|prompt| !prompt.is_context_size_alert());
+        }
+    }
+
+    /// Returns whether the provider usage baseline belongs to the selected
+    /// transcript branch.
+    fn context_usage_baseline_applies(&self, conv: &Agent) -> bool {
+        let Some(agent_id) = conv.agent_id.as_deref() else {
+            return false;
+        };
+        let baseline = conv
+            .context_usage_head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let current_head = conv
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        self.agent_store
+            .agent(agent_id)
+            .is_some_and(|tree| tree.contains_head_ancestry(baseline, current_head))
+    }
+
+    /// Reconciles provider usage with the selected durable branch and publishes
+    /// the complete live context and stats projections.
+    fn reconcile_agent_context_usage_for_selected_branch(&mut self, cid: &AgentId) {
+        let derived = self
+            .agents
+            .get(cid)
+            .and_then(|conv| self.agent_context_usage_at(conv.agent_id.as_deref()?, conv.head));
+        let retained_root = self.agents.get(cid).and_then(|conv| {
+            (conv.context_usage_head.is_none() && self.context_usage_baseline_applies(conv))
+                .then(|| {
+                    Some((
+                        conv.context_usage_model.clone()?,
+                        conv.context_input_tokens?,
+                        conv.context_cached_tokens.unwrap_or_default(),
+                        None,
+                    ))
+                })
+                .flatten()
+        });
+        let restored = derived.or(retained_root).filter(|(model, ..)| {
+            let current_model = self
+                .agents
+                .get(cid)
+                .and_then(|conv| self.model_for_agent_role(conv));
+            (current_model.is_none() && !self.provider_model_info.contains_key(model))
+                || current_model.as_ref() == Some(model)
+        });
+        self.clear_agent_context_usage(cid);
+        let (model, input_tokens, cached_tokens, usage_head) = restored
+            .map(|(model, input, cached, head)| (Some(model), Some(input), Some(cached), head))
+            .unwrap_or((None, None, None, None));
+        let context_window = model
+            .as_ref()
+            .and_then(|model| context_window_for_model(&self.provider_model_info, model));
+        let percent_used = context_window
+            .zip(input_tokens)
+            .map(|(window, tokens)| context_percent_used(tokens, window));
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.context_input_tokens = input_tokens;
+            conv.context_cached_tokens = cached_tokens;
+            conv.context_usage_head = usage_head;
+            conv.context_usage_model = model;
+            conv.context_percent_used = percent_used;
+        }
+        self.publish_event(
+            None,
+            Event::HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged {
+                agent_id: cid.clone(),
+                input_tokens,
+                cached_tokens,
+                context_window,
+                percent_used,
+            }),
+        );
+        self.emit_agent_stats_updated(cid);
+    }
+
     /// True iff every configured extension has either reached `Ready`
     /// or dropped permanently.
     ///
@@ -28892,19 +28995,6 @@ impl Harness {
             BackgroundCompletionPromptMode::QueueAndAdvance,
             tau_proto::ToolTerminalCause::ToolError,
         );
-    }
-
-    fn clear_agent_context_usage(&mut self, cid: &AgentId) {
-        if let Some(conv) = self.agents.get_mut(cid) {
-            conv.context_input_tokens = None;
-            conv.context_usage_head = None;
-            conv.context_usage_model = None;
-            conv.context_cached_tokens = None;
-            conv.context_percent_used = None;
-            conv.fired_context_size_alerts.clear();
-            conv.pending_prompts
-                .retain(|prompt| !prompt.is_context_size_alert());
-        }
     }
 
     fn handle_background_tool_cancelled(

@@ -285,11 +285,18 @@ across a later compaction boundary. The producing model travels with the
 runtime usage until provider model discovery can validate it against the
 agent's resolved model. A qualified model that has not been discovered yet is
 unresolved, not mismatched, so staggered provider startup retains it until its
-provider appears; only a confirmed different resolution clears it. Accepted
-compaction and explicit agent model changes also clear the usage, head, model,
-cached-token, and percentage baseline. Consequently the first post-resume
-activation runs the same projected standalone-compaction decision as a live
-agent.
+provider appears; only a confirmed different resolution clears it. Live
+navigation performs the same selected-branch derivation after the durable head
+move, publishes the complete reconciled context-usage and agent-stats
+projections, and restores a prior branch's qualified baseline when that branch
+is reselected. A baseline is applicable only while its producing head is an
+ancestor of the selected head; root-qualified usage applies to every branch.
+Proactive scheduling and context-limit telemetry share that ancestry decision
+and decline a baseline when its branch ownership cannot be established.
+Accepted compaction and explicit agent model changes also clear the usage,
+head, model, cached-token, and percentage baseline. Consequently live
+navigation and cold rehydration make the same projected standalone-compaction
+decision for the selected branch.
 
 Typed image tool results remain canonical replay content until a compaction
 replacement window omits them. Logical canonical image bytes are counted across
