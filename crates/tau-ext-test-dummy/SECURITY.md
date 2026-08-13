@@ -6,9 +6,10 @@ functionality. It communicates through Tau's stdio extension protocol and, in
 release mode only, one caller-provisioned fixture-private Unix socket. The
 supervisor may provide ordinary inherited process state, but this crate does not
 inspect environment variables or secrets, use its configured state directory,
-open network connections, or spawn child processes. The one narrow filesystem
-exception is the configured fixture-private Unix socket used by
-`hold_until_success_release`.
+open network connections, or spawn child processes. The narrow filesystem
+exceptions are the configured fixture-private Unix socket used by
+`hold_until_success_release` and the one caller-owned fixture-private marker
+leaf used by `exit_once_then_success`.
 
 The harness supplies typed configuration, prompt events, tool starts,
 cancellation, and disconnect. Configuration rejects unknown fields and invalid
@@ -40,6 +41,17 @@ are rejected without release. The worker accepts one active invocation, reports
 readiness before arming release, and uses one bounded overall lifecycle.
 Cancellation and shutdown wake notification-driven waits. Teardown joins all
 owned threads and removes the socket without manufacturing a success result.
+
+`exit_once_then_success` requires one absolute marker path beneath a
+caller-owned private `0700` fixture root. The first live call reports correlated
+progress, claims the absent leaf using `create_new`, and exits without a
+terminal. A replacement may only check a regular existing marker and return the
+ordinary success terminal. Missing or relative configuration, a missing parent,
+a non-regular marker, or a filesystem error fails closed. The initially absent
+marker leaf is the intentional first-use case. The
+extension never creates or removes the caller's root;
+this one-bit fixture capability adds no arbitrary scripts, timing controls,
+environment access, or broader filesystem authority.
 
 Primary safeguards are the focused dummy lifecycle tests and the S6
 interrupted-worker cold-resume acceptance in `tau-e2e-tests`. Re-review this

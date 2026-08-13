@@ -75,6 +75,447 @@ fn deterministic_dummy_tool_round() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Proves a real supervised dummy that observed a provider-authored call can
+/// disconnect, let the harness own and continue its error, restart once, and
+/// serve one later explicit provider-authored call only after replacement
+/// Ready.
+#[test]
+fn deterministic_dummy_disconnect_respawns_before_later_turn()
+-> Result<(), Box<dyn std::error::Error>> {
+    const FIRST_PROMPT: &str = "disconnect the supervised dummy";
+    const SECOND_PROMPT: &str = "use the replacement dummy";
+    const FIRST_CALL: &str = "disconnect-call";
+    const SECOND_CALL: &str = "replacement-call";
+    const DISCONNECT_DIAGNOSTIC: &str = "tau_internal: true\n\nTool call `disconnect-call` was interrupted because extension disconnected. Side effects may have occurred.";
+
+    let fixture = DeterministicFixture::new_exit_once_then_success_v2(
+        "deterministic_dummy_disconnect_respawns_before_later_turn",
+        &ScenarioV2::new(
+            "exit-once-then-success",
+            vec![ScenarioLaneV2 {
+                ctx_id: "exit-once-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::DummyToolCall {
+                        user_text: FIRST_PROMPT.to_owned(),
+                        call_id: FIRST_CALL.into(),
+                    },
+                    ScenarioActionV2::DummyToolRepair {
+                        user_text: FIRST_PROMPT.to_owned(),
+                        call_id: FIRST_CALL.into(),
+                        diagnostic: DISCONNECT_DIAGNOSTIC.to_owned(),
+                        response: "disconnect observed".to_owned(),
+                    },
+                    ScenarioActionV2::DummyToolCall {
+                        user_text: SECOND_PROMPT.to_owned(),
+                        call_id: SECOND_CALL.into(),
+                    },
+                    ScenarioActionV2::DummyToolResult {
+                        user_text: SECOND_PROMPT.to_owned(),
+                        call_id: SECOND_CALL.into(),
+                        response: "replacement succeeded".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+        DUMMY_TOOL,
+    )?;
+    let socket = fixture.socket_path("exit-once-respawn");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut observed = Vec::new();
+
+    create_agent(&mut peer, "exit-once-lane", FIRST_PROMPT)?;
+    let agent_id = loop {
+        let event = recv_observed_before(&mut peer, deadline)?;
+        let created = match &event.event {
+            Event::AgentPromptCreated(created)
+                if created.ctx_id.as_deref() == Some("exit-once-lane") =>
+            {
+                Some(created.agent_id.clone())
+            }
+            _ => None,
+        };
+        observed.push(event);
+        if let Some(created) = created {
+            break created;
+        }
+    };
+
+    let mut saw_progress = false;
+    loop {
+        let event = recv_observed_before(&mut peer, deadline)?;
+        match &event.event {
+            Event::ToolProgress(progress)
+                if progress.call_id.as_str() == FIRST_CALL
+                    && progress.message.as_deref() == Some("exit_once_then_success ready") =>
+            {
+                saw_progress = true;
+            }
+            Event::ProviderResponseFinished(finished) if saw_progress => {
+                assert_assistant(&finished.output_items, "disconnect observed");
+                observed.push(event);
+                break;
+            }
+            _ => {}
+        }
+        observed.push(event);
+    }
+
+    wait_for_dummy_restart_ready(&mut peer, deadline, &mut observed)?;
+    submit_prompt(&mut peer, &agent_id, "replacement-turn", SECOND_PROMPT)?;
+    let mut second_finished = false;
+    loop {
+        let event = recv_observed_before(&mut peer, deadline)?;
+        match &event.event {
+            Event::ProviderResponseFinished(finished)
+                if matches!(
+                    finished.output_items.as_slice(),
+                    [ContextItem::Message(message)]
+                        if message.content
+                            == [tau_proto::ContentPart::Text {
+                                text: "replacement succeeded".to_owned()
+                            }]
+                ) =>
+            {
+                assert_assistant(&finished.output_items, "replacement succeeded");
+                second_finished = true;
+            }
+            Event::AgentStatsUpdated(stats)
+                if second_finished
+                    && stats.agent_id == agent_id
+                    && stats.runtime_state == AgentRuntimeState::Idle
+                    && stats.tools.in_flight == 0 =>
+            {
+                observed.push(event);
+                break;
+            }
+            _ => {}
+        }
+        observed.push(event);
+    }
+
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    let snapshot = DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    assert_exit_once_respawn_events(
+        &observed,
+        &snapshot,
+        FIRST_CALL,
+        SECOND_CALL,
+        DISCONNECT_DIAGNOSTIC,
+    )?;
+    assert_exit_once_public_projections(
+        &fixture.published_trace_events()?,
+        FIRST_CALL,
+        SECOND_CALL,
+        DISCONNECT_DIAGNOSTIC,
+    )?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// Requires the public journal projection to publish one disconnected error and
+/// one later normal success independently of their canonical durable owners.
+fn assert_exit_once_public_projections(
+    events: &[Event],
+    first_call: &str,
+    second_call: &str,
+    _diagnostic: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let errors = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ToolError(error) if error.call_id.as_str() == first_call
+            )
+        })
+        .count();
+    let results = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ToolResult(result)
+                    if result.call_id.as_str() == second_call
+                        && result.result == CborValue::Text("restart succeeded".to_owned())
+            )
+        })
+        .count();
+    if errors != 1 || results != 1 {
+        return Err(format!(
+            "public terminal projections changed: disconnected errors={errors}, replacement results={results}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Waits for the sole expected restart and replacement readiness without
+/// dropping unrelated lifecycle and public projection observations.
+fn wait_for_dummy_restart_ready(
+    peer: &mut tau_socket::SocketPeer,
+    deadline: Instant,
+    observed: &mut Vec<DaemonObserved>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut restarted = false;
+    loop {
+        let event = recv_observed_before(peer, deadline).map_err(|error| {
+            format!(
+                "wait for dummy restart/Ready after {} observations: {error}",
+                observed.len()
+            )
+        })?;
+        match &event.event {
+            Event::ExtensionRestarting(restarting)
+                if restarting.extension_name.as_str() == "e2e-test-dummy" =>
+            {
+                if restarted
+                    || restarting.attempt != 1
+                    || restarting.reason.as_deref() != Some("unexpected disconnect")
+                {
+                    return Err(
+                        format!("unexpected dummy restart observation: {restarting:?}").into(),
+                    );
+                }
+                restarted = true;
+            }
+            Event::ExtensionReady(ready)
+                if restarted && ready.extension_name.as_str() == "e2e-test-dummy" =>
+            {
+                observed.push(event);
+                return Ok(());
+            }
+            _ => {}
+        }
+        observed.push(event);
+    }
+}
+
+/// Separates canonical durable ownership from public tool projections and
+/// verifies the one causal disconnect/restart/replacement ordering.
+fn assert_exit_once_respawn_events(
+    observed: &[DaemonObserved],
+    snapshot: &DurableSnapshot,
+    first_call: &str,
+    second_call: &str,
+    diagnostic: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let first_ready = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                Event::ExtensionReady(ready) if ready.extension_name.as_str() == "e2e-test-dummy"
+            )
+        })
+        .ok_or("missing initial dummy readiness")?;
+    let first_started = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                Event::ToolStarted(started) if started.call_id.as_str() == first_call
+            )
+        })
+        .ok_or("missing first public tool start")?;
+    let first_public_error = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                Event::ToolError(error)
+                    if error.call_id.as_str() == first_call && error.message == diagnostic
+            )
+        })
+        .ok_or("missing first public disconnected tool error")?;
+    let first_progress = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                Event::ToolProgress(progress)
+                    if progress.call_id.as_str() == first_call
+                        && progress.message.as_deref() == Some("exit_once_then_success ready")
+            )
+        })
+        .ok_or("missing correlated first-call dummy observation progress")?;
+    let restart = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                Event::ExtensionRestarting(restarting)
+                    if restarting.extension_name.as_str() == "e2e-test-dummy"
+            )
+        })
+        .ok_or("missing dummy restart")?;
+    let replacement_ready = observed
+        .iter()
+        .enumerate()
+        .skip(restart + 1)
+        .find_map(|(index, event)| {
+            matches!(
+                &event.event,
+                Event::ExtensionReady(ready) if ready.extension_name.as_str() == "e2e-test-dummy"
+            )
+            .then_some(index)
+        })
+        .ok_or("missing replacement dummy readiness")?;
+    let second_started = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                Event::ToolStarted(started) if started.call_id.as_str() == second_call
+            )
+        })
+        .ok_or("missing second public tool start")?;
+    let dummy_exits = observed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(
+                &event.event,
+                Event::ExtensionExited(exited)
+                    if exited.extension_name.as_str() == "e2e-test-dummy"
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if dummy_exits.len() != 1
+        || !(first_started < first_progress
+            && first_progress < first_public_error
+            && first_public_error < dummy_exits[0]
+            && dummy_exits[0] < restart
+            && dummy_exits[0] < replacement_ready
+            && replacement_ready < second_started)
+        || first_started <= first_ready
+    {
+        return Err("dummy lifecycle/public projection order changed".into());
+    }
+    let dummy_ready_count = observed
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.event,
+                Event::ExtensionReady(ready) if ready.extension_name.as_str() == "e2e-test-dummy"
+            )
+        })
+        .count();
+    if dummy_ready_count != 2 {
+        return Err(format!(
+            "expected initial and replacement dummy Ready, got {dummy_ready_count}"
+        )
+        .into());
+    }
+    let initial_instance = match &observed[first_ready].event {
+        Event::ExtensionReady(ready) => &ready.instance_id,
+        _ => unreachable!("initial readiness position identifies ExtensionReady"),
+    };
+    let replacement_instance = match &observed[replacement_ready].event {
+        Event::ExtensionReady(ready) => &ready.instance_id,
+        _ => unreachable!("replacement readiness position identifies ExtensionReady"),
+    };
+    if initial_instance != replacement_instance {
+        return Err("dummy respawn changed its logical instance identity".into());
+    }
+    if observed
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.event,
+                Event::ExtensionRestarting(restarting)
+                    if restarting.extension_name.as_str() == "e2e-test-dummy"
+            )
+        })
+        .count()
+        != 1
+    {
+        return Err("dummy restarted more than once".into());
+    }
+    if observed.iter().any(|event| {
+        matches!(event.event, Event::ExtensionRestarting(_))
+            && !matches!(
+                &event.event,
+                Event::ExtensionRestarting(restarting)
+                    if restarting.extension_name.as_str() == "e2e-test-dummy"
+            )
+    }) {
+        return Err("provider or unrelated extension restarted".into());
+    }
+
+    let durable = snapshot
+        .agent_events
+        .iter()
+        .map(|record| (&record.event, record.observation_id))
+        .collect::<Vec<_>>();
+    let first_errors = durable
+        .iter()
+        .filter_map(|(event, observation_id)| match event {
+            Event::ProviderToolError(error)
+                if error.call_id.as_str() == first_call
+                    && error.message == diagnostic
+                    && error.tool_name.as_str() == "restart_test_dummy" =>
+            {
+                Some(*observation_id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if first_errors.len() != 1
+        || durable.iter().any(|(event, _)| {
+            matches!(event, Event::ProviderToolResult(result) if result.call_id.as_str() == first_call)
+        })
+    {
+        return Err("first call did not have exactly one canonical disconnected error".into());
+    }
+    if !durable.iter().any(|(event, _)| {
+        matches!(
+            event,
+            Event::AgentToolTerminalClassified(classification)
+                if classification.terminal == first_errors[0]
+                    && classification.cause == tau_proto::ToolTerminalCause::ProviderDisconnected
+        )
+    }) {
+        return Err("first canonical error lacked ProviderDisconnected classification".into());
+    }
+    let second_results = durable
+        .iter()
+        .filter(|(event, _)| {
+            matches!(
+                event,
+                Event::ProviderToolResult(result)
+                    if result.call_id.as_str() == second_call
+                        && result.result == CborValue::Text("restart succeeded".to_owned())
+            )
+        })
+        .count();
+    if second_results != 1
+        || durable.iter().any(|(event, _)| {
+            matches!(event, Event::ProviderToolError(error) if error.call_id.as_str() == second_call)
+        })
+    {
+        return Err("replacement call did not have exactly one canonical success".into());
+    }
+    let folded =
+        tau_core::AgentTree::try_from_events(snapshot.agent_id.clone(), &snapshot.agent_events)
+            .map_err(|error| {
+                format!("final durable agent fold rejected its event stream: {error}")
+            })?;
+    if folded.has_open_foreground_tool_round()
+        || !folded.unresolved_foreground_tool_calls().is_empty()
+    {
+        return Err("final durable agent fold retained an unresolved foreground tool call".into());
+    }
+    Ok(())
+}
+
 /// The real provider, status handler, and dummy tool preserve current-status
 /// policy in either parallel order: Working suppresses the tool-start reminder,
 /// blocks a final, and Done or Blocked releases that final.

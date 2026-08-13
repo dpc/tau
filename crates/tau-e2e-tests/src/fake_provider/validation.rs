@@ -123,7 +123,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
             match action {
                 ScenarioActionV2::DummyToolCall { call_id, .. }
                     if !dummy_call_ids.insert(call_id.as_str())
-                        || dummy_call_ids.len() > 1
+                        || 2 < dummy_call_ids.len()
                         || call_id.is_empty()
                         || call_id.len() > 256
                         || !matches!(
@@ -609,6 +609,15 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
             "typed-image scenario requires one bounded call/result/replay lane",
         ));
     }
+    if 1 < dummy_call_ids.len()
+        && (dummy_call_ids.len() != 2
+            || scenario.lanes.len() != 1
+            || !is_disconnect_repair_then_success(&scenario.lanes[0].actions))
+    {
+        return Err(ClientError::handler(
+            "two dummy pairs require exact call/repair/call/success lifecycle order",
+        ));
+    }
     if barriers
         .values()
         .any(|(participants, lanes)| *participants != lanes.len())
@@ -618,4 +627,28 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Matches the sole two-pair dummy lifecycle used to prove one live extension
+/// disconnect, provider repair, replacement readiness, and later success.
+fn is_disconnect_repair_then_success(actions: &[ScenarioActionV2]) -> bool {
+    matches!(
+        actions,
+        [
+            ScenarioActionV2::DummyToolCall {
+                call_id: first_call, ..
+            },
+            ScenarioActionV2::DummyToolRepair {
+                call_id: first_repair, ..
+            },
+            ScenarioActionV2::DummyToolCall {
+                call_id: second_call, ..
+            },
+            ScenarioActionV2::DummyToolResult {
+                call_id: second_result, ..
+            },
+        ] if first_call == first_repair
+            && second_call == second_result
+            && first_call != second_call
+    )
 }

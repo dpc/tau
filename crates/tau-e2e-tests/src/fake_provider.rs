@@ -21,7 +21,7 @@ use tau_proto::{
     ContextRecoveryDisposition, ContextRole, Effort, Event, EventName, InputModality, MessageItem,
     ProviderModelInfo, ProviderModelsDeclared, ProviderPromptSubmitted, ProviderResponseFinished,
     ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
-    ToolCallItem, ToolName, ToolType, Verbosity,
+    ToolCallId, ToolCallItem, ToolName, ToolType, Verbosity,
 };
 use validation::{validate_v1, validate_v2};
 
@@ -1881,6 +1881,31 @@ impl FakeState {
         }
     }
 
+    /// Returns the first repaired call only for the sole closed two-pair
+    /// disconnect/replacement scenario.
+    fn exit_once_repair_before(&self, cursor: usize) -> Option<(ToolCallId, String)> {
+        let scenario = self.v2().ok()?;
+        let actions = scenario.lanes.first()?.actions.as_slice();
+        let [
+            ScenarioActionV2::DummyToolCall {
+                call_id: first_call,
+                ..
+            },
+            ScenarioActionV2::DummyToolRepair {
+                call_id: repair_call,
+                diagnostic,
+                ..
+            },
+            ScenarioActionV2::DummyToolCall { .. },
+            ScenarioActionV2::DummyToolResult { .. },
+        ] = actions
+        else {
+            return None;
+        };
+        (scenario.lanes.len() == 1 && cursor == 3 && first_call == repair_call)
+            .then_some((first_call.clone(), diagnostic.clone()))
+    }
+
     fn require_v2_user_text(
         &mut self,
         prompt: &tau_proto::AgentPromptCreated,
@@ -1925,7 +1950,31 @@ impl FakeState {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                if results.len() != 1
+                if let Some((first_call_id, first_diagnostic)) =
+                    self.exit_once_repair_before(cursor)
+                {
+                    if results.len() != 2
+                        || !results.iter().any(|result| {
+                            result.call_id == first_call_id
+                                && result.tool_type == ToolType::Function
+                                && result.status
+                                    == tau_proto::ToolResultStatus::Error {
+                                        message: first_diagnostic.to_owned(),
+                                    }
+                        })
+                        || !results.iter().any(|result| {
+                            result.call_id == *call_id
+                                && result.tool_type == ToolType::Function
+                                && result.status == tau_proto::ToolResultStatus::Success
+                                && result.output.body == "restart succeeded"
+                        })
+                    {
+                        return Err(self.mismatch(
+                            cursor,
+                            "exit-once dummy continuation must retain exactly repaired error and replacement success",
+                        ));
+                    }
+                } else if results.len() != 1
                     || results[0].call_id != *call_id
                     || results[0].tool_type != ToolType::Function
                     || results[0].status != tau_proto::ToolResultStatus::Success

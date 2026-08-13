@@ -138,6 +138,15 @@ type, dimensions, detail, and BLAKE3 digest in diagnostics; no image bytes enter
 the bounded provider trace, terminal metadata, or generic fixture observation.
 It adds no image file, decoder, network, shell, or runtime-control input.
 
+The live dummy-respawn acceptance enables only `exit_once_then_success`. Its
+fixture creates a private `0700` marker root and configures one absent absolute
+leaf. The first observed live dummy call atomically claims that leaf and exits;
+the replacement can only observe its regular-file presence and return the fixed
+success. The scenario grammar permits exactly `call → repair → call → success`
+with distinct fixed IDs. It has no marker polling, arbitrary filesystem path,
+timing, PID, general scripting, queued-work survival, provider-respawn, or
+runtime-semantics claim.
+
 The standalone-compaction acceptance actions are the fake's sole
 standalone-compaction opt-in: all other scenarios continue publishing that
 capability as false. They accept a nonempty harness-owned compact transcript,

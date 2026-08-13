@@ -483,6 +483,92 @@ fn v2_dummy_repair_grammar_is_adjacent_and_bounded() {
     );
 }
 
+/// Ensures the fake provider admits two dummy pairs only for the one closed
+/// disconnect-repair-replacement lifecycle and rejects reordered, repeated,
+/// mismatched, or extra pairs.
+#[test]
+fn v2_exit_once_dummy_lifecycle_grammar_is_closed() {
+    let scenario = ScenarioV2::new(
+        "exit-once",
+        vec![ScenarioLaneV2 {
+            ctx_id: "exit-once-lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::DummyToolCall {
+                    user_text: "disconnect".to_owned(),
+                    call_id: "disconnect-call".into(),
+                },
+                ScenarioActionV2::DummyToolRepair {
+                    user_text: "disconnect".to_owned(),
+                    call_id: "disconnect-call".into(),
+                    diagnostic: "disconnect diagnostic".to_owned(),
+                    response: "disconnect observed".to_owned(),
+                },
+                ScenarioActionV2::DummyToolCall {
+                    user_text: "replacement".to_owned(),
+                    call_id: "replacement-call".into(),
+                },
+                ScenarioActionV2::DummyToolResult {
+                    user_text: "replacement".to_owned(),
+                    call_id: "replacement-call".into(),
+                    response: "replacement succeeded".to_owned(),
+                },
+            ],
+        }],
+    );
+    assert!(
+        FakeConfig {
+            scenario: ScenarioConfig::V2(scenario.clone())
+        }
+        .validate()
+        .is_ok()
+    );
+
+    let mut reordered = scenario.clone();
+    reordered.lanes[0].actions.swap(1, 2);
+    let mut repeated = scenario.clone();
+    let ScenarioActionV2::DummyToolCall { call_id, .. } = &mut repeated.lanes[0].actions[2] else {
+        unreachable!()
+    };
+    *call_id = "disconnect-call".into();
+    let mut mismatched = scenario.clone();
+    let ScenarioActionV2::DummyToolResult { call_id, .. } = &mut mismatched.lanes[0].actions[3]
+    else {
+        unreachable!()
+    };
+    *call_id = "wrong-call".into();
+    let mut extra = scenario.clone();
+    extra.lanes[0]
+        .actions
+        .push(ScenarioActionV2::DummyToolCall {
+            user_text: "extra".to_owned(),
+            call_id: "extra-call".into(),
+        });
+    extra.lanes[0]
+        .actions
+        .push(ScenarioActionV2::DummyToolResult {
+            user_text: "extra".to_owned(),
+            call_id: "extra-call".into(),
+            response: "extra".to_owned(),
+        });
+    let mut extra_lane = scenario.clone();
+    extra_lane.lanes.push(ScenarioLaneV2 {
+        ctx_id: "unrelated".to_owned(),
+        actions: vec![ScenarioActionV2::Text {
+            user_text: "unrelated".to_owned(),
+            response: "unrelated".to_owned(),
+        }],
+    });
+    for invalid in [reordered, repeated, mismatched, extra, extra_lane] {
+        assert!(
+            FakeConfig {
+                scenario: ScenarioConfig::V2(invalid)
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
 /// Ensures live repair observations fail closed on wrong calls, duplicates,
 /// inversion, and delivery outside the current repair action.
 #[test]
@@ -561,6 +647,52 @@ fn v2_dummy_repair_continuation_requires_one_exact_error() {
         .validate_and_commit_v2_action(0, 1, &exact, &action)
         .expect("exact repaired result commits");
     assert_eq!(state.lane_cursors, [2]);
+}
+
+/// Ensures the sole exit-once replacement continuation retains exactly the
+/// repaired first error and the second normal result, rejecting omissions,
+/// mutations, and extra terminals.
+#[test]
+fn v2_exit_once_replacement_continuation_requires_exact_two_terminals() {
+    let scenario = exit_once_scenario();
+    let action = scenario.lanes[0].actions[3].clone();
+    let agent = tau_proto::AgentId::parse("agent").expect("agent id");
+    let mut state = FakeState::default();
+    state.scenario = Some(ScenarioConfig::V2(scenario));
+    state.lane_cursors = vec![3];
+    state.agent_lanes = HashMap::from([(agent.clone(), 0)]);
+    let mut prompt = prompt_for(&agent, "replacement", None);
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![
+                    error_tool_result("disconnect-call", "disconnect diagnostic"),
+                    tool_result("replacement-call", "restart succeeded"),
+                ],
+            },
+        ));
+    let exact = prompt.clone();
+
+    latest_tool_results_mut(&mut prompt).items.remove(0);
+    assert!(state.validate_v2_action(3, &prompt, &action).is_err());
+    prompt = exact.clone();
+    latest_tool_results_mut(&mut prompt).items[0] =
+        error_tool_result("disconnect-call", "mutated diagnostic");
+    assert!(state.validate_v2_action(3, &prompt, &action).is_err());
+    prompt = exact.clone();
+    latest_tool_results_mut(&mut prompt).items[1] = tool_result("replacement-call", "wrong");
+    assert!(state.validate_v2_action(3, &prompt, &action).is_err());
+    prompt = exact.clone();
+    latest_tool_results_mut(&mut prompt)
+        .items
+        .push(tool_result("extra-call", "restart succeeded"));
+    assert!(state.validate_v2_action(3, &prompt, &action).is_err());
+    state
+        .validate_and_commit_v2_action(0, 3, &exact, &action)
+        .expect("exact repaired error plus replacement success commits");
+    assert_eq!(state.lane_cursors, [4]);
 }
 
 /// Ensures production `agent_start` remains at most two exact, bounded,
@@ -1662,6 +1794,36 @@ fn dummy_repair_scenario(diagnostic: &str) -> ScenarioV2 {
                     call_id: "call".into(),
                     diagnostic: diagnostic.to_owned(),
                     response: "complete".to_owned(),
+                },
+            ],
+        }],
+    )
+}
+
+fn exit_once_scenario() -> ScenarioV2 {
+    ScenarioV2::new(
+        "exit-once",
+        vec![ScenarioLaneV2 {
+            ctx_id: "exit-once-lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::DummyToolCall {
+                    user_text: "disconnect".to_owned(),
+                    call_id: "disconnect-call".into(),
+                },
+                ScenarioActionV2::DummyToolRepair {
+                    user_text: "disconnect".to_owned(),
+                    call_id: "disconnect-call".into(),
+                    diagnostic: "disconnect diagnostic".to_owned(),
+                    response: "disconnect observed".to_owned(),
+                },
+                ScenarioActionV2::DummyToolCall {
+                    user_text: "replacement".to_owned(),
+                    call_id: "replacement-call".into(),
+                },
+                ScenarioActionV2::DummyToolResult {
+                    user_text: "replacement".to_owned(),
+                    call_id: "replacement-call".into(),
+                    response: "replacement succeeded".to_owned(),
                 },
             ],
         }],

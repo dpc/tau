@@ -42,6 +42,16 @@ One bounded overall lifecycle covers readiness, connection, and frame assembly.
 Cancellation and shutdown wake the notification-driven worker. Cancellation,
 disconnect, and teardown join all owned threads and remove the socket without
 synthesizing success.
+`exit_once_then_success` is a distinct closed respawn fixture mode. Its caller
+owns a private `0700` root and supplies one fresh absent absolute
+`exit_once_marker_path` below it. After correlated readiness progress, the
+first live invocation atomically claims that regular-file leaf with
+`create_new` and exits without a terminal. A replacement checks the regular
+marker and emits the ordinary `restart succeeded` terminal. Missing, relative,
+or unusable configuration, a missing parent, a non-regular marker, and
+filesystem errors fail closed; the initially absent marker leaf is the intended
+first-use case. This mode has no timing, call-count, exit-code, or general
+event-scripting control.
 
 Both hold modes transfer their selected result, error, deadline, or cancellation
 outcome to the protocol loop over an unbounded internal channel. The loop keeps
@@ -64,7 +74,9 @@ Security-relevant boundaries:
   and the fixture-private Unix release socket described above.
 - Apart from creating and removing that socket, the crate does not read or
   write files, persist state, access secrets, open network connections, or spawn
-  subprocesses.
+  subprocesses. `exit_once_then_success` is the narrow exception: it atomically
+  creates or checks one caller-owned fixture-private marker leaf and never
+  creates or removes its parent root.
 - Config parsing rejects unknown fields and invalid `restart_mode` values.
 - `typed_image_test_dummy` is foreground-only and accepts no arguments or
   runtime control; it appears only when `typed_image: true`.
@@ -73,6 +85,9 @@ Security-relevant boundaries:
   seconds, and joins that worker on cancellation or shutdown.
 - `hold_until_success_release` permits one externally released worker and
   arbitrates release, cancellation, and shutdown so exactly one outcome wins.
+- `exit_once_then_success` permits only its one absolute marker path and
+  performs one atomic first-use claim; replayed starts do not claim it, report
+  a terminal, or exit the extension.
 - Replayed `tool.started` deliveries are ignored so historical events cannot
   retrigger tool replies or extension exits.
 

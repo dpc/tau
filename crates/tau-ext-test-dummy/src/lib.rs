@@ -9,7 +9,8 @@
 mod release_hold;
 
 use std::error::Error;
-use std::io::{Read, Write};
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Read, Write};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -75,6 +76,8 @@ enum RestartMode {
     HoldNoSideEffect,
     /// Wait for an authenticated fixture-private socket release.
     HoldUntilSuccessRelease,
+    /// Exit once after a fixture-private atomic marker claim, then succeed.
+    ExitOnceThenSuccess,
 }
 
 /// Closed configuration accepted by the test-only dummy extension.
@@ -89,6 +92,8 @@ struct ExtConfig {
     release_socket_path: Option<PathBuf>,
     /// Fixture-generated nonce required by `hold_until_success_release`.
     release_nonce: Option<String>,
+    /// Fixture-private atomic marker used by `exit_once_then_success`.
+    exit_once_marker_path: Option<PathBuf>,
 }
 
 /// Runtime state for the dummy extension.
@@ -106,6 +111,8 @@ struct DummyState<T> {
     hold_timeout: Duration,
     /// Validated fixture-private release configuration.
     release_config: Option<ReleaseConfig>,
+    /// Validated fixture-private atomic exit-once marker.
+    exit_once_marker_path: Option<PathBuf>,
     /// Worker-to-loop terminal outcomes.
     terminals: AsyncTerminals,
 }
@@ -309,6 +316,36 @@ where
                         ));
                     };
                     cx.state.release_config = Some(ReleaseConfig::new(socket_path, nonce)?);
+                } else if cx.config().release_socket_path.is_some() || cx.config().release_nonce.is_some()
+                {
+                    return Err(tau_client::ClientError::handler(
+                        "release_socket_path and release_nonce are only valid for hold_until_success_release",
+                    ));
+                }
+                if cx.state.restart_mode == RestartMode::ExitOnceThenSuccess {
+                    let Some(marker_path) = cx.config().exit_once_marker_path.clone() else {
+                        return Err(tau_client::ClientError::handler(
+                            "exit_once_then_success requires exit_once_marker_path",
+                        ));
+                    };
+                    if !marker_path.is_absolute() {
+                        return Err(tau_client::ClientError::handler(
+                            "exit_once_then_success requires an absolute exit_once_marker_path",
+                        ));
+                    }
+                    if marker_path
+                        .symlink_metadata()
+                        .is_ok_and(|metadata| !metadata.file_type().is_file())
+                    {
+                        return Err(tau_client::ClientError::handler(
+                            "exit_once_then_success marker must be absent or a regular file",
+                        ));
+                    }
+                    cx.state.exit_once_marker_path = Some(marker_path);
+                } else if cx.config().exit_once_marker_path.is_some() {
+                    return Err(tau_client::ClientError::handler(
+                        "exit_once_marker_path is only valid for exit_once_then_success",
+                    ));
                 }
                 Ok(())
             })
@@ -455,6 +492,7 @@ where
         pending_hold: None,
         hold_timeout,
         release_config: None,
+        exit_once_marker_path: None,
         terminals: AsyncTerminals {
             sender: None,
             receiver: terminal_rx,
@@ -637,6 +675,56 @@ where
         RestartMode::Success => cx.report_result(restart_success(invoke)),
         RestartMode::HoldNoSideEffect => start_no_side_effect_hold(cx, invoke),
         RestartMode::HoldUntilSuccessRelease => start_success_release_hold(cx, invoke),
+        RestartMode::ExitOnceThenSuccess => exit_once_then_success(cx, invoke),
+    }
+}
+
+/// Emits correlated observation progress, atomically claims the configured
+/// marker, and exits once or reports the ordinary deterministic success.
+fn exit_once_then_success<T>(
+    cx: &mut tau_client::ToolContext<'_, DummyState<T>>,
+    invoke: tau_proto::ToolStarted,
+) -> ClientResult<()>
+where
+    T: Rng,
+{
+    cx.handle().report_tool_progress(tau_proto::ToolProgress {
+        call_id: invoke.call_id.clone(),
+        tool_name: invoke.tool_name.clone(),
+        message: Some("exit_once_then_success ready".to_owned()),
+        progress: None,
+        display: None,
+    })?;
+    let marker_path = cx
+        .state
+        .exit_once_marker_path
+        .as_ref()
+        .expect("exit-once marker configuration validated");
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_path)
+    {
+        Ok(_) => {
+            cx.request_stop();
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata = marker_path.symlink_metadata().map_err(|metadata_error| {
+                tau_client::ClientError::handler(format!(
+                    "exit_once_then_success marker could not be checked after existing claim: {metadata_error}"
+                ))
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(tau_client::ClientError::handler(
+                    "exit_once_then_success marker must be a regular file",
+                ));
+            }
+            cx.report_result(restart_success(invoke))
+        }
+        Err(error) => Err(tau_client::ClientError::handler(format!(
+            "exit_once_then_success marker claim failed: {error}"
+        ))),
     }
 }
 

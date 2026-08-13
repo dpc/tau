@@ -53,7 +53,10 @@ prompts, tool calls, shell output, and other local test data.
 
 The deterministic fixture covers Tau's subprocess lifecycle, CBOR protocol,
 Configure/Ready gate, model publication/selection/routing, prompt construction,
-provider event validation, tool dispatch/continuation, typed failures,
+provider event validation, tool dispatch/continuation, one supervised
+non-provider disconnect whose observed live call receives a harness-owned
+terminal before provider repair, replacement Ready, and a later explicit
+replacement success, typed failures,
 cancellation, one typed-image tool result across clean durable replay, fatal provider disconnect, concurrent lane isolation, clean
 restore, durable projection, and headless shutdown. Its two-agent restore gate
 also proves that one completed production-started durable worker remains

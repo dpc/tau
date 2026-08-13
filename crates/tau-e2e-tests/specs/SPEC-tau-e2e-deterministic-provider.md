@@ -107,6 +107,12 @@ disconnect, and named barriers whose participants must all submit before any
 lane completes. It also has one narrow adjacent action pair for the allowlisted
 `restart_test_dummy` empty-argument call and exact successful result; arbitrary
 tool names, arguments, and results remain outside the grammar. A separate sole
+lane four-action exception permits exactly distinct
+`call → disconnected-error repair → call → success` pairs: its first call must
+retain the exact harness disconnected diagnostic in the repair, and its second
+call must retain exactly that repair plus its own normal success. This exception
+exists only for the real supervised test-dummy respawn acceptance; every other
+V2 shape retains the sole adjacent pair limit. A separate sole
 typed-image lane permits one fixed empty-argument dummy call, its one native 1×1
 PNG result, and one clean-resume continuation. The fake accepts that result only
 when its call identity, type, dimensions, detail, canonical bytes, and BLAKE3

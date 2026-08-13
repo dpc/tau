@@ -14,7 +14,7 @@ advertise: false
 - Registers `restart_test_dummy`, a tool that historically either exits the extension process or returns an error at random, and disabled-by-default `typed_image_test_dummy`.
 - Can be configured with deterministic `restart_mode` for tests: `random`,
   `success`, `error`, `exit`, `hold_no_side_effect`, or
-  `hold_until_success_release`.
+  `hold_until_success_release`, or `exit_once_then_success`.
 - `typed_image: true` enables `typed_image_test_dummy`, which returns a fixed
   in-memory 1×1 PNG as typed provider content for
   the hermetic durable-replay test. It accepts no arguments and does not read or
@@ -32,6 +32,13 @@ advertise: false
   it. One overall deadline bounds connection and frame assembly, while
   cancellation/disconnect wakes and joins all worker threads without synthetic
   success.
+- `exit_once_then_success` requires one absolute marker below a caller-owned
+  private `0700` fixture root. The first live call reports correlated progress,
+  atomically creates that marker, and exits without a terminal. A replacement
+  checks the regular existing marker and returns `restart succeeded`. Missing or
+  relative configuration, a missing parent, a non-regular marker, and filesystem
+  errors fail closed; the initially absent marker leaf is intentional. The mode
+  has no timing or general fault-scripting controls.
 - Ignores replay-marked `tool.started` deliveries so historical restart events do not emit tool replies or exit the extension again; malformed config is surfaced as `ConfigError`.
 - Intercepts `agent.prompt_submitted` and rewrites whole-word `tao` to `tau`, preserving letter case. When it changes text it emits a transient harness notice message: `did you mean "Tau"? — corrected for you`.
 
@@ -47,11 +54,13 @@ extensions: {
   "test-dummy": {
     enable: true,
     config: {
-      restart_mode: "success", // also hold_no_side_effect | hold_until_success_release
+       restart_mode: "success", // also hold_no_side_effect | hold_until_success_release | exit_once_then_success
       typed_image: false, // enables typed_image_test_dummy
       // Release mode additionally requires:
-      // release_socket_path: "/private/fixture/release.sock",
-      // release_nonce: "fixture-generated-nonce",
+       // release_socket_path: "/private/fixture/release.sock",
+       // release_nonce: "fixture-generated-nonce",
+       // Exit-once mode additionally requires:
+       // exit_once_marker_path: "/private/fixture/exit-once-marker",
     },
   },
 }

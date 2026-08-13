@@ -11,6 +11,10 @@ Regression coverage should include:
 
 - random restart outcomes: tool error and extension exit without reply;
 - deterministic `restart_mode` outcomes: `success`, `error`, and `exit`;
+- `exit_once_then_success` rejecting missing, relative, and unrelated marker
+  configuration; first live marker claim exiting after correlated progress;
+  second regular-marker use returning exactly one success; and replayed starts
+  neither claiming the marker nor exiting;
 - `typed_image: true` enabling `typed_image_test_dummy` with its one fixed
   native image terminal, `provider-content:image` tag, and foreground-only
   declaration; the owning

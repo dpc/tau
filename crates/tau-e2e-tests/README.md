@@ -20,7 +20,10 @@ The acceptance cases cover streaming/final text, a successful tool round
 through `tau-ext-test-dummy`, one typed-image tool round with exact durable
 replay after clean restart, current-status reminders and final gating through
 the real built-in `status` handler in both parallel orders with accepted and
-rejected reports plus Done/Blocked completion, explicit local-only standalone-compaction
+rejected reports plus Done/Blocked completion, one live supervised dummy
+disconnect after correlated observation with one harness-owned disconnected
+terminal, provider repair, one replacement Ready, and a later explicit
+replacement-tool success, explicit local-only standalone-compaction
 replacement plus terminal provider-error/cancellation recovery and later
 continuation, one canonical context-window rejection followed by a uniquely
 correlated reactive opaque replacement and exactly one automatic continuation,

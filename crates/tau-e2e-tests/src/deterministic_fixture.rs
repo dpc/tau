@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::fs::DirBuilder;
 use std::path::{Path, PathBuf};
 
 use tau_harness::{
@@ -74,6 +75,8 @@ enum FixtureDummyMode {
     Success,
     /// Return the one fixed typed image result.
     TypedImage,
+    /// Exit once after claiming one fixture-private marker, then succeed.
+    ExitOnceThenSuccess,
 }
 
 impl DeterministicFixture {
@@ -152,6 +155,35 @@ impl DeterministicFixture {
             FixtureToolSurface {
                 dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
                 dummy_mode: FixtureDummyMode::TypedImage,
+                status_policy: false,
+            },
+            FixtureMode::Standard,
+        )
+    }
+
+    /// Creates the one closed live-respawn fixture with a private atomic
+    /// exit-once marker owned by the fixture root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact binaries, generated
+    /// configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_exit_once_then_success_v2(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+        dummy_tool_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface {
+                dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                dummy_mode: FixtureDummyMode::ExitOnceThenSuccess,
                 status_policy: false,
             },
             FixtureMode::Standard,
@@ -403,24 +435,41 @@ impl DeterministicFixture {
         );
         let dummy_enabled = dummy_tool_bin.is_some();
         let tools = if let Some(dummy_tool_bin) = dummy_tool_bin {
+            let mut dummy_config = serde_json::json!({
+                "restart_mode": if matches!(
+                    mode,
+                    FixtureMode::SessionRestoreInterruptedTool | FixtureMode::SessionRestoreMixed
+                ) {
+                    "hold_no_side_effect"
+                } else if dummy_mode == FixtureDummyMode::ExitOnceThenSuccess {
+                    "exit_once_then_success"
+                } else {
+                    "success"
+                },
+                "typed_image": dummy_mode == FixtureDummyMode::TypedImage,
+            });
+            if dummy_mode == FixtureDummyMode::ExitOnceThenSuccess {
+                use std::os::unix::fs::DirBuilderExt;
+
+                let marker_root = root.join("exit-once-marker");
+                DirBuilder::new().mode(0o700).create(&marker_root)?;
+                dummy_config
+                    .as_object_mut()
+                    .expect("literal dummy config is an object")
+                    .insert(
+                        "exit_once_marker_path".to_owned(),
+                        serde_json::Value::String(
+                            marker_root.join("claimed").to_string_lossy().into_owned(),
+                        ),
+                    );
+            }
             extensions.insert(
                 "e2e-test-dummy".to_owned(),
                 serde_json::json!({
                     "command": [exact_binary(&dummy_tool_bin)?],
                     "role": "tool",
                     "require": true,
-                    "config": {
-                        "restart_mode": if matches!(
-                            mode,
-                            FixtureMode::SessionRestoreInterruptedTool
-                                | FixtureMode::SessionRestoreMixed
-                        ) {
-                            "hold_no_side_effect"
-                        } else {
-                            "success"
-                        },
-                        "typed_image": dummy_mode == FixtureDummyMode::TypedImage,
-                    },
+                    "config": dummy_config,
                 }),
             );
             if status_policy {

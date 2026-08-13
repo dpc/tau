@@ -222,6 +222,27 @@ fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMe
     })
 }
 
+fn exit_once_config(marker_path: &std::path::Path) -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![
+            (
+                CborValue::Text("restart_mode".to_owned()),
+                CborValue::Text("exit_once_then_success".to_owned()),
+            ),
+            (
+                CborValue::Text("exit_once_marker_path".to_owned()),
+                CborValue::Text(marker_path.to_string_lossy().into_owned()),
+            ),
+        ]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
+    })
+}
+
 fn unique_socket_path(label: &str) -> PathBuf {
     use std::os::unix::fs::DirBuilderExt;
 
@@ -235,6 +256,21 @@ fn unique_socket_path(label: &str) -> PathBuf {
         .create(&root)
         .expect("create private fixture root");
     root.join("release.sock")
+}
+
+fn unique_marker_path(label: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "tau-dummy-{label}-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("create private fixture root");
+    root.join("exit-once-marker")
 }
 
 fn send_release_frame(socket_path: &std::path::Path, frame: &[u8]) {
@@ -556,6 +592,121 @@ fn invalid_restart_mode_emits_config_error() {
         "error should describe invalid restart mode: {}",
         error.message
     );
+}
+
+/// Ensures the closed marker mode rejects missing, relative, and unrelated
+/// marker configuration before it can claim or reuse a filesystem marker.
+#[test]
+fn exit_once_mode_configuration_fails_closed() {
+    let missing = restart_config("exit_once_then_success");
+    let relative = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![
+            (
+                CborValue::Text("restart_mode".to_owned()),
+                CborValue::Text("exit_once_then_success".to_owned()),
+            ),
+            (
+                CborValue::Text("exit_once_marker_path".to_owned()),
+                CborValue::Text("relative-marker".to_owned()),
+            ),
+        ]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
+    });
+    let extra = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![(
+            CborValue::Text("exit_once_marker_path".to_owned()),
+            CborValue::Text("/tmp/fixture-marker".to_owned()),
+        )]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
+    });
+    let release_extra = HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![(
+            CborValue::Text("release_nonce".to_owned()),
+            CborValue::Text("unused".to_owned()),
+        )]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
+    });
+    for config in [missing, relative, extra, release_extra] {
+        let frames = run_restart_frames(&[config], 1);
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+        );
+        assert!(frames.iter().all(|frame| {
+            !matches!(
+                emitted_event(frame),
+                Some(Event::ToolResultReported(_)) | Some(Event::ToolErrorReported(_))
+            )
+        }));
+    }
+}
+
+/// Ensures the first live marker-mode call reports correlated progress, claims
+/// the absent private marker atomically, and exits without a terminal.
+#[test]
+fn exit_once_mode_first_live_call_exits_without_terminal() {
+    let marker_path = unique_marker_path("exit-first");
+    let frames = run_restart_frames(&[exit_once_config(&marker_path), invoke_restart()], 1);
+
+    assert!(marker_path.is_file());
+    assert!(frames.iter().any(|frame| {
+        matches!(
+            emitted_event(frame),
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "call-1"
+                    && progress.message.as_deref() == Some("exit_once_then_success ready")
+        )
+    }));
+    assert!(frames.iter().all(|frame| {
+        !matches!(
+            emitted_event(frame),
+            Some(Event::ToolResultReported(_)) | Some(Event::ToolErrorReported(_))
+        )
+    }));
+    std::fs::remove_dir_all(marker_path.parent().expect("fixture marker parent"))
+        .expect("remove fixture marker root");
+}
+
+/// Ensures a replacement marker-mode process accepts the regular existing
+/// marker and emits exactly one ordinary successful terminal.
+#[test]
+fn exit_once_mode_second_live_call_returns_success() {
+    let marker_path = unique_marker_path("exit-second");
+    std::fs::write(&marker_path, []).expect("seed regular fixture marker");
+    let frames = run_restart_frames(&[exit_once_config(&marker_path), invoke_restart()], 1);
+
+    let results = frames
+        .iter()
+        .filter_map(emitted_event)
+        .filter_map(|event| match event {
+            Event::ToolResultReported(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].call_id.as_str(), "call-1");
+    assert_eq!(
+        results[0].result,
+        CborValue::Text("restart succeeded".to_owned())
+    );
+    std::fs::remove_dir_all(marker_path.parent().expect("fixture marker parent"))
+        .expect("remove fixture marker root");
 }
 
 /// Verifies release mode cannot become ready or bind a socket unless both
@@ -1177,6 +1328,39 @@ fn replayed_exit_restart_does_not_prevent_later_live_tool_result() {
         .collect::<Vec<_>>();
     assert_eq!(results.len(), 1, "only the later live invoke should reply");
     assert_eq!(results[0].call_id.as_str(), "call-1");
+}
+
+/// Ensures replayed marker-mode starts neither claim the marker nor stop the
+/// extension, leaving a later live start to take the first-exit path.
+#[test]
+fn replayed_exit_once_start_is_ignored() {
+    let marker_path = unique_marker_path("exit-replay");
+    let frames = run_restart_frames(
+        &[
+            exit_once_config(&marker_path),
+            replayed_restart(),
+            invoke_restart(),
+        ],
+        1,
+    );
+
+    assert!(marker_path.is_file());
+    assert_eq!(
+        frames
+            .iter()
+            .filter_map(emitted_event)
+            .filter(|event| matches!(event, Event::ToolProgressReported(_)))
+            .count(),
+        1
+    );
+    assert!(frames.iter().all(|frame| {
+        !matches!(
+            emitted_event(frame),
+            Some(Event::ToolResultReported(_)) | Some(Event::ToolErrorReported(_))
+        )
+    }));
+    std::fs::remove_dir_all(marker_path.parent().expect("fixture marker parent"))
+        .expect("remove fixture marker root");
 }
 
 fn intercepted_prompt(prompt: AgentPromptSubmitted) -> HarnessOutputMessage {

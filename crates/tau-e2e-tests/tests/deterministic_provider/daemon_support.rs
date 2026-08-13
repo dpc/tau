@@ -321,6 +321,9 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
         EventName::SESSION_REPLAY_COMPLETE,
         EventName::TOOL_RESULT,
         EventName::TOOL_RESULT_DISPLAY,
+        EventName::TOOL_STARTED,
+        EventName::TOOL_ERROR,
+        EventName::TOOL_PROGRESS,
         EventName::AGENT_STANDALONE_COMPACTION_STARTED,
         EventName::AGENT_STANDALONE_COMPACTION_FAILED,
         EventName::AGENT_COMPACTED,
@@ -470,6 +473,39 @@ pub(super) fn recv_observed(
             }
             SocketReceive::Message { .. } => {}
             SocketReceive::Timeout => return Err("timed out waiting for daemon event".into()),
+            SocketReceive::Closed => return Err("daemon socket closed".into()),
+        }
+    }
+}
+
+/// Receives one delivered event before the caller's single causal deadline.
+pub(super) fn recv_observed_before(
+    peer: &mut SocketPeer,
+    deadline: Instant,
+) -> Result<DaemonObserved, Box<dyn std::error::Error>> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match peer.recv_timeout(remaining)? {
+            SocketReceive::Message {
+                message: HarnessOutputMessage::Deliver(delivery),
+            } => {
+                let (event, replay, recorded_at) = delivery.into_parts();
+                return Ok(DaemonObserved {
+                    event,
+                    replay,
+                    recorded_at,
+                });
+            }
+            SocketReceive::Message {
+                message: HarnessOutputMessage::Disconnect(disconnect),
+            } => {
+                return Err(disconnect
+                    .reason
+                    .unwrap_or_else(|| "daemon disconnected".to_owned())
+                    .into());
+            }
+            SocketReceive::Message { .. } => {}
+            SocketReceive::Timeout => return Err("causal daemon wait exceeded deadline".into()),
             SocketReceive::Closed => return Err("daemon socket closed".into()),
         }
     }
