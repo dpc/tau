@@ -125,6 +125,15 @@ harness authenticates the Provider connection, derives the instance-specific
 durable-session path, and writes without parsing or decompressing payload bytes.
 Both transport and filesystem queues are bounded and best-effort. Capture
 payloads never enter events, journals, debug JSONL, or generic Debug output.
+Explicitly enabled compact HTTP failure captures preserve bounded causal
+provider evidence, including an allowlisted header set and a credential-redacted
+64-KiB decoded body prefix. Reqwest content decoding precedes accounting; captures
+hash exactly the decoded bytes delivered and distinguish complete decoded-body
+from partial coverage. Treat these owner-only local artifacts as
+sensitive: provider error bodies can reflect prompt, account, or service-internal
+data even after configured credentials are removed. Configurable diagnostic
+retention defaults to fourteen days; disabling cleanup can retain them
+indefinitely.
 Disabled-by-default cache refreshes resend an exact previously successful
 Provider-visible prefix. The harness keeps that content in process memory and
 sends refresh/cancel requests point-to-point only to the captured configured

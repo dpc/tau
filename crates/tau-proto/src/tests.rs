@@ -6343,7 +6343,7 @@ fn provider_capture_round_trips_with_redacted_debug() {
     let message = crate::HarnessInputMessage::ProviderDebugCapture(crate::ProviderDebugCapture {
         session_id: crate::SessionId::parse("session").expect("session"),
         agent_prompt_id: crate::AgentPromptId::parse("prompt").expect("prompt"),
-        class: crate::ProviderDebugCaptureClass::WebsocketResponse,
+        class: crate::ProviderDebugCaptureClass::CompactHttpFailure,
         zstd: b"raw-sensitive-bytes".to_vec(),
     });
     let encoded = crate::encode_harness_input_to_vec(&message).expect("encode");

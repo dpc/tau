@@ -1315,6 +1315,8 @@ pub enum ProviderDebugCaptureClass {
     UnknownResponse,
     /// Bounded, redacted metadata for one failed finite Responses attempt.
     ResponsesAttemptFailure,
+    /// Private causal evidence for one failed unary compact HTTP request.
+    CompactHttpFailure,
 }
 
 /// One opaque zstd-compressed Provider debug artifact attributed to a harness

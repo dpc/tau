@@ -227,6 +227,17 @@ Request captures from that finite inference path carry the same
 `logical_attempt` and exact `wire_dispatch_index`. Unary compaction captures
 omit these fields rather than fabricating inference correlation.
 
+A non-success unary compact HTTP response additionally submits one private
+schema-v0 `compact-http-failure` capture while provider diagnostics are enabled.
+It retains the status, a closed request-correlation/content/retry header
+allowlist, up to 64 KiB of credential-redacted decoded response bytes, and bounded
+common provider code, type, parameter, and message fields. It hashes every body
+byte delivered by reqwest after content decoding, before EOF or bounded
+termination, and states whether the digest covers the complete decoded body.
+This local causal evidence uses the shared zstd and
+harness-owned storage path; it never enters provider terminal normalization,
+events, journals, debug JSONL, or UI traffic.
+
 The parser and transport boundaries construct opaque failure evidence before
 the error reaches retry policy. Persistent records retain only closed
 classification/transport facts, validated codes and IDs, message/reason
@@ -234,8 +245,13 @@ presence and lengths, and a bounded structural event shape. They never retain
 provider prose, close reasons, raw values, headers, endpoints, proxy/account
 data, request/model output, credentials, or raw library errors. This projection
 is bounded and redacted but remains a private, potentially credential-bearing
-artifact. Submission and fourteen-day diagnostic retention reuse the shared
-best-effort writer; omission never changes provider execution.
+artifact. Submission and configurable diagnostic retention reuse the shared
+best-effort writer; cleanup defaults to fourteen days and may be disabled.
+Omission never changes provider execution.
+The compact HTTP failure record is the deliberate exception to the
+prose/header/raw-value exclusions above: it is operator-enabled private forensic
+evidence, redacts exact configured credentials rather than minimizing the
+provider failure, and remains subject to the same bounded best-effort retention.
 
 ## Streaming status boundary
 

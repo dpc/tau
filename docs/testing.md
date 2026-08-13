@@ -579,7 +579,10 @@ writers and cleanup. Worker and producer-integration tests live in
 and the concrete provider backends. Exercise immediate bounded admission,
 Provider-side zstd round trips, redacted protocol Debug, late-session
 attribution, exact opaque harness writes, and refusal of missing or symlinked
-session/debug/capture directories. The process-wide sender deliberately
+session/debug/capture directories. Compact HTTP failure tests must pin the
+allowlisted headers, credential-only redaction, parsed-field bounds, 64-KiB
+decoded prefix, complete/partial decoded hash coverage, filename grammar, and owner-only
+directory/file modes. The process-wide sender deliberately
 has no shutdown or join API: process exit can interrupt queued or in-flight
 captures. A local-channel worker-drain test covers only the worker loop after
 test producers disconnect and is not a production shutdown guarantee.

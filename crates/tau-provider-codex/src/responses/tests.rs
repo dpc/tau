@@ -1775,6 +1775,153 @@ fn parse_compact_response_preserves_raw_item_spelling() {
     assert_eq!(item.raw_json.as_deref(), Some(raw));
 }
 
+fn compact_test_failure_capture(
+    config: &ResponsesConfig,
+    sink: path_std_sync::Arc<
+        path_std_sync::Mutex<Vec<tau_provider::debug_capture_writer::ProviderDebugCapture>>,
+    >,
+) -> compact_failure_capture::CompactFailureCaptureContext {
+    let mut prompt = basic_prompt_payload();
+    prompt.debug_provider_requests = true;
+    compact_failure_capture::CompactFailureCaptureContext::new(
+        "ap-compact-failure",
+        config,
+        &prompt,
+    )
+    .with_test_sink(sink)
+}
+
+/// The production compact HTTP boundary must submit exactly one causal private
+/// capture before it normalizes an ordinary provider rejection.
+#[test]
+fn compact_http_rejection_submits_failure_capture() {
+    use std::io::{Read as _, Write as _};
+
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).expect("request");
+        let body = br#"{"error":{"code":"rejected","message":"causal detail"}}"#;
+        write!(
+            stream,
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nX-Request-Id: request-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("headers");
+        stream.write_all(body).expect("body");
+    });
+    let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
+        base_url: format!("http://{address}"),
+        ..chain_test_config()
+    };
+    let sink = path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new()));
+    let capture = compact_test_failure_capture(&config, path_std_sync::Arc::clone(&sink));
+
+    let result = compact_http_request(
+        &config,
+        "thread-failure",
+        "{}",
+        &crate::test_network_policy(),
+        &path_tokio_sync::Notify::new(),
+        &capture,
+    );
+
+    assert!(matches!(result, Err(LlmError::HttpStatus(400, _))));
+    server.join().expect("server");
+    let captures = sink.lock().expect("sink");
+    assert_eq!(captures.len(), 1);
+    let record: serde_json::Value = serde_json::from_slice(captures[0].json()).expect("capture");
+    assert_eq!(record["http"]["status"], 400);
+    assert_eq!(record["body"]["complete"], true);
+    assert_eq!(record["body"]["parsed_error"]["code"]["utf8"], "rejected");
+}
+
+/// Cancellation after non-success headers and a body prefix must return
+/// `Canceled` while preserving exactly one incomplete prefix/hash capture.
+#[test]
+fn compact_http_body_cancellation_submits_incomplete_capture() {
+    use std::io::{Read as _, Write as _};
+
+    use sha2::Digest as _;
+
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let (prefix_tx, prefix_rx) = path_std_sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = path_std_sync::mpsc::sync_channel(1);
+    let prefix = b"partial-causal-prefix";
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).expect("request");
+        write!(
+            stream,
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+            prefix.len() + 1024
+        )
+        .expect("headers");
+        stream.write_all(prefix).expect("prefix");
+        stream.flush().expect("flush");
+        prefix_tx.send(()).expect("prefix observed");
+        let _ = release_rx.recv_timeout(path_std_time::Duration::from_secs(2));
+    });
+    let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
+        base_url: format!("http://{address}"),
+        ..chain_test_config()
+    };
+    let sink = path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new()));
+    let (consumed_tx, consumed_rx) = path_std_sync::mpsc::sync_channel(1);
+    let capture = compact_test_failure_capture(&config, path_std_sync::Arc::clone(&sink))
+        .with_test_body_chunk_observer(path_std_sync::Arc::new(move || {
+            let _ = consumed_tx.try_send(());
+        }));
+    let cancel = path_std_sync::Arc::new(path_tokio_sync::Notify::new());
+    let worker_cancel = path_std_sync::Arc::clone(&cancel);
+    let (result_tx, result_rx) = path_std_sync::mpsc::sync_channel(1);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            result_tx
+                .send(compact_http_request(
+                    &config,
+                    "thread-partial",
+                    "{}",
+                    &crate::test_network_policy(),
+                    &worker_cancel,
+                    &capture,
+                ))
+                .expect("result");
+        });
+        prefix_rx
+            .recv_timeout(path_std_time::Duration::from_secs(1))
+            .expect("prefix");
+        consumed_rx
+            .recv_timeout(path_std_time::Duration::from_secs(1))
+            .expect("client consumed prefix");
+        cancel.notify_one();
+        assert!(matches!(
+            result_rx
+                .recv_timeout(path_std_time::Duration::from_secs(1))
+                .expect("result"),
+            Err(LlmError::Canceled)
+        ));
+    });
+    release_tx.send(()).expect("release");
+    server.join().expect("server");
+    let captures = sink.lock().expect("sink");
+    assert_eq!(captures.len(), 1);
+    let record: serde_json::Value = serde_json::from_slice(captures[0].json()).expect("capture");
+    assert_eq!(record["body"]["complete"], false);
+    assert_eq!(record["body"]["decoded_bytes_received"], prefix.len());
+    assert_eq!(
+        record["body"]["sha256_decoded_received"],
+        format!("{:x}", sha2::Sha256::digest(prefix))
+    );
+}
+
 /// Unary compaction uses dedicated HTTP JSON framing in both modes and scopes
 /// the Lite marker to compatibility mode.
 #[test]
@@ -1820,6 +1967,9 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
             account_id: Some("acct-test".to_owned()),
             ..chain_test_config()
         };
+        let prompt = basic_prompt_payload();
+        let failure_capture =
+            compact_failure_capture::CompactFailureCaptureContext::new("ap-test", &config, &prompt);
 
         let body = compact_http_request(
             &config,
@@ -1827,6 +1977,7 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
             "{}",
             &crate::test_network_policy(),
             &path_tokio_sync::Notify::new(),
+            &failure_capture,
         )
         .expect("compact response");
         assert_eq!(body, r#"{"output":[]}"#);
@@ -1888,6 +2039,9 @@ fn compact_http_request_cancellation_closes_active_socket() {
         path_std_collections::BTreeMap::new(),
         None,
     );
+    let prompt = basic_prompt_payload();
+    let failure_capture =
+        compact_failure_capture::CompactFailureCaptureContext::new("ap-test", &config, &prompt);
     let cancel = path_std_sync::Arc::new(path_tokio_sync::Notify::new());
     let worker_cancel = path_std_sync::Arc::clone(&cancel);
     let (result_tx, result_rx) = path_std_sync::mpsc::channel();
@@ -1900,6 +2054,7 @@ fn compact_http_request_cancellation_closes_active_socket() {
                     "{}",
                     &network,
                     &worker_cancel,
+                    &failure_capture,
                 ))
                 .expect("result receiver");
         });

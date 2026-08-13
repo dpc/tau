@@ -3,8 +3,10 @@
 //! Ordinary inference uses the pooled [`ws`] transport exclusively. HTTPS is
 //! retained only for the unary compact operation.
 
+mod compact_failure_capture;
+
 use std::borrow::Cow;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{sync as path_std_sync, thread as path_std_thread, time as path_std_time};
 
 use base64::{Engine as _, engine as path_base64_engine};
@@ -48,7 +50,6 @@ const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COMPACT_HTTP_THREADS: usize = 4;
 const MAX_COMPACT_SUCCESS_BODY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_COMPACT_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
 struct CompactTransportState {
@@ -490,6 +491,11 @@ fn send_compact_request_inner(
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
     let permit = acquire_compact_transport(abort)?;
     let thread_id = request.prompt_cache_key(&config.base_url, config.mode);
+    let failure_capture = compact_failure_capture::CompactFailureCaptureContext::new(
+        agent_prompt_id,
+        config,
+        request,
+    );
     let config = config.clone();
     let completion = path_std_sync::Arc::new((
         path_std_sync::Mutex::new(CompactCompletion::default()),
@@ -504,7 +510,14 @@ fn send_compact_request_inner(
         .spawn(move || {
             let _permit = permit;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                compact_http_request(&config, &thread_id, &body_str, &network, &network_cancel)
+                compact_http_request(
+                    &config,
+                    &thread_id,
+                    &body_str,
+                    &network,
+                    &network_cancel,
+                    &failure_capture,
+                )
             }))
             .unwrap_or_else(|_| {
                 Err(LlmError::InvalidResponse(
@@ -578,6 +591,7 @@ fn compact_http_request(
     body_str: &str,
     network: &tau_provider::OutboundNetworkPolicy,
     cancel_notify: &tokio::sync::Notify,
+    failure_capture: &compact_failure_capture::CompactFailureCaptureContext,
 ) -> Result<String, LlmError> {
     let url = compact_url(&config.base_url);
     let runtime = path_tokio_runtime::Builder::new_current_thread()
@@ -601,53 +615,97 @@ fn compact_http_request(
         if config.mode.is_lite_compatibility() {
             req = req.header(RESPONSES_LITE_HEADER, "true");
         }
+        let response = tokio::select! {
+            biased;
+            () = cancel_notify.notified() => return Err(LlmError::Canceled),
+            result = req.body(body_str.to_owned()).send() => result.map_err(|error| {
+                LlmError::Outbound(network.reqwest_error(
+                    &url,
+                    tau_provider::OutboundPhase::Request,
+                    &error,
+                ))
+            })?,
+        };
+        if !response.status().is_success() {
+            let code = response.status().as_u16();
+            let headers = response.headers().clone();
+            if let Some(error) = network.proxy_response_error(&url, code) {
+                failure_capture.submit(
+                    code,
+                    &headers,
+                    failure_capture.body_capture().finish(false),
+                );
+                return Err(LlmError::Outbound(error));
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    tau_provider::retry_policy::parse_retry_after(value, SystemTime::now())
+                });
+            let body = read_compact_error_body(response, failure_capture, cancel_notify).await?;
+            return Err(match retry_after {
+                Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
+                None => LlmError::HttpStatus(code, body),
+            });
+        }
         tokio::select! {
             biased;
             () = cancel_notify.notified() => Err(LlmError::Canceled),
-            result = async {
-                let response = req
-                    .body(body_str.to_owned())
-                    .send()
-                    .await
-                    .map_err(|error| {
-                        LlmError::Outbound(network.reqwest_error(
-                            &url,
-                            tau_provider::OutboundPhase::Request,
-                            &error,
-                        ))
-                    })?;
-                if !response.status().is_success() {
-                    let code = response.status().as_u16();
-                    if let Some(error) = network.proxy_response_error(&url, code) {
-                        return Err(LlmError::Outbound(error));
-                    }
-                    let retry_after = response
-                        .headers()
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| {
-                            tau_provider::retry_policy::parse_retry_after(
-                                value,
-                                std::time::SystemTime::now(),
-                            )
-                        });
-                    let body = read_compact_body(
-                        response,
-                        MAX_COMPACT_ERROR_BODY_BYTES,
-                        network,
-                        &url,
-                    )
-                    .await
-                    .unwrap_or_default();
-                    return Err(match retry_after {
-                        Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
-                        None => LlmError::HttpStatus(code, body),
-                    });
-                }
-                read_compact_body(response, MAX_COMPACT_SUCCESS_BODY_BYTES, network, &url).await
-            } => result,
+            result = read_compact_body(
+                response,
+                MAX_COMPACT_SUCCESS_BODY_BYTES,
+                network,
+                &url,
+            ) => result,
         }
     })
+}
+
+async fn read_compact_error_body(
+    mut response: reqwest::Response,
+    failure_capture: &compact_failure_capture::CompactFailureCaptureContext,
+    cancel_notify: &tokio::sync::Notify,
+) -> Result<String, LlmError> {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let mut body = failure_capture.body_capture();
+    let mut complete = false;
+    let mut canceled = false;
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = cancel_notify.notified() => {
+                canceled = true;
+                break;
+            }
+            result = response.chunk() => result,
+        };
+        match next {
+            Ok(Some(chunk)) => {
+                body.push(&chunk);
+                #[cfg(test)]
+                failure_capture.observe_test_body_chunk();
+                if body.reached_retention_limit() {
+                    break;
+                }
+            }
+            Ok(None) => {
+                complete = true;
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let body = body.finish(complete);
+    let provider_error_text = body.provider_error_text();
+    failure_capture.submit(status, &headers, body);
+    if canceled {
+        Err(LlmError::Canceled)
+    } else {
+        Ok(provider_error_text)
+    }
 }
 
 async fn read_compact_body(

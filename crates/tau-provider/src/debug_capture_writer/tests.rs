@@ -89,6 +89,30 @@ fn compression_builds_opaque_attributed_protocol_message() {
     assert!(!format!("{capture:?}").contains("secret"));
 }
 
+/// Compact HTTP failure evidence must use the same zstd-compressed,
+/// non-journaled harness-provider transport as every other private capture.
+#[test]
+fn compact_failure_uses_shared_zstd_transport() {
+    let capture = ProviderDebugCapture::new(
+        tau_proto::SessionId::parse("session-test").expect("session"),
+        tau_proto::AgentPromptId::parse("compact-prompt").expect("prompt"),
+        tau_proto::ProviderDebugCaptureClass::CompactHttpFailure,
+        br#"{"capture_kind":"compact_http_failure"}"#.to_vec(),
+    );
+    let message = compressed_message(&CaptureJob::new(capture)).expect("compress");
+    let tau_proto::HarnessInputMessage::ProviderDebugCapture(capture) = message else {
+        panic!("dedicated capture message");
+    };
+    assert_eq!(
+        capture.class,
+        tau_proto::ProviderDebugCaptureClass::CompactHttpFailure
+    );
+    assert_eq!(
+        zstd::stream::decode_all(&capture.zstd[..]).expect("decode"),
+        br#"{"capture_kind":"compact_http_failure"}"#
+    );
+}
+
 /// Ensures absolute, traversal, and malformed session spellings cannot enter
 /// structured capture attribution.
 #[test]

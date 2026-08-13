@@ -20,8 +20,9 @@ terminal gate, priority scheduler, or second stream.
 The harness authenticates the configured Provider instance, accepts only known
 durable-session attribution, derives
 `debug/provider-requests/<instance>/`, and writes through a second bounded
-best-effort worker without inspecting or decompressing the blob. The Provider
-receives no writable capture mount or host capture path.
+best-effort worker without inspecting or decompressing the blob. Capture
+directories and files are owner-only. The Provider receives no writable capture
+mount or host capture path.
 
 Provider startup captures one `Arc<OutboundNetworkPolicy>` and injects it into
 each backend runtime. The snapshot selects lowercase proxy variables before

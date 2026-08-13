@@ -172,6 +172,7 @@ fn cleanup_applies_exact_shared_cutoff_to_every_diagnostic_class() {
         "events.jsonl",
         "debug/provider-requests/1-prompt-http-sse-request.json",
         "debug/provider-requests/1-prompt-websocket-response.json.zst",
+        "debug/provider-requests/1-prompt-compact-http-failure.json.zst",
     ] {
         for (label, age, removed) in [
             ("exact", retention, true),
@@ -203,6 +204,9 @@ fn cleanup_applies_exact_shared_cutoff_to_every_diagnostic_class() {
 fn cleanup_uses_shared_provider_capture_filename_contract() {
     assert!(super::is_provider_capture_filename(
         "123-sp-6-http-sse-request.json.zst"
+    ));
+    assert!(super::is_provider_capture_filename(
+        "123-sp-6-compact-http-failure.json.zst"
     ));
     assert!(!super::is_provider_capture_filename(
         "notes-http-sse-request.json"

@@ -147,21 +147,40 @@ fn write_capture(job: &CaptureWriteJob) -> io::Result<()> {
     let debug_dir = job.session_dir.join("debug");
     let captures_dir = debug_dir.join("provider-requests");
     let instance_dir = captures_dir.join(job.provider_instance.as_str());
-    ensure_or_create_real_directory(&debug_dir)?;
-    ensure_or_create_real_directory(&captures_dir)?;
-    ensure_or_create_real_directory(&instance_dir)?;
+    ensure_or_create_private_real_directory(&debug_dir)?;
+    ensure_or_create_private_real_directory(&captures_dir)?;
+    ensure_or_create_private_real_directory(&instance_dir)?;
     let path = instance_dir.join(job.filename.as_str());
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(&job.zstd)
 }
 
-/// Create one directory when absent, then require a non-symlink directory.
-fn ensure_or_create_real_directory(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
+/// Create or validate one owner-private, non-symlink capture directory.
+fn ensure_or_create_private_real_directory(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => ensure_real_directory(path),
         Err(error) => Err(error),
+    }?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    Ok(())
 }
 
 /// Require `path` to identify a directory without following a final symlink.

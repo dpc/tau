@@ -36,6 +36,63 @@ fn writes_opaque_bytes_to_harness_owned_path() {
         .expect("capture"),
         bytes
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let capture_root = session.join("debug/provider-requests");
+        let instance = capture_root.join("provider");
+        let capture = instance.join("1-prompt-http-sse-request.json.zst");
+        for directory in [session.join("debug"), capture_root, instance] {
+            assert_eq!(
+                fs::metadata(directory)
+                    .expect("capture directory")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        assert_eq!(
+            fs::metadata(capture)
+                .expect("capture file")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+/// Existing capture directories with permissive modes must be tightened before
+/// a private provider artifact is created.
+#[cfg(unix)]
+#[test]
+fn tightens_existing_capture_directory_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = TempDir::new().expect("temp");
+    let session = temp.path().join("session");
+    let debug = session.join("debug");
+    let captures = debug.join("provider-requests");
+    let instance = captures.join("provider");
+    fs::create_dir_all(&instance).expect("capture tree");
+    for directory in [&debug, &captures, &instance] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
+            .expect("permissive fixture");
+    }
+
+    write_capture(&job(&session, b"private")).expect("write");
+
+    for directory in [debug, captures, instance] {
+        assert_eq!(
+            fs::metadata(directory)
+                .expect("capture directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
 }
 
 /// Proves a symlinked Provider instance sink cannot redirect an attributed

@@ -95,6 +95,11 @@ and visible. Replay delivers a committed but undelivered terminal once and never
 resends ambiguous compactor work or repeats committed delivery. An explicit
 recovery creates a successor outcome and delivery rather than rewriting history.
 Cross-agent `agent_compact` remains asynchronous and waitable.
+When private provider diagnostics are enabled, a non-success compact HTTP
+response may produce one bounded credential-redacted local failure capture
+before terminal normalization. This best-effort zstd artifact follows normal
+diagnostic retention and never becomes a journal, event, UI fact, or recovery
+authority.
 The model-callable path accepts work only when the exact captured
 provider-qualified model supports standalone compaction and its route exists.
 It has no inline fallback. Provider terminal errors, including context-window

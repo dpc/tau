@@ -236,6 +236,9 @@ durable session, derives the configured-instance path itself, and queues exact
 zstd bytes on a bounded filesystem worker without parsing or decompression.
 Late captures retain their attributed old session across rollover; missing
 session roots, overload, failures, and shutdown omit the best-effort artifact.
+The writer creates capture directories with owner-only access and capture files
+with owner read/write access, tightening existing capture-directory modes before
+each write.
 
 Live provider retry updates may carry bounded provider detail, but the
 non-authoritative `events.jsonl` projection replaces it with only retry

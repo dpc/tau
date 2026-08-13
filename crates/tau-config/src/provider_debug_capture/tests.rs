@@ -12,6 +12,7 @@ fn filename_round_trips_every_supported_class_and_format() {
         ProviderDebugCaptureClass::WebsocketResponse,
         ProviderDebugCaptureClass::UnknownResponse,
         ProviderDebugCaptureClass::ResponsesAttemptFailure,
+        ProviderDebugCaptureClass::CompactHttpFailure,
     ] {
         for format in [
             ProviderDebugCaptureFormat::LegacyJson,
@@ -24,6 +25,23 @@ fn filename_round_trips_every_supported_class_and_format() {
             );
         }
     }
+}
+
+/// Compact HTTP failure artifacts need a distinct stable basename so retention
+/// cleanup and forensic tooling cannot confuse them with normalized responses.
+#[test]
+fn compact_http_failure_has_distinct_compressed_filename() {
+    let prompt = tau_proto::AgentPromptId::parse("compact-7").expect("prompt id");
+    let filename = ProviderDebugCaptureFilename::new(
+        123,
+        &prompt,
+        ProviderDebugCaptureClass::CompactHttpFailure,
+        ProviderDebugCaptureFormat::ZstdJson,
+    );
+    assert_eq!(
+        filename.as_str(),
+        "123-compact-7-compact-http-failure.json.zst"
+    );
 }
 
 /// Ensures unrelated suffix collisions and malformed timestamp/prompt
