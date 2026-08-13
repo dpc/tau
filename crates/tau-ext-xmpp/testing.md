@@ -12,6 +12,10 @@ multiple MUC agents, room identity/collision handling, status-201 room config,
 long-agent-ID and nodeprep/case-fold non-collapse, distinct active and pending
 room collisions, join errors and exact self-presence correlation, mediated
 invite payloads and leave presence, real-JID allowlist routing,
+active/pending presence scope, inclusive 256-per-room and 1,024-per-worker
+identity-cache limits, replacement at capacity, per-room quarantine and
+trusted-membership fail-closed behavior, initial-roster failure, and lifecycle
+purging,
 hidden-real-JID fail-closed and explicit membership trust behavior, exact
 transport-neutral delivered-report mapping, report-before-result ordering and
 `persist=false` metadata,

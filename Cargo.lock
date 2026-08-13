@@ -6092,6 +6092,7 @@ dependencies = [
  "tokio",
  "tokio-xmpp",
  "tracing",
+ "tracing-subscriber",
  "xmpp-parsers",
 ]
 

@@ -35,7 +35,17 @@ room forms or set member affiliations; private, hidden, members-only, persistent
 real-JID-visible policy comes from server defaults or preconfiguration. Inbound occupant
 authorization requires a current occupant-to-real-JID mapping matching `allowed_jids`,
 unless the operator explicitly sets `trust_muc_membership: true` and accepts server
-membership as the security boundary. Disconnect clears those mappings.
+membership as the security boundary.
+
+The worker retains mappings only for available full occupant-JID presence from
+an active room or the exact pending room currently joining. It accepts at most
+256 mappings per room and 1,024 across the worker, including those exact limits;
+replacement of an existing occupant remains allowed at capacity. Overflow clears
+and quarantines only that room. A quarantined active room drops all groupchat
+before either real-JID or trusted-membership admission, while initial-roster
+overflow fails registration. A fresh join rebuilds that room from empty state.
+Rollback, retirement, disconnect, a new online connection, and shutdown purge
+the applicable mappings and quarantine state.
 
 Registration has a 45-second worker budget inside the outer 60-second tool wait.
 Timeout, join/config failure, or a dropped response receiver removes pending and active

@@ -30,3 +30,4 @@ xmpp-parsers.workspace = true
 
 [dev-dependencies]
 tau-core.workspace = true
+tracing-subscriber.workspace = true

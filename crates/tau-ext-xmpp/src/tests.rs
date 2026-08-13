@@ -22,6 +22,21 @@ impl Drop for SaturationHookGuard {
     }
 }
 
+/// Cloneable tracing sink for warning-content assertions.
+#[derive(Clone, Default)]
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        self.0.lock().expect("trace bytes").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Production writer blocked by the first detached saturation filler.
 struct SaturationWriter {
     /// Serialized protocol output.
@@ -1961,7 +1976,8 @@ fn disconnected_state_requires_fresh_online_readiness() {
     let (tx, _rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
     worker.bound_jid = Some(Jid::new("tau@example.org/tau-resource").expect("jid"));
-    worker.occupant_real_jids.insert(
+    retain_muc_identity(
+        &mut worker,
         Jid::new("room@conference.example.org/alice").expect("jid"),
         Jid::new("me@example.org/dino").expect("jid"),
     );
@@ -1969,7 +1985,7 @@ fn disconnected_state_requires_fresh_online_readiness() {
     worker.handle_disconnected();
 
     assert!(worker.bound_jid.is_none());
-    assert!(worker.occupant_real_jids.is_empty());
+    assert_eq!(worker.muc_presence_cache.total_len(), 0);
 }
 
 /// `xmpp_send` rejects unexpected arguments such as a destination JID so future
@@ -2029,6 +2045,20 @@ fn muc_message(from: Jid, body: &str) -> Stanza {
             .with_body(Lang::new(), body.to_owned());
     message.from = Some(from);
     message.into()
+}
+
+/// Retain one test MUC identity through the same bounded cache used by
+/// presence.
+fn retain_muc_identity(worker: &mut WorkerState, occupant: Jid, real_jid: Jid) {
+    let real_jid = real_jid
+        .try_into_full()
+        .unwrap_or_else(|bare| full_jid(&format!("{bare}/test-resource")));
+    assert_eq!(
+        worker
+            .muc_presence_cache
+            .admit(occupant.try_into_full().expect("full occupant"), real_jid,),
+        Admission::Retained
+    );
 }
 
 fn delayed_muc_message(from: Jid, body: &str) -> Stanza {
@@ -2168,6 +2198,396 @@ fn muc_join_presence_correlation_requires_exact_room_and_nick() {
         &other_room,
         matching.from.as_ref().expect("from")
     ));
+}
+
+/// Build one MUC-user presence assertion for cache admission tests.
+fn muc_identity_presence(from: Jid, real_jid: &str, type_: PresenceType) -> Presence {
+    let mut presence = Presence::new(type_);
+    presence.from = Some(from);
+    presence.payloads.push(
+        format!(
+            "<x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant' jid='{real_jid}'/></x>"
+        )
+        .parse()
+        .expect("muc-user payload"),
+    );
+    presence
+}
+
+/// Overflow one active room through production presence ingress.
+fn overflow_active_room(worker: &mut WorkerState, room: &BareJid) {
+    for index in 0..=MAX_MUC_OCCUPANTS_PER_ROOM {
+        worker.handle_presence(muc_identity_presence(
+            Jid::new(&format!("{room}/nick-{index}")).expect("jid"),
+            &format!("user-{index}@example.org/resource"),
+            PresenceType::None,
+        ));
+    }
+}
+
+/// Parse a full JID for typed cache unit tests.
+fn full_jid(value: &str) -> xmpp_parsers::jid::FullJid {
+    Jid::new(value)
+        .expect("jid")
+        .try_into_full()
+        .expect("full jid")
+}
+
+/// Presence from irrelevant rooms, bare senders, and non-available types must
+/// never create authentication state that could become authoritative later.
+#[test]
+fn muc_presence_cache_accepts_only_available_full_jids_from_tracked_rooms() {
+    let (mut worker, _rx, room, _occupant) = worker_with_muc_agent();
+    let irrelevant = Jid::new("other@conference.example.org/alice").expect("jid");
+    worker.handle_presence(muc_identity_presence(
+        irrelevant,
+        "me@example.org/dino",
+        PresenceType::None,
+    ));
+    assert_eq!(worker.muc_presence_cache.total_len(), 0);
+
+    worker.handle_presence(muc_identity_presence(
+        room.clone().into(),
+        "me@example.org/dino",
+        PresenceType::None,
+    ));
+    for type_ in [
+        PresenceType::Probe,
+        PresenceType::Subscribe,
+        PresenceType::Subscribed,
+        PresenceType::Unsubscribe,
+        PresenceType::Unsubscribed,
+    ] {
+        worker.handle_presence(muc_identity_presence(
+            Jid::new("tau-agent-1@conference.example.org/alice").expect("jid"),
+            "me@example.org/dino",
+            type_,
+        ));
+    }
+    assert_eq!(worker.muc_presence_cache.total_len(), 0);
+
+    let occupant = Jid::new("tau-agent-1@conference.example.org/alice").expect("jid");
+    worker.handle_presence(muc_identity_presence(
+        occupant.clone(),
+        "me@example.org/dino",
+        PresenceType::None,
+    ));
+    assert_eq!(worker.muc_presence_cache.room_len(&room), 1);
+    let mut unavailable = Presence::unavailable();
+    unavailable.from = Some(occupant);
+    worker.handle_presence(unavailable);
+    assert_eq!(worker.muc_presence_cache.total_len(), 0);
+}
+
+/// Initial roster presence for the exact pending room must survive promotion,
+/// while the same pre-join assertion from another room stays irrelevant.
+#[test]
+fn muc_pending_roster_mapping_routes_after_successful_promotion() {
+    let (tx, rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
+    let agent = agent_id("agent-1");
+    let room = Jid::new("tau-agent-1@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    let occupant = Jid::new("tau-agent-1@conference.example.org/alice").expect("jid");
+    worker.pending_muc_joins.insert(
+        agent.clone(),
+        MucOccupant::new(room.clone(), "tau-self".to_owned()),
+    );
+    worker.handle_presence(muc_identity_presence(
+        Jid::new("other@conference.example.org/alice").expect("jid"),
+        "mallory@example.org/resource",
+        PresenceType::None,
+    ));
+    worker.handle_presence(muc_identity_presence(
+        occupant.clone(),
+        "me@example.org/dino",
+        PresenceType::None,
+    ));
+    assert_eq!(worker.muc_presence_cache.total_len(), 1);
+
+    worker.room_to_agent.insert(room.clone(), agent.clone());
+    worker.conversations.insert(
+        agent.clone(),
+        Conversation::Muc {
+            room: room.clone(),
+            nick: "tau-self".to_owned(),
+        },
+    );
+    worker.pending_muc_joins.remove(&agent);
+    activate_worker_agent(&mut worker, agent);
+    worker.handle_stanza(muc_message(occupant, "hello"));
+    assert!(rx.try_recv().is_ok());
+}
+
+/// The 256th per-room mapping and replacement at capacity are accepted, while
+/// a distinct 257th mapping clears and quarantines only that room.
+#[test]
+fn muc_presence_cache_per_room_limit_is_inclusive_and_replacement_safe() {
+    let room = Jid::new("room@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    let mut cache = MucPresenceCache::default();
+    for index in 0..MAX_MUC_OCCUPANTS_PER_ROOM {
+        assert_eq!(
+            cache.admit(
+                full_jid(&format!("room@conference.example.org/nick-{index}")),
+                full_jid(&format!("user-{index}@example.org/resource")),
+            ),
+            Admission::Retained
+        );
+    }
+    assert_eq!(cache.room_len(&room), MAX_MUC_OCCUPANTS_PER_ROOM);
+    assert_eq!(
+        cache.admit(
+            full_jid("room@conference.example.org/nick-0"),
+            full_jid("replacement@example.org/resource"),
+        ),
+        Admission::Retained
+    );
+    assert_eq!(cache.room_len(&room), MAX_MUC_OCCUPANTS_PER_ROOM);
+    assert_eq!(
+        cache.admit(
+            full_jid("room@conference.example.org/overflow"),
+            full_jid("overflow@example.org/resource"),
+        ),
+        Admission::Quarantined
+    );
+    assert!(cache.is_quarantined(&room));
+    assert_eq!(cache.room_len(&room), 0);
+    assert_eq!(cache.total_len(), 0);
+}
+
+/// The 1,024th worker mapping and replacement at capacity are accepted; the
+/// next room is quarantined without removing complete state from other rooms.
+#[test]
+fn muc_presence_cache_worker_limit_is_inclusive_and_room_isolated() {
+    let mut cache = MucPresenceCache::default();
+    let mut rooms = Vec::new();
+    for room_index in 0..4 {
+        let room = Jid::new(&format!("room-{room_index}@conference.example.org"))
+            .expect("jid")
+            .to_bare();
+        for occupant_index in 0..MAX_MUC_OCCUPANTS_PER_ROOM {
+            assert_eq!(
+                cache.admit(
+                    full_jid(&format!(
+                        "room-{room_index}@conference.example.org/nick-{occupant_index}"
+                    )),
+                    full_jid(&format!(
+                        "user-{room_index}-{occupant_index}@example.org/resource"
+                    )),
+                ),
+                Admission::Retained
+            );
+        }
+        rooms.push(room);
+    }
+    assert_eq!(cache.total_len(), MAX_MUC_OCCUPANTS_TOTAL);
+    assert_eq!(
+        cache.admit(
+            full_jid("room-0@conference.example.org/nick-0"),
+            full_jid("replacement@example.org/resource"),
+        ),
+        Admission::Retained
+    );
+    let overflow_room = Jid::new("overflow@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    assert_eq!(
+        cache.admit(
+            full_jid("overflow@conference.example.org/nick"),
+            full_jid("overflow@example.org/resource"),
+        ),
+        Admission::Quarantined
+    );
+    assert!(cache.is_quarantined(&overflow_room));
+    assert_eq!(cache.total_len(), MAX_MUC_OCCUPANTS_TOTAL);
+    assert_eq!(cache.room_len(&rooms[0]), MAX_MUC_OCCUPANTS_PER_ROOM);
+}
+
+/// Pending-roster overflow produces the approved terminal detail and purging
+/// the rolled-back pending join removes its quarantine state.
+#[test]
+fn muc_initial_roster_overflow_fails_registration_and_rollback_purges_state() {
+    let (tx, _rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal(), test_authority());
+    let agent = agent_id("agent-1");
+    let room = Jid::new("tau-agent-1@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    worker.pending_muc_joins.insert(
+        agent.clone(),
+        MucOccupant::new(room.clone(), "tau-self".to_owned()),
+    );
+    for index in 0..=MAX_MUC_OCCUPANTS_PER_ROOM {
+        worker.handle_presence(muc_identity_presence(
+            Jid::new(&format!("tau-agent-1@conference.example.org/nick-{index}")).expect("jid"),
+            &format!("user-{index}@example.org/resource"),
+            PresenceType::None,
+        ));
+    }
+    let mut self_presence = Presence::available();
+    self_presence.from =
+        Some(Jid::new("tau-agent-1@conference.example.org/tau-self").expect("jid"));
+    self_presence.payloads.push(
+        MucUser::new()
+            .with_statuses(vec![MucStatus::SelfPresence])
+            .into(),
+    );
+    assert_eq!(
+        worker
+            .handle_muc_self_presence(&room, self_presence)
+            .expect_err("incomplete roster"),
+        "xmpp MUC occupant roster exceeds cache limits (256 per room, 1024 total); registration was not installed"
+    );
+    assert!(!worker.room_to_agent.contains_key(&room));
+    assert!(!worker.conversations.contains_key(&agent));
+    worker.remove_conversation(&agent);
+    assert!(!worker.muc_presence_cache.is_quarantined(&room));
+    assert_eq!(worker.muc_presence_cache.total_len(), 0);
+}
+
+/// Quarantine must precede both real-JID and trusted-membership admission so
+/// neither a formerly cached nor overflowing occupant can route a message.
+#[test]
+fn muc_quarantine_fails_closed_under_both_membership_modes() {
+    for trust_membership in [false, true] {
+        let (mut worker, rx, _room, occupant) = worker_with_muc_agent();
+        worker.cfg.muc.trust_muc_membership = trust_membership;
+        overflow_active_room(&mut worker, &_room);
+        let overflow = Jid::new("tau-agent-1@conference.example.org/overflow").expect("jid");
+        assert!(worker.muc_presence_cache.is_quarantined(&_room));
+        worker.handle_stanza(muc_message(occupant, "formerly cached"));
+        worker.handle_stanza(muc_message(overflow, "overflow"));
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+/// Overflow in one active room must neither remove another room's identities
+/// nor prevent that other room from routing an allowlisted message.
+#[test]
+fn muc_quarantine_isolates_other_active_rooms() {
+    let (mut worker, rx, room_b, occupant_b) = worker_with_muc_agent();
+    retain_muc_identity(
+        &mut worker,
+        occupant_b.clone(),
+        Jid::new("me@example.org/dino").expect("jid"),
+    );
+    let room_a = Jid::new("tau-agent-2@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    worker
+        .room_to_agent
+        .insert(room_a.clone(), agent_id("agent-2"));
+    overflow_active_room(&mut worker, &room_a);
+    assert!(worker.muc_presence_cache.is_quarantined(&room_a));
+    assert_eq!(worker.muc_presence_cache.room_len(&room_b), 1);
+    worker.handle_stanza(muc_message(occupant_b, "room B remains usable"));
+    assert!(rx.try_recv().is_ok());
+}
+
+/// Active overflow emits one fixed content-free warning per room and suppresses
+/// repeats until a connection reset permits one new warning.
+#[test]
+fn muc_active_overflow_warning_is_content_free_once_per_connection() {
+    let (mut worker, _rx, room, _occupant) = worker_with_muc_agent();
+    let trace = TraceWriter::default();
+    let captured = Arc::clone(&trace.0);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || trace.clone())
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        for index in 0..MAX_MUC_OCCUPANTS_PER_ROOM {
+            worker.handle_presence(muc_identity_presence(
+                Jid::new(&format!("{room}/nick-{index}")).expect("jid"),
+                &format!("user-{index}@example.org/resource"),
+                PresenceType::None,
+            ));
+        }
+        worker.handle_presence(muc_identity_presence(
+            Jid::new("tau-agent-1@conference.example.org/secret-nick").expect("jid"),
+            "secret-person@example.org/private-resource",
+            PresenceType::None,
+        ));
+        worker.muc_presence_cache.begin_join(&room);
+        overflow_active_room(&mut worker, &room);
+        worker.muc_presence_cache.clear_connection();
+        overflow_active_room(&mut worker, &room);
+    });
+
+    let output = String::from_utf8(captured.lock().expect("trace bytes").clone())
+        .expect("UTF-8 trace output");
+    assert_eq!(
+        output
+            .matches("xmpp MUC presence cache limit reached; quarantining room until a fresh join")
+            .count(),
+        2
+    );
+    for secret in [
+        "tau-agent-1",
+        "conference.example.org",
+        "secret-nick",
+        "secret-person",
+        "private-resource",
+    ] {
+        assert!(!output.contains(secret), "warning leaked `{secret}`");
+    }
+}
+
+/// A fresh join clears quarantine and mappings, while a connection reset also
+/// resets the one-warning marker and all room state.
+#[test]
+fn muc_presence_cache_fresh_join_and_connection_lifecycle_purge_state() {
+    let room = Jid::new("room@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    let mut cache = MucPresenceCache::default();
+    for index in 0..=MAX_MUC_OCCUPANTS_PER_ROOM {
+        let _ = cache.admit(
+            full_jid(&format!("room@conference.example.org/nick-{index}")),
+            full_jid(&format!("user-{index}@example.org/resource")),
+        );
+    }
+    assert!(cache.is_quarantined(&room));
+    assert!(cache.take_warning(&room));
+    assert!(!cache.take_warning(&room));
+    cache.begin_join(&room);
+    assert!(!cache.is_quarantined(&room));
+    assert_eq!(cache.total_len(), 0);
+    assert!(!cache.take_warning(&room));
+    cache.clear_connection();
+    assert!(cache.take_warning(&room));
+}
+
+/// Warning suppression metadata is itself bounded, and once full it suppresses
+/// later warnings until a new connection resets both contents and allocation.
+#[test]
+fn muc_presence_cache_warning_metadata_is_bounded_per_connection() {
+    let mut cache = MucPresenceCache::default();
+    for index in 0..MAX_WARNED_MUC_ROOMS {
+        let room = Jid::new(&format!("room-{index}@conference.example.org"))
+            .expect("jid")
+            .to_bare();
+        assert!(cache.take_warning(&room));
+        cache.purge_room(&room);
+    }
+    let overflow_room = Jid::new("warning-overflow@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    assert!(!cache.take_warning(&overflow_room));
+    let (warning_count, warning_capacity, suppressed) = cache.warning_state();
+    assert_eq!(warning_count, MAX_WARNED_MUC_ROOMS);
+    assert!(warning_capacity < MAX_WARNED_MUC_ROOMS * 2);
+    assert!(suppressed);
+
+    cache.clear_connection();
+    assert_eq!(cache.warning_state(), (0, 0, false));
+    assert!(cache.take_warning(&overflow_room));
 }
 
 /// MUC groupchat messages without real-JID proof fail closed by default so room
@@ -2720,7 +3140,8 @@ fn allowed_muc_message_submits_replay_stable_report() {
     worker
         .room_to_agent
         .insert(room.clone(), agent_id("agent-1"));
-    worker.occupant_real_jids.insert(
+    retain_muc_identity(
+        &mut worker,
         occupant.clone(),
         Jid::new("me@example.org/dino").expect("jid"),
     );
@@ -2768,7 +3189,8 @@ fn allowed_muc_message_submits_replay_stable_report() {
 #[test]
 fn muc_message_from_unallowed_real_jid_is_not_routed() {
     let (mut worker, rx, _room, occupant) = worker_with_muc_agent();
-    worker.occupant_real_jids.insert(
+    retain_muc_identity(
+        &mut worker,
         occupant.clone(),
         Jid::new("mallory@example.org").expect("jid"),
     );
@@ -2840,9 +3262,11 @@ fn muc_hidden_real_jid_occupant_label_is_descriptive_metadata() {
 fn muc_own_message_is_not_routed() {
     let (mut worker, rx, _room, _occupant) = worker_with_muc_agent();
     let own = Jid::new("tau-agent-1@conference.example.org/tau-self").expect("jid");
-    worker
-        .occupant_real_jids
-        .insert(own.clone(), Jid::new("me@example.org/dino").expect("jid"));
+    retain_muc_identity(
+        &mut worker,
+        own.clone(),
+        Jid::new("me@example.org/dino").expect("jid"),
+    );
     worker.handle_stanza(muc_message(own, "echo"));
     assert!(rx.try_recv().is_err());
 }
@@ -2853,7 +3277,8 @@ fn muc_own_message_is_not_routed() {
 fn oversized_muc_message_is_not_routed() {
     let (mut worker, rx, _room, occupant) = worker_with_muc_agent();
     worker.cfg.max_message_bytes = 4;
-    worker.occupant_real_jids.insert(
+    retain_muc_identity(
+        &mut worker,
         occupant.clone(),
         Jid::new("me@example.org/dino").expect("jid"),
     );
@@ -2866,7 +3291,8 @@ fn oversized_muc_message_is_not_routed() {
 #[test]
 fn delayed_muc_history_is_not_routed() {
     let (mut worker, rx, _room, occupant) = worker_with_muc_agent();
-    worker.occupant_real_jids.insert(
+    retain_muc_identity(
+        &mut worker,
         occupant.clone(),
         Jid::new("me@example.org/dino").expect("jid"),
     );
@@ -2879,11 +3305,13 @@ fn delayed_muc_history_is_not_routed() {
 #[test]
 fn online_state_clears_muc_real_jid_cache() {
     let (mut worker, _rx, _room, occupant) = worker_with_muc_agent();
-    worker
-        .occupant_real_jids
-        .insert(occupant, Jid::new("me@example.org/dino").expect("jid"));
+    retain_muc_identity(
+        &mut worker,
+        occupant,
+        Jid::new("me@example.org/dino").expect("jid"),
+    );
     worker.apply_online_state(Jid::new("tau@example.org/new").expect("jid"));
-    assert!(worker.occupant_real_jids.is_empty());
+    assert_eq!(worker.muc_presence_cache.total_len(), 0);
 }
 
 /// Direct-resource reconnect handling updates the stored full JID and returns a
@@ -2937,7 +3365,8 @@ fn muc_rooms_to_rejoin_lists_only_muc_conversations() {
 #[test]
 fn muc_unavailable_presence_invalidates_real_jid_cache() {
     let (mut worker, rx, _room, occupant) = worker_with_muc_agent();
-    worker.occupant_real_jids.insert(
+    retain_muc_identity(
+        &mut worker,
         occupant.clone(),
         Jid::new("me@example.org/dino").expect("jid"),
     );
@@ -3133,10 +3562,12 @@ fn removing_muc_conversation_tracks_leave_and_clears_routing() {
     worker.conversations.insert(
         agent.clone(),
         Conversation::Muc {
-            room,
+            room: room.clone(),
             nick: "tau-self".to_owned(),
         },
     );
+    overflow_active_room(&mut worker, &room);
+    assert!(worker.muc_presence_cache.is_quarantined(&room));
 
     let removed = worker
         .remove_conversation(&agent)
@@ -3144,6 +3575,7 @@ fn removing_muc_conversation_tracks_leave_and_clears_routing() {
 
     assert!(!worker.conversations.contains_key(&agent));
     assert!(worker.room_to_agent.values().all(|mapped| mapped != &agent));
+    assert!(!worker.muc_presence_cache.is_quarantined(&room));
     let Conversation::Muc { room, nick } = removed else {
         panic!("muc conversation")
     };

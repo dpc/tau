@@ -9,6 +9,7 @@
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
 
+mod muc_presence_cache;
 mod output;
 mod registration_authority;
 
@@ -22,6 +23,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+#[cfg(test)]
+use muc_presence_cache::MAX_WARNED_MUC_ROOMS;
+use muc_presence_cache::{
+    Admission, MAX_MUC_OCCUPANTS_PER_ROOM, MAX_MUC_OCCUPANTS_TOTAL, MucPresenceCache,
+};
 use output::Output;
 #[cfg(test)]
 pub(crate) use output::SATURATION_HOOK;
@@ -1390,8 +1396,8 @@ struct WorkerState {
     pending_muc_joins: HashMap<AgentId, MucOccupant>,
     /// MUC room to agent mapping.
     room_to_agent: HashMap<BareJid, AgentId>,
-    /// MUC occupant real JID cache.
-    occupant_real_jids: HashMap<Jid, Jid>,
+    /// Bounded room-scoped MUC occupant authentication state.
+    muc_presence_cache: MucPresenceCache,
     /// Process-unique entropy for locally generated inbound message identities.
     message_id_nonce: [u8; 16],
     /// Monotonic ordinal for inbound stanzas that omit a stanza id.
@@ -1421,7 +1427,7 @@ impl WorkerState {
             registration_leases: HashMap::new(),
             pending_muc_joins: HashMap::new(),
             room_to_agent: HashMap::new(),
-            occupant_real_jids: HashMap::new(),
+            muc_presence_cache: MucPresenceCache::default(),
             message_id_nonce,
             next_local_message_id: 1,
             #[cfg(test)]
@@ -1520,6 +1526,7 @@ impl WorkerState {
                 let occupant = MucOccupant::new(room.clone(), nick);
                 self.pending_muc_joins
                     .insert(agent_id.clone(), occupant.clone());
+                self.muc_presence_cache.begin_join(&room);
                 if let Err(error) = join_room(client, &occupant.room, &occupant.nick).await {
                     self.leave_pending_muc_join(&agent_id, client).await;
                     return Err(error);
@@ -1723,7 +1730,7 @@ impl WorkerState {
     /// connection.
     fn handle_disconnected(&mut self) {
         self.bound_jid = None;
-        self.occupant_real_jids.clear();
+        self.muc_presence_cache.clear_connection();
     }
 
     /// Revoke an exact worker route before best-effort remote cleanup.
@@ -1755,6 +1762,9 @@ impl WorkerState {
         }
         self.registration_leases.remove(agent_id);
         let pending = self.pending_muc_joins.remove(agent_id);
+        if let Some(occupant) = pending.as_ref() {
+            self.muc_presence_cache.purge_room(&occupant.room);
+        }
         let conversation = self.remove_conversation(agent_id);
         Some((pending, conversation))
     }
@@ -1762,7 +1772,12 @@ impl WorkerState {
     /// Remove one registered conversation and its room mapping.
     fn remove_conversation(&mut self, agent_id: &AgentId) -> Option<Conversation> {
         let conversation = self.conversations.remove(agent_id);
-        self.pending_muc_joins.remove(agent_id);
+        if let Some(occupant) = self.pending_muc_joins.remove(agent_id) {
+            self.muc_presence_cache.purge_room(&occupant.room);
+        }
+        if let Some(Conversation::Muc { room, .. }) = conversation.as_ref() {
+            self.muc_presence_cache.purge_room(room);
+        }
         self.room_to_agent.retain(|_, mapped| mapped != agent_id);
         conversation
     }
@@ -1771,6 +1786,7 @@ impl WorkerState {
     /// by one overall cleanup budget.
     async fn leave_all_with_timeout(&mut self, client: &mut Client, timeout: Duration) {
         let deadline = path_tokio_time::Instant::now() + timeout;
+        self.muc_presence_cache.clear_connection();
         let conversations = self
             .conversations
             .drain()
@@ -1790,7 +1806,6 @@ impl WorkerState {
                 .await;
         }
         self.room_to_agent.clear();
-        self.occupant_real_jids.clear();
         self.registration_leases.clear();
     }
 
@@ -1821,6 +1836,7 @@ impl WorkerState {
     /// Leave a pending MUC join and remove its non-routable registration state.
     async fn leave_pending_muc_join(&mut self, agent_id: &AgentId, client: &mut Client) {
         if let Some(occupant) = self.pending_muc_joins.get(agent_id).cloned() {
+            self.muc_presence_cache.purge_room(&occupant.room);
             self.leave_muc_occupant(&occupant, client).await;
             self.pending_muc_joins.remove(agent_id);
         }
@@ -1868,7 +1884,7 @@ impl WorkerState {
     /// registrations whose externally visible address changed.
     fn apply_online_state(&mut self, bound_jid: Jid) -> Vec<(AgentId, Jid)> {
         self.bound_jid = Some(bound_jid.clone());
-        self.occupant_real_jids.clear();
+        self.muc_presence_cache.clear_connection();
         self.update_direct_conversations(bound_jid)
     }
 
@@ -1977,9 +1993,7 @@ impl WorkerState {
                     tokio_xmpp::Event::Stanza(Stanza::Presence(presence))
                         if muc_presence_from(&presence, &occupant) =>
                     {
-                        let join = MucJoin::from_self_presence(&presence)?;
-                        self.handle_presence(presence);
-                        return Ok(join);
+                        return self.handle_muc_self_presence(room, presence);
                     }
                     tokio_xmpp::Event::Stanza(stanza) => {
                         self.handle_nested_stanza(stanza, "muc join")?;
@@ -1996,10 +2010,28 @@ impl WorkerState {
             })?
     }
 
+    /// Validate correlated self-presence and reject an incomplete initial
+    /// roster.
+    fn handle_muc_self_presence(
+        &mut self,
+        room: &BareJid,
+        presence: Presence,
+    ) -> Result<MucJoin, String> {
+        let join = MucJoin::from_self_presence(&presence)?;
+        self.handle_presence(presence);
+        if self.is_pending_muc_room(room) && self.muc_presence_cache.is_quarantined(room) {
+            return Err(format!(
+                "xmpp MUC occupant roster exceeds cache limits ({MAX_MUC_OCCUPANTS_PER_ROOM} per room, {MAX_MUC_OCCUPANTS_TOTAL} total); registration was not installed"
+            ));
+        }
+        Ok(join)
+    }
+
     /// Rejoin all known MUC rooms after an online/reconnect event.
     async fn rejoin_all(&mut self, client: &mut Client) -> WorkerControl {
         for (room, nick) in self.muc_rooms_to_rejoin() {
             let occupant = MucOccupant::new(room, nick);
+            self.muc_presence_cache.begin_join(&occupant.room);
             if let Err(error) = join_room(client, &occupant.room, &occupant.nick).await {
                 tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to rejoin xmpp muc room");
                 continue;
@@ -2067,11 +2099,18 @@ impl WorkerState {
         let Some(from) = presence.from.clone() else {
             return;
         };
+        let Ok(occupant) = from.clone().try_into_full() else {
+            return;
+        };
+        let room = occupant.to_bare();
+        if !self.is_tracked_muc_room(&room) {
+            return;
+        }
         if matches!(
             presence.type_,
             PresenceType::Unavailable | PresenceType::Error
         ) {
-            self.occupant_real_jids.remove(&from);
+            self.muc_presence_cache.remove(&occupant);
             if presence.type_ == PresenceType::Error {
                 let error = presence
                     .payloads
@@ -2081,14 +2120,41 @@ impl WorkerState {
             }
             return;
         }
+        if presence.type_ != PresenceType::None {
+            return;
+        }
         for payload in presence.payloads {
-            if let Ok(muc_user) = MucUser::try_from(payload)
-                && let Some(real_jid) = muc_user.items.iter().find_map(|item| item.jid.clone())
+            let Ok(muc_user) = MucUser::try_from(payload) else {
+                continue;
+            };
+            let Some(real_jid) = muc_user.items.iter().find_map(|item| item.jid.clone()) else {
+                continue;
+            };
+            if self.muc_presence_cache.admit(occupant.clone(), real_jid) == Admission::Quarantined
+                && self.room_to_agent.contains_key(&room)
+                && self.muc_presence_cache.take_warning(&room)
             {
-                self.occupant_real_jids
-                    .insert(from.clone(), real_jid.into());
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    per_room_limit = MAX_MUC_OCCUPANTS_PER_ROOM,
+                    worker_limit = MAX_MUC_OCCUPANTS_TOTAL,
+                    "xmpp MUC presence cache limit reached; quarantining room until a fresh join"
+                );
             }
         }
+    }
+
+    /// Return whether one room is active or is the exact room currently
+    /// joining.
+    fn is_tracked_muc_room(&self, room: &BareJid) -> bool {
+        self.room_to_agent.contains_key(room) || self.is_pending_muc_room(room)
+    }
+
+    /// Return whether one room is an exact pending MUC join.
+    fn is_pending_muc_room(&self, room: &BareJid) -> bool {
+        self.pending_muc_joins
+            .values()
+            .any(|occupant| &occupant.room == room)
     }
 
     /// Process inbound message stanzas.
@@ -2133,13 +2199,19 @@ impl WorkerState {
         let Some(agent_id) = self.room_to_agent.get(&room).cloned() else {
             return;
         };
+        if self.muc_presence_cache.is_quarantined(&room) {
+            return;
+        }
         let Some(lease) = self.registration_leases.get(&agent_id).copied() else {
             return;
         };
         if self.is_own_muc_message(&agent_id, &from) {
             return;
         }
-        let real = self.occupant_real_jids.get(&from).cloned();
+        let Ok(occupant) = from.clone().try_into_full() else {
+            return;
+        };
+        let real = self.muc_presence_cache.get(&occupant).cloned();
         if real.is_none() && !self.cfg.muc.trust_muc_membership {
             tracing::warn!(target: LOG_TARGET, room = %room, expose_real_jids = self.cfg.muc.expose_real_jids, "dropping muc message without real jid proof");
             return;

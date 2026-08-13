@@ -136,7 +136,13 @@ failure, or a crash may leave transport effects without a canonical fact.
   policy. Tau sends a formal
   XEP-0045 mediated invite to `default_recipient` plus a direct fallback notice
   with the room JID, and enforces `allowed_jids` from current real-JID presence
-  when available. Registration waits for the exact post-join `room/nick`
+  when available. Tau retains available full occupant-JID mappings only for
+  active rooms or the exact room currently joining. Fixed inclusive limits allow
+  256 mappings per room and 1,024 per worker; existing occupants may update at
+  capacity. Crossing either limit clears and quarantines that room. Initial
+  roster overflow fails registration, while an active quarantined room drops all
+  groupchat, including trusted-membership fallback, until a fresh join. Other
+  rooms remain usable. Registration waits for the exact post-join `room/nick`
   self-presence or presence error. A self-presence with status 201 triggers an
   instant-room owner config submit; presence/config errors or timeouts are
   returned from `xmpp_register` instead of silently claiming a usable room.
@@ -195,6 +201,8 @@ Tau requests zero MUC history on join and drops delayed/history message stanzas
 if they are still delivered, so initial room backlog is not converted into
 prompts. Tau sends unavailable presence when unregistering an agent or shutting
 down a session so the XMPP account leaves no-longer-registered MUC rooms.
+Rooms with more than 256 retained occupant real-JID mappings are intentionally
+unsupported.
 
 ## Troubleshooting Conversations/Android MUC replies
 

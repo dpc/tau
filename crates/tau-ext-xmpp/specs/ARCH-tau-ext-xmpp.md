@@ -70,7 +70,12 @@ hidden, and members-only room policy.
 
 The worker is the source of truth for XMPP connection readiness: an authenticated
 tokio-xmpp `Online` event sets the current bound full JID, and `Disconnected`
-clears it plus connection-scoped MUC occupant real-JID cache. `xmpp_register`
+clears it plus connection-scoped MUC occupant real-JID cache. That cache accepts
+only active-room or exact pending-join available full occupant presence, with
+inclusive fixed limits of 256 mappings per room and 1,024 per worker. Overflow
+clears and quarantines only the affected room, fails an initial registration, and
+otherwise drops that room's groupchat until a fresh join; retirement and rollback
+purge the room state. `xmpp_register`
 waits up to 30 seconds for readiness after starting the bridge before issuing
 registration. `xmpp_send` waits up to 30 seconds only after the bridge has
 already been started; startup remains registration-driven, and if no registered

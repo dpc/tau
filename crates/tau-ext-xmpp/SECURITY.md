@@ -12,6 +12,13 @@ authorization boundary. Incoming text remains untrusted external input. A
 worker-side conversation left after failed cleanup must not retain local routing
 authority.
 
+MUC real-JID presence state is scoped to active rooms and the exact pending room
+currently joining. The worker retains at most 256 occupant mappings per room and
+1,024 total. Crossing either inclusive limit clears and quarantines only the
+affected room; every groupchat from that room then fails closed before
+trusted-membership fallback until a fresh join rebuilds the roster. An oversized
+initial roster fails registration.
+
 Current tool delivery still runs readiness, registration, and sequential multipart
 send waits on the serialized protocol reader. Unregister and lifecycle retirement
 instead revoke the exact process-local registration lease first, enqueue bounded
