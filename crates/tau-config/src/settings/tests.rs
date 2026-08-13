@@ -3433,6 +3433,56 @@ profiles:
     assert_eq!(settings.extensions["core-shell"].enable, Some(true));
 }
 
+/// Ensures profile-wide Tau-state access layers over base and drop-in values,
+/// while the later command-line harness layer remains authoritative.
+#[test]
+fn selected_profile_layers_tau_state_access_before_cli_overrides() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+tau_state_access: legacy
+profiles:
+  focused:
+    tau_state_access: read_only
+"#,
+    )
+    .expect("write base profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-focused.yaml"),
+        r#"
+profiles:
+  focused:
+    tau_state_access: hidden
+"#,
+    )
+    .expect("write profile drop-in");
+
+    let profile = profile_name("focused");
+    let profiled = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(profiled.tau_state_access, TauStateAccess::Hidden);
+
+    let overrides = [
+        HarnessConfigCliOverride::from_str("tau_state_access=read_only")
+            .expect("Tau-state access override"),
+    ];
+    let overridden = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &overrides,
+    )
+    .expect("load selected profile with command-line override");
+    assert_eq!(overridden.tau_state_access, TauStateAccess::ReadOnly);
+}
+
 /// Ensures profile definitions merge through ordinary user/drop-in discovery,
 /// then reject unknown selected names instead of silently using base settings.
 #[test]

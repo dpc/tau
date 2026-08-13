@@ -24,6 +24,20 @@ settings read-only. Provider captures cross the
 extension protocol as bounded opaque zstd blobs; the harness alone derives and
 writes their session/instance paths.
 
+A selected profile can set the global default for that daemon without using the
+process-wide environment force:
+
+```yaml
+profiles:
+  rostra-bot:
+    tau_state_access: hidden
+```
+
+The profile value loads after base files and before `--harness-config`.
+An explicit `extensions.<name>.tau_state_access` remains the per-instance
+override, and `TAU_EXTENSION_TAU_STATE_ACCESS` remains the final process-wide
+force.
+
 The read-only default improves debugging and cooperative extension
 introspection. It also means every configured supervised extension in a
 persistent harness can read other Tau session and agent state unless `hidden`
@@ -291,8 +305,9 @@ command-line overrides. `--profile NAME` wins over `TAU_PROFILE=NAME`; when
 neither selects a name, top-level `default_profile: NAME` selects a fallback.
 Omit `default_profile`, or set it to `null`, to load only base layers. Named
 profiles do not inherit the fallback profile: each profile independently
-patches the base layers. A profile can change `enable` and arbitrary `config`
-for a base-configured or built-in extension, and CLI overrides still win:
+patches the base layers. A profile can change the global `tau_state_access`
+default plus `enable` and arbitrary `config` for a base-configured or built-in
+extension, and CLI overrides still win:
 
 ```yaml
 default_profile: focused

@@ -159,17 +159,18 @@ profiles:
               verbosity: high
 ```
 
-Profiles support `agents.default_role`, agent defaults including `agents.enable`,
-global role metadata, role groups, role patches, and extension `enable` and
-arbitrary `config` patches. A profile can select a role it creates or enables.
+Profiles support the global `tau_state_access` default, `agents.default_role`,
+agent defaults including `agents.enable`, global role metadata, role groups,
+role patches, and extension `enable` and arbitrary `config` patches. A profile
+can select a role it creates or enables.
 Its selected default supersedes the base setting, while a later
 `--harness-config agents.default_role=...` override supersedes the profile. Set
 `agents.default_role: null` in a profile to clear a base default and fall back
 to configured role order. The `defaultRole` alias is also accepted. Extension
 config maps merge recursively; arrays, scalars, nested nulls, and type
 mismatches replace, while top-level `config: null` remains absent/no-op.
-Profiles do not expose unrelated harness settings; keep those in base files or
-use a normal command-line override.
+Profiles do not expose per-instance outer extension fields or unrelated harness
+settings; keep those in base files or use a normal command-line override.
 
 `tau component harness` runs in the current process, so it cannot apply
 `--profile`; its normal base-configured `default_profile` still applies, and

@@ -1,8 +1,9 @@
 # ARCH-tau-config: tau-config architecture
 
 `tau_state_access` selects `hidden`, `read_only`, or `legacy` for supervised
-extensions, and an extension entry can override it with the same field. The
-shipped default is `read_only`;
+extensions, and an extension entry can override it with the same field. A
+selected profile can replace this global default before command-line layers.
+The shipped default is `read_only`;
 `TAU_EXTENSION_TAU_STATE_ACCESS` accepts only those exact lowercase values and
 is a final process-wide force after all configuration layers. The CLI rejects
 that force on attach because it cannot change an existing daemon.
@@ -175,15 +176,16 @@ array replacement:
 ## Selectable configuration profiles
 
 `profiles` is a raw configuration-only map, not part of effective
-`HarnessSettings`. A selected profile supports `agents.default_role`, agent
-provider defaults, agent/global role metadata, role groups and roles, plus
-`extensions.<name>.enable` and arbitrary `extensions.<name>.config` for a
-built-in or base-configured extension. Extension config objects merge
-recursively; arrays, scalars, nested nulls, and type mismatches replace lower
-precedence values, and no deletion sentinel exists. A top-level extension
-`config: null` retains its existing absent/no-op compatibility. Role and
-extension patches replay after base file layers, so relative values resolve
-against base settings, and before CLI role or `--harness-config` patches.
+`HarnessSettings`. A selected profile supports the global `tau_state_access`
+default, `agents.default_role`, agent provider defaults, agent/global role
+metadata, role groups and roles, plus `extensions.<name>.enable` and arbitrary
+`extensions.<name>.config` for a built-in or base-configured extension.
+Extension config objects merge recursively; arrays, scalars, nested nulls, and
+type mismatches replace lower precedence values, and no deletion sentinel
+exists. A top-level extension `config: null` retains its existing absent/no-op
+compatibility. Profile patches replay after base file layers, so relative values
+resolve against base settings, and before CLI role or `--harness-config`
+patches.
 
 `default_profile` is base selection configuration, evaluated from built-in,
 user, and ordered `harness.d` layers before profile loading. A later null value

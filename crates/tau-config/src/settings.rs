@@ -1193,12 +1193,15 @@ struct HarnessRoleOverrides {
 /// Raw, selected-profile patches kept separate from effective harness settings.
 ///
 /// Profiles deliberately expose only the startup default role, role metadata,
-/// extension enablement, and arbitrary extension-owned config patches. This
-/// avoids making a profile a second copy of the complete harness schema while
-/// allowing extension settings to compose recursively.
+/// the global extension Tau-state access default, extension enablement, and
+/// arbitrary extension-owned config patches. This avoids making a profile a
+/// second copy of the complete harness schema while allowing extension settings
+/// to compose recursively.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfile {
+    /// Default Tau-state presentation for supervised extension instances.
+    tau_state_access: Option<TauStateAccess>,
     /// Agent defaults, role groups, and per-role patches.
     agents: HarnessProfileAgentOverrides,
     /// Enablement and extension-owned config patches for normally resolved
@@ -3360,6 +3363,16 @@ fn profile_config_source(
         })
         .collect::<serde_json::Map<_, _>>();
     let mut values = serde_json::Map::new();
+    if let Some(tau_state_access) = profile.tau_state_access {
+        values.insert(
+            "tau_state_access".to_owned(),
+            serde_json::to_value(tau_state_access).map_err(|error| {
+                SettingsError::Config(config::ConfigError::Message(format!(
+                    "failed to serialize selected profile Tau-state access: {error}"
+                )))
+            })?,
+        );
+    }
     values.insert(
         "extensions".to_owned(),
         serde_json::Value::Object(extensions),
