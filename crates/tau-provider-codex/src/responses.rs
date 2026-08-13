@@ -2,6 +2,7 @@
 //!
 //! Ordinary inference uses the pooled [`ws`] transport exclusively. HTTPS is
 //! retained only for the unary compact operation.
+#![allow(dead_code)]
 
 mod compact_failure_capture;
 
@@ -2059,9 +2060,15 @@ struct CompactRequest {
 #[derive(Serialize)]
 /// Per-request metadata interpreted by the Responses WebSocket transport.
 struct ResponsesClientMetadata {
+    /// Truthful caller identity used by the ChatGPT Responses router.
+    originator: &'static str,
+    /// Model and optional service-tier route selection.
+    #[serde(rename = "x-codex-routing-hint")]
+    routing_hint: String,
     /// String-valued routing marker that opts this request into Responses Lite.
     #[serde(rename = "ws_request_header_x_openai_internal_codex_responses_lite")]
-    responses_lite: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    responses_lite: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -2266,7 +2273,14 @@ fn build_request(
         };
 
     let responses_lite = config.mode.is_lite_compatibility();
-    let mut input = build_input_items(config, input_items, responses_lite);
+    let preserve_compaction_trigger = request.compaction.is_none()
+        && matches!(input_items.last(), Some(ContextItem::CompactionTrigger));
+    let mut input = build_input_items(
+        config,
+        input_items,
+        responses_lite,
+        preserve_compaction_trigger,
+    );
 
     let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
 
@@ -2388,6 +2402,7 @@ fn build_input_items(
     config: &ResponsesConfig,
     input_items: &[ContextItem],
     responses_lite: bool,
+    preserve_compaction_trigger: bool,
 ) -> Vec<ResponsesInputItem> {
     let input_items = if config.supports_compaction {
         trim_before_latest_compaction(input_items)
@@ -2402,7 +2417,10 @@ fn build_input_items(
         data_url_bytes: 0,
     };
     for item in input_items {
-        if responses_lite && matches!(item, ContextItem::CompactionTrigger) {
+        if responses_lite
+            && !preserve_compaction_trigger
+            && matches!(item, ContextItem::CompactionTrigger)
+        {
             continue;
         }
         convert_context_item(item, config.supports_phase, &mut image_budget, &mut input);
@@ -2440,11 +2458,14 @@ pub(super) fn build_ws_envelope(
     generate: Option<bool>,
 ) -> WsResponseCreate {
     let mut body = build_request(config, request, cached_response_anchor);
-    if config.mode.is_lite_compatibility() {
-        body.client_metadata = Some(ResponsesClientMetadata {
-            responses_lite: "true",
-        });
-    }
+    body.client_metadata = Some(ResponsesClientMetadata {
+        originator: "tau",
+        routing_hint: match body.service_tier {
+            Some(tier) => format!("model={};tier={tier}", config.model_id),
+            None => format!("model={}", config.model_id),
+        },
+        responses_lite: config.mode.is_lite_compatibility().then_some("true"),
+    });
     WsResponseCreate {
         ty: "response.create",
         generate,

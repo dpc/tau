@@ -2486,6 +2486,8 @@ where
         cancel_generation: 0,
         quota: QuotaCoordinator::default(),
         oauth_refresh_rejections: OAuthRefreshRejectionCache::default(),
+        unavailable_compact_identities: HashSet::new(),
+        compact_profile_identities: HashMap::new(),
         extension_data_client: None,
     };
     let install_extension_data_client = startup.publish_models_after_configure;
@@ -2746,6 +2748,10 @@ struct ProviderRuntime<F> {
     quota: QuotaCoordinator,
     /// Permanent refresh rejections scoped to exact credential generations.
     oauth_refresh_rejections: OAuthRefreshRejectionCache,
+    /// Provider namespaces downgraded after a generic compact-route 404.
+    unavailable_compact_identities: HashSet<InferenceProfileIdentity>,
+    /// Latest resolved compaction generation for each provider namespace.
+    compact_profile_identities: HashMap<ProviderName, InferenceProfileIdentity>,
     /// Runtime Secret-scope RPC client, installed after startup transport
     /// setup.
     extension_data_client: Option<ExtensionDataClient>,
@@ -2869,6 +2875,22 @@ where
         .unwrap_or(PromptBackend::Unavailable);
         self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
+            let identity = config.inference_identity();
+            let changed = self
+                .compact_profile_identities
+                .insert(model.provider.clone(), identity)
+                .is_some_and(|previous| previous != identity);
+            if changed {
+                let mut models = models_for_profiles(profiles);
+                apply_compact_route_downgrades(
+                    &mut models,
+                    &self.compact_profile_identities,
+                    &self.unavailable_compact_identities,
+                );
+                handle.send(HarnessInputMessage::emit_transient(
+                    Event::ProviderModelsDeclared(ProviderModelsDeclared { models }),
+                ))?;
+            }
             let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
         } else {
             self.clear_prewarm_profile(&model.provider);
@@ -3383,6 +3405,37 @@ where
                 }
                 Ok(WorkerMessage::PromptDone) => {
                     self.active_prompts = self.active_prompts.saturating_sub(1);
+                }
+                Ok(WorkerMessage::CompactRouteUnavailable { provider, identity }) => {
+                    let mut profiles = self.load_profiles();
+                    let provider_models = models_for_profiles(&profiles);
+                    for model in provider_models {
+                        if let Some(PromptBackend::Responses(config)) = resolve_prompt_backend(
+                            &model.id,
+                            &mut profiles,
+                            &mut self.oauth_refresh_rejections,
+                            self.codex_runtime.network(),
+                            self.extension_data_client.as_ref(),
+                        ) {
+                            self.compact_profile_identities
+                                .insert(model.id.provider.clone(), config.inference_identity());
+                        }
+                    }
+                    if self.compact_profile_identities.get(&provider) == Some(&identity) {
+                        let changed = self.unavailable_compact_identities.insert(identity);
+                        if !changed {
+                            continue;
+                        }
+                        let mut models = models_for_profiles(&profiles);
+                        apply_compact_route_downgrades(
+                            &mut models,
+                            &self.compact_profile_identities,
+                            &self.unavailable_compact_identities,
+                        );
+                        handle.send(HarnessInputMessage::emit_transient(
+                            Event::ProviderModelsDeclared(ProviderModelsDeclared { models }),
+                        ))?;
+                    }
                 }
                 Ok(WorkerMessage::PrewarmDone {
                     key,
@@ -4622,6 +4675,13 @@ enum WorkerMessage {
     },
     /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
+    /// A canonical v2 unsupported code removed compaction for this generation.
+    CompactRouteUnavailable {
+        /// Provider namespace whose current route/account was rejected.
+        provider: ProviderName,
+        /// Exact resolved profile generation that observed the rejection.
+        identity: InferenceProfileIdentity,
+    },
     /// Exact supervised prewarm worker completion.
     PrewarmDone {
         /// Cache owner whose work finished.
@@ -5034,6 +5094,16 @@ fn production_prompt_executor() -> PromptExecutor {
                 logical_attempt: tau_provider_codex::LogicalAttempt::new(
                     execution.job.retry_state.attempts.saturating_add(1),
                 ),
+                compact_route_unavailable: &|identity| {
+                    let _ = send_worker_message(
+                        &execution.output_tx,
+                        &execution.output_waker,
+                        WorkerMessage::CompactRouteUnavailable {
+                            provider: model.provider.clone(),
+                            identity,
+                        },
+                    );
+                },
             };
             handle_prompt_backend(
                 &agent_prompt_id,
@@ -6121,6 +6191,8 @@ struct ChatGptPromptExecutionContext<'a> {
     runtime: &'a CodexRuntime,
     /// One-based finite-attempt ordinal owned by this prompt execution.
     logical_attempt: tau_provider_codex::LogicalAttempt,
+    /// Publishes a process-local capability downgrade to the main loop.
+    compact_route_unavailable: &'a dyn Fn(InferenceProfileIdentity),
 }
 
 /// Retry evidence returned by one finite provider attempt.
@@ -6168,7 +6240,7 @@ where
                     compaction_compacted_input_tokens: None,
                     backend: Some(backend_descriptor(
                         config,
-                        ProviderBackendTransport::HttpSse,
+                        ProviderBackendTransport::Websocket,
                         false,
                     )),
                     provider_response_id: None,
@@ -6187,7 +6259,27 @@ where
             Ok(None)
         }
         CompactOutcome::Terminal(error) => {
-            let backend = backend_descriptor(config, ProviderBackendTransport::HttpSse, false);
+            let backend = backend_descriptor(config, ProviderBackendTransport::Websocket, false);
+            finish_error(
+                agent_prompt_id,
+                prompt,
+                &backend,
+                error,
+                None,
+                execution.debug_provider_requests,
+                writer,
+            )?;
+            Ok(None)
+        }
+        CompactOutcome::RouteUnavailable {
+            error,
+            newly_downgraded,
+            profile_identity,
+        } => {
+            if newly_downgraded {
+                (execution.compact_route_unavailable)(profile_identity);
+            }
+            let backend = backend_descriptor(config, ProviderBackendTransport::Websocket, false);
             finish_error(
                 agent_prompt_id,
                 prompt,
@@ -6827,6 +6919,22 @@ fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelI
         }
     }
     models
+}
+
+fn apply_compact_route_downgrades(
+    models: &mut [ProviderModelInfo],
+    identities: &HashMap<ProviderName, InferenceProfileIdentity>,
+    unavailable: &HashSet<InferenceProfileIdentity>,
+) {
+    for model in models {
+        if identities
+            .get(&model.id.provider)
+            .is_some_and(|identity| unavailable.contains(identity))
+        {
+            model.supports_standalone_compaction = false;
+            model.standalone_compaction_threshold = None;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -125,7 +125,7 @@ harness authenticates the Provider connection, derives the instance-specific
 durable-session path, and writes without parsing or decompressing payload bytes.
 Both transport and filesystem queues are bounded and best-effort. Capture
 payloads never enter events, journals, debug JSONL, or generic Debug output.
-Explicitly enabled compact HTTP failure captures preserve bounded causal
+Historical explicitly enabled compact HTTP failure captures preserve bounded causal
 provider evidence, including an allowlisted header set and a credential-redacted
 64-KiB decoded body prefix. Reqwest content decoding precedes accounting; captures
 hash exactly the decoded bytes delivered and distinguish complete decoded-body

@@ -95,16 +95,19 @@ and visible. Replay delivers a committed but undelivered terminal once and never
 resends ambiguous compactor work or repeats committed delivery. An explicit
 recovery creates a successor outcome and delivery rather than rewriting history.
 Cross-agent `agent_compact` remains asynchronous and waitable.
-When private provider diagnostics are enabled, a non-success compact HTTP
-response may produce one bounded credential-redacted local failure capture
-before terminal normalization. This best-effort zstd artifact follows normal
-diagnostic retention and never becomes a journal, event, UI fact, or recovery
-authority.
+Private provider diagnostics for standalone ChatGPT compaction follow the
+ordinary Responses WebSocket capture contract and never become journal, event,
+UI, or recovery authority.
 The model-callable path accepts work only when the exact captured
 provider-qualified model supports standalone compaction and its route exists.
 It has no inline fallback. Provider terminal errors, including context-window
 rejection during standalone compaction, produce one terminal transaction
 failure and are not retried indefinitely.
+The Codex adapter serializes the first v2 compaction probe for a route/account
+generation. A compaction-specific request rejection removes standalone
+capability for that generation; explicit tools and automatic recovery share the
+downgrade. Credential/account generation changes reject stale observations and
+restore one fresh probe. Negative capability evidence is not persisted.
 An explicit `:compact` or authorized `agent_compact` request may recover a
 terminally blocked standalone transaction. Its successor may preserve the
 failed cut or retreat it along the same ancestor path to obtain a closed
@@ -283,6 +286,21 @@ provider-visible input. See
 [SPEC-interactive-user-prompt-envelope](SPEC-interactive-user-prompt-envelope.md)
 and
 [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
+
+ChatGPT v2 is the scoped exception to provider-output-only replacement. It
+sends the full provider-visible input plus a final `compaction_trigger`, accepts
+exactly one provider compaction item followed by `response.completed`, and
+constructs the replacement from approved retained input plus that item last.
+Retention preserves order and metadata for real user/hook messages and
+non-final agent messages no larger than 10,000 approximate tokens. It applies a
+newest-first 64,000-token aggregate text budget, keeps complete groups, and
+middle-truncates at most one boundary message with an explicit token marker.
+Images and audio inside retained messages remain uncharged by this retention
+budget. All other input items are omitted. Invalid output or failed validation
+installs nothing.
+Outside the explicitly scoped ChatGPT-v2 exception, a standalone provider
+request is stateless and its ordered provider output remains the canonical
+replacement window without pruning or reinterpretation.
 
 Cold agent rehydration restores context usage only from the latest
 model-qualified durable assistant response on the selected branch and never

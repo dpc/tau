@@ -1,19 +1,22 @@
 //! ChatGPT/Codex provider backend helpers.
 //!
 //! This crate owns the ChatGPT/Codex model metadata and OpenAI Responses API
-//! implementation, including pooled WebSocket inference and supported unary
-//! HTTPS control-plane operations.
+//! implementation, including pooled WebSocket inference and HTTPS control-plane
+//! operations.
 //! Component boundaries and provider-visible replay are summarized in
 //! `ARCH-tau-provider-codex` and
 //! `SPEC-tau-provider-codex-streaming-replay`.
 
 #[cfg(test)]
 use std::collections as path_std_collections;
-use std::collections::hash_map as path_std_collections_hash_map;
+use std::collections::{HashMap, hash_map as path_std_collections_hash_map};
 use std::num::NonZeroU32;
+use std::time::Duration;
 use std::{cell as path_std_cell, sync as path_std_sync};
 
 use responses::pool as path_responses_pool;
+mod compact_v2;
+use compact_v2::build_v2_compacted_window;
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ThinkingSummary, Verbosity,
@@ -168,6 +171,15 @@ impl From<u64> for QuotaProfileIdentity {
 /// Opaque identity for mode-sensitive inference and prewarm state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InferenceProfileIdentity(u64);
+
+#[cfg(feature = "test-support")]
+impl InferenceProfileIdentity {
+    /// Constructs a deterministic synthetic inference identity for tests.
+    #[must_use]
+    pub fn from_test_value(value: u64) -> Self {
+        Self(value)
+    }
+}
 
 impl ResolvedConfig {
     /// Returns the credential-free configured endpoint.
@@ -429,6 +441,15 @@ pub enum CompactOutcome {
     Canceled,
     /// A proven terminal failure ended the operation.
     Terminal(CodexError),
+    /// The selected profile proved that its generic compact route is absent.
+    RouteUnavailable {
+        /// Sanitized terminal error for the current transaction.
+        error: CodexError,
+        /// Whether this attempt installed the process-local downgrade.
+        newly_downgraded: bool,
+        /// Exact resolved profile generation that proved unavailable.
+        profile_identity: InferenceProfileIdentity,
+    },
 }
 
 #[cfg(test)]
@@ -486,13 +507,66 @@ struct NeverAbortWaker;
 
 impl TurnAbortWaker for NeverAbortWaker {}
 
-/// Runtime state for the ChatGPT/Codex WebSocket inference pool.
+/// Runtime state for ChatGPT/Codex WebSocket inference and compaction
+/// admission.
 pub struct CodexRuntime {
     /// Shared pool whose connection setup uses `network`.
     ws_pool: responses::pool::SharedWsPool,
     /// Required immutable startup policy for all Codex control-plane and prompt
     /// traffic.
     network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
+    /// Generation-scoped v2 compaction admission observations.
+    compact_routes: CompactAdmission,
+}
+
+/// Synchronized generation-scoped compaction route observations.
+struct CompactAdmission {
+    /// Current state by resolved profile generation.
+    states: std::sync::Mutex<HashMap<InferenceProfileIdentity, CompactRouteState>>,
+    /// Wakes waiters after probe completion.
+    changed: std::sync::Condvar,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompactRouteState {
+    Probing,
+    Available,
+    Unavailable,
+}
+
+enum CompactAdmissionResult<'a> {
+    Probe(CompactProbe<'a>),
+    Admitted,
+    Unavailable,
+    Canceled,
+    InternalFailure,
+}
+
+struct CompactProbe<'a> {
+    runtime: &'a CodexRuntime,
+    identity: InferenceProfileIdentity,
+    completed: bool,
+}
+
+impl CompactProbe<'_> {
+    fn complete(mut self, state: CompactRouteState) {
+        if let Ok(mut routes) = self.runtime.compact_routes.states.lock() {
+            routes.insert(self.identity, state);
+            self.runtime.compact_routes.changed.notify_all();
+        }
+        self.completed = true;
+    }
+}
+
+impl Drop for CompactProbe<'_> {
+    fn drop(&mut self) {
+        if !self.completed
+            && let Ok(mut routes) = self.runtime.compact_routes.states.lock()
+        {
+            routes.remove(&self.identity);
+            self.runtime.compact_routes.changed.notify_all();
+        }
+    }
 }
 
 /// Result of one ChatGPT/Codex streaming dispatch.
@@ -528,6 +602,58 @@ pub enum StreamUpdate<'a> {
 }
 
 impl CodexRuntime {
+    fn acquire_compact_probe(
+        &self,
+        identity: InferenceProfileIdentity,
+        abort: &mut impl TurnAbort,
+    ) -> CompactAdmissionResult<'_> {
+        let Ok(mut routes) = self.compact_routes.states.lock() else {
+            return CompactAdmissionResult::InternalFailure;
+        };
+        loop {
+            if abort.is_aborted() {
+                return CompactAdmissionResult::Canceled;
+            }
+            match routes.get(&identity) {
+                Some(CompactRouteState::Unavailable) => {
+                    return CompactAdmissionResult::Unavailable;
+                }
+                Some(CompactRouteState::Probing) => {
+                    let Ok(waited) = self
+                        .compact_routes
+                        .changed
+                        .wait_timeout(routes, Duration::from_millis(25))
+                    else {
+                        return CompactAdmissionResult::InternalFailure;
+                    };
+                    routes = waited.0;
+                }
+                Some(CompactRouteState::Available) => return CompactAdmissionResult::Admitted,
+                None => {
+                    routes.insert(identity, CompactRouteState::Probing);
+                    return CompactAdmissionResult::Probe(CompactProbe {
+                        runtime: self,
+                        identity,
+                        completed: false,
+                    });
+                }
+            }
+        }
+    }
+
+    fn mark_compact_route_unavailable(&self, identity: InferenceProfileIdentity) -> bool {
+        self.compact_routes
+            .states
+            .lock()
+            .map(|mut routes| {
+                let changed = routes.insert(identity, CompactRouteState::Unavailable)
+                    != Some(CompactRouteState::Unavailable);
+                self.compact_routes.changed.notify_all();
+                changed
+            })
+            .unwrap_or(false)
+    }
+
     /// Create an empty Codex runtime using one immutable startup network
     /// policy.
     #[must_use]
@@ -535,6 +661,10 @@ impl CodexRuntime {
         Self {
             ws_pool: path_responses_pool::SharedWsPool::new(path_std_sync::Arc::clone(&network)),
             network,
+            compact_routes: CompactAdmission {
+                states: path_std_sync::Mutex::new(HashMap::new()),
+                changed: path_std_sync::Condvar::new(),
+            },
         }
     }
 
@@ -773,8 +903,7 @@ impl CodexRuntime {
             .map_err(CodexError)
     }
 
-    /// Invalidates the matching WebSocket chain before dispatch, then runs one
-    /// joined unary remote compaction operation.
+    /// Invalidates the matching chain, then runs one v2 WebSocket compaction.
     pub fn compact(
         &self,
         agent_prompt_id: &str,
@@ -782,6 +911,27 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        let identity = config.inference_identity();
+        let probe = match self.acquire_compact_probe(identity, abort) {
+            CompactAdmissionResult::Probe(probe) => Some(probe),
+            CompactAdmissionResult::Admitted => None,
+            CompactAdmissionResult::Canceled => return CompactOutcome::Canceled,
+            CompactAdmissionResult::InternalFailure => {
+                return CompactOutcome::Terminal(CodexError(common::LlmError::InvalidResponse(
+                    "compaction admission state unavailable".to_owned(),
+                )));
+            }
+            CompactAdmissionResult::Unavailable => {
+                return CompactOutcome::RouteUnavailable {
+                    error: CodexError(common::LlmError::ProviderFailure(
+                        tau_proto::ProviderFailureKind::RequestRejected,
+                        "standalone compaction route is unavailable for this profile".to_owned(),
+                    )),
+                    newly_downgraded: false,
+                    profile_identity: identity,
+                };
+            }
+        };
         if let Err(error) = self.ws_pool.invalidate(config.wire(), request) {
             return if abort.is_aborted() {
                 CompactOutcome::Canceled
@@ -792,26 +942,59 @@ impl CodexRuntime {
         if abort.is_aborted() {
             return CompactOutcome::Canceled;
         }
-        let compact_result = responses::responses_compact(
+        let mut correlation =
+            attempt_failure::AttemptCaptureCorrelation::new(LogicalAttempt::new(1));
+        let compact_result = self.stream(
             agent_prompt_id,
             config.wire(),
             request,
+            &mut correlation,
             abort,
-            path_std_sync::Arc::clone(&self.network),
+            &mut |_| {},
         );
-        if abort.is_aborted() {
-            return CompactOutcome::Canceled;
-        }
-        let output = match compact_result {
-            Ok(output) => output,
+        let provider_output = match compact_result {
+            Ok(dispatch) => {
+                if let Some(probe) = probe {
+                    probe.complete(CompactRouteState::Available);
+                }
+                dispatch.state.into_output_items()
+            }
             Err(common::LlmError::Canceled) => return CompactOutcome::Canceled,
             Err(error) => {
+                if error.is_compaction_route_unavailable() {
+                    let newly_downgraded = if let Some(probe) = probe {
+                        probe.complete(CompactRouteState::Unavailable);
+                        true
+                    } else {
+                        self.mark_compact_route_unavailable(identity)
+                    };
+                    return CompactOutcome::RouteUnavailable {
+                        error: CodexError(error),
+                        newly_downgraded,
+                        profile_identity: identity,
+                    };
+                }
+                if let Some(probe) = probe {
+                    probe.complete(CompactRouteState::Available);
+                }
                 return match error.retry_decision() {
                     Some(decision) => CompactOutcome::Retry(decision),
                     None => CompactOutcome::Terminal(CodexError(error)),
                 };
             }
         };
+        if provider_output.len() != 1
+            || !matches!(
+                provider_output.first(),
+                Some(tau_proto::ContextItem::Compaction(_))
+            )
+        {
+            return CompactOutcome::Terminal(CodexError(common::LlmError::InvalidResponse(
+                "compaction response did not contain exactly one canonical compaction item"
+                    .to_owned(),
+            )));
+        }
+        let output = build_v2_compacted_window(request.context, provider_output);
         if abort.is_aborted() {
             CompactOutcome::Canceled
         } else {

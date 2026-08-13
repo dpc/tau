@@ -306,6 +306,7 @@ fn chat_completions_event_snapshot(
                 debug_provider_requests: false,
                 runtime: &runtime,
                 logical_attempt: tau_provider_codex::LogicalAttempt::new(1),
+                compact_route_unavailable: &|_| {},
             },
             &mut |_| {},
         )

@@ -1791,7 +1791,7 @@ fn compact_test_failure_capture(
     .with_test_sink(sink)
 }
 
-/// The production compact HTTP boundary must submit exactly one causal private
+/// The retired compact HTTP compatibility boundary submits one causal private
 /// capture before it normalizes an ordinary provider rejection.
 #[test]
 fn compact_http_rejection_submits_failure_capture() {
@@ -2338,8 +2338,8 @@ fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
     assert_eq!(body["input"][0]["role"], "user");
 }
 
-/// Ensures standard WebSocket requests do not accidentally acquire the Lite
-/// marker merely because the model has a GPT-5.6 name.
+/// Ensures standard WebSocket requests carry truthful identity and routing
+/// metadata without accidentally acquiring the Lite marker.
 #[test]
 fn ws_envelope_omits_responses_lite_metadata_in_standard_mode() {
     let config = ResponsesConfig {
@@ -2349,15 +2349,27 @@ fn ws_envelope_omits_responses_lite_metadata_in_standard_mode() {
         ..chain_test_config()
     };
 
-    let body = serde_json::to_value(build_ws_envelope(
-        &config,
-        &basic_prompt_payload(),
-        None,
-        None,
-    ))
-    .expect("serialize");
+    let mut request = basic_prompt_payload();
+    request.params.service_tier = Some(tau_proto::ServiceTier::Fast);
+    let body =
+        serde_json::to_value(build_ws_envelope(&config, &request, None, None)).expect("serialize");
 
-    assert!(body.get("client_metadata").is_none());
+    assert_eq!(body["client_metadata"]["originator"], "tau");
+    assert_eq!(
+        body["client_metadata"]["x-codex-routing-hint"],
+        "model=gpt-5.6-luna;tier=priority"
+    );
+    assert!(
+        body["client_metadata"]
+            .get("ws_request_header_x_openai_internal_codex_responses_lite")
+            .is_none()
+    );
+    assert!(
+        body["client_metadata"]
+            .get("x-codex-installation-id")
+            .is_none()
+    );
+    assert!(body["client_metadata"].get("x-oai-attestation").is_none());
     assert_eq!(body["parallel_tool_calls"], true);
 }
 
@@ -2628,6 +2640,41 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
     assert_eq!(body["context_management"][0]["type"], "compaction");
     assert_eq!(body["context_management"][0]["compact_threshold"], 1200);
     assert_eq!(body["input"][0]["type"], "compaction_trigger");
+}
+
+/// GPT-5.6 v2 standalone compaction sends the complete window and final trigger
+/// on a fresh ordinary Responses chain.
+#[test]
+fn build_request_sends_v2_compaction_as_fresh_full_window() {
+    for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
+        let config = ResponsesConfig {
+            mode,
+            supports_compaction: false,
+            ..chain_test_config()
+        };
+        let items = [
+            user_text("first"),
+            assistant_text("answer"),
+            ContextItem::CompactionTrigger,
+        ];
+        let request = request_for_items(&items);
+
+        let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+        let input = body["input"].as_array().expect("input");
+
+        assert_eq!(
+            input.last().expect("final input")["type"],
+            "compaction_trigger"
+        );
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| item["type"] == "compaction_trigger")
+                .count(),
+            1
+        );
+        assert!(body.get("previous_response_id").is_none());
+    }
 }
 
 #[test]

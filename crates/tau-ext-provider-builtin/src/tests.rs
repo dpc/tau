@@ -8,6 +8,38 @@ mod compatibility;
 
 use super::*;
 
+/// A route downgrade must remove both standalone admission fields only from
+/// the affected provider's published model snapshot.
+#[test]
+fn compact_route_downgrade_republishes_honest_capability() {
+    let unavailable = ProviderName::new("chatgpt");
+    let available = ProviderName::new("other-chatgpt");
+    let mut models = tau_provider_codex::models_for_provider(&unavailable);
+    models.extend(tau_provider_codex::models_for_provider(&available));
+    let identities = HashMap::from([(
+        unavailable.clone(),
+        InferenceProfileIdentity::from_test_value(1),
+    )]);
+    let unavailable_set = HashSet::from([InferenceProfileIdentity::from_test_value(1)]);
+
+    apply_compact_route_downgrades(&mut models, &identities, &unavailable_set);
+
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.provider == unavailable)
+            .all(|model| !model.supports_standalone_compaction
+                && model.standalone_compaction_threshold.is_none())
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.provider == available)
+            .any(|model| model.supports_standalone_compaction
+                && model.standalone_compaction_threshold.is_some())
+    );
+}
+
 /// Pins the production prompt-worker default so ordinary provider instances
 /// admit eight prompt jobs without an environment override.
 #[test]

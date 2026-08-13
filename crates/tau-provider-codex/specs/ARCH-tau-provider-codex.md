@@ -41,7 +41,12 @@ Ordinary ChatGPT/Codex Responses inference always uses the pooled WebSocket
 transport. There is no surface or transport selector and no HTTP/SSE inference
 fallback. Capability, connection-limit, and retryable WebSocket failures surface
 to the outer logical-prompt scheduler rather than replaying the prompt over HTTP.
-HTTPS remains supported for OAuth, quota acquisition, and unary compaction.
+HTTPS remains supported for OAuth and quota acquisition. Standalone ChatGPT
+compaction uses the ordinary pooled Responses WebSocket route, starts a fresh
+chain, and sends the complete provider-visible window followed by one
+`compaction_trigger`. Per-request metadata identifies Tau truthfully and carries
+the model/service-tier routing hint; Tau does not claim a Codex installation or
+attestation identity.
 The writer sends a 25-second `websocket_control_ping` WebSocket control frame
 only to keep an idle transport path alive. It is not a Responses envelope, never
 starts inference, and cannot refresh a prompt cache.
@@ -119,14 +124,14 @@ HTTP header or per-request WebSocket metadata marker. Retries, reconnect, replay
 and previous-response chaining retain the selected mode; there is no mode fallback.
 
 Both modes suppress legacy inline `context_management` for GPT-5.6 and advertise
-standalone compaction. The provider sends unary HTTP
-`POST /codex/responses/compact` using its compact schema: both modes lower required
-tool declarations into `input` `additional_tools` items and omit ordinary
-top-level `tools`, `parallel_tool_calls`, `reasoning`, and `text`. Supported compact
-members, including `instructions`, `previous_response_id`, prompt-cache controls,
-and service tier, remain intact. Structurally valid provider-authored opaque
-items retain their raw replay sidecars through the durable replacement window and
-cold provider replay; typed items retain their normal semantic validation.
+standalone compaction. V2 success requires `response.completed` and exactly one
+opaque provider compaction item. Tau constructs the replacement from retained
+real user/hook and eligible agent-message input, preserving order and metadata,
+then appends that provider item. Agent messages above 10,000 approximate tokens
+are omitted. A newest-first 64,000-token text budget retains complete groups and
+middle-truncates at most one boundary message; images and audio in retained
+messages do not consume this budget. Invalid output installs nothing. Raw
+provider sidecars remain intact through durable replacement and cold replay.
 Older models retain inline context management and ignore the profile's Lite
 compatibility flag.
 Hosted Responses tools are not part of either contract; Tau's tools remain
@@ -227,7 +232,7 @@ Request captures from that finite inference path carry the same
 `logical_attempt` and exact `wire_dispatch_index`. Unary compaction captures
 omit these fields rather than fabricating inference correlation.
 
-A non-success unary compact HTTP response additionally submits one private
+The retired unary compact HTTP path submitted one private
 schema-v0 `compact-http-failure` capture while provider diagnostics are enabled.
 It retains the status, a closed request-correlation/content/retry header
 allowlist, up to 64 KiB of credential-redacted decoded response bytes, and bounded
@@ -248,7 +253,7 @@ is bounded and redacted but remains a private, potentially credential-bearing
 artifact. Submission and configurable diagnostic retention reuse the shared
 best-effort writer; cleanup defaults to fourteen days and may be disabled.
 Omission never changes provider execution.
-The compact HTTP failure record is the deliberate exception to the
+That historical compact HTTP failure record is the deliberate exception to the
 prose/header/raw-value exclusions above: it is operator-enabled private forensic
 evidence, redacts exact configured credentials rather than minimizing the
 provider failure, and remains subject to the same bounded best-effort retention.

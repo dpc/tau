@@ -186,8 +186,9 @@ local servers such as llama.cpp as well as remote compatible services. The
 `sse` or `websocket` transport, explicit models, and stateless full-transcript
 replay. The ChatGPT
 OAuth/Codex route is a separate private Responses backend whose inference is
-WebSocket-only; it never falls back to HTTP/SSE, though OAuth, quota, and
-standalone compaction remain HTTPS operations. All of these routes share one
+WebSocket-only; it never falls back to HTTP/SSE, though OAuth and quota remain
+HTTPS operations. Standalone GPT-5.6 compaction uses a fresh ordinary Responses
+WebSocket request with full input and a final compaction trigger. All of these routes share one
 startup-snapshotted proxy, `NO_PROXY`, platform-TLS, and optional additive-CA
 policy.
 

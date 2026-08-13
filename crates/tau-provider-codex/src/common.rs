@@ -113,6 +113,7 @@ pub enum LlmError {
     ReloadableConfig(String),
     /// Provider response was syntactically readable but unsafe to accept.
     InvalidResponse(String),
+    #[allow(dead_code)]
     Io(std::io::Error),
     Json(serde_json::Error),
     Vcr(tau_vcr::VcrError),
@@ -171,6 +172,16 @@ impl std::error::Error for LlmError {
 }
 
 impl LlmError {
+    /// Returns whether canonical provider code proves v2 compaction
+    /// unsupported.
+    #[must_use]
+    pub(crate) fn is_compaction_route_unavailable(&self) -> bool {
+        matches!(
+            self.stream_error_code(),
+            Some("compaction_not_supported" | "unsupported_compaction")
+        )
+    }
+
     /// Attach opaque evidence without changing the underlying policy error.
     pub(crate) fn observed(self, evidence: crate::attempt_failure::AttemptFailureEvidence) -> Self {
         Self::Observed {

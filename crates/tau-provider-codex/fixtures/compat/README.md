@@ -6,10 +6,11 @@ Lite lowering, including tools, assistant phase, reasoning effort and summary,
 verbosity, encrypted-reasoning inclusion, service tier, and deterministic
 prompt-cache identity.
 
-`responses-compact-standard.json` and `responses-compact-lite.json` use the same
-complete input for `/codex/responses/compact`. They freeze its smaller documented
-schema: tools are `input` `additional_tools`, while ordinary top-level tools,
-parallel calls, reasoning, and text are absent.
+`responses-compact-standard.json` and `responses-compact-lite.json` preserve
+historical compatibility evidence for the retired private unary route. Current
+ChatGPT standalone compaction uses the ordinary Responses request shape plus a
+final `compaction_trigger`; these legacy fixtures are not its production
+contract.
 
 `responses-compact-output.json` is the canonical opaque response form. Its raw
 item JSON must survive parsing and later provider replay unchanged.

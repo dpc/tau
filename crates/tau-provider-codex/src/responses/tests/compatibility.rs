@@ -63,8 +63,8 @@ fn compatibility_request_snapshot(mode: ResponsesMode) -> serde_json::Value {
         .expect("serialize compatibility Responses request")
 }
 
-/// Builds the documented unary compact request from the same complete
-/// compatibility input as ordinary inference lowering.
+/// Builds the retired unary compact request retained as historical wire
+/// compatibility evidence.
 fn compatibility_compact_request_snapshot(mode: ResponsesMode) -> serde_json::Value {
     let config = crate::config_for_model_mode(
         &tau_proto::ModelName::new("gpt-5.6-sol"),

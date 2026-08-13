@@ -35,7 +35,7 @@ recordable full-replay shape and the compatible chained-delta shape.
 Changes to a default route or protocol surface maintain a capability matrix for
 direct function and custom calls, parallel generation, programmatic/code mode,
 hosted tools, images and detail, reasoning continuity, compaction, chaining and
-replay, WebSocket inference, unary HTTPS, quota/retry behavior, and profile/auth scope. Golden
+replay, WebSocket inference and v2 compaction, quota/retry behavior, and profile/auth scope. Golden
 requests cover every supported mode. Prompts must not advertise unsupported
 capabilities, and the default retains an end-to-end multi-tool lifecycle test.
 Reference-client metadata is evidence rather than a Tau requirement; compatibility

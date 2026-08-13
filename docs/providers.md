@@ -774,8 +774,8 @@ override.
 
 `tau-provider-codex` implements the private ChatGPT OAuth/Codex Responses
 contract. Ordinary inference is WebSocket-only: it has no HTTP/SSE selector or
-fallback. HTTPS remains in that backend for OAuth, `/wham/usage`, and unary
-`/codex/responses/compact`. It supports Standard Responses by default and
+fallback. HTTPS remains in that backend for OAuth and `/wham/usage`. It supports
+Standard Responses by default and
 explicit Lite compatibility, Function and Custom tools, response-id chaining,
 prompt caching, pool/prewarm reuse, opaque replay items, and provider-owned
 reasoning state. It is not a public API-key OpenAI Responses client.
@@ -869,10 +869,12 @@ The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices.
 Standard mode publishes and requests parallel direct tool calls; Lite
 compatibility publishes its one-call limit. Neither mode emits legacy inline
-context management. Manual and threshold-driven compaction use the separate
-unary `/codex/responses/compact` operation with the selected mode's request
-shape and a provider default threshold of 334,800 tokens; accepted output
-becomes one standalone transcript boundary.
+context management. Manual and threshold-driven compaction use a fresh ordinary
+Responses WebSocket request with the full window and a final
+`compaction_trigger`. Tau retains the approved recent input subset and appends
+the single opaque provider compaction item as one standalone boundary. A
+route/account rejection removes capability for that credential generation;
+rotation permits one fresh serialized probe.
 After setup, ChatGPT/Codex inference uses WebSocket exclusively with a separate
 five-minute idle watchdog. The watchdog resets on each provider frame and is not
 an absolute turn-duration cap. If upstream goes quiet, Tau
