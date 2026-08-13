@@ -1,6 +1,6 @@
 use std::collections as path_std_collections;
 use std::fs::DirBuilder;
-use std::io::{Cursor, Error, Read};
+use std::io::{Cursor, Error, ErrorKind, Read};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -13,6 +13,10 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Exact text used to synchronize the hold-disconnect fixture.
+const HOLD_READY_MARKER: &[u8] = b"hold_no_side_effect ready";
+
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Panic-safe installation of one correlated production saturation hook.
@@ -25,22 +29,56 @@ impl Drop for SaturationHookGuard {
 }
 
 /// Cloneable output sink used while a release client runs concurrently.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct SharedWriter {
     /// Bytes emitted by all cloned writers.
     bytes: Arc<Mutex<Vec<u8>>>,
+    /// Readiness marker and flushed-frame completion state shared by clones.
+    readiness: Arc<(Mutex<ReadinessState>, Condvar)>,
+}
+
+impl Default for SharedWriter {
+    fn default() -> Self {
+        Self {
+            bytes: Arc::default(),
+            readiness: Arc::new((Mutex::new(ReadinessState::default()), Condvar::new())),
+        }
+    }
+}
+
+/// Tracks whether the exact detached readiness frame reached the test writer.
+#[derive(Default)]
+struct ReadinessState {
+    /// Whether emitted bytes contain the sole fixture readiness marker.
+    marker_seen: bool,
+    /// Whether a flush completed after the marker was emitted.
+    published: bool,
 }
 
 impl std::io::Write for SharedWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .expect("output lock")
-            .extend_from_slice(buffer);
+        let mut bytes = self.bytes.lock().expect("output lock");
+        bytes.extend_from_slice(buffer);
+        if bytes
+            .windows(HOLD_READY_MARKER.len())
+            .any(|window| window == HOLD_READY_MARKER)
+        {
+            self.readiness
+                .0
+                .lock()
+                .expect("readiness state")
+                .marker_seen = true;
+        }
         Ok(buffer.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        let (state, wake) = &*self.readiness;
+        let mut state = state.lock().expect("readiness state");
+        if state.marker_seen {
+            state.published = true;
+            wake.notify_all();
+        }
         Ok(())
     }
 }
@@ -49,6 +87,11 @@ impl SharedWriter {
     /// Returns a snapshot of all bytes emitted so far.
     fn snapshot(&self) -> Vec<u8> {
         self.bytes.lock().expect("output lock").clone()
+    }
+
+    /// Returns the shared readiness-flush completion barrier.
+    fn readiness_barrier(&self) -> Arc<(Mutex<ReadinessState>, Condvar)> {
+        Arc::clone(&self.readiness)
     }
 }
 
@@ -327,6 +370,18 @@ fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
     input
 }
 
+/// Serializes protocol input without injecting the restart fixture's default
+/// configuration frame.
+fn protocol_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
+    let mut input = Vec::new();
+    let mut writer = HarnessOutputWriter::new(&mut input);
+    for frame in input_frames {
+        writer.write_message(frame).expect("write input frame");
+    }
+    writer.flush().expect("flush input");
+    input
+}
+
 fn decode_output(output: Vec<u8>) -> Vec<HarnessInputMessage> {
     let mut reader = HarnessInputReader::new(Cursor::new(output));
     let mut frames = Vec::new();
@@ -344,6 +399,46 @@ struct DelayedReader {
     suffix: Cursor<Vec<u8>>,
     /// Whether the one delay has elapsed.
     delayed: bool,
+}
+
+/// Reader that withholds the disconnect fixture frame until detached readiness
+/// output has reached the protocol writer.
+struct ReadinessGatedReader {
+    /// Configuration and tool invocation available immediately.
+    prefix: Cursor<Vec<u8>>,
+    /// Disconnect frame released after readiness.
+    suffix: Cursor<Vec<u8>>,
+    /// Signals that the detached readiness frame fully reached the writer.
+    readiness: Arc<(Mutex<ReadinessState>, Condvar)>,
+    /// Whether readiness released the suffix.
+    released: bool,
+}
+
+impl Read for ReadinessGatedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.prefix.read(buffer)?;
+        if count != 0 {
+            return Ok(count);
+        }
+        if !self.released {
+            let (state, wake) = &*self.readiness;
+            let (state, timeout) = wake
+                .wait_timeout_while(
+                    state.lock().expect("readiness state"),
+                    Duration::from_secs(1),
+                    |state| !state.published,
+                )
+                .expect("readiness wait");
+            if timeout.timed_out() && !state.published {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "hold readiness was not published before disconnect",
+                ));
+            }
+            self.released = true;
+        }
+        self.suffix.read(buffer)
+    }
 }
 
 impl Read for DelayedReader {
@@ -812,14 +907,18 @@ fn hold_no_side_effect_reports_ready_then_cancels() {
 /// tool terminal.
 #[test]
 fn hold_no_side_effect_disconnect_has_no_terminal_output() {
-    let frames = run_restart_frames(
-        &[
-            restart_config("hold_no_side_effect"),
-            invoke_restart(),
-            disconnect(),
-        ],
-        1,
-    );
+    let prefix = restart_input(&[restart_config("hold_no_side_effect"), invoke_restart()]);
+    let suffix = protocol_input(&[disconnect()]);
+    let output = SharedWriter::default();
+    let reader = ReadinessGatedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        readiness: output.readiness_barrier(),
+        released: false,
+    };
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, output.clone(), &mut rng).expect("run");
+    let frames = decode_output(output.snapshot());
 
     assert!(frames.iter().any(|frame| {
         matches!(
