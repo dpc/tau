@@ -10,6 +10,8 @@ use tau_provider_codex::oauth::OAuthError;
 
 use crate::OpenAiAuth;
 
+const MAX_UNAUTHORIZED_GENERATIONS_PER_PROVIDER: usize = 64;
+
 /// Exact profile credential generation associated with one refresh attempt.
 #[derive(Eq, PartialEq)]
 struct OAuthCredentialGeneration {
@@ -38,12 +40,58 @@ struct OAuthRefreshRejection {
 pub(crate) struct OAuthRefreshRejectionCache {
     /// Last permanently rejected generation for each provider namespace.
     providers: BTreeMap<ProviderName, OAuthRefreshRejection>,
+    /// Bounded exact-generation unauthorized recovery state per provider.
+    unauthorized: BTreeMap<ProviderName, UnauthorizedGenerations>,
+}
+
+/// Exact generations plus fail-closed overflow state for one provider.
+#[derive(Default)]
+struct UnauthorizedGenerations {
+    /// Whether each observed generation spent its forced recovery.
+    generations: BTreeMap<u64, bool>,
+    /// Whether capacity exhaustion disables unknown-generation recovery.
+    saturated: bool,
 }
 
 impl OAuthRefreshRejectionCache {
     /// Returns whether this provider has any remembered rejected generation.
     pub(crate) fn contains(&self, provider: &ProviderName) -> bool {
         self.providers.contains_key(provider)
+    }
+
+    /// Records one canonical provider 401 for an exact resolved credential
+    /// identity.
+    pub(crate) fn record_unauthorized(&mut self, provider: ProviderName, identity: u64) {
+        let state = self.unauthorized.entry(provider).or_default();
+        if state.generations.contains_key(&identity) || state.saturated {
+            return;
+        }
+        if MAX_UNAUTHORIZED_GENERATIONS_PER_PROVIDER <= state.generations.len() {
+            state.saturated = true;
+            return;
+        }
+        state.generations.insert(identity, false);
+    }
+
+    /// Consumes forced-refresh authority only for the exact rejected identity.
+    pub(crate) fn take_unauthorized(&mut self, provider: &ProviderName, identity: u64) -> bool {
+        self.unauthorized.get_mut(provider).is_some_and(|state| {
+            let Some(consumed) = state.generations.get_mut(&identity) else {
+                return false;
+            };
+            if *consumed {
+                return false;
+            }
+            *consumed = true;
+            true
+        })
+    }
+
+    /// Returns whether this exact rejected generation already spent recovery.
+    pub(crate) fn unauthorized_exhausted(&self, provider: &ProviderName, identity: u64) -> bool {
+        self.unauthorized.get(provider).is_some_and(|state| {
+            state.saturated || state.generations.get(&identity).copied() == Some(true)
+        })
     }
 
     /// Removes stale rejection state after an observed credential/profile
@@ -99,12 +147,21 @@ impl OAuthRefreshRejectionCache {
     pub(crate) fn clear(&mut self, provider: &ProviderName) {
         self.providers.remove(provider);
     }
+
+    /// Clears only refresh-endpoint rejection state after successful rotation.
+    pub(crate) fn clear_refresh_rejection(&mut self, provider: &ProviderName) {
+        self.providers.remove(provider);
+    }
 }
 
 /// Typed result of resolving a Secret-RPC-backed ChatGPT credential refresh.
 pub(crate) enum RefreshCredentialsError {
     /// Credential RPC or serialization failed.
     Storage(std::io::Error),
+    /// Refreshed or concurrently published credentials crossed identity.
+    IdentityMismatch,
+    /// Forced recovery retained the provider-rejected access token.
+    RejectedGeneration,
     /// The OAuth endpoint rejected the authoritative credential generation.
     OAuth {
         /// Credential generation read through Secret RPC.
@@ -125,6 +182,10 @@ impl fmt::Display for RefreshCredentialsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Storage(error) => write!(formatter, "credential storage failed: {error}"),
+            Self::IdentityMismatch => formatter.write_str("ChatGPT identity changed"),
+            Self::RejectedGeneration => {
+                formatter.write_str("ChatGPT access token was not replaced")
+            }
             Self::OAuth {
                 credentials: _,
                 error,
@@ -149,6 +210,12 @@ impl fmt::Debug for RefreshCredentialsError {
                 .debug_tuple("RefreshCredentialsError::Storage")
                 .field(error)
                 .finish(),
+            Self::IdentityMismatch => {
+                formatter.write_str("RefreshCredentialsError::IdentityMismatch")
+            }
+            Self::RejectedGeneration => {
+                formatter.write_str("RefreshCredentialsError::RejectedGeneration")
+            }
             Self::OAuth {
                 credentials: _,
                 error,
@@ -171,6 +238,7 @@ impl Error for RefreshCredentialsError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Storage(error) => Some(error),
+            Self::IdentityMismatch | Self::RejectedGeneration => None,
             Self::OAuth {
                 credentials: _,
                 error,

@@ -12,6 +12,11 @@ default `Display` and `Debug` provider-content-free except for safe HTTP status
 and a closed allowlist of fixed provider codes. Provider-builtin owns the
 generation cache and locked-profile fallback policy; this crate never persists
 negative authentication state.
+Refresh alone uses the upstream JSON request contract. Successful refresh
+responses may omit access and refresh replacements; callers preserve those
+credential fields. A supplied access replacement must be a non-expired JWT and
+its `exp` claim, rather than provider-relative lifetime metadata, determines
+local expiry. Authorization-code exchange remains form encoded.
 
 Authenticated account quota is external-provider data governed by
 [GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).

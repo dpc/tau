@@ -70,6 +70,18 @@ pub struct OAuthTokens {
     pub account_id: Option<String>,
 }
 
+/// Optional token replacements returned by one refresh response.
+pub struct OAuthTokenRefresh {
+    /// Replacement bearer token, when the provider rotated it.
+    pub access_token: Option<String>,
+    /// Replacement refresh credential, when the provider rotated it.
+    pub refresh_token: Option<String>,
+    /// Expiry derived from the replacement access token's `exp` claim.
+    pub expires_at_ms: Option<u64>,
+    /// Account identifier derived from the replacement access token.
+    pub account_id: Option<String>,
+}
+
 /// Build the authorization URL for OpenAI Codex. Returns (url, state,
 /// code_verifier) — the caller must present the URL to the user.
 pub fn openai_codex_auth_url() -> (String, String, String) {
@@ -157,15 +169,61 @@ pub fn openai_codex_exchange(
 pub fn openai_codex_refresh(
     refresh_token: &str,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> Result<OAuthTokens, OAuthError> {
-    let body = format!(
-        "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}",
-        refresh_token = urlencoding(refresh_token),
-        client_id = OPENAI_CLIENT_ID,
-    );
+) -> Result<OAuthTokenRefresh, OAuthError> {
+    let body = refresh_request(refresh_token);
 
-    let json = post_form(OPENAI_TOKEN_URL, &body, network)?;
-    parse_openai_token_response(&json)
+    let json = post_json(OPENAI_TOKEN_URL, &body, network)?;
+    parse_openai_refresh_response(&json)
+}
+
+fn refresh_request(refresh_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "client_id": OPENAI_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    })
+}
+
+fn parse_openai_refresh_response(
+    json: &serde_json::Value,
+) -> Result<OAuthTokenRefresh, OAuthError> {
+    if !json.is_object() {
+        return Err(OAuthError::invalid_response(
+            "OAuth refresh response was not an object",
+        ));
+    }
+    let access_token = optional_token_field(json, "access_token")?;
+    let refresh_token = optional_token_field(json, "refresh_token")?;
+    let (expires_at_ms, account_id) = match access_token.as_deref() {
+        Some(access_token) => {
+            let expires_at_ms = jwt_expiration_ms(access_token)
+                .ok_or_else(|| OAuthError::invalid_response("invalid access_token expiry"))?;
+            if expires_at_ms <= now_ms() {
+                return Err(OAuthError::invalid_response("expired access_token"));
+            }
+            (Some(expires_at_ms), extract_openai_account_id(access_token))
+        }
+        None => (None, None),
+    };
+    Ok(OAuthTokenRefresh {
+        access_token,
+        refresh_token,
+        expires_at_ms,
+        account_id,
+    })
+}
+
+fn optional_token_field(
+    json: &serde_json::Value,
+    field: &'static str,
+) -> Result<Option<String>, OAuthError> {
+    match json.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(OAuthError::invalid_response(format!("invalid {field}"))),
+    }
 }
 
 fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
@@ -181,12 +239,7 @@ fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, 
         .as_u64()
         .ok_or_else(|| OAuthError::invalid_response("missing expires_in"))?;
 
-    let now_ms: u64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    let now_ms = now_ms();
     let expires_at_ms = now_ms.saturating_add(expires_in.saturating_mul(1000));
 
     // Try to extract account_id from JWT claims.
@@ -210,7 +263,32 @@ pub fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
     let payload = jwt.split('.').nth(1)?;
     let payload = base64_url_safe_no_pad_decode(payload)?;
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    claims.get("iat")?.as_u64().map(|seconds| seconds * 1000)
+    claims.get("iat")?.as_u64()?.checked_mul(1000)
+}
+
+/// Returns the unverified JWT expiry claim for local refresh scheduling.
+pub fn jwt_expiration_ms(jwt: &str) -> Option<u64> {
+    let payload = jwt.split('.').nth(1)?;
+    let payload = base64_url_safe_no_pad_decode(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims
+        .get("exp")?
+        .as_u64()
+        .and_then(|seconds| seconds.checked_mul(1000))
+}
+
+/// Returns the unverified ChatGPT account claim used to pin token rotation.
+pub fn jwt_openai_account_id(jwt: &str) -> Option<String> {
+    extract_openai_account_id(jwt)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 /// Decode JWT payload (no verification) to extract OpenAI account ID.
@@ -249,6 +327,36 @@ fn post_form(
             .header("content-type", "application/x-www-form-urlencoded")
             .timeout(Duration::from_secs(30))
             .body(body.to_owned())
+            .send()
+            .await
+            .map_err(|error| {
+                OAuthError::from_outbound(network.reqwest_error(
+                    url,
+                    tau_provider::OutboundPhase::Request,
+                    &error,
+                ))
+            })?;
+        read_success_json(response, network, url).await
+    })
+}
+
+/// POST a JSON body and parse one bounded JSON response.
+fn post_json(
+    url: &str,
+    body: &serde_json::Value,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> Result<serde_json::Value, OAuthError> {
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(OAuthError::transport)?;
+    runtime.block_on(async {
+        let client = network.client_for(url).map_err(OAuthError::from_outbound)?;
+        let response = client
+            .post(url)
+            .header("content-type", "application/json")
+            .timeout(Duration::from_secs(30))
+            .body(body.to_string())
             .send()
             .await
             .map_err(|error| {

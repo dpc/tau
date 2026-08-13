@@ -1,4 +1,142 @@
+use std::sync::mpsc;
 use std::{io as path_std_io, net as path_std_net};
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+fn jwt(claims: serde_json::Value) -> String {
+    use base64::Engine as _;
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
+    format!("header.{payload}.signature")
+}
+
+/// Refresh parsing preserves every omitted replacement while accepting an
+/// independently rotated refresh token.
+#[test]
+fn refresh_response_accepts_omitted_replacement_fields() {
+    let omitted = super::parse_openai_refresh_response(&serde_json::json!({}))
+        .expect("all replacements may be omitted");
+    assert!(omitted.access_token.is_none());
+    assert!(omitted.refresh_token.is_none());
+    assert!(omitted.expires_at_ms.is_none());
+    assert!(omitted.account_id.is_none());
+
+    let rotated = super::parse_openai_refresh_response(&serde_json::json!({
+        "refresh_token": "replacement"
+    }))
+    .expect("refresh-only rotation");
+    assert_eq!(rotated.refresh_token.as_deref(), Some("replacement"));
+    assert!(rotated.access_token.is_none());
+}
+
+/// A replacement access token must be a non-expired JWT with a bounded numeric
+/// expiry; provider `expires_in` cannot override that authority.
+#[test]
+fn refresh_response_rejects_malformed_and_expired_access_tokens() {
+    for access_token in [
+        "malformed".to_owned(),
+        jwt(serde_json::json!({"exp": "later"})),
+        jwt(serde_json::json!({"exp": 1})),
+    ] {
+        assert!(
+            super::parse_openai_refresh_response(&serde_json::json!({
+                "access_token": access_token,
+                "expires_in": u64::MAX,
+            }))
+            .is_err()
+        );
+    }
+}
+
+/// A successful refresh envelope must remain an object even when every
+/// replacement field is omitted.
+#[test]
+fn refresh_response_rejects_non_object_json() {
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!("text"),
+        serde_json::json!(1),
+    ] {
+        assert!(super::parse_openai_refresh_response(&value).is_err());
+    }
+}
+
+/// Oversized numeric `iat` claims cannot panic later refresh scheduling.
+#[test]
+fn jwt_issued_at_rejects_millisecond_overflow() {
+    let token = jwt(serde_json::json!({
+        "iat": u64::MAX,
+        "exp": u64::MAX / 1000,
+    }));
+    assert!(super::jwt_issued_at_ms(&token).is_none());
+    assert!(super::jwt_expiration_ms(&token).is_some());
+}
+
+/// Refresh uses the current JSON contract and never regresses auth-code
+/// exchange's separate form-encoded request.
+#[test]
+fn refresh_request_fields_serialize_as_json() {
+    let body = super::refresh_request("opaque +& token");
+    let encoded = body.to_string();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&encoded).expect("JSON request"),
+        body
+    );
+    assert!(!encoded.contains("grant_type=refresh_token"));
+}
+
+/// The actual HTTP helpers keep refresh JSON separate from the form-encoded
+/// authorization-code exchange path.
+#[test]
+fn oauth_http_paths_send_distinct_wire_encodings() {
+    let refresh = capture_oauth_request(|url| {
+        super::post_json(
+            url,
+            &super::refresh_request("opaque +& token"),
+            &crate::test_network_policy(),
+        )
+    });
+    assert!(refresh.contains("content-type: application/json\r\n"));
+    let refresh_body = refresh.split_once("\r\n\r\n").expect("request body").1;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(refresh_body).expect("refresh JSON"),
+        super::refresh_request("opaque +& token")
+    );
+
+    let exchange = capture_oauth_request(|url| {
+        super::post_form(
+            url,
+            "grant_type=authorization_code&code=opaque%2B%26",
+            &crate::test_network_policy(),
+        )
+    });
+    assert!(exchange.contains("content-type: application/x-www-form-urlencoded\r\n"));
+    assert!(exchange.ends_with("grant_type=authorization_code&code=opaque%2B%26"));
+}
+
+fn capture_oauth_request(
+    request: impl FnOnce(&str) -> Result<serde_json::Value, super::OAuthError>,
+) -> String {
+    let listener =
+        path_std_net::TcpListener::bind(("127.0.0.1", 0)).expect("bind OAuth test server");
+    let address = listener.local_addr().expect("OAuth test server address");
+    let (sender, receiver) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept OAuth request");
+        let bytes = read_complete_http_request_bytes(&mut stream);
+        sender.send(bytes).expect("capture OAuth request");
+        let body = b"{}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        path_std_io::Write::write_all(&mut stream, response.as_bytes()).expect("write headers");
+        path_std_io::Write::write_all(&mut stream, body).expect("write body");
+    });
+    request(&format!("http://{address}/oauth/token")).expect("OAuth request");
+    server.join().expect("OAuth test server");
+    String::from_utf8(receiver.recv().expect("captured request")).expect("ASCII request")
+}
 
 /// OpenAI's nested OAuth envelope must expose only typed, bounded fields rather
 /// than retaining the complete response body.
@@ -257,6 +395,10 @@ fn post_form_bytes_from_test_server(
 /// tests intermittently observe a transport error rather than the intended
 /// oversized or invalid-encoding classification.
 fn read_complete_http_request(stream: &mut std::net::TcpStream) {
+    let _ = read_complete_http_request_bytes(stream);
+}
+
+fn read_complete_http_request_bytes(stream: &mut std::net::TcpStream) -> Vec<u8> {
     const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
     let mut request = Vec::new();
@@ -288,7 +430,7 @@ fn read_complete_http_request(stream: &mut std::net::TcpStream) {
             })
             .unwrap_or(0);
         if request.len() >= body_start + content_length {
-            return;
+            return request;
         }
     }
 }

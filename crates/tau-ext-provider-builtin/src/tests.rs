@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs::File;
 use std::sync::atomic as path_std_sync_atomic;
 use std::{io as path_std_io, time as path_std_time};
@@ -1206,6 +1207,255 @@ fn oauth_auth_replacement_preserves_responses_lite_compatibility() {
     ));
 }
 
+fn oauth_test_jwt(account_id: &str) -> String {
+    let payload = match account_id {
+        "account-a" => {
+            "eyJleHAiOjE4NDQ2NzQ0MDczNzA5NTUxLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC1hIn19"
+        }
+        "account-b" => {
+            "eyJleHAiOjE4NDQ2NzQ0MDczNzA5NTUxLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC1iIn19"
+        }
+        _ => panic!("unsupported fixture account"),
+    };
+    format!("header.{payload}.signature")
+}
+
+/// Rotation preserves omitted credentials but refuses a replacement access
+/// token whose account claim crosses the pinned ChatGPT identity.
+#[test]
+fn oauth_refresh_merge_preserves_omissions_and_rejects_identity_change() {
+    let current = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh-a".to_owned(),
+        expires_at_ms: u64::MAX,
+        account_id: Some("account-a".to_owned()),
+    };
+    let preserved = merge_chatgpt_refresh(
+        &current,
+        path_tau_provider_codex_oauth::OAuthTokenRefresh {
+            access_token: None,
+            refresh_token: None,
+            expires_at_ms: None,
+            account_id: None,
+        },
+    )
+    .expect("omitted replacements preserve the pinned generation");
+    assert_eq!(preserved, current);
+    let anchored_without_claim = OpenAiAuth {
+        access_token: "opaque-access".to_owned(),
+        ..current.clone()
+    };
+    let preserved = merge_chatgpt_refresh(
+        &anchored_without_claim,
+        path_tau_provider_codex_oauth::OAuthTokenRefresh {
+            access_token: None,
+            refresh_token: None,
+            expires_at_ms: None,
+            account_id: None,
+        },
+    )
+    .expect("omitted access preserves stored account anchor");
+    assert_eq!(preserved.account_id.as_deref(), Some("account-a"));
+
+    let mismatch = merge_chatgpt_refresh(
+        &current,
+        path_tau_provider_codex_oauth::OAuthTokenRefresh {
+            access_token: Some(oauth_test_jwt("account-b")),
+            refresh_token: Some("refresh-b".to_owned()),
+            expires_at_ms: Some(u64::MAX),
+            account_id: Some("account-b".to_owned()),
+        },
+    );
+    assert!(matches!(
+        mismatch,
+        Err(RefreshCredentialsError::IdentityMismatch)
+    ));
+}
+
+/// A losing CAS may adopt only a concurrently published credential from the
+/// pinned account, and forced recovery still requires a new access token.
+#[test]
+fn oauth_cas_race_adoption_preserves_identity_and_replaces_rejected_access() {
+    let current = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh-a".to_owned(),
+        expires_at_ms: u64::MAX,
+        account_id: Some("account-a".to_owned()),
+    };
+    let mut winner = current.clone();
+    winner.access_token = format!("{}-rotated", oauth_test_jwt("account-a"));
+    winner.refresh_token = "refresh-winner".to_owned();
+    validate_authoritative_rotation(&current, &winner, true)
+        .expect("same-account winner with replacement access token");
+
+    assert!(matches!(
+        validate_authoritative_rotation(&current, &current, true),
+        Err(RefreshCredentialsError::RejectedGeneration)
+    ));
+    let mut crossed = winner;
+    crossed.account_id = Some("account-b".to_owned());
+    crossed.access_token = oauth_test_jwt("account-b");
+    assert!(matches!(
+        validate_authoritative_rotation(&current, &crossed, true),
+        Err(RefreshCredentialsError::IdentityMismatch)
+    ));
+}
+
+/// Canonical unauthorized recovery grants one forced refresh to the exact
+/// rejected inference generation and does not reset on repeated 401 reports.
+#[test]
+fn oauth_unauthorized_recovery_is_exact_generation_and_once_only() {
+    let provider = ProviderName::new("chatgpt");
+    let mut cache = OAuthRefreshRejectionCache::default();
+    cache.record_unauthorized(provider.clone(), 41);
+    assert!(!cache.take_unauthorized(&provider, 40));
+    assert!(cache.take_unauthorized(&provider, 41));
+    assert!(cache.unauthorized_exhausted(&provider, 41));
+    cache.record_unauthorized(provider.clone(), 41);
+    assert!(!cache.take_unauthorized(&provider, 41));
+    cache.record_unauthorized(provider.clone(), 42);
+    assert!(cache.take_unauthorized(&provider, 42));
+    cache.record_unauthorized(provider.clone(), 41);
+    cache.record_unauthorized(provider.clone(), 42);
+    assert!(cache.unauthorized_exhausted(&provider, 42));
+    assert!(!cache.take_unauthorized(&provider, 42));
+    cache.clear_refresh_rejection(&provider);
+    cache.record_unauthorized(provider.clone(), 41);
+    assert!(cache.unauthorized_exhausted(&provider, 41));
+    assert!(!cache.take_unauthorized(&provider, 41));
+    cache.clear(&provider);
+    cache.record_unauthorized(provider.clone(), 41);
+    assert!(cache.unauthorized_exhausted(&provider, 41));
+}
+
+/// A canonical 401 forces refresh while the token is locally valid, and a
+/// failed recovery makes that exact generation unavailable without a second
+/// endpoint attempt.
+#[test]
+fn oauth_unauthorized_forces_once_then_suppresses_rejected_generation() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
+    let original = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh-a".to_owned(),
+        expires_at_ms: u64::MAX,
+        account_id: Some("account-a".to_owned()),
+    };
+    let config = tau_provider_codex::resolved_config_for_provider_model(
+        &provider,
+        &model.model,
+        tau_provider_codex::ResolvedCredentials::new(
+            original.access_token.clone(),
+            original.account_id.clone(),
+        ),
+        CodexMode::Standard,
+    );
+    let identity = backend_profile_identity(&PromptBackend::Responses(config))
+        .expect("ChatGPT backend identity");
+    let mut cache = OAuthRefreshRejectionCache::default();
+    cache.record_unauthorized(provider.clone(), identity);
+    let attempts = Cell::new(0);
+    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(502, "{}");
+
+    let mut auth = original.clone();
+    let first = resolve_chatgpt_backend_with_refresh(
+        &model,
+        &provider,
+        &mut auth,
+        CodexMode::Standard,
+        &mut cache,
+        |_, _, _, force| {
+            assert!(force);
+            attempts.set(attempts.get() + 1);
+            Err(RefreshCredentialsError::OAuth {
+                credentials: Box::new(original.clone()),
+                error: rejection.clone(),
+            })
+        },
+    );
+    assert!(first.is_none());
+    assert_eq!(attempts.get(), 1);
+
+    auth = original;
+    let second = resolve_chatgpt_backend_with_refresh(
+        &model,
+        &provider,
+        &mut auth,
+        CodexMode::Standard,
+        &mut cache,
+        |_, _, _, _| panic!("rejected generation must remain suppressed"),
+    );
+    assert!(second.is_none());
+    assert_eq!(attempts.get(), 1);
+}
+
+/// Forced recovery without a refresh credential cannot return the exact
+/// rejected access token as a usable backend.
+#[test]
+fn oauth_unauthorized_with_empty_refresh_token_fails_closed() {
+    let current = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: String::new(),
+        expires_at_ms: u64::MAX,
+        account_id: Some("account-a".to_owned()),
+    };
+    assert!(matches!(
+        refresh_required(&current, true),
+        Err(RefreshCredentialsError::RejectedGeneration)
+    ));
+}
+
+/// Automatic retry can reload token rotation only within the pinned account.
+#[test]
+fn automatic_retry_refuses_cross_account_backend_rotation() {
+    let model = ModelName::new("gpt-5.4");
+    let config = |account: &str| {
+        PromptBackend::Responses(tau_provider_codex::resolved_config_for_provider_model(
+            &ProviderName::new("chatgpt"),
+            &model,
+            tau_provider_codex::ResolvedCredentials::new(
+                oauth_test_jwt(account),
+                Some(account.to_owned()),
+            ),
+            CodexMode::Standard,
+        ))
+    };
+    let PromptBackend::Responses(anchor) = config("account-a") else {
+        unreachable!()
+    };
+    assert!(automatic_retry_identity_matches(
+        Some(&anchor),
+        &config("account-a")
+    ));
+    assert!(automatic_retry_identity_matches(
+        Some(&anchor),
+        &PromptBackend::Unavailable
+    ));
+    assert!(!automatic_retry_identity_matches(
+        Some(&anchor),
+        &config("account-b")
+    ));
+}
+
+/// CAS adoption requires equal non-empty identity anchors.
+#[test]
+fn oauth_cas_adoption_rejects_missing_and_blank_identity() {
+    for account_id in [None, Some(String::new()), Some(" ".to_owned())] {
+        let current = OpenAiAuth {
+            access_token: "token-without-claims".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_ms: u64::MAX,
+            account_id: account_id.clone(),
+        };
+        let mut winner = current.clone();
+        winner.access_token.push_str("-new");
+        assert!(matches!(
+            validate_authoritative_rotation(&current, &winner, true),
+            Err(RefreshCredentialsError::IdentityMismatch)
+        ));
+    }
+}
+
 /// Startup quota initialization must resolve one model per ChatGPT profile, so
 /// one rejected refresh cannot be amplified by every published model. The
 /// typed trace projection excludes arbitrary provider fields and preserves
@@ -1284,7 +1534,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 &mut profile.auth,
                 mode,
                 &mut refresh_rejections,
-                |provider, _, _| {
+                |provider, _, _, _| {
                     attempts.push(provider.clone());
                     Err(RefreshCredentialsError::OAuth {
                         credentials: Box::new(authoritative),
@@ -1365,7 +1615,7 @@ fn refresh_failure_falls_back_only_to_still_valid_access_token() {
             &mut auth,
             CodexMode::Standard,
             &mut cache,
-            |_, _, _| {
+            |_, _, _, _| {
                 Err(RefreshCredentialsError::OAuth {
                     credentials: Box::new(authoritative),
                     error: rejection.clone(),

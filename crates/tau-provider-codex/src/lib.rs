@@ -266,6 +266,26 @@ impl ResolvedConfig {
         self.inner.api_key == access_token && self.inner.account_id.as_deref() == account_id
     }
 
+    /// Returns whether another resolved configuration is pinned to this
+    /// account.
+    #[must_use]
+    pub fn same_chatgpt_identity(&self, other: &Self) -> bool {
+        self.inner
+            .account_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            == other
+                .inner
+                .account_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            && self
+                .inner
+                .account_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
     /// Returns an opaque process-local identity for endpoint and credential
     /// generation comparisons.
     #[must_use]
@@ -402,6 +422,9 @@ pub enum AttemptOutcome {
         progress: SemanticProgress,
         /// Bounded, redacted provider detail suitable only for live status.
         live_detail: Option<RedactedProviderDetail>,
+        /// Whether the canonical provider response rejected this bearer with
+        /// 401.
+        canonical_unauthorized: bool,
     },
     /// Trusted local cancellation ended the attempt.
     Canceled {
@@ -816,6 +839,7 @@ impl CodexRuntime {
             Err(common::LlmError::Canceled) => AttemptOutcome::Canceled { progress },
             Err(error) => match error.retry_decision() {
                 Some(decision) => {
+                    let canonical_unauthorized = error.is_canonical_unauthorized();
                     let live_detail = error.evidence().and_then(|evidence| {
                         evidence.live_detail(
                             config.wire().api_key.as_str(),
@@ -837,6 +861,7 @@ impl CodexRuntime {
                         decision,
                         progress,
                         live_detail,
+                        canonical_unauthorized,
                     }
                 }
                 None => AttemptOutcome::Terminal {

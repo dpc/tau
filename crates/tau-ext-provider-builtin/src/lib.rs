@@ -658,6 +658,15 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
     Some(hasher.finish())
 }
 
+fn automatic_retry_identity_matches(pinned: Option<&ResolvedConfig>, next: &PromptBackend) -> bool {
+    match (pinned, next) {
+        (Some(pinned), PromptBackend::Responses(next)) => pinned.same_chatgpt_identity(next),
+        (Some(_), PromptBackend::Unavailable) => true,
+        (Some(_), _) => false,
+        (None, _) => true,
+    }
+}
+
 fn full_quota_window(
     observation: tau_provider_codex::QuotaWindowObservation,
     observed_at_unix_ms: u64,
@@ -3254,6 +3263,21 @@ where
         Ok(())
     }
 
+    fn finish_identity_changed_prompt(
+        &mut self,
+        job: &PromptJob,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        handle.send(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseFinishedReported(simple_finished(
+                job.agent_prompt_id.clone(),
+                job.prompt.agent_id.clone(),
+                job.prompt.originator.clone(),
+                "ChatGPT identity changed; automatic retry refused",
+            )),
+        ))
+    }
+
     fn start_or_reject_prompt(
         &mut self,
         agent_prompt_id: tau_proto::AgentPromptId,
@@ -3268,6 +3292,10 @@ where
         let mut profiles = self.load_profiles();
         let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
         let profile_identity = backend_profile_identity(&backend);
+        let pinned_chatgpt_identity = match &backend {
+            PromptBackend::Responses(config) => Some(config.clone()),
+            _ => None,
+        };
         let mut frame_writer = handle_frame_writer(handle);
         write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
             .map_err(|error| ClientError::handler(error.to_string()))?;
@@ -3279,6 +3307,7 @@ where
             ),
             prompt,
             backend,
+            pinned_chatgpt_identity,
             profile_identity,
             retry_state: PromptRetryState::default(),
             cancel_generation: self.cancel_generation,
@@ -3451,6 +3480,7 @@ where
                     mut job,
                     decision,
                     live_detail,
+                    canonical_unauthorized,
                 }) => {
                     if self.input_closed
                         || job.cancel_generation != self.cancel_generation
@@ -3459,6 +3489,10 @@ where
                         self.cancellation.take_canceled(&job.agent_prompt_id);
                         self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                         continue;
+                    }
+                    if canonical_unauthorized && let Some(identity) = job.profile_identity {
+                        self.oauth_refresh_rejections
+                            .record_unauthorized(job.prompt.model.provider.clone(), identity);
                     }
                     let policy_delay = job
                         .retry_state
@@ -3540,8 +3574,16 @@ where
                         continue;
                     }
                     let mut profiles = self.load_profiles();
-                    job.backend =
+                    let backend =
                         self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
+                    if !automatic_retry_identity_matches(
+                        job.pinned_chatgpt_identity.as_ref(),
+                        &backend,
+                    ) {
+                        self.finish_identity_changed_prompt(&job, handle)?;
+                        continue;
+                    }
+                    job.backend = backend;
                     job.profile_identity = backend_profile_identity(&job.backend);
                     self.prompt_queue.push_back(job);
                 }
@@ -3961,6 +4003,8 @@ struct PromptJob {
     debug_provider_requests: bool,
     prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
+    /// Immutable account anchor for every automatic retry of this owned prompt.
+    pinned_chatgpt_identity: Option<ResolvedConfig>,
     /// Inference profile identity used by the next finite attempt.
     profile_identity: Option<u64>,
     retry_state: PromptRetryState,
@@ -4703,6 +4747,9 @@ enum WorkerMessage {
         decision: RetryDecision,
         /// Bounded, redacted provider detail for ordinary live status only.
         live_detail: Option<tau_provider_codex::RedactedProviderDetail>,
+        /// Whether an exact canonical 401 authorizes forced credential
+        /// recovery.
+        canonical_unauthorized: bool,
     },
     /// A delayed logical prompt whose retry deadline has arrived.
     RetryDue(PromptJob),
@@ -5124,6 +5171,7 @@ fn production_prompt_executor() -> PromptExecutor {
                         job: execution.job,
                         decision: retry.decision,
                         live_detail: retry.live_detail,
+                        canonical_unauthorized: retry.canonical_unauthorized,
                     },
                 );
             }
@@ -5533,11 +5581,12 @@ fn resolve_chatgpt_backend(
         auth_store,
         mode,
         refresh_rejections,
-        |provider, mode, rejections| {
+        |provider, mode, rejections, force| {
             refresh_chatgpt_credentials_rpc(
                 provider,
                 mode,
                 rejections,
+                force,
                 network,
                 extension_data_client,
             )
@@ -5555,13 +5604,31 @@ fn resolve_chatgpt_backend_with_refresh(
         &ProviderName,
         CodexMode,
         &mut OAuthRefreshRejectionCache,
+        bool,
     ) -> Result<OpenAiAuth, RefreshCredentialsError>,
 ) -> Option<ResolvedConfig> {
+    let current_config = tau_provider_codex::resolved_config_for_provider_model(
+        &model.provider,
+        &model.model,
+        tau_provider_codex::ResolvedCredentials::new(
+            auth_store.access_token.clone(),
+            auth_store.account_id.clone(),
+        ),
+        mode,
+    );
+    let current_identity = backend_profile_identity(&PromptBackend::Responses(current_config));
+    if current_identity
+        .is_some_and(|identity| refresh_rejections.unauthorized_exhausted(provider_name, identity))
+    {
+        return None;
+    }
+    let forced = current_identity
+        .is_some_and(|identity| refresh_rejections.take_unauthorized(provider_name, identity));
     let refresh_due =
         oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
             && !auth_store.refresh_token.trim().is_empty();
-    if refresh_due || refresh_rejections.contains(provider_name) {
-        match refresh(provider_name, mode, refresh_rejections) {
+    if forced || refresh_due || refresh_rejections.contains(provider_name) {
+        match refresh(provider_name, mode, refresh_rejections, forced) {
             Ok(refreshed) => {
                 *auth_store = refreshed;
             }
@@ -5571,6 +5638,20 @@ fn resolve_chatgpt_backend_with_refresh(
                     provider = %provider_name,
                     "failed to refresh ChatGPT credentials: {error}"
                 );
+                if forced {
+                    auth_store.access_token.clear();
+                }
+            }
+            Err(
+                error @ (RefreshCredentialsError::IdentityMismatch
+                | RefreshCredentialsError::RejectedGeneration),
+            ) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    provider = %provider_name,
+                    "failed to refresh ChatGPT credentials: {error}"
+                );
+                auth_store.access_token.clear();
             }
             Err(
                 RefreshCredentialsError::OAuth { credentials, error }
@@ -5582,6 +5663,9 @@ fn resolve_chatgpt_backend_with_refresh(
                     provider = %provider_name,
                     "failed to refresh ChatGPT credentials: {error}"
                 );
+                if forced {
+                    auth_store.access_token.clear();
+                }
             }
         }
     }
@@ -5605,6 +5689,7 @@ fn refresh_chatgpt_credentials_rpc(
     provider_name: &ProviderName,
     mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
+    force: bool,
     network: &tau_provider::OutboundNetworkPolicy,
     extension_data_client: Option<&ExtensionDataClient>,
 ) -> Result<OpenAiAuth, RefreshCredentialsError> {
@@ -5646,10 +5731,8 @@ fn refresh_chatgpt_credentials_rpc(
             error,
         });
     }
-    if !oauth_token_should_refresh(&current.access_token, current.expires_at_ms)
-        || current.refresh_token.trim().is_empty()
-    {
-        refresh_rejections.clear(provider_name);
+    if !refresh_required(&current, force)? {
+        refresh_rejections.clear_refresh_rejection(provider_name);
         return Ok(current);
     }
     let tokens =
@@ -5663,12 +5746,7 @@ fn refresh_chatgpt_credentials_rpc(
                 });
             }
         };
-    let refreshed = OpenAiAuth {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at_ms: tokens.expires_at_ms,
-        account_id: tokens.account_id,
-    };
+    let refreshed = merge_chatgpt_refresh(&current, tokens)?;
     let replacement = serde_json::to_vec(&credential_record::ChatGptOAuthCredential::from(
         refreshed.clone(),
     ))
@@ -5687,7 +5765,10 @@ fn refresh_chatgpt_credentials_rpc(
         },
     ) {
         Ok(tau_proto::ExtensionDataValue::CompareAndSwapFile) => {
-            refresh_rejections.clear(provider_name);
+            if force && refreshed.access_token == current.access_token {
+                return Err(RefreshCredentialsError::RejectedGeneration);
+            }
+            refresh_rejections.clear_refresh_rejection(provider_name);
             Ok(refreshed)
         }
         Ok(_) => Err(RefreshCredentialsError::Storage(path_std_io::Error::other(
@@ -5724,13 +5805,84 @@ fn refresh_chatgpt_credentials_rpc(
                     ))
                 })?;
             let authoritative = record.into_auth();
-            refresh_rejections.clear(provider_name);
+            validate_authoritative_rotation(&current, &authoritative, force)?;
+            refresh_rejections.clear_refresh_rejection(provider_name);
             Ok(authoritative)
         }
         Err(_) => Err(RefreshCredentialsError::Storage(path_std_io::Error::other(
             "OAuth credential CAS failed",
         ))),
     }
+}
+
+fn refresh_required(current: &OpenAiAuth, force: bool) -> Result<bool, RefreshCredentialsError> {
+    if current.refresh_token.trim().is_empty() {
+        return if force {
+            Err(RefreshCredentialsError::RejectedGeneration)
+        } else {
+            Ok(false)
+        };
+    }
+    Ok(force || oauth_token_should_refresh(&current.access_token, current.expires_at_ms))
+}
+
+fn validate_authoritative_rotation(
+    current: &OpenAiAuth,
+    authoritative: &OpenAiAuth,
+    force: bool,
+) -> Result<(), RefreshCredentialsError> {
+    let current_identity = chatgpt_account_identity(current)?;
+    let authoritative_identity = chatgpt_account_identity(authoritative)?;
+    if current_identity.is_none() || authoritative_identity != current_identity {
+        return Err(RefreshCredentialsError::IdentityMismatch);
+    }
+    if force && authoritative.access_token == current.access_token {
+        return Err(RefreshCredentialsError::RejectedGeneration);
+    }
+    Ok(())
+}
+
+fn chatgpt_account_identity(auth: &OpenAiAuth) -> Result<Option<String>, RefreshCredentialsError> {
+    let stored = auth
+        .account_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    let claim = tau_provider_codex::oauth::jwt_openai_account_id(&auth.access_token)
+        .filter(|value| !value.trim().is_empty());
+    if stored.is_some() && claim.is_some() && stored != claim {
+        return Err(RefreshCredentialsError::IdentityMismatch);
+    }
+    Ok(stored.or(claim))
+}
+
+fn merge_chatgpt_refresh(
+    current: &OpenAiAuth,
+    tokens: tau_provider_codex::oauth::OAuthTokenRefresh,
+) -> Result<OpenAiAuth, RefreshCredentialsError> {
+    let expected_account = chatgpt_account_identity(current)?;
+    let replaced_access = tokens.access_token.is_some();
+    let access_token = tokens
+        .access_token
+        .unwrap_or_else(|| current.access_token.clone());
+    let account_id = if replaced_access {
+        tokens
+            .account_id
+            .or_else(|| tau_provider_codex::oauth::jwt_openai_account_id(&access_token))
+    } else {
+        expected_account.clone()
+    };
+    if expected_account.is_none() || account_id != expected_account {
+        return Err(RefreshCredentialsError::IdentityMismatch);
+    }
+    Ok(OpenAiAuth {
+        access_token,
+        refresh_token: tokens
+            .refresh_token
+            .unwrap_or_else(|| current.refresh_token.clone()),
+        expires_at_ms: tokens.expires_at_ms.unwrap_or(current.expires_at_ms),
+        account_id,
+    })
 }
 
 fn oauth_token_should_refresh(access_token: &str, expires_at_ms: u64) -> bool {
@@ -5895,6 +6047,7 @@ where
         PromptBackend::Unavailable => Ok(Some(PromptAttemptRetry {
             decision: RetryDecision::new(RetryClass::Auth),
             live_detail: None,
+            canonical_unauthorized: false,
         })),
         PromptBackend::Responses(config) => handle_prompt(
             agent_prompt_id,
@@ -6110,6 +6263,7 @@ fn finish_retry_attempt<W: Write>(
     Ok(Some(PromptAttemptRetry {
         decision,
         live_detail: None,
+        canonical_unauthorized: false,
     }))
 }
 
@@ -6201,6 +6355,9 @@ struct PromptAttemptRetry {
     decision: RetryDecision,
     /// Bounded provider detail for ordinary live status only.
     live_detail: Option<tau_provider_codex::RedactedProviderDetail>,
+    /// Canonical provider 401 authority for exact-generation credential
+    /// recovery.
+    canonical_unauthorized: bool,
 }
 
 fn handle_compact_prompt<R, W: Write>(
@@ -6253,6 +6410,7 @@ where
         CompactOutcome::Retry(decision) => Ok(Some(PromptAttemptRetry {
             decision,
             live_detail: None,
+            canonical_unauthorized: false,
         })),
         CompactOutcome::Canceled => {
             finish_canceled(agent_prompt_id, prompt, writer)?;
@@ -6437,6 +6595,7 @@ where
             decision,
             progress,
             live_detail,
+            canonical_unauthorized,
         } => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
@@ -6449,6 +6608,7 @@ where
             return Ok(Some(PromptAttemptRetry {
                 decision,
                 live_detail,
+                canonical_unauthorized,
             }));
         }
         CodexAttemptOutcome::Terminal { error, progress } => {

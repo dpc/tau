@@ -844,6 +844,13 @@ credential/profile change permits a new attempt, and restart may probe once
 again. A failed preemptive refresh can use only an access token that remains
 valid; an expired bearer is never used. The logical prompt keeps its existing
 slow authentication retry cadence.
+A canonical provider HTTP 401 overrides local expiry once for the exact
+credential generation. Tau reloads and, if needed, forces one refresh; it does
+not automatically replay the prompt with the same rejected access token after
+that recovery fails. Refresh accepts omitted token replacements, derives any
+replacement access-token expiry from its JWT `exp`, and publishes or adopts a
+CAS winner only when its ChatGPT account identity matches the pinned account.
+Missing or inconsistent identity fails closed.
 `:retry` initially bypasses a shared cooldown for only the selected prompt. A
 successful terminal response from that probe invalidates the exact cooldown it
 tested and wakes same-profile peers with stable anti-herd jitter. Error,

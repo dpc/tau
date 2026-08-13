@@ -797,6 +797,7 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
                     decision: RetryDecision::new(RetryClass::UsageWindow)
                         .with_retry_after(Some(Duration::from_secs(86_400))),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("park old-profile prompt");
@@ -931,6 +932,7 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::UsageWindow),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("return stale shared evidence");
@@ -1055,6 +1057,7 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         debug_provider_requests: false,
         prompt,
         backend: PromptBackend::Unavailable,
+        pinned_chatgpt_identity: None,
         profile_identity: None,
         retry_state: PromptRetryState::default(),
         cancel_generation: 0,
@@ -2229,6 +2232,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("return retry outcome");
@@ -2365,6 +2369,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("park first attempt");
@@ -2481,6 +2486,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                     job: execution.job,
                     decision,
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("install generated usage-window cooldown");
@@ -2927,6 +2933,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
                 decision: RetryDecision::new(RetryClass::UsageWindow)
                     .with_retry_after(Some(Duration::from_secs(86_400))),
                 live_detail: None,
+                canonical_unauthorized: false,
             },
         )
         .expect("park usage failure");
@@ -3042,6 +3049,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
+                canonical_unauthorized: false,
             },
         )
         .expect("park attempt");
@@ -3160,6 +3168,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("return retry");
@@ -3408,6 +3417,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
                     decision: RetryDecision::new(RetryClass::Account)
                         .with_retry_after(Some(Duration::from_secs(86_400))),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("park limited prompt");
@@ -3507,7 +3517,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
     };
     let fresh = OpenAiAuth {
         access_token: "fresh-token".to_owned(),
-        account_id: Some("fresh-account".to_owned()),
+        account_id: Some("account".to_owned()),
         ..chatgpt_auth()
     };
     let mut startup_profiles = profiles_with_chatgpt_auth(old.clone());
@@ -3535,7 +3545,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                     profiles_with_chatgpt_auth(fresh.clone());
             }
             (1, PromptBackend::Responses(config)) => {
-                assert!(config.credentials_match("fresh-token", Some("fresh-account")));
+                assert!(config.credentials_match("fresh-token", Some("account")));
                 assert_eq!(
                     config.mode(),
                     CodexMode::LiteCompatibility,
@@ -3549,7 +3559,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                     profiles_with_chatgpt_auth(fresh.clone());
             }
             (3, PromptBackend::Responses(config)) => {
-                assert!(config.credentials_match("fresh-token", Some("fresh-account")));
+                assert!(config.credentials_match("fresh-token", Some("account")));
                 let mut writer = execution.frame_writer();
                 writer
                     .write_message(&HarnessInputMessage::emit_transient(
@@ -3574,6 +3584,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
+                canonical_unauthorized: false,
             },
         )
         .expect("schedule profile reload");
@@ -3669,6 +3680,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("schedule retry after partial output");
@@ -3874,6 +3886,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
                     job: execution.job,
                     decision: RetryDecision::new(class),
                     live_detail: None,
+                    canonical_unauthorized: false,
                 },
             )
             .expect("schedule family retry");
@@ -4018,6 +4031,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                         decision: RetryDecision::new(RetryClass::UsageWindow)
                             .with_retry_after(Some(Duration::from_secs(86_400))),
                         live_detail: None,
+                        canonical_unauthorized: false,
                     },
                 )
                 .expect("park delayed prompt");
@@ -4465,6 +4479,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
                         RetryClass::Unknown
                     }),
                     live_detail: Some(live_detail.clone()),
+                    canonical_unauthorized: false,
                 },
             )
             .expect("schedule status fixture retry");
@@ -4720,6 +4735,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
+                canonical_unauthorized: false,
             },
         )
         .expect("return late retry");

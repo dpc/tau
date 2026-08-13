@@ -1,5 +1,34 @@
 use super::*;
 
+/// Only the canonical HTTP status can authorize credential recovery; provider
+/// prose and structured stream codes cannot impersonate a 401.
+#[test]
+fn canonical_unauthorized_requires_exact_http_status() {
+    assert!(LlmError::HttpStatus(401, String::new()).is_canonical_unauthorized());
+    assert!(
+        LlmError::HttpStatusRetryAfter(401, String::new(), Duration::from_secs(1))
+            .is_canonical_unauthorized()
+    );
+    assert!(!LlmError::HttpStatus(403, "401 Unauthorized".to_owned()).is_canonical_unauthorized());
+    assert!(
+        !LlmError::StreamError {
+            body: "HTTP 401".to_owned(),
+            code: Some("unauthorized".to_owned()),
+            retry_after: None,
+        }
+        .is_canonical_unauthorized()
+    );
+    let disguised_terminal =
+        LlmError::HttpStatus(401, r#"{"error":{"code":"invalid_prompt"}}"#.to_owned());
+    assert_eq!(
+        disguised_terminal
+            .retry_decision()
+            .expect("canonical 401 remains recoverable")
+            .class,
+        RetryClass::Auth
+    );
+}
+
 /// Contradictory private-route cached input is clamped identically in the
 /// legacy counter and normalized cache observation.
 #[test]

@@ -53,6 +53,18 @@ compare-and-swap serializes refresh publication, and a losing refresher reloads
 the winning generation rather than retrying a rotated refresh token. Closed
 credential-invalidating 400/401 codes may suppress the exact generation for this
 process. Rotation clears it; restart may retry once.
+Separately, one canonical inference HTTP 401 authorizes at most one forced
+reload/refresh for the exact resolved credential generation, even while its
+local expiry remains current. Failure or a refresh that retains the rejected
+access token blocks automatic replay for that generation. Refresh publication
+and losing-CAS adoption require the same non-empty ChatGPT account identity;
+missing, internally inconsistent, or changed identity fails closed before the
+prompt can continue. The current credential contract does not retain an ID
+token, so user-id and workspace-class claims cannot be pinned reliably when the
+refresh response omits that optional token.
+The bounded rejected-generation history survives temporary profile removal or
+backend-family replacement within the process, preventing remove/re-add from
+re-authorizing the same bearer.
 
 The cross-component authority and no-guessed-applicability rule are defined by
 [GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).

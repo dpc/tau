@@ -32,6 +32,12 @@ profile change permits a new attempt; cold restart may probe once again. A
 failed preemptive refresh may fall back only to the authoritative locked access
 token while it remains valid, never to an expired or stale pre-lock bearer. This
 does not change the logical prompt's slow authentication retry cadence.
+A canonical provider HTTP 401 instead overrides local expiry once for its exact
+credential generation. Tau reloads and may force one refresh, but will not
+automatically replay with the same rejected bearer if recovery fails. Omitted
+refresh replacements preserve existing fields; replacement access-token expiry
+comes from JWT `exp`, and refresh/CAS adoption fails closed if the pinned
+ChatGPT account identity is missing, inconsistent, or changed.
 
 ## Provider profiles and CLI
 

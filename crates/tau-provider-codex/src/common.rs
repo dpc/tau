@@ -172,6 +172,15 @@ impl std::error::Error for LlmError {
 }
 
 impl LlmError {
+    /// Returns whether the canonical HTTP status rejected the presented bearer.
+    #[must_use]
+    pub(crate) fn is_canonical_unauthorized(&self) -> bool {
+        matches!(
+            self.root_error(),
+            Self::HttpStatus(401, _) | Self::HttpStatusRetryAfter(401, _, _)
+        )
+    }
+
     /// Returns whether canonical provider code proves v2 compaction
     /// unsupported.
     #[must_use]
@@ -300,6 +309,9 @@ fn classify_http_status(
     body: &str,
     transport_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
+    if code == 401 {
+        return Some(RetryDecision::new(RetryClass::Auth).with_retry_after(transport_hint));
+    }
     // Keep adapter classification independent from UI prose.
     let provider_code = canonical_error_identifiers(body).into_iter().next();
     if http_failure_kind(code, body).is_some() {
