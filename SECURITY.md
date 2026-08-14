@@ -510,6 +510,15 @@ anchors/previews. The harness returns exactly one requester-directed multiline
 notice and does not publish the request or result. Other client origins and
 configured extensions are silently denied; extension attempts retain normal
 phase validation and metering but are denied before activation staging.
+Tree prompt previews are untrusted terminal text. The harness encodes them
+before constructing the common requester-directed notice, so interactive and
+headless clients receive identical terminal-inert text without TTY-dependent
+rewriting. Focused harness and CLI regressions protect the encoding, directed
+routing, interactive VT result, and exact headless bytes. Security review must
+revisit this boundary when changing the preview window or encoding,
+`requires_visible_escape`, directed routing, or either client's tree rendering.
+See
+[`SPEC-tau-harness-session-state`](crates/tau-harness/specs/SPEC-tau-harness-session-state.md).
 Only authenticated configured Tool/Core peers may publish transient tool
 registration/unregistration declarations; canonical `tool.register` and
 `tool.unregister` state is harness-authored. After declaration commit, the

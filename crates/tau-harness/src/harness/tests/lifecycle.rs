@@ -1318,7 +1318,7 @@ fn tree_request_returns_one_directed_multiline_notice() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    append_user_message_via_event(&mut h, "s1", "first tree prompt");
+    append_user_message_via_event(&mut h, "s1", "A\u{1b}[2J\rforged\n\u{202e}B\\C\u{9b}D雪");
     append_user_message_via_event(&mut h, "s1", "second tree prompt");
     let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
     let (_observer_id, mut observer) = connect_socket_ui(&mut h);
@@ -1351,9 +1351,16 @@ fn tree_request_returns_one_directed_multiline_notice() {
         notice.message,
         concat!(
             "    0   before first prompt (root)\n",
-            "    1   before prompt  user: first tree prompt\n",
+            r"    1   before prompt  user: A\u{001B}[2J\u{000D}forged \u{202E}B\\C\u{009B}D雪",
+            "\n",
             "    2   before prompt  user: second tree prompt",
         )
+    );
+    assert_eq!(notice.message.lines().count(), 3);
+    assert!(
+        notice.message.chars().all(|character| {
+            character == '\n' || !tau_proto::requires_visible_escape(character)
+        })
     );
     assert_no_message(&mut requesting_ui);
     assert_no_message(&mut observer);

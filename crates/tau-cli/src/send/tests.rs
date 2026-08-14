@@ -6,7 +6,8 @@ use tau_proto::{
     UiTreeNavigationTarget,
 };
 
-use super::{event_for_test_line, message_for_line, read_tree_result, run_send};
+use super::{event_for_test_line, message_for_line, read_tree_result, run_send, tree_stdout_text};
+use crate::test_support::TREE_PREVIEW_PARITY_NOTICE;
 use crate::ui_prompt::DEFAULT_AGENT_ROLE;
 
 const SESSION_ID: &str = "test-session";
@@ -170,7 +171,7 @@ fn headless_tree_result_reads_one_multiline_notice() {
             tau_proto::UnixMicros::now(),
             Event::HarnessNotice(tau_proto::HarnessNotice {
                 kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
-                message: "root\nfirst prompt\nsecond prompt".to_owned(),
+                message: TREE_PREVIEW_PARITY_NOTICE.to_owned(),
                 level: tau_proto::NoticeLevel::Info,
                 always_show: false,
             }),
@@ -178,9 +179,17 @@ fn headless_tree_result_reads_one_multiline_notice() {
         .expect("write tree result");
     harness_writer.flush().expect("flush tree result");
 
+    let result = read_tree_result(&mut reader).expect("read tree result");
+    assert_eq!(result, TREE_PREVIEW_PARITY_NOTICE);
+    let stdout = tree_stdout_text(&result);
     assert_eq!(
-        read_tree_result(&mut reader).expect("read tree result"),
-        "root\nfirst prompt\nsecond prompt"
+        stdout.as_bytes(),
+        format!("{TREE_PREVIEW_PARITY_NOTICE}\n").as_bytes()
+    );
+    assert!(
+        stdout
+            .chars()
+            .all(|character| character == '\n' || !character.is_control())
     );
 }
 

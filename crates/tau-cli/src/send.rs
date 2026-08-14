@@ -85,12 +85,18 @@ fn send_message(
         let (mut reader, mut writer) =
             crate::ui_client::connect_ui_client_until(&socket_path, "tau-dev-send", deadline)?;
         crate::ui_client::send_message(&mut writer, &message)?;
-        println!("{}", read_tree_result(&mut reader)?);
+        print!("{}", tree_stdout_text(&read_tree_result(&mut reader)?));
     } else {
         let mut writer = crate::ui_client::connect_ui_writer(&socket_path, "tau-dev-send")?;
         crate::ui_client::send_message(&mut writer, &message)?;
     }
     Ok(())
+}
+
+/// Formats one requester-directed tree result for unconditional headless
+/// output.
+fn tree_stdout_text(result: &str) -> String {
+    format!("{result}\n")
 }
 
 #[cfg(test)]

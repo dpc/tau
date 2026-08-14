@@ -36,17 +36,31 @@ pub fn format_extension_event(event: &Event) -> String {
     }
 }
 
-/// One-line preview of a session entry for `:tree` output.
+/// Renders one session entry for terminal-inert `:tree` presentation.
+///
+/// The preview selects the bounded source-scalar window before visibly
+/// encoding unsafe scalars and backslashes, so encoding cannot move the
+/// established truncation boundary or produce a partial escape.
 pub(crate) fn render_entry_preview(entry: &AgentEntry) -> String {
     let raw = tau_session_inspect::format_session_entry(entry);
-    let single_line: String = raw
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect();
-    if single_line.chars().count() > 60 {
-        let truncated: String = single_line.chars().take(60).collect();
-        format!("{truncated}…")
-    } else {
-        single_line
+    let mut scalars = raw.chars();
+    let mut preview = String::new();
+    for character in scalars.by_ref().take(60) {
+        match character {
+            '\n' => preview.push(' '),
+            '\\' => preview.push_str("\\\\"),
+            character if tau_proto::requires_visible_escape(character) => {
+                use std::fmt::Write as _;
+                let _ = write!(preview, "\\u{{{:04X}}}", character as u32);
+            }
+            character => preview.push(character),
+        }
     }
+    if scalars.next().is_some() {
+        preview.push('…');
+    }
+    preview
 }
+
+#[cfg(test)]
+mod tests;

@@ -1174,4 +1174,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;

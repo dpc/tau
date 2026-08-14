@@ -245,7 +245,9 @@ disconnect the extension, or fail required startup.
 
 UI tree inspection is a flat `ui_tree_request` input message from an attached
 socket UI. The harness preserves the existing session/agent validation, prompt
-anchor ordering, selected-head markers, previews, and diagnostic text, then
+anchor ordering, selected-head markers, and diagnostic text. It presents prompt
+previews under the exact terminal-inert encoding contract in
+[SPEC-tau-harness-session-state](SPEC-tau-harness-session-state.md), then
 returns exactly one requester-directed multiline `harness.notice` with the
 existing lines in their existing order. Neither the request nor result enters
 publication, interception, subscriptions, semantic persistence, or replay. The

@@ -242,6 +242,15 @@ nodes, and agent-message projections are not.
 Anchor previews use the raw canonical accepted prompt text, never the
 provider-only `<user>` projection described by
 [SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
+The harness selects the existing 60-scalar formatted-entry preview window from
+that canonical source before presentation encoding; the fixed `user: ` prefix
+consumes six scalars in this window. Within the selected window it flattens
+prompt LF to one ordinary space, doubles literal backslashes, and encodes every
+scalar selected by `tau_proto::requires_visible_escape` as an uppercase,
+minimum-four-digit ASCII `\u{XXXX}` escape. It preserves all other Unicode and
+appends `…` if and only if another source scalar exists. This transient
+encoding leaves the canonical journal and provider projection unchanged while
+giving interactive and headless clients the same terminal-inert notice.
 
 Live agent-message activation is runtime-only branch ownership. Navigation to a
 sibling is allowed but cannot acknowledge or scan an owed wake from the other

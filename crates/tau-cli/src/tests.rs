@@ -7863,29 +7863,28 @@ fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
 /// distinct lines, including anchor spacing and the selected-head marker.
 #[test]
 fn tree_notice_renders_multiline_result_without_reformatting() {
-    let (_term, handle, vt) = setup(80, 24);
+    let (_term, handle, vt) = setup(240, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    let expected = [
-        "    0   before first prompt (root)",
-        "    1   before prompt  user: first prompt",
-        "    2 * before prompt  user: second prompt",
-    ];
+    let expected = crate::test_support::TREE_PREVIEW_PARITY_NOTICE
+        .lines()
+        .collect::<Vec<_>>();
 
     renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
         kind: tau_proto::notice_kind::HARNESS_NOTICE.into(),
-        message: expected.join("\n"),
+        message: crate::test_support::TREE_PREVIEW_PARITY_NOTICE.into(),
         level: tau_proto::NoticeLevel::Info,
         always_show: false,
     }));
     sync(&handle);
 
-    let rows = vt.screen_text(80);
+    let rows = vt.screen_text(240);
     let mut previous_row = None;
-    for line in expected {
+    let mut rendered_tree_rows = Vec::new();
+    for line in &expected {
         let row = rows
             .iter()
             .position(|row| row.contains(line))
@@ -7895,7 +7894,20 @@ fn tree_notice_renders_multiline_result_without_reformatting() {
             "tree rows are out of order: {rows:?}"
         );
         previous_row = Some(row);
+        rendered_tree_rows.push(
+            rows[row]
+                .strip_prefix("□ ")
+                .unwrap_or(&rows[row])
+                .trim_end(),
+        );
     }
+    assert_eq!(rendered_tree_rows, expected);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("before first prompt") || row.contains("before prompt"))
+            .count(),
+        expected.len()
+    );
 }
 
 #[test]
