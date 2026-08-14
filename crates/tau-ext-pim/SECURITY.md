@@ -27,6 +27,23 @@ whenever provider pagination, lifecycle filters, cursor encoding, or page-size
 selection changes.
 
 
+## Google Calendar read diagnostics
+
+Google Calendar list/read failures and RSVP's preparatory GET retain at most the
+first 4 KiB of a non-success response body. Before control and whitespace
+cleanup, the backend uses credential-length bounded lookahead to exact-redact
+the active access token and configured custom API base, including matches that
+cross the retained-prefix cut. The resulting bounded diagnostic may reach tool
+errors and the Calendar audit log; success responses and post-dispatch write
+classification remain unchanged.
+
+Regression coverage must exercise the production list/read and RSVP paths,
+model-visible and audit sinks, repeated and overlapping credentials, and each
+credential crossing the 4 KiB cut. Revisit this boundary whenever Calendar
+request credentials, API-base selection, non-success body reads, diagnostic
+bounds/sanitization, or error sinks change.
+
+
 ## Google Calendar mutation outcomes
 
 Entering ureq's `send` or `call` method for the side-effecting

@@ -42,6 +42,22 @@ pub(crate) enum GoogleWriteError {
     OutcomeUnknown,
 }
 
+/// Effective Calendar API base and its optional diagnostic-secret role.
+struct GoogleApiBase<'a> {
+    /// Base URL used to build Calendar API requests.
+    effective: &'a str,
+    /// Configured custom base that diagnostics must redact.
+    custom: Option<&'a str>,
+}
+
+/// Exact request credentials and their bounded provider-error redaction rules.
+struct ErrorBodyRedaction<'a> {
+    /// Active bearer token bytes, when nonempty.
+    token: Option<&'a [u8]>,
+    /// Configured custom Calendar API base bytes, when nonempty.
+    endpoint: Option<&'a [u8]>,
+}
+
 /// One Google calendar visible to the account.
 pub struct GoogleCalendar {
     /// Calendar id used in tool and API calls.
@@ -148,6 +164,87 @@ enum GoogleBoundary {
     },
 }
 
+impl<'a> ErrorBodyRedaction<'a> {
+    fn new(access_token: &'a str, custom_api_base: Option<&'a str>) -> Self {
+        Self {
+            token: (!access_token.is_empty()).then_some(access_token.as_bytes()),
+            endpoint: custom_api_base
+                .filter(|api_base| !api_base.is_empty())
+                .map(str::as_bytes),
+        }
+    }
+
+    fn read_and_format(&self, reader: impl Read) -> String {
+        let mut bytes = Vec::new();
+        let _ = reader
+            .take(self.read_limit() as u64)
+            .read_to_end(&mut bytes);
+        self.format(&bytes)
+    }
+
+    fn read_limit(&self) -> usize {
+        let longest_secret = self
+            .token
+            .into_iter()
+            .chain(self.endpoint)
+            .map(<[u8]>::len)
+            .max()
+            .unwrap_or(0);
+        MAX_ERROR_BODY_BYTES.saturating_add(longest_secret.saturating_sub(1))
+    }
+
+    fn format(&self, bytes: &[u8]) -> String {
+        let mut text = String::from_utf8_lossy(&self.redact_prefix(bytes)).into_owned();
+        truncate_utf8_bytes(&mut text, MAX_ERROR_BODY_BYTES);
+        sanitize_error_text(&text)
+    }
+
+    fn redact_prefix(&self, bytes: &[u8]) -> Vec<u8> {
+        let source_limit = bytes.len().min(MAX_ERROR_BODY_BYTES);
+        let mut redacted = Vec::with_capacity(source_limit);
+        let mut index = 0;
+        while index < source_limit {
+            let Some((mut end, mut includes_token)) = self.match_end(bytes, index) else {
+                redacted.push(bytes[index]);
+                index += 1;
+                continue;
+            };
+            let mut probe = index + 1;
+            while probe < end.min(source_limit) {
+                if let Some((next_end, next_includes_token)) = self.match_end(bytes, probe) {
+                    end = end.max(next_end);
+                    includes_token |= next_includes_token;
+                }
+                probe += 1;
+            }
+            redacted.extend_from_slice(if includes_token {
+                b"<redacted>"
+            } else {
+                b"<redacted-endpoint>"
+            });
+            index = end;
+        }
+        redacted
+    }
+
+    fn match_end(&self, bytes: &[u8], index: usize) -> Option<(usize, bool)> {
+        let token_end = self
+            .token
+            .filter(|secret| bytes[index..].starts_with(secret))
+            .map(|secret| index + secret.len());
+        let endpoint_end = self
+            .endpoint
+            .filter(|secret| bytes[index..].starts_with(secret))
+            .map(|secret| index + secret.len());
+        match (token_end, endpoint_end) {
+            (Some(token_end), Some(endpoint_end)) => Some((token_end.max(endpoint_end), true)),
+            (Some(token_end), None) => Some((token_end, true)),
+            (None, Some(endpoint_end)) => Some((endpoint_end, false)),
+            (None, None) => None,
+        }
+    }
+}
+
 impl GoogleBackend {
     /// Build a backend using the extension-authorized secret set.
     pub fn new(secrets: BTreeMap<String, SecretValue>) -> Self {
@@ -196,8 +293,8 @@ impl GoogleBackend {
     ) -> Result<Vec<GoogleCalendar>, String> {
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
-        let url = format!("{api_base}/users/me/calendarList");
-        let json = self.get_json(&url, &token)?;
+        let url = format!("{}/users/me/calendarList", api_base.effective);
+        let json = self.get_json(&url, &token, api_base.custom)?;
         let calendars = json
             .get("items")
             .and_then(Value::as_array)
@@ -246,11 +343,12 @@ impl GoogleBackend {
         let api_base = api_base(account)?;
         let query = event_list_query(&query)?;
         let url = format!(
-            "{api_base}/calendars/{}/events?{}",
+            "{}/calendars/{}/events?{}",
+            api_base.effective,
             encode_path_segment(calendar_id),
             query
         );
-        let json = self.get_json(&url, &token)?;
+        let json = self.get_json(&url, &token, api_base.custom)?;
         let next_cursor = google_next_cursor(&json)?;
         let events = json
             .get("items")
@@ -277,11 +375,12 @@ impl GoogleBackend {
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
         let url = format!(
-            "{api_base}/calendars/{}/events/{}",
+            "{}/calendars/{}/events/{}",
+            api_base.effective,
             encode_path_segment(calendar_id),
             encode_path_segment(event_id)
         );
-        parse_event(&self.get_json(&url, &token)?).ok_or_else(|| {
+        parse_event(&self.get_json(&url, &token, api_base.custom)?).ok_or_else(|| {
             format!("Google event `{event_id}` response was missing required fields")
         })
     }
@@ -315,7 +414,8 @@ impl GoogleBackend {
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let url = format!(
-            "{api_base}/calendars/{}/events?{}",
+            "{}/calendars/{}/events?{}",
+            api_base.effective,
             encode_path_segment(calendar_id),
             query.finish()
         );
@@ -364,7 +464,8 @@ impl GoogleBackend {
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let url = format!(
-            "{api_base}/calendars/{}/events/{}?{}",
+            "{}/calendars/{}/events/{}?{}",
+            api_base.effective,
             encode_path_segment(calendar_id),
             encode_path_segment(event_id),
             query.finish()
@@ -405,7 +506,8 @@ impl GoogleBackend {
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let url = format!(
-            "{api_base}/calendars/{}/events/{}?{}",
+            "{}/calendars/{}/events/{}?{}",
+            api_base.effective,
             encode_path_segment(calendar_id),
             encode_path_segment(event_id),
             query.finish()
@@ -462,12 +564,13 @@ impl GoogleBackend {
             .map_err(GoogleWriteError::NotDispatched)?;
         let api_base = api_base(account).map_err(GoogleWriteError::NotDispatched)?;
         let event_url = format!(
-            "{api_base}/calendars/{}/events/{}",
+            "{}/calendars/{}/events/{}",
+            api_base.effective,
             encode_path_segment(calendar_id),
             encode_path_segment(event_id)
         );
         let current = self
-            .get_json(&event_url, &token)
+            .get_json(&event_url, &token, api_base.custom)
             .map_err(GoogleWriteError::NotDispatched)?;
         let patch = attendee_response_patch(&current, response_status)
             .map_err(GoogleWriteError::NotDispatched)?;
@@ -489,7 +592,13 @@ impl GoogleBackend {
             .access_token(&account.id, config, stored_refresh_token, message)
     }
 
-    fn get_json(&self, url: &str, access_token: &str) -> Result<Value, String> {
+    fn get_json(
+        &self,
+        url: &str,
+        access_token: &str,
+        custom_api_base: Option<&str>,
+    ) -> Result<Value, String> {
+        let redaction = ErrorBodyRedaction::new(access_token, custom_api_base);
         let mut response = self
             .agent
             .get(url)
@@ -497,7 +606,7 @@ impl GoogleBackend {
             .header("Accept", "application/json")
             .call()
             .map_err(|error| format!("Google Calendar API request failed: {error}"))?;
-        self.parse_json_response(&mut response)
+        self.parse_json_response(&mut response, &redaction)
     }
 
     fn post_json_write(
@@ -563,12 +672,13 @@ impl GoogleBackend {
     fn parse_json_response(
         &self,
         response: &mut ureq::http::Response<ureq::Body>,
+        redaction: &ErrorBodyRedaction<'_>,
     ) -> Result<Value, String> {
         if !response.status().is_success() {
             return Err(format!(
                 "Google Calendar API returned HTTP {}: {}",
                 response.status().as_u16(),
-                read_error_body(response)
+                read_error_body(response, redaction)
             ));
         }
         let text = read_limited_body(response, "Google Calendar API response")?;
@@ -647,14 +757,17 @@ fn google_oauth_config(account: &ValidatedAccount) -> Result<GoogleOauthSecretCo
     })
 }
 
-fn api_base(account: &ValidatedAccount) -> Result<&str, String> {
+fn api_base(account: &ValidatedAccount) -> Result<GoogleApiBase<'_>, String> {
     let Some(ValidatedBackendConfig::Google { api_base, .. }) = &account.backend else {
         return Err(format!(
             "calendar account `{}` is not a google account",
             account.id
         ));
     };
-    Ok(api_base.as_deref().unwrap_or(GOOGLE_CALENDAR_API_BASE))
+    Ok(GoogleApiBase {
+        effective: api_base.as_deref().unwrap_or(GOOGLE_CALENDAR_API_BASE),
+        custom: api_base.as_deref(),
+    })
 }
 
 fn allowed_google_calendar(
@@ -1062,17 +1175,22 @@ fn read_limited_body(
     String::from_utf8(bytes).map_err(|_| format!("{context} was not valid UTF-8"))
 }
 
-fn read_error_body(response: &mut ureq::http::Response<ureq::Body>) -> String {
-    let mut bytes = Vec::new();
-    let _ = response
-        .body_mut()
-        .as_reader()
-        .take(MAX_ERROR_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut bytes);
-    if MAX_ERROR_BODY_BYTES < bytes.len() {
-        bytes.truncate(MAX_ERROR_BODY_BYTES);
+fn read_error_body(
+    response: &mut ureq::http::Response<ureq::Body>,
+    redaction: &ErrorBodyRedaction<'_>,
+) -> String {
+    redaction.read_and_format(response.body_mut().as_reader())
+}
+
+fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
     }
-    sanitize_error_text(&String::from_utf8_lossy(&bytes))
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
 }
 
 fn sanitize_error_text(value: &str) -> String {

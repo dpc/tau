@@ -31,6 +31,13 @@ cursor reconstruction; tool tests cover schemas; model-visible output tests
 cover headers and row shape. Keep these layers deterministic and use loopback
 feeds or scripted provider pages rather than live accounts.
 
+Google Calendar non-success read tests use loopback responses to cover list,
+event-read, and RSVP-preflight production paths through tool errors and Calendar
+audit output. Focused provider tests pin the 4 KiB retained response prefix,
+credential-length bounded lookahead, exact active-token/custom-base redaction
+before cleanup, repeated/overlapping matches, and both credentials crossing the
+prefix cut.
+
 Google Calendar mutation tests use deterministic loopback HTTP servers through
 the real runtime and backend. They cover the pre-dispatch/unknown-outcome cut,
 all mutation methods, response body/status/parser failures, complete success,

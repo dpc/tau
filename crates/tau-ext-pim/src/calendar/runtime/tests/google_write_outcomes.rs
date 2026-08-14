@@ -4,6 +4,72 @@ use std::thread;
 
 use super::*;
 
+/// Calendar list/read failures redact the request bearer and custom endpoint at
+/// the provider boundary before tool errors and audit records retain them.
+#[test]
+fn google_read_failures_redact_request_credentials_from_all_sinks() {
+    let cases = [
+        command_args("list_calendars", vec![]),
+        command_args(
+            "list_events",
+            vec![("calendar", CborValue::Text("google/primary".to_owned()))],
+        ),
+        command_args(
+            "read_event",
+            vec![
+                ("calendar", CborValue::Text("google/primary".to_owned())),
+                ("event_id", CborValue::Text("evt".to_owned())),
+            ],
+        ),
+    ];
+
+    for args in cases {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let (api_base, server) = reflecting_error_server();
+        let engine = google_network_test_engine(temp.path(), &api_base, true);
+
+        let result = dispatch_test(&engine, args);
+        let error = calendar_error_message(&result);
+        assert_redacted_read_error(&error, &api_base);
+        let log = engine.action_log_last(10).expect("calendar log");
+        assert_redacted_read_error(&log, &api_base);
+
+        let request = server.join().expect("server");
+        assert!(request.starts_with(b"GET "), "{request:?}");
+        assert!(
+            String::from_utf8_lossy(&request)
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-access-token"),
+            "{request:?}"
+        );
+    }
+}
+
+/// RSVP's preparatory GET is a read-side failure and must redact credentials
+/// without changing its pre-dispatch classification or approval recovery.
+#[test]
+fn rsvp_preflight_error_redacts_request_credentials() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let (api_base, server) = reflecting_error_server();
+    let engine = google_network_test_engine(temp.path(), &api_base, true);
+    let id = pending_rsvp(&engine);
+
+    let error = engine
+        .action_change_approve(&id)
+        .expect_err("preflight response fails");
+
+    assert_redacted_read_error(&error, &api_base);
+    assert!(engine.state.change_pending_exists(&id).expect("pending"));
+    assert!(
+        !engine
+            .state
+            .change_sending_exists(&id)
+            .expect("not sending")
+    );
+    let request = server.join().expect("server");
+    assert!(request.starts_with(b"GET "), "{request:?}");
+}
+
 /// A connection loss after Google accepts a request leaves the approval in
 /// `sending`, and a second approval cannot dispatch the mutation again.
 #[test]
@@ -350,6 +416,35 @@ fn one_request_server(response: Option<Vec<u8>>) -> (String, thread::JoinHandle<
         request
     });
     (api_base, server)
+}
+
+fn reflecting_error_server() -> (String, thread::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let api_base = format!("http://{}", listener.local_addr().expect("address"));
+    let response_api_base = api_base.clone();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let request = read_http_request(&mut stream);
+        let body = format!("ordinary diagnostic test-access-token endpoint={response_api_base}");
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+        request
+    });
+    (api_base, server)
+}
+
+fn assert_redacted_read_error(error: &str, api_base: &str) {
+    assert!(error.contains("HTTP 400"), "{error}");
+    assert!(error.contains("ordinary diagnostic"), "{error}");
+    assert!(error.contains("<redacted>"), "{error}");
+    assert!(error.contains("<redacted-endpoint>"), "{error}");
+    assert!(!error.contains("test-access-token"), "{error}");
+    assert!(!error.contains(api_base), "{error}");
 }
 
 fn scripted_server(responses: Vec<Option<Vec<u8>>>) -> (String, thread::JoinHandle<Vec<Vec<u8>>>) {

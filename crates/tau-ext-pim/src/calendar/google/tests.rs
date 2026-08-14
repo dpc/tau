@@ -1,4 +1,68 @@
+use std::io::Cursor;
+
 use super::*;
+
+/// Provider diagnostics redact every exact credential echo while preserving
+/// ordinary text and the existing final body bound.
+#[test]
+fn error_body_formatter_redacts_repeated_credentials_before_bounding() {
+    let token = "test-access-token";
+    let endpoint = "http://127.0.0.1:1234/private";
+    let body =
+        format!("ordinary {token} middle {endpoint} repeated {token} and {endpoint}\nsecond line");
+    let redaction = ErrorBodyRedaction::new(token, Some(endpoint));
+
+    let formatted = redaction.format(body.as_bytes());
+
+    assert_eq!(
+        formatted,
+        "ordinary <redacted> middle <redacted-endpoint> repeated <redacted> and <redacted-endpoint> second line"
+    );
+    assert!(!formatted.contains(token), "{formatted}");
+    assert!(!formatted.contains(endpoint), "{formatted}");
+    assert!(formatted.len() <= MAX_ERROR_BODY_BYTES);
+}
+
+/// A token or custom endpoint that begins inside the retained 4 KiB source
+/// prefix must be fully recognized even when its tail lies beyond that cut.
+#[test]
+fn error_body_formatter_redacts_each_credential_across_the_source_cut() {
+    let token = "test-access-token";
+    let endpoint = "http://127.0.0.1:1234/private";
+    let redaction = ErrorBodyRedaction::new(token, Some(endpoint));
+    for (secret, expected_marker) in [(token, "<redacted>"), (endpoint, "<redacted-endpoint>")] {
+        let prefix_len = MAX_ERROR_BODY_BYTES - secret.len() + 1;
+        let body = format!("{}{secret} trailing diagnostic", "x".repeat(prefix_len));
+        let formatted = redaction.read_and_format(Cursor::new(body));
+
+        assert!(!formatted.contains(secret), "{formatted}");
+        assert!(formatted.contains(expected_marker), "{formatted}");
+        assert!(formatted.len() <= MAX_ERROR_BODY_BYTES);
+    }
+}
+
+/// Overlapping exact credentials form one redacted range, regardless of which
+/// value starts first or whether both begin at the same byte.
+#[test]
+fn error_body_formatter_coalesces_overlapping_credentials() {
+    for (token, endpoint, body) in [
+        (
+            "https",
+            "https://private.example",
+            "https://private.example",
+        ),
+        ("abcde", "cdefg", "abcdefg"),
+        ("cdefg", "abcde", "abcdefg"),
+    ] {
+        let redaction = ErrorBodyRedaction::new(token, Some(endpoint));
+
+        let formatted = redaction.format(body.as_bytes());
+
+        assert_eq!(formatted, "<redacted>");
+        assert!(!formatted.contains(token), "{formatted}");
+        assert!(!formatted.contains(endpoint), "{formatted}");
+    }
+}
 
 /// Google list reads must explicitly choose deleted-event visibility instead of
 /// inheriting a provider default that could change or be bypassed by test data.
