@@ -197,12 +197,13 @@ fn append_failure_can_leave_partial_or_complete_bytes() {
 #[test]
 fn list_files_rejects_directories_larger_than_extension_data_limit() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    for index in 0..=MAX_EXTENSION_DATA_LIST_ENTRIES {
+    let test_limit = 3;
+    for index in 0..=test_limit {
         std::fs::write(tempdir.path().join(format!("entry-{index}")), b"")
             .expect("create list entry");
     }
 
-    let err = run_extension_data_list_files(tempdir.path(), String::new())
+    let err = list_extension_data_entries_with_limit(tempdir.path(), tempdir.path(), test_limit)
         .expect_err("oversized list must fail");
 
     assert_eq!(err.kind, tau_proto::ExtensionDataErrorKind::QuotaExceeded);

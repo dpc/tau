@@ -213,14 +213,22 @@ pub(super) fn list_extension_data_entries(
     root: &Path,
     dir: &Path,
 ) -> Result<Vec<tau_proto::ExtensionDataEntry>, ExtensionDataError> {
+    list_extension_data_entries_with_limit(root, dir, MAX_EXTENSION_DATA_LIST_ENTRIES)
+}
+
+fn list_extension_data_entries_with_limit(
+    root: &Path,
+    dir: &Path,
+    max_entries: usize,
+) -> Result<Vec<tau_proto::ExtensionDataEntry>, ExtensionDataError> {
     let entries = std::fs::read_dir(dir).map_err(|error| {
         ExtensionDataError::io(format!("failed to list `{}`", dir.display()), error)
     })?;
     let mut out = Vec::new();
     for (seen_entries, entry) in entries.enumerate() {
-        if MAX_EXTENSION_DATA_LIST_ENTRIES <= seen_entries {
+        if max_entries <= seen_entries {
             return Err(quota_exceeded(format!(
-                "directory `{}` has more than {MAX_EXTENSION_DATA_LIST_ENTRIES} entries",
+                "directory `{}` has more than {max_entries} entries",
                 dir.display()
             )));
         }
