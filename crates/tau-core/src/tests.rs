@@ -780,7 +780,8 @@ fn agent_checkpoint_listing_exposes_unrepairable_summary_state() {
 }
 
 /// Foreground repair must reject a huge declared frame before allocating its
-/// payload, even when the corrupt journal itself contains only the header.
+/// payload, even when the corrupt journal itself contains only the header. An
+/// explicit deadline isolates frame validation from the elapsed-time budget.
 #[test]
 fn agent_checkpoint_repair_rejects_declared_frame_over_budget() {
     let agents_dir = temp_dir("agent-checkpoint-frame-budget");
@@ -793,7 +794,11 @@ fn agent_checkpoint_repair_rejects_declared_frame_over_budget() {
     )
     .expect("oversized frame header");
 
-    let entries = crate::list_agent_entries(&agents_dir).expect("bounded list");
+    let entries = crate::agent_checkpoint::list_agent_entries_until_for_test(
+        &agents_dir,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .expect("bounded list");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].status, crate::AgentListStatus::RepairFailed);
     let _ = std::fs::remove_dir_all(agents_dir);
