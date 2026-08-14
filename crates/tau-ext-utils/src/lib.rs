@@ -5,13 +5,18 @@
 //! tool and prompt facts; papercuts append independent diagnostic JSONL records
 //! through harness-managed per-instance storage.
 
+mod daily_schedule;
+mod host_timezone;
 #[cfg(test)]
 mod tests;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use daily_schedule::{DailySchedule, WallClockZone};
+use host_timezone::{HostTimezoneProvider, SystemHostTimezoneProvider};
+use jiff::tz::TimeZone;
 use tau_client::{
     ClientHandle, ClientResult, ExtensionBuilder, ExtensionDataClient, ManualExtensionRuntime,
     ManualRuntimeInput, TauExtension, TauExtensionRunner,
@@ -45,7 +50,9 @@ const MIN_DELAY_SECONDS: u64 = 10;
 const MIN_INTERVAL_SECONDS: u64 = 60;
 const MAX_DELAY_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 const MAX_LIST_TIMERS: usize = 64;
-const DEFAULT_WAIT: Duration = Duration::from_secs(60);
+/// Maximum wait also bounding live host-timezone polling cadence.
+const MAX_TIMER_WAIT: Duration = Duration::from_secs(60);
+const HOST_TIMEZONE_REFRESH_SECONDS: u64 = 60;
 
 /// Run the extension on stdin/stdout.
 ///
@@ -111,6 +118,12 @@ struct TimerRuntime {
     handle: Option<ClientHandle>,
     /// Active timers keyed by `(agent_id, timer_id)`.
     timers: HashMap<TimerKey, TimerEntry>,
+    /// Source used to read one host-local timezone snapshot per refresh.
+    timezone_provider: Box<dyn HostTimezoneProvider>,
+    /// Last successfully read host-local timezone and rules.
+    local_timezone: Option<TimeZone>,
+    /// Monotonic instant of the last host-timezone refresh attempt.
+    timezone_checked_at: Option<Instant>,
     /// Replayed live timer invocations awaiting their terminal success/error.
     pending_invocations: HashMap<String, PendingInvocation>,
     /// Agents whose restore boundary succeeded and may receive timer prompts.
@@ -314,14 +327,84 @@ struct TimerEntry {
     agent_id: AgentId,
     /// Stable path-safe timer id.
     timer_id: String,
-    /// Next due timestamp in Unix microseconds.
-    next_fire_at: UnixMicros,
-    /// Optional recurrence interval.
-    interval_seconds: Option<u64>,
+    /// One-shot, fixed-interval, or daily timing state.
+    recurrence: TimerRecurrence,
     /// Internal prompt message to submit when the timer fires.
     message: String,
     /// Number of prompt submissions this timer has already fired.
     fired_count: u64,
+}
+
+impl TimerEntry {
+    /// Return the current due timestamp, or `None` while timezone recovery
+    /// waits.
+    fn next_fire_at(&self) -> Option<UnixMicros> {
+        match &self.recurrence {
+            TimerRecurrence::OneShot { next_fire_at }
+            | TimerRecurrence::Interval { next_fire_at, .. } => Some(*next_fire_at),
+            TimerRecurrence::Daily {
+                deadline: DailyDeadline::At(next_fire_at),
+                ..
+            } => Some(*next_fire_at),
+            TimerRecurrence::Daily {
+                deadline: DailyDeadline::AwaitingTimezone,
+                ..
+            } => None,
+        }
+    }
+
+    /// Replace the resolved due timestamp for recurring timing state.
+    fn set_next_fire_at(&mut self, next: UnixMicros) {
+        match &mut self.recurrence {
+            TimerRecurrence::OneShot { next_fire_at }
+            | TimerRecurrence::Interval { next_fire_at, .. } => *next_fire_at = next,
+            TimerRecurrence::Daily { deadline, .. } => *deadline = DailyDeadline::At(next),
+        }
+    }
+}
+
+/// Recurrence behavior retained by an active timer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TimerRecurrence {
+    /// Remove the timer at this first firing.
+    OneShot {
+        /// Absolute due timestamp.
+        next_fire_at: UnixMicros,
+    },
+    /// Repeat after a fixed number of seconds.
+    Interval {
+        /// Absolute due timestamp.
+        next_fire_at: UnixMicros,
+        /// Fixed recurrence length.
+        interval_seconds: u64,
+    },
+    /// Repeat at one UTC or host-local wall-clock time each day.
+    Daily {
+        /// Validated daily wall-clock request.
+        schedule: DailySchedule,
+        /// Latest schedule or canonical prompt timestamp already accounted for.
+        progress_floor: UnixMicros,
+        /// Current resolved deadline or pending host-timezone recovery.
+        deadline: DailyDeadline,
+    },
+}
+
+/// Deadline state for a daily timer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DailyDeadline {
+    /// Timer has this absolute next firing.
+    At(UnixMicros),
+    /// Accepted replay state is waiting for a usable local timezone.
+    AwaitingTimezone,
+}
+
+/// Source of one successfully recorded schedule mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduleMutationSource {
+    /// Live tool handling may reject a currently unresolvable local schedule.
+    Live,
+    /// Replay must retain an accepted local schedule for later recovery.
+    Replay,
 }
 
 /// Replayed timer tool invocation awaiting a terminal result.
@@ -333,6 +416,8 @@ struct PendingInvocation {
     call_id: String,
     /// Original tool arguments copied from `tool.started`.
     arguments: CborValue,
+    /// Recorded start timestamp used as the stable schedule anchor.
+    started_at: UnixMicros,
 }
 
 /// Parsed timer tool action.
@@ -354,12 +439,24 @@ enum TimerAction {
 struct ScheduleArgs {
     /// Stable path-safe timer id.
     timer_id: String,
-    /// Initial delay before the first firing.
-    delay_seconds: u64,
-    /// Optional recurrence interval after each firing.
-    interval_seconds: Option<u64>,
+    /// Relative or daily timing mode.
+    timing: ScheduleTiming,
     /// Internal prompt body to submit when due.
     message: String,
+}
+
+/// Validated timing mode for a schedule action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ScheduleTiming {
+    /// Initial delay with optional fixed recurrence.
+    Relative {
+        /// Initial delay before the first firing.
+        delay_seconds: u64,
+        /// Optional recurrence interval after each firing.
+        interval_seconds: Option<u64>,
+    },
+    /// Daily wall-clock recurrence.
+    Daily(DailySchedule),
 }
 
 /// Successful live timer result and its terminal-only display projection.
@@ -423,6 +520,9 @@ impl TimerRuntime {
         Self {
             handle: Some(handle),
             timers: HashMap::new(),
+            timezone_provider: Box::new(SystemHostTimezoneProvider),
+            local_timezone: None,
+            timezone_checked_at: None,
             pending_invocations: HashMap::new(),
             replay_complete_agents: HashSet::new(),
             reported_timer_agents: HashSet::new(),
@@ -469,9 +569,11 @@ impl TimerRuntime {
         self.timers
             .values()
             .filter(|timer| self.replay_complete_agents.contains(&timer.agent_id))
-            .map(|timer| duration_until(timer.next_fire_at, now))
+            .filter_map(|timer| timer.next_fire_at())
+            .map(|deadline| duration_until(deadline, now))
             .min()
-            .unwrap_or(DEFAULT_WAIT)
+            .unwrap_or(MAX_TIMER_WAIT)
+            .min(MAX_TIMER_WAIT)
     }
 
     fn fire_due_now(&mut self) -> ClientResult<()> {
@@ -531,14 +633,30 @@ impl TimerRuntime {
     }
 
     fn collect_due(&mut self, now: UnixMicros) -> Vec<FireRecord> {
-        let mut due_keys: Vec<_> = self
+        let mut due_keys: HashSet<_> = self
             .timers
             .iter()
             .filter(|(_, timer)| {
-                self.replay_complete_agents.contains(&timer.agent_id) && timer.next_fire_at <= now
+                self.replay_complete_agents.contains(&timer.agent_id)
+                    && timer
+                        .next_fire_at()
+                        .is_some_and(|next_fire_at| next_fire_at <= now)
             })
             .map(|(key, _)| key.clone())
             .collect();
+        self.refresh_local_daily_deadlines(&due_keys);
+        due_keys.extend(
+            self.timers
+                .iter()
+                .filter(|(_, timer)| {
+                    self.replay_complete_agents.contains(&timer.agent_id)
+                        && timer
+                            .next_fire_at()
+                            .is_some_and(|next_fire_at| next_fire_at <= now)
+                })
+                .map(|(key, _)| key.clone()),
+        );
+        let mut due_keys: Vec<_> = due_keys.into_iter().collect();
         due_keys.sort_by(|a, b| {
             a.agent_id
                 .as_ref()
@@ -555,16 +673,51 @@ impl TimerRuntime {
             let ctx_id = timer_ctx_id(&timer.timer_id, timer.fired_count);
             let mut prompt = format!("Timer `{}` fired: {}", timer.timer_id, timer.message);
             use std::fmt::Write as _;
-            if let Some(interval) = timer.interval_seconds {
-                let missed = missed_intervals(timer.next_fire_at, now, interval);
+            let local_timezone = self.local_timezone.as_ref();
+            let advance = match &mut timer.recurrence {
+                TimerRecurrence::OneShot { .. } => None,
+                TimerRecurrence::Interval {
+                    next_fire_at,
+                    interval_seconds,
+                } => {
+                    let missed = missed_intervals(*next_fire_at, now, *interval_seconds);
+                    Some((
+                        add_seconds(*next_fire_at, interval_seconds.saturating_mul(missed)),
+                        missed,
+                    ))
+                }
+                TimerRecurrence::Daily {
+                    schedule,
+                    progress_floor,
+                    deadline: DailyDeadline::At(next_fire_at),
+                } => match schedule.advance_past(*next_fire_at, now, local_timezone) {
+                    Ok(advance) => Some(advance),
+                    Err(error) => {
+                        tracing::warn!(
+                            timer_id = timer.timer_id,
+                            %error,
+                            "daily timer could not resolve its next wall-clock occurrence"
+                        );
+                        self.timers.insert(key, timer);
+                        continue;
+                    }
+                }
+                .inspect(|_| {
+                    *progress_floor = now;
+                }),
+                TimerRecurrence::Daily {
+                    deadline: DailyDeadline::AwaitingTimezone,
+                    ..
+                } => None,
+            };
+            if let Some((next_fire_at, missed)) = advance {
                 if 1 < missed {
                     let _ = write!(
                         &mut prompt,
                         "\n\nCoalesced {missed} missed scheduled firings while Tau was unavailable."
                     );
                 }
-                timer.next_fire_at =
-                    add_seconds(timer.next_fire_at, interval.saturating_mul(missed));
+                timer.set_next_fire_at(next_fire_at);
                 self.timers.insert(key.clone(), timer.clone());
             }
             fires.push(FireRecord {
@@ -577,7 +730,75 @@ impl TimerRuntime {
         fires
     }
 
-    fn handle_started_replay(&mut self, started: &ToolStarted) {
+    /// Recalculate future local deadlines from one cadence-bounded host sample.
+    fn refresh_local_daily_deadlines(&mut self, due: &HashSet<TimerKey>) {
+        let has_active_local = self.timers.values().any(|timer| {
+            self.replay_complete_agents.contains(&timer.agent_id)
+                && matches!(
+                    &timer.recurrence,
+                    TimerRecurrence::Daily { schedule, .. } if !schedule.is_utc()
+                )
+        });
+        if !has_active_local || !self.refresh_host_timezone() {
+            return;
+        }
+        let local_timezone = self.local_timezone.as_ref();
+        for timer in self.timers.values_mut() {
+            let key = TimerKey {
+                agent_id: timer.agent_id.clone(),
+                timer_id: timer.timer_id.clone(),
+            };
+            if due.contains(&key) || !self.replay_complete_agents.contains(&timer.agent_id) {
+                continue;
+            }
+            let TimerRecurrence::Daily {
+                schedule,
+                progress_floor,
+                deadline,
+            } = &mut timer.recurrence
+            else {
+                continue;
+            };
+            if schedule.is_utc() {
+                continue;
+            }
+            match schedule.next_after(*progress_floor, local_timezone) {
+                Ok(next_fire_at) => {
+                    *deadline = DailyDeadline::At(next_fire_at);
+                }
+                Err(error) => tracing::warn!(
+                    timer_id = timer.timer_id,
+                    %error,
+                    "daily timer could not follow the changed host local timezone"
+                ),
+            }
+        }
+    }
+
+    /// Refresh the runtime-owned host timezone on a monotonic one-minute
+    /// cadence.
+    fn refresh_host_timezone(&mut self) -> bool {
+        let now = Instant::now();
+        let due = self
+            .timezone_checked_at
+            .is_none_or(|checked| HOST_TIMEZONE_REFRESH_SECONDS <= checked.elapsed().as_secs());
+        if !due {
+            return false;
+        }
+        self.timezone_checked_at = Some(now);
+        match self.timezone_provider.current_timezone() {
+            Ok(timezone) => {
+                self.local_timezone = Some(timezone);
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "host local timezone refresh failed");
+                false
+            }
+        }
+    }
+
+    fn handle_started_replay(&mut self, started: &ToolStarted, recorded_at: Option<UnixMicros>) {
         if !self.is_timer_tool(&started.tool_name) {
             return;
         }
@@ -587,11 +808,12 @@ impl TimerRuntime {
                 agent_id: started.agent_id.clone(),
                 call_id: started.call_id.to_string(),
                 arguments: started.arguments.clone(),
+                started_at: recorded_at.unwrap_or_else(UnixMicros::now),
             },
         );
     }
 
-    fn handle_result_replay(&mut self, result: &ToolResult, now: UnixMicros) {
+    fn handle_result_replay(&mut self, result: &ToolResult) {
         if !self.is_timer_tool(&result.tool_name) || result.kind != ToolResultKind::Final {
             return;
         }
@@ -599,7 +821,7 @@ impl TimerRuntime {
         let Some(pending) = self.pending_invocations.remove(&call_id) else {
             return;
         };
-        let _ = self.apply_successful_invocation(&pending, now);
+        let _ = self.apply_successful_invocation(&pending, ScheduleMutationSource::Replay);
     }
 
     fn handle_error_replay(&mut self, call_id: &str) {
@@ -625,12 +847,45 @@ impl TimerRuntime {
             return;
         };
         timer.fired_count = timer.fired_count.max(fired_count);
-        if let Some(interval) = timer.interval_seconds {
-            let base = recorded_at.unwrap_or(timer.next_fire_at);
-            while timer.next_fire_at <= base {
-                timer.next_fire_at = add_seconds(timer.next_fire_at, interval);
+        let base = recorded_at
+            .or_else(|| timer.next_fire_at())
+            .unwrap_or_else(UnixMicros::now);
+        match &mut timer.recurrence {
+            TimerRecurrence::OneShot { .. } => {}
+            TimerRecurrence::Interval {
+                next_fire_at,
+                interval_seconds,
+            } => {
+                while *next_fire_at <= base {
+                    *next_fire_at = add_seconds(*next_fire_at, *interval_seconds);
+                }
+                self.timers.insert(key, timer);
             }
-            self.timers.insert(key, timer);
+            TimerRecurrence::Daily {
+                schedule,
+                progress_floor,
+                deadline,
+            } => {
+                *progress_floor = if *progress_floor < base {
+                    base
+                } else {
+                    *progress_floor
+                };
+                match schedule.next_after(*progress_floor, self.local_timezone.as_ref()) {
+                    Ok(next_fire_at) => {
+                        *deadline = DailyDeadline::At(next_fire_at);
+                    }
+                    Err(error) => {
+                        *deadline = DailyDeadline::AwaitingTimezone;
+                        tracing::warn!(
+                            timer_id = timer.timer_id,
+                            %error,
+                            "replayed daily timer retained pending timezone recovery"
+                        );
+                    }
+                }
+                self.timers.insert(key, timer);
+            }
         }
     }
 
@@ -698,11 +953,12 @@ impl TimerRuntime {
             agent_id: invoke.agent_id.clone(),
             call_id: invoke.call_id.to_string(),
             arguments: invoke.arguments.clone(),
+            started_at: now,
         };
         let action = parse_action(&pending.arguments, &pending.call_id)?;
         let display_args = timer_action_display_args(&action);
         let TimerActionResult { result, outcome } =
-            self.apply_timer_action(&pending.agent_id, action, now)?;
+            self.apply_timer_action(&pending.agent_id, action, now, ScheduleMutationSource::Live)?;
         self.sync_timer_indicators_for(HashSet::from([pending.agent_id.clone()]))
             .map_err(|error| error.to_string())?;
         Ok(TimerToolCompletion {
@@ -750,10 +1006,10 @@ impl TimerRuntime {
     fn apply_successful_invocation(
         &mut self,
         pending: &PendingInvocation,
-        now: UnixMicros,
+        source: ScheduleMutationSource,
     ) -> Result<CborValue, String> {
         let action = parse_action(&pending.arguments, &pending.call_id)?;
-        self.apply_timer_action(&pending.agent_id, action, now)
+        self.apply_timer_action(&pending.agent_id, action, pending.started_at, source)
             .map(|result| result.result)
     }
 
@@ -762,10 +1018,11 @@ impl TimerRuntime {
         agent_id: &AgentId,
         action: TimerAction,
         now: UnixMicros,
+        source: ScheduleMutationSource,
     ) -> Result<TimerActionResult, String> {
         match action {
             TimerAction::Schedule(args) => {
-                self.schedule_timer(agent_id, args, now)
+                self.schedule_timer(agent_id, args, now, source)
                     .map(|result| TimerActionResult {
                         result,
                         outcome: TimerActionOutcome::NoAdditionalContext,
@@ -781,6 +1038,7 @@ impl TimerRuntime {
         agent_id: &AgentId,
         args: ScheduleArgs,
         now: UnixMicros,
+        source: ScheduleMutationSource,
     ) -> Result<CborValue, String> {
         let replacing = self.timers.contains_key(&TimerKey {
             agent_id: agent_id.clone(),
@@ -808,12 +1066,48 @@ impl TimerRuntime {
                 args.timer_id
             ));
         }
-        let next_fire_at = add_seconds(now, args.delay_seconds);
+        let recurrence = match &args.timing {
+            ScheduleTiming::Relative {
+                delay_seconds,
+                interval_seconds,
+            } => {
+                let next_fire_at = add_seconds(now, *delay_seconds);
+                match interval_seconds {
+                    Some(interval_seconds) => TimerRecurrence::Interval {
+                        next_fire_at,
+                        interval_seconds: *interval_seconds,
+                    },
+                    None => TimerRecurrence::OneShot { next_fire_at },
+                }
+            }
+            ScheduleTiming::Daily(schedule) => {
+                if !schedule.is_utc() {
+                    let _refreshed = self.refresh_host_timezone();
+                }
+                let resolution = schedule.next_after(now, self.local_timezone.as_ref());
+                let deadline = match resolution {
+                    Ok(next_fire_at) => DailyDeadline::At(next_fire_at),
+                    Err(error) if source == ScheduleMutationSource::Replay => {
+                        tracing::warn!(
+                            timer_id = args.timer_id,
+                            %error,
+                            "restored daily timer retained pending timezone recovery"
+                        );
+                        DailyDeadline::AwaitingTimezone
+                    }
+                    Err(error) => return Err(error),
+                };
+                TimerRecurrence::Daily {
+                    schedule: schedule.clone(),
+                    progress_floor: now,
+                    deadline,
+                }
+            }
+        };
         let entry = TimerEntry {
             agent_id: agent_id.clone(),
             timer_id: args.timer_id.clone(),
-            next_fire_at,
-            interval_seconds: args.interval_seconds,
+            recurrence,
             message: args.message,
             fired_count: 0,
         };
@@ -854,18 +1148,45 @@ impl TimerRuntime {
             .values()
             .filter(|timer| &timer.agent_id == agent_id)
             .collect();
-        timers.sort_by_key(|timer| (timer.next_fire_at.get(), timer.timer_id.clone()));
+        timers.sort_by_key(|timer| {
+            (
+                timer.next_fire_at().map(UnixMicros::get),
+                timer.timer_id.clone(),
+            )
+        });
         let lines: Vec<String> = timers
             .into_iter()
             .take(MAX_LIST_TIMERS)
             .map(|timer| {
-                let due = duration_until(timer.next_fire_at, now).as_secs();
-                match timer.interval_seconds {
-                    Some(interval) => format!(
+                let due = timer
+                    .next_fire_at()
+                    .map(|deadline| duration_until(deadline, now).as_secs());
+                match &timer.recurrence {
+                    TimerRecurrence::Interval {
+                        interval_seconds, ..
+                    } => format!(
                         "{}: due in {}s, repeats every {}s",
-                        timer.timer_id, due, interval
+                        timer.timer_id,
+                        due.unwrap_or(0),
+                        interval_seconds
                     ),
-                    None => format!("{}: due in {}s, one-shot", timer.timer_id, due),
+                    TimerRecurrence::OneShot { .. } => {
+                        format!("{}: due in {}s, one-shot", timer.timer_id, due.unwrap_or(0))
+                    }
+                    TimerRecurrence::Daily {
+                        schedule, deadline, ..
+                    } => format!(
+                        "{}: {}, daily at {} {}",
+                        timer.timer_id,
+                        match deadline {
+                            DailyDeadline::At(_) => {
+                                format!("due in {}s", due.unwrap_or(0))
+                            }
+                            DailyDeadline::AwaitingTimezone => "awaiting local timezone".to_owned(),
+                        },
+                        schedule.display_time(),
+                        if schedule.is_utc() { "UTC" } else { "local" }
+                    ),
                 }
             })
             .collect();
@@ -1011,10 +1332,12 @@ fn handle_delivery(
     };
     if delivery.replay {
         match delivery.event.as_ref() {
-            Event::ToolStarted(started) => runtime.state_mut().handle_started_replay(started),
-            Event::ToolResult(result) | Event::ProviderToolResult(result) => runtime
+            Event::ToolStarted(started) => runtime
                 .state_mut()
-                .handle_result_replay(result, delivery.recorded_at.unwrap_or_else(UnixMicros::now)),
+                .handle_started_replay(started, delivery.recorded_at),
+            Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+                runtime.state_mut().handle_result_replay(result)
+            }
             Event::ToolError(error) | Event::ProviderToolError(error) => {
                 runtime
                     .state_mut()
@@ -1127,11 +1450,9 @@ fn timer_display_args(arguments: &CborValue, call_id: &str) -> String {
 
 fn timer_action_display_args(action: &TimerAction) -> String {
     match action {
-        TimerAction::Schedule(args) => schedule_display_args(
-            Some(args.timer_id.as_str()),
-            Some(args.delay_seconds),
-            args.interval_seconds,
-        ),
+        TimerAction::Schedule(args) => {
+            schedule_display_args(Some(args.timer_id.as_str()), &args.timing)
+        }
         TimerAction::Cancel { timer_id } => format!("cancel {timer_id}"),
         TimerAction::List => "list".to_owned(),
     }
@@ -1157,11 +1478,7 @@ fn fallback_timer_display_args(arguments: &CborValue) -> String {
         return String::new();
     };
     match action.as_str() {
-        "schedule" => schedule_display_args(
-            sanitized_display_timer_id(arguments).as_deref(),
-            display_seconds_field(arguments, "delay_seconds"),
-            display_seconds_field(arguments, "interval_seconds"),
-        ),
+        "schedule" => fallback_schedule_display_args(arguments),
         "cancel" => sanitized_display_timer_id(arguments)
             .map(|timer_id| format!("cancel {timer_id}"))
             .unwrap_or_else(|| "cancel".to_owned()),
@@ -1170,19 +1487,56 @@ fn fallback_timer_display_args(arguments: &CborValue) -> String {
     }
 }
 
-fn schedule_display_args(
-    timer_id: Option<&str>,
-    delay_seconds: Option<u64>,
-    interval_seconds: Option<u64>,
-) -> String {
+fn schedule_display_args(timer_id: Option<&str>, timing: &ScheduleTiming) -> String {
     let mut parts = vec!["schedule".to_owned()];
     if let Some(timer_id) = timer_id {
         parts.push(timer_id.to_owned());
     }
-    if let Some(delay) = delay_seconds {
+    match timing {
+        ScheduleTiming::Relative {
+            delay_seconds,
+            interval_seconds,
+        } => {
+            parts.push(format!("in {}", format_seconds(*delay_seconds)));
+            if let Some(interval) = interval_seconds {
+                parts.push(format!("every {}", format_seconds(*interval)));
+            }
+        }
+        ScheduleTiming::Daily(schedule) => {
+            parts.push(format!("daily at {}", schedule.display_time()));
+            parts.push(if schedule.is_utc() {
+                "UTC".to_owned()
+            } else {
+                "local".to_owned()
+            });
+        }
+    }
+    parts.join(" ")
+}
+
+/// Summarize only validated timing fragments from malformed schedule arguments.
+fn fallback_schedule_display_args(arguments: &CborValue) -> String {
+    let timer_id = sanitized_display_timer_id(arguments);
+    if let Some(value) = tau_proto::cbor_text_field(arguments, "daily_time")
+        && let Ok(schedule) = DailySchedule::parse(
+            &value,
+            if tau_proto::cbor_bool_field(arguments, "utc").unwrap_or(false) {
+                WallClockZone::Utc
+            } else {
+                WallClockZone::Local
+            },
+        )
+    {
+        return schedule_display_args(timer_id.as_deref(), &ScheduleTiming::Daily(schedule));
+    }
+    let mut parts = vec!["schedule".to_owned()];
+    if let Some(timer_id) = timer_id {
+        parts.push(timer_id);
+    }
+    if let Some(delay) = display_seconds_field(arguments, "delay_seconds") {
         parts.push(format!("in {}", format_seconds(delay)));
     }
-    if let Some(interval) = interval_seconds {
+    if let Some(interval) = display_seconds_field(arguments, "interval_seconds") {
         parts.push(format!("every {}", format_seconds(interval)));
     }
     parts.join(" ")
@@ -1232,7 +1586,7 @@ fn timer_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TIMER_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Schedule, cancel, and list session-scoped timer reminders. Timers wake the agent with internal prompts.".to_owned()),
+        description: Some("Schedule, cancel, and list session-scoped timer reminders. Use delay_seconds for relative timers or daily_time for a daily HH:MM wall-clock timer; daily timers use the host local timezone unless utc is true. Timers wake the agent with internal prompts.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -1241,6 +1595,8 @@ fn timer_tool_spec() -> ToolSpec {
                 "timer_id": {"type": "string", "maxLength": MAX_TIMER_ID_BYTES, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Path-safe id. Required for cancel; optional for schedule."},
                 "delay_seconds": {"type": "integer", "minimum": MIN_DELAY_SECONDS, "maximum": MAX_DELAY_SECONDS},
                 "interval_seconds": {"type": "integer", "minimum": MIN_INTERVAL_SECONDS, "maximum": MAX_DELAY_SECONDS},
+                "daily_time": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "description": "Daily wall-clock time in exact HH:MM format. Mutually exclusive with delay_seconds and interval_seconds."},
+                "utc": {"type": "boolean", "description": "Use UTC for daily_time. Omitted or false uses the running host's local timezone."},
                 // Keep the byte limit in runtime validation: JSON Schema
                 // maxLength counts characters, and large values also produce
                 // grammar repetitions that llama.cpp refuses to parse.
@@ -1315,16 +1671,49 @@ fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String>
                 Some(id) => validate_timer_id(&id)?,
                 None => generated_timer_id(call_id),
             };
-            let delay_seconds =
-                bounded_seconds(value, "delay_seconds", MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)?;
-            let interval_seconds = match tau_proto::cbor_int_field(value, "interval_seconds") {
-                Some(_) => Some(bounded_seconds(
-                    value,
-                    "interval_seconds",
-                    MIN_INTERVAL_SECONDS,
-                    MAX_DELAY_SECONDS,
-                )?),
-                None => None,
+            let timing = if tau_proto::cbor_field(value, "daily_time").is_some() {
+                if tau_proto::cbor_field(value, "delay_seconds").is_some()
+                    || tau_proto::cbor_field(value, "interval_seconds").is_some()
+                {
+                    return Err(
+                        "daily_time is mutually exclusive with delay_seconds and interval_seconds"
+                            .to_owned(),
+                    );
+                }
+                let daily_time = tau_proto::cbor_text_field(value, "daily_time")
+                    .ok_or_else(|| "daily_time must be a string".to_owned())?;
+                let utc = match tau_proto::cbor_field(value, "utc") {
+                    Some(CborValue::Bool(utc)) => *utc,
+                    Some(_) => return Err("utc must be a boolean".to_owned()),
+                    None => false,
+                };
+                ScheduleTiming::Daily(DailySchedule::parse(
+                    &daily_time,
+                    if utc {
+                        WallClockZone::Utc
+                    } else {
+                        WallClockZone::Local
+                    },
+                )?)
+            } else {
+                if tau_proto::cbor_field(value, "utc").is_some() {
+                    return Err("utc requires daily_time".to_owned());
+                }
+                let delay_seconds =
+                    bounded_seconds(value, "delay_seconds", MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)?;
+                let interval_seconds = match tau_proto::cbor_int_field(value, "interval_seconds") {
+                    Some(_) => Some(bounded_seconds(
+                        value,
+                        "interval_seconds",
+                        MIN_INTERVAL_SECONDS,
+                        MAX_DELAY_SECONDS,
+                    )?),
+                    None => None,
+                };
+                ScheduleTiming::Relative {
+                    delay_seconds,
+                    interval_seconds,
+                }
             };
             let message = tau_proto::cbor_text_field(value, "message")
                 .ok_or_else(|| "message is required for schedule".to_owned())?;
@@ -1333,8 +1722,7 @@ fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String>
             }
             Ok(TimerAction::Schedule(ScheduleArgs {
                 timer_id,
-                delay_seconds,
-                interval_seconds,
+                timing,
                 message,
             }))
         }

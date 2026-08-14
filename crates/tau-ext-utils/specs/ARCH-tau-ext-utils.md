@@ -66,7 +66,37 @@ publishes `agent.prompt_submitted`; the extension never forges transcript prompt
 See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 Periodic timers coalesce downtime into one internal prompt and advance the next
-fire time beyond the current wall clock.
+fire time beyond the current wall clock. Relative schedules retain their
+existing initial-delay and optional fixed-interval behavior. Daily wall-clock
+schedules instead carry one exact `HH:MM` time: `utc=true` uses UTC, while the
+default resolves the running host's local timezone. They use the first matching
+instant strictly after scheduling, skip nonexistent spring-forward times, and
+choose the earlier instant for repeated fall-back times. Multiple overdue daily
+occurrences coalesce into one prompt with an exact count. Calendar-distance and
+timezone-transition work bounds that count independently of elapsed days.
+Replayed schedule and prompt facts recalculate future instants using the running
+host configuration. The canonical timer prompt timestamp is the occurrence
+floor, so a backward clock move cannot repeat an already prompt-recorded daily
+occurrence.
+
+The runtime reads one Jiff system-timezone snapshot per refresh cycle and uses
+that same snapshot for every local timer calculation in the cycle. Jiff discovers
+platform host configuration, including Unix `TZ` overrides and regular or linked
+`/etc/localtime` TZif rules, and caches discovery process-wide for approximately
+five minutes. While local timers are active, the timer runtime polls that source
+on a 60-second monotonic cadence; host configuration changes therefore affect
+timers after Jiff's cache expires. Already-due deadlines fire before
+reinterpretation; replaying agents wait for their boundary; transient lookup
+failure retains accepted restored state for a later refresh. No timezone name or
+database version enters durable timer state. Multiple daily times remain
+independent timers rather than one grouped or cron-like schedule.
+
+For Clank ticket `3y67`, the user approved these interface, local-time, DST,
+missed-fire, and recovery semantics, including registration at `tool.started`,
+due-before-reinterpretation ordering, prompt timestamps as the backward-clock
+progress floor, retained unresolved state after transient discovery failure, and
+Jiff's approximately five-minute system-discovery cache. This satisfies
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 After live timer mutations and successful timer replay, the extension declares
 `timer_scheduled` exactly when an agent's reconstructed timer map is nonempty.
@@ -75,7 +105,12 @@ replacement declarations after map mutations, while the harness clears source,
 agent-unload, and session-rollover contributions. Scheduled timers are not
 modeled as active tool calls.
 
-Session lifecycle is explicit: live `session.started` and `session.shutdown` clear all active timer state, and `session.agent_unloaded` makes that agent's timers dormant until a later successful replay boundary. Schedule requests reject duplicate active ids instead of acting as implicit updates. The default safety floor is 10 seconds for one-shot delays and 60 seconds for recurring intervals.
+Session lifecycle is explicit: live `session.started` and `session.shutdown`
+clear all active timer state, and `session.agent_unloaded` makes that agent's
+timers dormant until a later successful replay boundary. Schedule requests
+reject duplicate active ids instead of acting as implicit updates. The default
+safety floor is 10 seconds for one-shot delays and 60 seconds for fixed recurring
+intervals. Existing per-agent and per-session bounds also cover daily timers.
 
 ## Timer tool display
 

@@ -670,6 +670,26 @@ delivery, exact bounded correlation, no generic completion, consumed wait state,
 and no replayed checkpoint. Cover success, started failure/cancellation,
 pre-start failure, and explicit successor recovery independently; retain
 cross-agent `agent_compact` as the asynchronous waitable control case.
+
+
+## Wall-clock timer coverage
+
+`tau-ext-utils` keeps calendar parsing, DST gap/fold selection, and exact
+large-gap counting in `daily_schedule` unit tests. Runtime tests inject host
+timezone snapshots to cover the single refresh cadence, due-before-refresh
+ordering, backward-clock progress, transient lookup recovery, and 60-second
+runtime polling without changing the process timezone. Jiff owns platform
+discovery and its approximately five-minute process-wide cache. Replay tests pair
+recorded `tool.started` and successful terminal facts, then fold canonical timer
+prompts and the agent replay boundary; retain the exact-minute start/result
+crash regression when changing schedule reconstruction.
+
+Keep parser/schema/display tests focused on the model interface. Put timezone
+source, deadline, replay-fold, and scheduler-loop changes under the focused
+runtime invariants above rather than relying on live host time or broad matrix
+coverage.
+
+
 ## Provider cache-refresh lifecycle
 
 Current deterministic coverage injects monotonic time and identity/jitter

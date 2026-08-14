@@ -7,6 +7,33 @@ problem. Record one concise, best-effort report, then continue the primary task.
 not call it merely to state that no problem occurred, and do not retry.”
 
 
+## Daily timers
+
+Relative timers continue to use `delay_seconds` and optional
+`interval_seconds`. A daily timer uses an exact wall-clock time instead:
+
+```json
+{"action":"schedule","timer_id":"agenda","daily_time":"08:00","message":"prepare today's agenda"}
+```
+
+The default follows the running host's local timezone, including daylight-saving
+changes. Set `"utc": true` to use UTC. A spring-forward date that has no requested
+local time is skipped; a repeated fall-back time fires once at its earlier
+occurrence. The first firing is strictly after scheduling. Downtime coalesces all
+overdue occurrences into one wakeup with an exact count.
+
+Tau reconstructs daily timers from the existing session replay facts. Restart
+uses the host's then-current local configuration and rules. While local timers are
+active, a running Tau process polls Jiff's system-timezone discovery on a
+60-second monotonic cadence. Jiff caches system discovery for approximately five
+minutes, so a changed host configuration can take that long to affect timers. A
+refresh never replaces an already-due occurrence. A transient lookup failure
+retains accepted restored timers for a later refresh.
+
+Each timer has one daily time, so register separate timer IDs for separate times
+and cancel or list them through the existing session-scoped actions.
+
+
 ## Enable papercuts
 
 Papercuts are disabled by default. Enable them for every agent using one

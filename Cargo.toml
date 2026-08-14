@@ -167,6 +167,7 @@ image = { version = "0.25", default-features = false, features = [
 indexmap = { version = "2", default-features = false, features = ["serde"] }
 ipnet = { version = "2", default-features = false, features = ["std"] }
 iroh = { version = "1.0.3", default-features = false, features = ["tls-ring"] }
+jiff = "0.2"
 json5 = { version = "0.4", default-features = false }
 lettre = { version = "0.11", default-features = false, features = [
   "builder",

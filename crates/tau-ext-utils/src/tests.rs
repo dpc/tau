@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Cursor, Write};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -152,10 +152,43 @@ fn started(call_id: &str, agent: &str, args: CborValue) -> ToolStarted {
     }
 }
 
+/// Deterministic UTC host-timezone source for timer runtime tests.
+struct FixedHostTimezoneProvider;
+
+impl HostTimezoneProvider for FixedHostTimezoneProvider {
+    fn current_timezone(&self) -> Result<TimeZone, String> {
+        Ok(TimeZone::UTC)
+    }
+}
+
+/// Scripted host-timezone source for refresh and failure-recovery tests.
+struct ScriptedHostTimezoneProvider {
+    /// Ordered results returned by refresh attempts.
+    results: Rc<RefCell<VecDeque<Result<TimeZone, String>>>>,
+}
+
+impl HostTimezoneProvider for ScriptedHostTimezoneProvider {
+    fn current_timezone(&self) -> Result<TimeZone, String> {
+        self.results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Err("scripted timezone results exhausted".to_owned()))
+    }
+}
+
 fn runtime() -> TimerRuntime {
+    runtime_with_timezone_provider(Box::new(FixedHostTimezoneProvider))
+}
+
+fn runtime_with_timezone_provider(
+    timezone_provider: Box<dyn HostTimezoneProvider>,
+) -> TimerRuntime {
     TimerRuntime {
         handle: None,
         timers: HashMap::new(),
+        timezone_provider,
+        local_timezone: None,
+        timezone_checked_at: None,
         pending_invocations: HashMap::new(),
         replay_complete_agents: HashSet::new(),
         reported_timer_agents: HashSet::new(),
@@ -164,6 +197,16 @@ fn runtime() -> TimerRuntime {
         session_id: None,
         papercut_storage: None,
     }
+}
+
+/// Invoke the normal live schedule mutation path in focused state tests.
+fn schedule_timer(
+    runtime: &mut TimerRuntime,
+    agent_id: &AgentId,
+    args: ScheduleArgs,
+    now: UnixMicros,
+) -> Result<CborValue, String> {
+    runtime.schedule_timer(agent_id, args, now, ScheduleMutationSource::Live)
 }
 
 /// Deterministic in-memory append target for papercut unit tests.
@@ -212,7 +255,7 @@ fn timer_wakeup_message_uses_persist_false() {
 }
 
 /// Timer schemas describe the runtime byte limit without a large grammar
-/// repetition.
+/// repetition and expose the closed daily wall-clock input.
 #[test]
 fn timer_tool_schema_omits_message_max_length() {
     let spec = timer_tool_spec();
@@ -228,6 +271,18 @@ fn timer_tool_schema_omits_message_max_length() {
             .get("description")
             .and_then(serde_json::Value::as_str),
         Some(expected_description.as_str())
+    );
+    assert_eq!(
+        parameters
+            .pointer("/properties/daily_time/pattern")
+            .and_then(serde_json::Value::as_str),
+        Some("^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    );
+    assert_eq!(
+        parameters
+            .pointer("/properties/utc/type")
+            .and_then(serde_json::Value::as_str),
+        Some("boolean")
     );
 }
 
@@ -245,21 +300,18 @@ fn overdue_timer_waits_for_agent_replay_complete() {
         ("message", CborValue::Text("hello".to_owned())),
     ]);
     let start = started("call-1", agent.as_ref(), args);
-    rt.handle_started_replay(&start);
-    rt.handle_result_replay(
-        &ToolResult {
-            presentation: Default::default(),
-            call_id: start.call_id.clone(),
-            tool_name: start.tool_name.clone(),
-            tool_type: ToolType::Function,
-            result: CborValue::Text("ok".to_owned()),
-            provider_content: Vec::new(),
-            kind: ToolResultKind::Final,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        },
-        base,
-    );
+    rt.handle_started_replay(&start, Some(base));
+    rt.handle_result_replay(&ToolResult {
+        presentation: Default::default(),
+        call_id: start.call_id.clone(),
+        tool_name: start.tool_name.clone(),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
 
     assert!(rt.collect_due(add_seconds(base, 15)).is_empty());
     rt.complete_agent_replay(&AgentReplayComplete {
@@ -280,12 +332,15 @@ fn periodic_timer_coalesces_missed_intervals() {
     let mut rt = runtime();
     let agent = AgentId::parse("agent-one").expect("agent id");
     rt.replay_complete_agents.insert(agent.clone());
-    rt.schedule_timer(
+    schedule_timer(
+        &mut rt,
         &agent,
         ScheduleArgs {
             timer_id: "tick".to_owned(),
-            delay_seconds: 1,
-            interval_seconds: Some(10),
+            timing: ScheduleTiming::Relative {
+                delay_seconds: 1,
+                interval_seconds: Some(10),
+            },
             message: "tick".to_owned(),
         },
         UnixMicros::new(0),
@@ -301,7 +356,320 @@ fn periodic_timer_coalesces_missed_intervals() {
             timer_id: "tick".to_owned(),
         })
         .expect("timer");
-    assert!(timer.next_fire_at > UnixMicros::new(35_000_000));
+    assert!(UnixMicros::new(35_000_000) < timer.next_fire_at().expect("resolved deadline"));
+}
+
+/// Daily UTC timers coalesce every overdue wall-clock occurrence into one
+/// wakeup and preserve the next requested time of day.
+#[test]
+fn daily_timer_coalesces_overdue_occurrences() {
+    let mut rt = runtime();
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    rt.replay_complete_agents.insert(agent.clone());
+    let scheduled_at = UnixMicros::new(1_767_254_400_000_000); // 2026-01-01 08:00Z
+    schedule_timer(
+        &mut rt,
+        &agent,
+        ScheduleArgs {
+            timer_id: "agenda".to_owned(),
+            timing: ScheduleTiming::Daily(
+                DailySchedule::parse("08:00", WallClockZone::Utc).expect("daily schedule"),
+            ),
+            message: "prepare agenda".to_owned(),
+        },
+        scheduled_at,
+    )
+    .expect("schedule");
+
+    let fires = rt.collect_due(UnixMicros::new(1_767_517_200_000_000)); // Jan 4 09:00Z
+
+    assert_eq!(fires.len(), 1);
+    assert!(fires[0].prompt.contains("Coalesced 3 missed"));
+    let timer = rt
+        .timers
+        .get(&TimerKey {
+            agent_id: agent,
+            timer_id: "agenda".to_owned(),
+        })
+        .expect("daily timer retained");
+    assert_eq!(
+        timer.next_fire_at(),
+        Some(UnixMicros::new(1_767_600_000_000_000)) // Jan 5 08:00Z
+    );
+}
+
+/// Daily schedule parsing requires one timing mode and keeps UTC scoped to
+/// wall-clock schedules without changing relative arguments.
+#[test]
+fn daily_schedule_arguments_are_closed_and_mutually_exclusive() {
+    let daily = cbor_map(vec![
+        ("action", CborValue::Text("schedule".to_owned())),
+        ("timer_id", CborValue::Text("agenda".to_owned())),
+        ("daily_time", CborValue::Text("08:00".to_owned())),
+        ("utc", CborValue::Bool(true)),
+        ("message", CborValue::Text("prepare agenda".to_owned())),
+    ]);
+    let parsed = parse_action(&daily, "call-daily").expect("daily action");
+    assert!(matches!(
+        parsed,
+        TimerAction::Schedule(ScheduleArgs {
+            timing: ScheduleTiming::Daily(_),
+            ..
+        })
+    ));
+
+    let both = cbor_map(vec![
+        ("action", CborValue::Text("schedule".to_owned())),
+        ("daily_time", CborValue::Text("08:00".to_owned())),
+        ("delay_seconds", CborValue::Integer(60.into())),
+        ("message", CborValue::Text("invalid".to_owned())),
+    ]);
+    assert!(parse_action(&both, "call-both").is_err());
+
+    let relative_utc = cbor_map(vec![
+        ("action", CborValue::Text("schedule".to_owned())),
+        ("delay_seconds", CborValue::Integer(60.into())),
+        ("utc", CborValue::Bool(false)),
+        ("message", CborValue::Text("invalid".to_owned())),
+    ]);
+    assert!(parse_action(&relative_utc, "call-relative").is_err());
+}
+
+/// One cadence-bounded timezone snapshot preserves an already-due occurrence
+/// across a zone change and a backward clock move cannot repeat it.
+#[test]
+fn local_timezone_refresh_preserves_due_and_backward_clock_progress() {
+    let results = Rc::new(RefCell::new(VecDeque::from([
+        Ok(TimeZone::get("Europe/Warsaw").expect("Warsaw")),
+        Ok(TimeZone::get("America/New_York").expect("New York")),
+        Ok(TimeZone::get("Asia/Tokyo").expect("Tokyo")),
+    ])));
+    let mut rt = runtime_with_timezone_provider(Box::new(ScriptedHostTimezoneProvider {
+        results: Rc::clone(&results),
+    }));
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    rt.replay_complete_agents.insert(agent.clone());
+    let scheduled_at = UnixMicros::new(1_767_225_600_000_000); // 2026-01-01 00:00Z
+    schedule_timer(
+        &mut rt,
+        &agent,
+        ScheduleArgs {
+            timer_id: "local".to_owned(),
+            timing: ScheduleTiming::Daily(
+                DailySchedule::parse("08:00", WallClockZone::Local).expect("daily schedule"),
+            ),
+            message: "wake".to_owned(),
+        },
+        scheduled_at,
+    )
+    .expect("schedule");
+
+    let due = UnixMicros::new(1_767_250_860_000_000); // 2026-01-01 07:01Z
+    rt.timezone_checked_at = Instant::now().checked_sub(Duration::from_secs(60));
+    assert_eq!(rt.collect_due(due).len(), 1);
+    let backward = UnixMicros::new(1_767_247_200_000_000); // 2026-01-01 06:00Z
+    rt.timezone_checked_at = Instant::now().checked_sub(Duration::from_secs(60));
+    assert!(rt.collect_due(backward).is_empty());
+    let timer = rt
+        .timers
+        .get(&TimerKey {
+            agent_id: agent,
+            timer_id: "local".to_owned(),
+        })
+        .expect("daily timer");
+    assert!(due < timer.next_fire_at().expect("resolved deadline"));
+    assert!(results.borrow().is_empty());
+}
+
+/// Host timezone lookup occurs once at scheduling and not again before the
+/// 60-second refresh boundary, then applies the next shared snapshot.
+#[test]
+fn local_timezone_refresh_obeys_sixty_second_cadence() {
+    let results = Rc::new(RefCell::new(VecDeque::from([
+        Ok(TimeZone::get("Europe/Warsaw").expect("Warsaw")),
+        Ok(TimeZone::get("America/New_York").expect("New York")),
+    ])));
+    let mut rt = runtime_with_timezone_provider(Box::new(ScriptedHostTimezoneProvider {
+        results: Rc::clone(&results),
+    }));
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    rt.replay_complete_agents.insert(agent.clone());
+    let start = UnixMicros::new(1_767_225_600_000_000);
+    schedule_timer(
+        &mut rt,
+        &agent,
+        ScheduleArgs {
+            timer_id: "cadence".to_owned(),
+            timing: ScheduleTiming::Daily(
+                DailySchedule::parse("08:00", WallClockZone::Local).expect("daily schedule"),
+            ),
+            message: "wake".to_owned(),
+        },
+        start,
+    )
+    .expect("schedule");
+
+    assert!(rt.collect_due(add_seconds(start, 59)).is_empty());
+    assert_eq!(results.borrow().len(), 1);
+    rt.timezone_checked_at = Instant::now().checked_sub(Duration::from_secs(60));
+    assert!(rt.collect_due(add_seconds(start, 60)).is_empty());
+    assert!(results.borrow().is_empty());
+    assert_eq!(
+        rt.timers
+            .get(&TimerKey {
+                agent_id: agent,
+                timer_id: "cadence".to_owned(),
+            })
+            .expect("timer")
+            .next_fire_at(),
+        Some(UnixMicros::new(1_767_272_400_000_000)) // Jan 1 13:00Z
+    );
+}
+
+/// An accepted local schedule remains reconstructable when timezone lookup is
+/// transiently unavailable and becomes due after a later shared refresh.
+#[test]
+fn restored_local_timer_recovers_after_timezone_lookup_failure() {
+    let results = Rc::new(RefCell::new(VecDeque::from([
+        Err("timezone unavailable".to_owned()),
+        Ok(TimeZone::get("Europe/Warsaw").expect("Warsaw")),
+    ])));
+    let mut rt = runtime_with_timezone_provider(Box::new(ScriptedHostTimezoneProvider {
+        results: Rc::clone(&results),
+    }));
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    let started_at = UnixMicros::new(1_767_225_600_000_000); // 2026-01-01 00:00Z
+    let start = started(
+        "call-local",
+        agent.as_ref(),
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("local".to_owned())),
+            ("daily_time", CborValue::Text("08:00".to_owned())),
+            ("message", CborValue::Text("wake".to_owned())),
+        ]),
+    );
+    rt.handle_started_replay(&start, Some(started_at));
+    rt.handle_result_replay(&ToolResult {
+        presentation: Default::default(),
+        call_id: start.call_id.clone(),
+        tool_name: start.tool_name.clone(),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    rt.replay_complete_agents.insert(agent.clone());
+    rt.timezone_checked_at = None;
+
+    let fires = rt.collect_due(UnixMicros::new(1_767_344_400_000_000)); // Jan 2 09:00Z
+
+    assert_eq!(fires.len(), 1);
+    assert!(fires[0].prompt.contains("Coalesced 2 missed"));
+    assert!(results.borrow().is_empty());
+}
+
+/// Replay uses the recorded tool-start timestamp, so a result committed just
+/// after the requested minute cannot move the first firing to tomorrow.
+#[test]
+fn replay_schedule_anchor_matches_live_across_exact_minute_boundary() {
+    let mut rt = runtime();
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    let started_at = UnixMicros::new(1_767_254_399_999_000); // 07:59:59.999Z
+    let start = started(
+        "call-boundary",
+        agent.as_ref(),
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("boundary".to_owned())),
+            ("daily_time", CborValue::Text("08:00".to_owned())),
+            ("utc", CborValue::Bool(true)),
+            ("message", CborValue::Text("wake".to_owned())),
+        ]),
+    );
+    rt.handle_started_replay(&start, Some(started_at));
+    rt.handle_result_replay(&ToolResult {
+        presentation: Default::default(),
+        call_id: start.call_id,
+        tool_name: start.tool_name,
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    assert_eq!(
+        rt.timers
+            .get(&TimerKey {
+                agent_id: agent,
+                timer_id: "boundary".to_owned(),
+            })
+            .expect("timer")
+            .next_fire_at(),
+        Some(UnixMicros::new(1_767_254_400_000_000))
+    );
+}
+
+/// Replayed daily schedule and canonical prompt facts advance the same timer to
+/// the next wall-clock occurrence without waiting for live firing.
+#[test]
+fn replayed_daily_prompt_advances_reconstructed_schedule() {
+    let mut rt = runtime();
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    let started_at = UnixMicros::new(1_767_225_600_000_000); // Jan 1 00:00Z
+    let start = started(
+        "call-replay-daily",
+        agent.as_ref(),
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("daily".to_owned())),
+            ("daily_time", CborValue::Text("08:00".to_owned())),
+            ("utc", CborValue::Bool(true)),
+            ("message", CborValue::Text("wake".to_owned())),
+        ]),
+    );
+    rt.handle_started_replay(&start, Some(started_at));
+    rt.handle_result_replay(&ToolResult {
+        presentation: Default::default(),
+        call_id: start.call_id,
+        tool_name: start.tool_name,
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    rt.handle_prompt_replay(
+        &AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent.clone(),
+            text: "Timer `daily` fired: wake".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: PromptMessageClass::Internal,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: Some("timer:daily:1".to_owned()),
+        },
+        Some(UnixMicros::new(1_767_254_400_000_000)),
+    );
+
+    assert_eq!(
+        rt.timers
+            .get(&TimerKey {
+                agent_id: agent,
+                timer_id: "daily".to_owned(),
+            })
+            .expect("timer")
+            .next_fire_at(),
+        Some(UnixMicros::new(1_767_340_800_000_000))
+    );
 }
 
 /// Replayed timer-fired prompts remove one-shot timers so they are not
@@ -311,12 +679,15 @@ fn replayed_timer_prompt_removes_one_shot() {
     let mut rt = runtime();
     let agent = AgentId::parse("agent-one").expect("agent id");
     rt.replay_complete_agents.insert(agent.clone());
-    rt.schedule_timer(
+    schedule_timer(
+        &mut rt,
         &agent,
         ScheduleArgs {
             timer_id: "once".to_owned(),
-            delay_seconds: 1,
-            interval_seconds: None,
+            timing: ScheduleTiming::Relative {
+                delay_seconds: 1,
+                interval_seconds: None,
+            },
             message: "wake".to_owned(),
         },
         UnixMicros::new(0),
@@ -372,12 +743,15 @@ fn session_lifecycle_clears_session_scoped_timers() {
     let mut rt = runtime();
     let agent = AgentId::parse("agent-one").expect("agent id");
     rt.replay_complete_agents.insert(agent.clone());
-    rt.schedule_timer(
+    schedule_timer(
+        &mut rt,
         &agent,
         ScheduleArgs {
             timer_id: "old".to_owned(),
-            delay_seconds: 10,
-            interval_seconds: None,
+            timing: ScheduleTiming::Relative {
+                delay_seconds: 10,
+                interval_seconds: None,
+            },
             message: "wake".to_owned(),
         },
         UnixMicros::new(0),
@@ -398,12 +772,15 @@ fn unloaded_agent_timers_are_dormant_until_replay_complete() {
     let mut rt = runtime();
     let agent = AgentId::parse("agent-one").expect("agent id");
     rt.replay_complete_agents.insert(agent.clone());
-    rt.schedule_timer(
+    schedule_timer(
+        &mut rt,
         &agent,
         ScheduleArgs {
             timer_id: "dormant".to_owned(),
-            delay_seconds: 10,
-            interval_seconds: None,
+            timing: ScheduleTiming::Relative {
+                delay_seconds: 10,
+                interval_seconds: None,
+            },
             message: "wake".to_owned(),
         },
         UnixMicros::new(0),
@@ -424,12 +801,15 @@ fn replayed_steered_timer_prompt_removes_one_shot() {
     let mut rt = runtime();
     let agent = AgentId::parse("agent-one").expect("agent id");
     rt.replay_complete_agents.insert(agent.clone());
-    rt.schedule_timer(
+    schedule_timer(
+        &mut rt,
         &agent,
         ScheduleArgs {
             timer_id: "busy".to_owned(),
-            delay_seconds: 10,
-            interval_seconds: None,
+            timing: ScheduleTiming::Relative {
+                delay_seconds: 10,
+                interval_seconds: None,
+            },
             message: "wake".to_owned(),
         },
         UnixMicros::new(0),
@@ -473,12 +853,15 @@ fn replayed_steered_timer_prompt_removes_one_shot() {
 fn errored_replay_drops_restored_timers_before_later_live_call() {
     let mut rt = runtime();
     let agent = AgentId::parse("agent-one").expect("agent id");
-    rt.schedule_timer(
+    schedule_timer(
+        &mut rt,
         &agent,
         ScheduleArgs {
             timer_id: "bad-restore".to_owned(),
-            delay_seconds: 10,
-            interval_seconds: None,
+            timing: ScheduleTiming::Relative {
+                delay_seconds: 10,
+                interval_seconds: None,
+            },
             message: "wake".to_owned(),
         },
         UnixMicros::new(0),
@@ -506,14 +889,15 @@ fn duplicate_schedule_is_rejected() {
     let agent = AgentId::parse("agent-one").expect("agent id");
     let args = ScheduleArgs {
         timer_id: "same".to_owned(),
-        delay_seconds: 10,
-        interval_seconds: None,
+        timing: ScheduleTiming::Relative {
+            delay_seconds: 10,
+            interval_seconds: None,
+        },
         message: "wake".to_owned(),
     };
-    rt.schedule_timer(&agent, args.clone(), UnixMicros::new(0))
-        .expect("first schedule");
+    schedule_timer(&mut rt, &agent, args.clone(), UnixMicros::new(0)).expect("first schedule");
 
-    assert!(rt.schedule_timer(&agent, args, UnixMicros::new(0)).is_err());
+    assert!(schedule_timer(&mut rt, &agent, args, UnixMicros::new(0)).is_err());
 }
 
 /// Timer result display args summarize schedule timing and recurrence
@@ -531,6 +915,44 @@ fn timer_display_args_summarize_schedule() {
     assert_eq!(
         timer_display_args(&args, "call-1"),
         "schedule standup in 10m every 1h"
+    );
+}
+
+/// Daily timer display and list output state the wall clock and whether it uses
+/// UTC, instead of presenting it as a drifting fixed interval.
+#[test]
+fn timer_display_and_list_summarize_daily_utc_schedule() {
+    let args = cbor_map(vec![
+        ("action", CborValue::Text("schedule".to_owned())),
+        ("timer_id", CborValue::Text("agenda".to_owned())),
+        ("daily_time", CborValue::Text("08:00".to_owned())),
+        ("utc", CborValue::Bool(true)),
+        ("message", CborValue::Text("prepare agenda".to_owned())),
+    ]);
+    assert_eq!(
+        timer_display_args(&args, "call-daily"),
+        "schedule agenda daily at 08:00 UTC"
+    );
+
+    let mut rt = runtime();
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    schedule_timer(
+        &mut rt,
+        &agent,
+        ScheduleArgs {
+            timer_id: "agenda".to_owned(),
+            timing: ScheduleTiming::Daily(
+                DailySchedule::parse("08:00", WallClockZone::Utc).expect("daily schedule"),
+            ),
+            message: "prepare agenda".to_owned(),
+        },
+        UnixMicros::new(1_767_254_400_000_000),
+    )
+    .expect("schedule");
+    assert_eq!(
+        rt.list_timers(&agent, UnixMicros::new(1_767_254_400_000_000))
+            .result,
+        CborValue::Text("agenda: due in 86400s, daily at 08:00 UTC".to_owned())
     );
 }
 
@@ -1144,7 +1566,7 @@ fn replayed_papercut_does_not_duplicate_append() {
         rt.record_papercut(&invoke, UnixMicros::new(1))
             .starts_with("recorded")
     );
-    rt.handle_started_replay(&invoke);
+    rt.handle_started_replay(&invoke, None);
 
     assert_eq!(lines.borrow().len(), 1);
     assert!(rt.pending_invocations.is_empty());
