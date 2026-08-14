@@ -22,8 +22,8 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use bounded_command::{
-    ProcessOwnership, run_with_bounded_stdout, run_with_bounded_stdout_after_spawn,
-    run_with_inherited_stdio,
+    BoundedCommandError, ProcessOwnership, run_with_bounded_stdout,
+    run_with_bounded_stdout_after_spawn, run_with_inherited_stdio,
 };
 pub use completion::{
     ArgCompleter, CommandCompletion, CommandName, CompletionData, CompletionItem, CompletionRule,
@@ -140,6 +140,11 @@ impl<F: FnMut() -> io::Result<()>> ExternalResumeGuard<F> {
         self.armed = false;
         (self.resume)()
     }
+
+    /// Prevents terminal resume when foreground ownership is unconfirmed.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
 }
 
 impl<F: FnMut() -> io::Result<()>> Drop for ExternalResumeGuard<F> {
@@ -154,6 +159,20 @@ impl<F: FnMut() -> io::Result<()>> Drop for ExternalResumeGuard<F> {
             );
         }
     }
+}
+
+/// Applies the fail-stop cut before an armed terminal-resume guard is dropped.
+fn preserve_pause_on_unconfirmed_foreground<T, F: FnMut() -> io::Result<()>>(
+    guard: ExternalResumeGuard<F>,
+    result: Result<T, BoundedCommandError>,
+) -> Result<T, BoundedCommandError> {
+    if result
+        .as_ref()
+        .is_err_and(BoundedCommandError::is_foreground_ownership_unconfirmed)
+    {
+        guard.disarm();
+    }
+    result
 }
 
 /// High-level events surfaced to the caller.
@@ -180,6 +199,61 @@ pub enum Event {
     /// A binding requested an application-defined action without touching the
     /// prompt draft.
     Action(String),
+}
+
+/// Failure while an interactive external program temporarily owns the terminal.
+#[derive(Debug)]
+pub enum ExternalProgramError {
+    /// Ordinary command failure after terminal ownership was restored.
+    Command(String),
+    /// Fatal failure because Tau could not confirm foreground ownership.
+    ForegroundOwnershipUnconfirmed(String),
+}
+
+impl ExternalProgramError {
+    /// Returns whether the interactive attachment must exit without resuming.
+    #[must_use]
+    pub fn is_foreground_ownership_unconfirmed(&self) -> bool {
+        matches!(self, Self::ForegroundOwnershipUnconfirmed(_))
+    }
+}
+
+impl std::fmt::Display for ExternalProgramError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Command(error) | Self::ForegroundOwnershipUnconfirmed(error) => {
+                formatter.write_str(error)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExternalProgramError {}
+
+impl From<BoundedCommandError> for ExternalProgramError {
+    fn from(error: BoundedCommandError) -> Self {
+        if error.is_foreground_ownership_unconfirmed() {
+            Self::ForegroundOwnershipUnconfirmed(error.to_string())
+        } else {
+            Self::Command(error.to_string())
+        }
+    }
+}
+
+impl From<String> for ExternalProgramError {
+    fn from(error: String) -> Self {
+        Self::Command(error)
+    }
+}
+
+/// Returns whether an input I/O error requires attachment-only terminal
+/// fail-stop.
+#[must_use]
+pub fn is_foreground_ownership_unconfirmed(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<BoundedCommandError>())
+        .is_some_and(BoundedCommandError::is_foreground_ownership_unconfirmed)
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -358,9 +432,14 @@ impl HighTerm {
     /// `rows` must be headerless TSV with the stable agent id in field one.
     /// Cancellation returns `Ok(None)`. The external `fzf` interaction uses a
     /// five-minute command timeout, including for an empty input roster. Tau
-    /// attempts to restore terminal input afterward; a restoration failure
-    /// supersedes the picker error.
-    pub fn pick_agent_row_with_fzf(&self, rows: &str) -> Result<Option<String>, String> {
+    /// checks foreground restoration after settling `fzf` and preserves the
+    /// primary outcome or failure alongside any restoration failure. If
+    /// ownership remains unconfirmed, the caller must exit the affected
+    /// attachment without resuming terminal input or output.
+    pub fn pick_agent_row_with_fzf(
+        &self,
+        rows: &str,
+    ) -> Result<Option<String>, ExternalProgramError> {
         self.pick_agent_row_with_command(
             path_std_ffi::OsStr::new("fzf"),
             rows,
@@ -376,7 +455,7 @@ impl HighTerm {
         rows: &str,
         timeout: std::time::Duration,
         ownership: ProcessOwnership,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, ExternalProgramError> {
         self.pick_agent_row_with_command_and_terminal(
             program,
             rows,
@@ -403,8 +482,9 @@ impl HighTerm {
             impl FnMut() -> io::Result<()>,
             impl FnOnce() -> Result<(), String>,
         >,
-    ) -> Result<Option<String>, String> {
-        let picker_rows = format_agent_picker_rows(rows, self.handle.size().0)?;
+    ) -> Result<Option<String>, ExternalProgramError> {
+        let picker_rows = format_agent_picker_rows(rows, self.handle.size().0)
+            .map_err(ExternalProgramError::Command)?;
         (hooks.pause)().map_err(|error| format!("could not release terminal: {error}"))?;
         let guard = ExternalResumeGuard::new(hooks.resume);
         let selection = run_agent_fzf_command_with_ownership(
@@ -414,10 +494,19 @@ impl HighTerm {
             ownership,
             hooks.after_spawn,
         );
-        guard
-            .finish()
-            .map_err(|error| format!("could not resume terminal after agent picker: {error}"))?;
-        selection
+        if selection
+            .as_ref()
+            .is_err_and(BoundedCommandError::is_foreground_ownership_unconfirmed)
+        {
+            guard.disarm();
+            return selection.map_err(ExternalProgramError::from);
+        }
+        guard.finish().map_err(|error| {
+            ExternalProgramError::Command(format!(
+                "could not resume terminal after agent picker: {error}"
+            ))
+        })?;
+        selection.map_err(ExternalProgramError::from)
     }
 
     /// Closes the active completion menu, if any, and updates its rendered
@@ -454,6 +543,7 @@ impl HighTerm {
             match self.handle_next_raw_event(raw) {
                 NextEventStep::Return(event) => return Ok(event),
                 NextEventStep::Continue => continue,
+                NextEventStep::Fatal(error) => return Err(error),
             }
         }
     }
@@ -489,7 +579,11 @@ impl HighTerm {
     }
 
     fn handle_buffer_changed_event(&mut self) -> NextEventStep {
-        if self.maybe_run_command_completion() {
+        let completion_changed = match self.maybe_run_command_completion() {
+            Ok(changed) => changed,
+            Err(error) => return NextEventStep::Fatal(error),
+        };
+        if completion_changed {
             self.sync_menu_block();
             self.handle.redraw_sync();
             return NextEventStep::Return(Event::BufferChanged);
@@ -528,14 +622,18 @@ impl HighTerm {
             command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
             trim: false,
         }));
-        self.handle.redraw_sync();
+        if !matches!(outcome, PromptActionOutcome::Fatal(_)) {
+            self.handle.redraw_sync();
+        }
         outcome.into_next_event_step()
     }
 
     fn handle_binding_event(&mut self, action: &str) -> NextEventStep {
         self.sync_menu_block();
         let outcome = self.run_binding(action);
-        self.handle.redraw_sync();
+        if !matches!(outcome, PromptActionOutcome::Fatal(_)) {
+            self.handle.redraw_sync();
+        }
         outcome.into_next_event_step()
     }
 
@@ -633,7 +731,10 @@ impl HighTerm {
                 return self.apply_raw_prompt_event(raw);
             }
             Ok(None) => {} // shell exited non-zero or no output applies.
-            Err(msg) => self.print_local(&format!("prompt action: {msg}")),
+            Err(error) if error.is_foreground_ownership_unconfirmed() => {
+                return PromptActionOutcome::Fatal(fatal_terminal_ownership(error));
+            }
+            Err(error) => self.print_local(&format!("prompt action: {error}")),
         }
         PromptActionOutcome::BufferChanged
     }
@@ -684,7 +785,7 @@ impl HighTerm {
         self.term.replace_last_submitted_input(history_line);
     }
 
-    fn maybe_run_command_completion(&mut self) -> bool {
+    fn maybe_run_command_completion(&mut self) -> io::Result<bool> {
         let buffer = self.handle.get_buffer();
         let cursor = self.handle.get_cursor();
         let Some((command, before, after)) = self
@@ -695,11 +796,11 @@ impl HighTerm {
             })
         else {
             self.last_command_completion_token = None;
-            return false;
+            return Ok(false);
         };
         let token_key = format!("{before}\0{cursor}");
         if self.last_command_completion_token.as_deref() == Some(token_key.as_str()) {
-            return false;
+            return Ok(false);
         }
         self.last_command_completion_token = Some(token_key);
         match run_completion_command(&self.term, &command) {
@@ -708,12 +809,15 @@ impl HighTerm {
                 let new_cursor = before.len() + text.len();
                 self.handle.set_buffer(new_text, new_cursor);
                 self.last_command_completion_token = None;
-                true
+                Ok(true)
             }
-            Ok(None) => false,
-            Err(msg) => {
-                self.print_local(&format!("completion command: {msg}"));
-                true
+            Ok(None) => Ok(false),
+            Err(error) if error.is_foreground_ownership_unconfirmed() => {
+                Err(fatal_terminal_ownership(error))
+            }
+            Err(error) => {
+                self.print_local(&format!("completion command: {error}"));
+                Ok(true)
             }
         }
     }
@@ -746,7 +850,7 @@ fn run_agent_fzf_command_with_ownership(
     timeout: std::time::Duration,
     ownership: ProcessOwnership,
     after_spawn: impl FnOnce() -> Result<(), String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, BoundedCommandError> {
     let mut command = path_std_process::Command::new(program);
     command
         .args(AGENT_PICKER_FZF_ARGS)
@@ -760,7 +864,12 @@ fn run_agent_fzf_command_with_ownership(
         ownership,
         after_spawn,
     )
-    .map_err(|error| format!("fzf failed: {error}"))?;
+    .map_err(|error| match error {
+        BoundedCommandError::Command(error) => {
+            BoundedCommandError::Command(format!("fzf failed: {error}"))
+        }
+        error @ BoundedCommandError::ForegroundOwnershipUnconfirmed { .. } => error,
+    })?;
     match output.status.code() {
         Some(1 | 130) => Ok(None),
         _ if !output.status.success() => Err(format!(
@@ -769,8 +878,9 @@ fn run_agent_fzf_command_with_ownership(
                 || "terminated by signal".to_owned(),
                 |code| code.to_string()
             )
-        )),
-        _ => parse_agent_fzf_output(output.stdout),
+        )
+        .into()),
+        _ => parse_agent_fzf_output(output.stdout).map_err(BoundedCommandError::Command),
     }
 }
 
@@ -916,25 +1026,28 @@ fn make_completion_source(
 fn run_completion_command(
     term: &tau_cli_term_raw::Term,
     command: &[String],
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, BoundedCommandError> {
     let Some((program, args)) = command.split_first() else {
-        return Err("empty command".to_owned());
+        return Err("empty command".to_owned().into());
     };
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
-    let _guard = ExternalResumeGuard::new(|| term.resume_after_external());
+    let guard = ExternalResumeGuard::new(|| term.resume_after_external());
     let mut command_builder = path_std_process::Command::new(program);
     command_builder
         .args(args)
         .stdin(path_std_process::Stdio::null())
         .stdout(path_std_process::Stdio::piped())
         .stderr(path_std_process::Stdio::null());
-    let output = run_with_bounded_stdout(
-        &mut command_builder,
-        None,
-        COMPLETION_COMMAND_OUTPUT_LIMIT_BYTES,
-        COMPLETION_COMMAND_TIMEOUT,
-        ProcessOwnership::ForegroundProcessGroup,
+    let output = preserve_pause_on_unconfirmed_foreground(
+        guard,
+        run_with_bounded_stdout(
+            &mut command_builder,
+            None,
+            COMPLETION_COMMAND_OUTPUT_LIMIT_BYTES,
+            COMPLETION_COMMAND_TIMEOUT,
+            ProcessOwnership::ForegroundProcessGroup,
+        ),
     )?;
     if !output.status.success() {
         return Ok(None);
@@ -1040,11 +1153,13 @@ enum PromptActionOutcome {
     BufferChanged,
     Continue,
     Return(Event),
+    Fatal(io::Error),
 }
 
 enum NextEventStep {
     Return(Event),
     Continue,
+    Fatal(io::Error),
 }
 
 impl PromptActionOutcome {
@@ -1053,8 +1168,14 @@ impl PromptActionOutcome {
             Self::BufferChanged => NextEventStep::Return(Event::BufferChanged),
             Self::Continue => NextEventStep::Continue,
             Self::Return(event) => NextEventStep::Return(event),
+            Self::Fatal(error) => NextEventStep::Fatal(error),
         }
     }
+}
+
+/// Converts terminal-ownership loss into a fatal interactive-input error.
+fn fatal_terminal_ownership(error: BoundedCommandError) -> io::Error {
+    io::Error::other(error)
 }
 
 impl PromptShellAction {
@@ -1145,7 +1266,7 @@ fn run_prompt_shell_action(
     external_editor: Option<&str>,
     prompt_history: &[String],
     action: PromptShellAction,
-) -> Result<Option<PromptShellResult>, String> {
+) -> Result<Option<PromptShellResult>, BoundedCommandError> {
     let external_action = match prompt_shell_dispatch(action, term) {
         PromptShellDispatch::Immediate(result) => return Ok(Some(result)),
         PromptShellDispatch::External(external_action) => external_action,
@@ -1180,13 +1301,13 @@ fn run_prompt_shell_action(
         "spawning prompt shell action"
     );
     if command.trim().is_empty() {
-        return Err("empty shell command".to_owned());
+        return Err("empty shell command".to_owned().into());
     }
 
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
     // RAII so a spawn error / panic still restores raw mode.
-    let _guard = ExternalResumeGuard::new(|| term.resume_after_external());
+    let guard = ExternalResumeGuard::new(|| term.resume_after_external());
 
     let mut command_builder = prompt_shell_command_builder(
         command,
@@ -1195,22 +1316,25 @@ fn run_prompt_shell_action(
         external_editor,
         history_picker.as_ref(),
     );
-    let Some(output) = run_external_prompt_shell_command(
-        &mut command_builder,
-        external_action.kind,
-        history_picker.as_ref(),
-    )?
-    else {
+    let command_result = preserve_pause_on_unconfirmed_foreground(
+        guard,
+        run_external_prompt_shell_command(
+            &mut command_builder,
+            external_action.kind,
+            history_picker.as_ref(),
+        ),
+    );
+    let Some(output) = command_result? else {
         return Ok(None);
     };
     match output {
         PromptShellCommandOutput::Captured(stdout) => {
-            return prompt_shell_captured_result(
+            return Ok(prompt_shell_captured_result(
                 external_action.kind,
                 external_action.shell.trim,
                 stdout,
                 prompt_history,
-            );
+            )?);
         }
         PromptShellCommandOutput::Edited => {}
     }
@@ -1277,7 +1401,7 @@ fn run_external_prompt_shell_command(
     command_builder: &mut std::process::Command,
     kind: PromptShellExternalKind,
     history_picker: Option<&PromptHistoryPicker>,
-) -> Result<Option<PromptShellCommandOutput>, String> {
+) -> Result<Option<PromptShellCommandOutput>, BoundedCommandError> {
     match kind {
         PromptShellExternalKind::Edit => run_prompt_edit_command(command_builder),
         PromptShellExternalKind::Insert | PromptShellExternalKind::HistorySearch => {
@@ -1288,7 +1412,7 @@ fn run_external_prompt_shell_command(
 
 fn run_prompt_edit_command(
     command_builder: &mut std::process::Command,
-) -> Result<Option<PromptShellCommandOutput>, String> {
+) -> Result<Option<PromptShellCommandOutput>, BoundedCommandError> {
     command_builder
         .stdin(path_std_process::Stdio::inherit())
         .stdout(path_std_process::Stdio::inherit())
@@ -1305,7 +1429,7 @@ fn run_prompt_edit_command(
 fn run_prompt_capture_command(
     command_builder: &mut std::process::Command,
     history_picker: Option<&PromptHistoryPicker>,
-) -> Result<Option<PromptShellCommandOutput>, String> {
+) -> Result<Option<PromptShellCommandOutput>, BoundedCommandError> {
     command_builder.stdin(if history_picker.is_some() {
         path_std_process::Stdio::piped()
     } else {

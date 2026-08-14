@@ -4,6 +4,72 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
 
+/// Unconfirmed foreground ownership disarms the outer resume guard so the
+/// interactive attachment cannot re-enable raw input or redraw.
+#[test]
+fn ownership_failure_does_not_resume_external_terminal() {
+    let resume_calls = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let resume_state = resume_calls.clone();
+    let guard = ExternalResumeGuard::new(move || {
+        resume_state.set(resume_state.get() + 1);
+        Ok(())
+    });
+    let error = BoundedCommandError::ForegroundOwnershipUnconfirmed {
+        primary: "command failure (injected waiter failure)".to_owned(),
+        restoration: "injected persistent restore failure".to_owned(),
+    };
+
+    let returned = preserve_pause_on_unconfirmed_foreground(guard, Err::<(), _>(error))
+        .expect_err("ownership failure remains fatal");
+
+    assert!(returned.is_foreground_ownership_unconfirmed());
+    assert!(returned.to_string().contains("injected waiter failure"));
+    assert!(returned.to_string().contains("persistent restore failure"));
+    assert_eq!(resume_calls.get(), 0);
+}
+
+/// Picker setup failure after foreground transfer still checks restoration and
+/// disarms the picker's distinct explicit-resume path on persistent failure.
+#[cfg(unix)]
+#[test]
+fn picker_post_spawn_restoration_failure_does_not_resume() {
+    use std::sync::atomic::Ordering;
+
+    let _foreground_guard = bounded_command::FOREGROUND_CLAIM_TEST_LOCK
+        .lock()
+        .expect("foreground restore test lock");
+    let _fzf_guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
+    let program = fake_fzf("sleep 30");
+    let (term, _handle, _input_tx) = new_test_term(vec![]);
+    let resume_calls = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let resume_state = resume_calls.clone();
+    bounded_command::FAIL_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
+
+    let error = term
+        .pick_agent_row_with_command_and_terminal(
+            program.as_os_str(),
+            "",
+            path_std_time::Duration::from_secs(2),
+            ProcessOwnership::ForegroundProcessGroup,
+            AgentPickerHooks {
+                pause: || Ok(()),
+                resume: move || {
+                    resume_state.set(resume_state.get() + 1);
+                    Ok(())
+                },
+                after_spawn: || Err("injected post-spawn setup failure".to_owned()),
+            },
+        )
+        .expect_err("persistent restoration failure must fail stop");
+    bounded_command::FAIL_FOREGROUND_RESTORE.store(false, Ordering::SeqCst);
+
+    assert!(error.is_foreground_ownership_unconfirmed());
+    let message = error.to_string();
+    assert!(message.contains("injected post-spawn setup failure"));
+    assert!(message.contains("restore Tau terminal foreground"));
+    assert_eq!(resume_calls.get(), 0);
+}
+
 fn new_test_term_with_data_and_bindings(
     commands: Vec<CommandCompletion>,
     bindings: impl IntoIterator<Item = (String, String)>,
@@ -1079,7 +1145,7 @@ fn agent_fzf_command_reports_missing_program_and_failure_status() {
         || Ok(()),
     )
     .expect_err("status 2 is an error");
-    assert!(error.contains("status 2"));
+    assert!(error.to_string().contains("status 2"));
 }
 
 /// The production picker wiring must retain the documented interactive bound
@@ -1141,7 +1207,7 @@ fn agent_picker_timeout_resumes_terminal_and_kills_descendants() {
         .expect_err("nonterminating picker times out");
 
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
-    assert!(error.contains("fzf failed: command exceeded"));
+    assert!(error.to_string().contains("fzf failed: command exceeded"));
     assert!(!terminal_paused.get(), "picker left terminal paused");
     let descendant_pid: i32 = std::fs::read_to_string(&pid_file)
         .expect("read descendant pid")

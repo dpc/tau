@@ -825,6 +825,33 @@ fn detach_command_sends_dedicated_request_frame() {
     }
 }
 
+/// Foreground-ownership fail-stop sends daemon-preservation authorization
+/// before the production shutdown sequence disconnects the affected attachment.
+#[test]
+fn foreground_fail_stop_sequences_detach_before_disconnect() {
+    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    harness_stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+
+    send_ui_exit_frames(InputLoopExit::ForegroundOwnershipUnconfirmed, &writer);
+
+    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+    assert_eq!(
+        reader.read_message().expect("read request"),
+        Some(HarnessInputMessage::UiDetachRequest(
+            tau_proto::UiDetachRequest {},
+        ))
+    );
+    assert_eq!(
+        reader.read_message().expect("read disconnect"),
+        Some(HarnessInputMessage::Disconnect(Disconnect {
+            reason: Some("detach".to_owned()),
+        }))
+    );
+}
+
 /// Bare `:tree`'s production command boundary writes exactly one dedicated
 /// request frame rather than an emitted event.
 #[test]

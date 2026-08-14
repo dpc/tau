@@ -952,9 +952,17 @@ journal. Snapshot failures return no partial rows.
 
 The optional picker resolves `fzf` through the same user's `PATH` and therefore
 treats it as trusted local code. Tau invokes fixed arguments directly, bounds its
-stdin/stdout and runtime, restores foreground ownership and raw terminal state,
-and revalidates the selected agent. Cancellation, subprocess/RPC errors, and stale
-selection are no-mutation outcomes.
+stdin/stdout and runtime, checks foreground restoration after settling the child,
+and revalidates the selected agent. Restoration failure preserves the primary
+picker outcome and the restoration error; Drop retries only as best-effort
+cleanup. When foreground ownership remains unconfirmed, Tau does not resume raw
+input, redraw, or terminal cleanup, disconnects only that UI attachment, and
+leaves an owned harness daemon running. Cancellation, ordinary subprocess/RPC
+errors after confirmed restoration, and stale selection are no-mutation outcomes.
+Focused safeguards cover bounded settlement and group cleanup, the high-level
+no-resume guard, attachment-fatal routing, and raw-terminal paused Drop/no-write
+behavior. Revisit them together when changing picker subprocess ownership,
+terminal pause/resume, input-loop error routing, or daemon exit disposition.
 Picker membership follows live lifecycle/navigation authority independently of
 missing, invalid, or unreadable creation-fact enrichment. Selection never
 changes navigation mode, runtime state, or agent loading.

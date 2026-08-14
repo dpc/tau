@@ -24,19 +24,21 @@ use std::os::unix::process::CommandExt as _;
 #[cfg(test)]
 use std::sync::Mutex;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 const POST_EXIT_PIPE_CLOSE_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(1);
 #[cfg(test)]
 static FAIL_NEXT_FOREGROUND_CLAIM: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
-static FAIL_NEXT_FOREGROUND_RESTORE: AtomicBool = AtomicBool::new(false);
+pub(super) static FAIL_FOREGROUND_RESTORE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FOREGROUND_RESTORE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_FAILED_FOREGROUND_CHILD_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
-static FOREGROUND_CLAIM_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(super) static FOREGROUND_CLAIM_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// How much subprocess ownership the bounded runner should take on failures.
 ///
@@ -72,6 +74,50 @@ pub(crate) struct BoundedCommandStatus {
     pub(crate) status: std::process::ExitStatus,
 }
 
+/// Failure from a bounded subprocess, including terminal-ownership failures.
+#[derive(Debug)]
+pub(crate) enum BoundedCommandError {
+    /// The command failed while Tau's foreground ownership was confirmed.
+    Command(String),
+    /// Tau could not confirm foreground ownership after settling the child.
+    ForegroundOwnershipUnconfirmed {
+        /// Child outcome or command error observed before restoration.
+        primary: String,
+        /// Error returned by the checked foreground-restoration attempt.
+        restoration: String,
+    },
+}
+
+impl BoundedCommandError {
+    /// Returns whether terminal input and redraw must remain paused.
+    pub(crate) fn is_foreground_ownership_unconfirmed(&self) -> bool {
+        matches!(self, Self::ForegroundOwnershipUnconfirmed { .. })
+    }
+}
+
+impl std::fmt::Display for BoundedCommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Command(error) => formatter.write_str(error),
+            Self::ForegroundOwnershipUnconfirmed {
+                primary,
+                restoration,
+            } => write!(
+                formatter,
+                "terminal foreground ownership remains unconfirmed after {primary}: {restoration}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BoundedCommandError {}
+
+impl From<String> for BoundedCommandError {
+    fn from(error: String) -> Self {
+        Self::Command(error)
+    }
+}
+
 /// Runs a child process while bounding captured stdout and elapsed time.
 ///
 /// Callers must configure stderr before calling. This helper always captures
@@ -89,7 +135,7 @@ pub(crate) fn run_with_bounded_stdout(
     stdout_limit: usize,
     timeout: std::time::Duration,
     ownership: ProcessOwnership,
-) -> Result<BoundedCommandOutput, String> {
+) -> Result<BoundedCommandOutput, BoundedCommandError> {
     run_with_bounded_stdout_after_spawn(
         command,
         stdin_input,
@@ -108,15 +154,15 @@ pub(crate) fn run_with_bounded_stdout_after_spawn(
     timeout: std::time::Duration,
     ownership: ProcessOwnership,
     after_spawn: impl FnOnce() -> Result<(), String>,
-) -> Result<BoundedCommandOutput, String> {
+) -> Result<BoundedCommandOutput, BoundedCommandError> {
     configure_process_ownership(command, ownership)?;
     if stdin_input.is_some() {
         command.stdin(path_std_process::Stdio::piped());
     }
     let mut child = command
         .spawn()
-        .map_err(|e| format!("could not spawn command: {e}"))?;
-    let process_group = match claim_process_group_handle(ownership, child.id()) {
+        .map_err(|e| BoundedCommandError::Command(format!("could not spawn command: {e}")))?;
+    let mut process_group = match claim_process_group_handle(ownership, child.id()) {
         Ok(process_group) => process_group,
         Err(error) => {
             #[cfg(test)]
@@ -127,15 +173,25 @@ pub(crate) fn run_with_bounded_stdout_after_spawn(
                 }
             };
             terminate_child(&mut child, child_pgid);
-            return Err(error);
+            return Err(error.into());
         }
     };
     if let Err(error) = after_spawn() {
         terminate_child(&mut child, process_group.child_pgid());
-        return Err(error);
+        return settle_after_child(&mut process_group, Err(error), |_| {
+            unreachable!("after-spawn failure has no successful child output")
+        });
     }
 
-    BoundedStdoutRun::start(child, process_group, stdin_input, stdout_limit)?.finish(timeout)
+    match BoundedStdoutRun::start(child, process_group, stdin_input, stdout_limit) {
+        Ok(run) => run.finish(timeout),
+        Err(BoundedStdoutStartFailure {
+            mut process_group,
+            primary,
+        }) => settle_after_child(&mut process_group, Err(primary), |_| {
+            unreachable!("captured setup failure has no successful child output")
+        }),
+    }
 }
 
 /// State for one bounded stdout child run.
@@ -163,6 +219,14 @@ struct BoundedStdoutRun {
     stdout_limit: usize,
 }
 
+/// Captured-command setup failure retaining foreground cleanup authority.
+struct BoundedStdoutStartFailure {
+    /// Process-group handle that must perform checked foreground restoration.
+    process_group: ProcessGroupHandle,
+    /// Primary setup failure observed after foreground transfer.
+    primary: String,
+}
+
 impl BoundedStdoutRun {
     /// Starts background pipe handling for a spawned child.
     fn start(
@@ -170,10 +234,13 @@ impl BoundedStdoutRun {
         process_group: ProcessGroupHandle,
         stdin_input: Option<&[u8]>,
         stdout_limit: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, BoundedStdoutStartFailure> {
         let Some(stdout) = child.stdout.take() else {
             terminate_child(&mut child, process_group.child_pgid());
-            return Err("command stdout was not captured".to_owned());
+            return Err(BoundedStdoutStartFailure {
+                process_group,
+                primary: "command stdout was not captured".to_owned(),
+            });
         };
         let (event_tx, event_rx) = path_std_sync::mpsc::channel();
         spawn_stdout_reader(stdout, stdout_limit, event_tx.clone());
@@ -194,10 +261,14 @@ impl BoundedStdoutRun {
 
     /// Waits until the child exits, a pipe error occurs, or the timeout
     /// expires.
-    fn finish(mut self, timeout: std::time::Duration) -> Result<BoundedCommandOutput, String> {
+    fn finish(
+        mut self,
+        timeout: std::time::Duration,
+    ) -> Result<BoundedCommandOutput, BoundedCommandError> {
         let result = self.wait_for_completion(timeout);
-        self.process_group.restore_foreground()?;
-        result
+        settle_after_child(&mut self.process_group, result, |output| {
+            format!("command exited with {}", output.status)
+        })
     }
 
     fn wait_for_completion(
@@ -446,12 +517,23 @@ pub(crate) fn run_with_inherited_stdio(
     command: &mut std::process::Command,
     timeout: std::time::Duration,
     ownership: ProcessOwnership,
-) -> Result<BoundedCommandStatus, String> {
+) -> Result<BoundedCommandStatus, BoundedCommandError> {
+    run_with_inherited_stdio_after_spawn(command, timeout, ownership, || Ok(()))
+}
+
+/// Runs an inherited-stdio command after exposing deterministic child
+/// readiness.
+fn run_with_inherited_stdio_after_spawn(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+    ownership: ProcessOwnership,
+    after_spawn: impl FnOnce() -> Result<(), String>,
+) -> Result<BoundedCommandStatus, BoundedCommandError> {
     configure_process_ownership(command, ownership)?;
     let mut child = command
         .spawn()
-        .map_err(|e| format!("could not spawn command: {e}"))?;
-    let process_group = match claim_process_group_handle(ownership, child.id()) {
+        .map_err(|e| BoundedCommandError::Command(format!("could not spawn command: {e}")))?;
+    let mut process_group = match claim_process_group_handle(ownership, child.id()) {
         Ok(process_group) => process_group,
         Err(error) => {
             #[cfg(test)]
@@ -462,12 +544,18 @@ pub(crate) fn run_with_inherited_stdio(
                 }
             };
             terminate_child(&mut child, child_pgid);
-            return Err(error);
+            return Err(error.into());
         }
     };
+    if let Err(error) = after_spawn() {
+        terminate_child(&mut child, process_group.child_pgid());
+        return settle_after_child(&mut process_group, Err(error), |_| {
+            unreachable!("after-spawn failure has no successful child status")
+        });
+    }
 
     let child_rx = spawn_child_waiter(child);
-    match child_rx.recv_timeout(timeout) {
+    let result = match child_rx.recv_timeout(timeout) {
         Ok(Ok(status)) => Ok(BoundedCommandStatus { status }),
         Ok(Err(error)) => {
             terminate_process_group_if_owned(process_group.child_pgid());
@@ -482,6 +570,39 @@ pub(crate) fn run_with_inherited_stdio(
             terminate_process_group_if_owned(process_group.child_pgid());
             Err("command monitor stopped unexpectedly".to_owned())
         }
+    };
+    settle_after_child(&mut process_group, result, |output| {
+        format!("command exited with {}", output.status)
+    })
+}
+
+/// Restores foreground ownership after a child has been fully settled.
+fn settle_after_child<T>(
+    process_group: &mut ProcessGroupHandle,
+    primary: Result<T, String>,
+    describe_success: impl FnOnce(&T) -> String,
+) -> Result<T, BoundedCommandError> {
+    settle_after_child_with_restore(primary, describe_success, || {
+        process_group.restore_foreground()
+    })
+}
+
+/// Combines the primary child result with one checked restoration attempt.
+fn settle_after_child_with_restore<T>(
+    primary: Result<T, String>,
+    describe_success: impl FnOnce(&T) -> String,
+    restore_foreground: impl FnOnce() -> Result<(), String>,
+) -> Result<T, BoundedCommandError> {
+    let primary_description = match &primary {
+        Ok(value) => describe_success(value),
+        Err(error) => format!("command failure ({error})"),
+    };
+    match restore_foreground() {
+        Ok(()) => primary.map_err(BoundedCommandError::Command),
+        Err(restoration) => Err(BoundedCommandError::ForegroundOwnershipUnconfirmed {
+            primary: primary_description,
+            restoration,
+        }),
     }
 }
 
@@ -625,7 +746,11 @@ impl ProcessGroupHandle {
         #[cfg(unix)]
         if let Some(parent_pgid) = self.parent_pgid {
             #[cfg(test)]
-            if FAIL_NEXT_FOREGROUND_RESTORE.swap(false, Ordering::SeqCst) {
+            {
+                FOREGROUND_RESTORE_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+            }
+            #[cfg(test)]
+            if FAIL_FOREGROUND_RESTORE.load(Ordering::SeqCst) {
                 return Err(
                     "could not restore Tau terminal foreground: injected failure".to_owned(),
                 );

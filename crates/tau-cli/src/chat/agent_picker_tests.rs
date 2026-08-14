@@ -1,6 +1,9 @@
 use std::cell as path_std_cell;
 
-use super::{AgentPickerResolution, resolve_agent_picker, with_agent_roster};
+use super::{
+    AgentPickerResolution, DaemonDisposition, InputLoopExit, resolve_agent_picker,
+    with_agent_roster,
+};
 use crate::estimated_cost::AgentCostSnapshot;
 use crate::list_agents as path_crate_list_agents;
 
@@ -169,4 +172,41 @@ fn picker_does_not_launch_after_current_roster_timeout() {
         AgentPickerResolution::Notice("agent roster request timed out after 10s".to_owned())
     );
     assert!(!picker_launched.get());
+}
+
+/// A picker that cannot confirm foreground restoration bypasses the ordinary
+/// local notice path so the input loop can exit the affected attachment.
+#[test]
+fn picker_foreground_restoration_failure_is_fatal() {
+    let result = resolve_agent_picker(
+        vec![auto_entry(tau_proto::AgentRuntimeState::Running)],
+        path_crate_list_agents::AgentPickerFilter::Active,
+        |_| None,
+        |_| {
+            Err(
+                tau_cli_term::ExternalProgramError::ForegroundOwnershipUnconfirmed(
+                    "persistent restore failure".to_owned(),
+                ),
+            )
+        },
+        || None,
+        || true,
+        |_| true,
+    );
+
+    assert_eq!(
+        result,
+        AgentPickerResolution::Fatal("persistent restore failure".to_owned())
+    );
+}
+
+/// Attachment fail-stop disconnects with a distinct reason and keeps an owned
+/// daemon running so another terminal can attach after this UI exits.
+#[test]
+fn foreground_restoration_fail_stop_keeps_daemon_running() {
+    let exit = InputLoopExit::ForegroundOwnershipUnconfirmed;
+
+    assert_eq!(exit.reason(), "foreground-ownership-unconfirmed");
+    assert_eq!(exit.harness_disconnect_reason(), "detach");
+    assert_eq!(exit.daemon_disposition(), DaemonDisposition::KeepRunning);
 }

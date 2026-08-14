@@ -16,6 +16,18 @@ Dynamic action tests apply successive owner-stamped schema generations and
 verify that deep argument completions plus parse errors use the latest
 suggestions while stale candidates disappear.
 
+Terminal foreground-restoration fail-stop coverage is intentionally layered.
+`tau-cli-term::bounded_command` owns checked settlement for captured and
+inherited-stdio children, preservation of primary and restoration failures,
+bounded cleanup, and process-group termination with bounded non-runnable
+descendant cleanup. The high-level `tau-cli-term` guard tests own the no-resume
+decision for prompt commands and the picker's distinct explicit-resume path.
+`tau-cli` tests own attachment-fatal routing through authorized daemon-preserving
+UI disconnect and daemon disposition. `tau-cli-term-raw` tests own paused
+shutdown, Drop cleanup suppression, and the no-redraw-write sink oracle. Changes
+to any layer must run the focused tests in all four owners rather than replacing
+them with a broad subprocess matrix.
+
 Prompt-history tests cover ordered asynchronous-worker persistence, nonblocking
 item/byte admission drops, unavailable-worker drops, malformed or unsupported
 records, torn or oversized tails, and command-layer redaction and routing.

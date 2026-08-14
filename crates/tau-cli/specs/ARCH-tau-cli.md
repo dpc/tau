@@ -112,12 +112,15 @@ The manual boundary and observable helper behavior are recorded in
 
 Raw terminal mode is a process-local ownership boundary. Before spawning editors
 or pickers, Tau must pause redraws, release raw-mode features, and always clear
-that paused state when setup or resume fails so the UI cannot remain permanently
-muted. Abort paths for terminal-releasing shell actions should terminate the
-owned process group before Tau resumes raw-mode/redraw ownership. Redraw and
-input coordination assumes a single foreground reader thread; background
-renderer threads must not write while the terminal is released to an external
-program.
+that paused state when ordinary setup or resume fails so the UI cannot remain
+permanently muted. Foreground process-group restoration is the narrow exception:
+if Tau cannot confirm that it regained foreground ownership after settling the
+child, it must not resume raw input or redraw and must exit only the affected
+interactive attachment without terminal cleanup writes. Abort paths for
+terminal-releasing shell actions should terminate the owned process group before
+Tau resumes raw-mode/redraw ownership. Redraw and input coordination assumes a
+single foreground reader thread; background renderer threads must not write
+while the terminal is released to an external program.
 
 Agent-selection input routing is mirrored immediately on the input thread so a
 prompt submitted during renderer handoff reaches the new target. The renderer

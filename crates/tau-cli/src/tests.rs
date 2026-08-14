@@ -34,7 +34,16 @@ use super::chat::{
 };
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 use super::tool_render::format_context_token_count;
-use super::{cli as path_super_cli, transcript_markers};
+use super::{CliError, cli as path_super_cli, transcript_markers};
+
+/// Foreground-ownership fail-stop must bypass generic stderr reporting because
+/// the process cannot confirm that it owns the terminal.
+#[test]
+fn foreground_ownership_failure_suppresses_top_level_terminal_report() {
+    let error = CliError::ForegroundOwnershipUnconfirmed("restore failed".to_owned());
+
+    assert!(!error.should_report_to_terminal());
+}
 
 /// Ensures only commands that launch a harness or render from harness settings
 /// validate a fresh snapshot. Attach and local/IPC inspection must remain

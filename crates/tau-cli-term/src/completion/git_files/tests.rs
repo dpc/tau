@@ -61,7 +61,7 @@ fn git_bounded_stdout_kills_child_on_overflow() {
     )
     .expect_err("over-limit stdout should fail");
 
-    assert!(error.contains("stdout exceeded"));
+    assert!(error.to_string().contains("stdout exceeded"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
 

@@ -39,7 +39,12 @@ Bounded subprocess execution lives in `src/bounded_command.rs`.
   `ProcessOwnership::ForegroundProcessGroup`: Tau first releases raw terminal
   mode, starts the command in an owned process group, hands that group the
   controlling terminal foreground pgrp, then restores Tau's pgrp before
-  raw-mode/redraw resume. `tcsetpgrp` is guarded against `SIGTTOU`.
+  raw-mode/redraw resume. `tcsetpgrp` is guarded against `SIGTTOU`. Both captured
+  and inherited-stdio runners check restoration after settling the child and
+  preserve the child outcome or failure alongside any restoration failure. If
+  Tau cannot confirm that it regained foreground ownership, the affected
+  interactive attachment remains paused and exits without raw input or redraw;
+  the process-group handle's Drop restoration is only a best-effort fallback.
 - Bounded command monitoring is event-driven, not poll/sleep based. Captured
   output commands use one monitor channel fed by the direct-child waiter thread,
   stdout reader thread, and optional stdin writer thread. The monitor blocks on

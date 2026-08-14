@@ -1387,7 +1387,7 @@ pub(crate) fn run_chat(
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
-    let exit = terminal_input_loop(
+    let input_result = terminal_input_loop(
         &mut term,
         &writer,
         &mut active_session_id,
@@ -1416,7 +1416,14 @@ pub(crate) fn run_chat(
             harness_socket_path,
             agent_estimated_api_costs,
         },
-    )?;
+    );
+    let (exit, foreground_ownership_error) = match input_result {
+        Ok(exit) => (exit, None),
+        Err(CliError::ForegroundOwnershipUnconfirmed(message)) => {
+            (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message))
+        }
+        Err(error) => return Err(error),
+    };
 
     tool_timer.stop();
     let _ = timer_thread.join();
@@ -1444,7 +1451,10 @@ pub(crate) fn run_chat(
 
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
 
-    Ok(())
+    match foreground_ownership_error {
+        Some(message) => Err(CliError::ForegroundOwnershipUnconfirmed(message)),
+        None => Ok(()),
+    }
 }
 
 /// Starts or attaches the daemon and establishes process-local UI logging.
@@ -1523,6 +1533,8 @@ enum InputLoopExit {
     /// User typed `:detach`. We leave the daemon running whether we
     /// spawned it or attached to it.
     Detach,
+    /// Foreground ownership is unconfirmed, so only this attachment may exit.
+    ForegroundOwnershipUnconfirmed,
 }
 
 impl InputLoopExit {
@@ -1530,6 +1542,21 @@ impl InputLoopExit {
         match self {
             Self::Quit => "quit",
             Self::Detach => "detach",
+            Self::ForegroundOwnershipUnconfirmed => "foreground-ownership-unconfirmed",
+        }
+    }
+
+    fn harness_disconnect_reason(self) -> &'static str {
+        match self {
+            Self::Quit => "quit",
+            Self::Detach | Self::ForegroundOwnershipUnconfirmed => "detach",
+        }
+    }
+
+    fn daemon_disposition(self) -> DaemonDisposition {
+        match self {
+            Self::Quit => DaemonDisposition::StopOwned,
+            Self::Detach | Self::ForegroundOwnershipUnconfirmed => DaemonDisposition::KeepRunning,
         }
     }
 }
@@ -1544,12 +1571,7 @@ fn shutdown_ui_connection(
 ) -> &'static str {
     let reason = exit.reason();
     local_disconnect_started.store(true, Ordering::Release);
-    let _ = send_frame(
-        &writer,
-        &HarnessInputMessage::Disconnect(Disconnect {
-            reason: Some(reason.to_owned()),
-        }),
-    );
+    send_ui_exit_frames(exit, &writer);
 
     // Drop the writer, then explicitly shut down the extra stream clone kept
     // by the main thread so the socket reader unblocks even if the daemon does
@@ -1564,6 +1586,18 @@ fn shutdown_ui_connection(
     reason
 }
 
+fn send_ui_exit_frames(exit: InputLoopExit, writer: &WriterHandle) {
+    if exit == InputLoopExit::ForegroundOwnershipUnconfirmed {
+        let _ = send_ui_detach_request(writer);
+    }
+    let _ = send_frame(
+        writer,
+        &HarnessInputMessage::Disconnect(Disconnect {
+            reason: Some(exit.harness_disconnect_reason().to_owned()),
+        }),
+    );
+}
+
 fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
     if handle.join().is_err() {
         tracing::warn!(target: "tau_cli::ui", name, "UI worker thread panicked during shutdown");
@@ -1575,10 +1609,19 @@ fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
     // outlives this process. `DaemonHandle::Drop` would otherwise kill the
     // child we spawned; `:detach` is exactly the case where we want it to keep
     // running.
-    match exit {
-        InputLoopExit::Quit => drop(daemon),
-        InputLoopExit::Detach => daemon.leak(),
+    match exit.daemon_disposition() {
+        DaemonDisposition::StopOwned => drop(daemon),
+        DaemonDisposition::KeepRunning => daemon.leak(),
     }
+}
+
+/// Daemon action selected after the terminal input loop ends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonDisposition {
+    /// Stop a daemon owned by this CLI process.
+    StopOwned,
+    /// Leave the daemon available after this attachment disconnects.
+    KeepRunning,
 }
 
 fn tool_timer_loop(state: Arc<(Mutex<ToolTimerState>, Condvar)>, renderer_tx: LocalRendererSender) {
@@ -2248,7 +2291,13 @@ fn apply_ephemeral_staging_command(
 impl<'a> TerminalInputSession<'a> {
     fn run(&mut self) -> Result<InputLoopExit, CliError> {
         loop {
-            let event = self.term.get_next_event()?;
+            let event = self.term.get_next_event().map_err(|error| {
+                if tau_cli_term::is_foreground_ownership_unconfirmed(&error) {
+                    CliError::ForegroundOwnershipUnconfirmed(error.to_string())
+                } else {
+                    CliError::Io(error)
+                }
+            })?;
             if let Ok(active_session) = self.ctx.active_session_state.lock()
                 && self.session_id.as_str() != active_session.as_str()
             {
@@ -2274,13 +2323,13 @@ impl<'a> TerminalInputSession<'a> {
                 Ok(None)
             }
             other => {
-                self.handle_non_exit_event(other);
+                self.handle_non_exit_event(other)?;
                 Ok(None)
             }
         }
     }
 
-    fn handle_non_exit_event(&mut self, event: tau_cli_term::Event) {
+    fn handle_non_exit_event(&mut self, event: tau_cli_term::Event) -> Result<(), CliError> {
         use tau_cli_term::Event as TermEvent;
 
         // These events update local UI/session state only; none of them can
@@ -2292,26 +2341,32 @@ impl<'a> TerminalInputSession<'a> {
             }
             TermEvent::FocusChanged { focused } => self.send_focus_changed(focused),
             TermEvent::BufferChanged => self.update_draft(),
-            TermEvent::Action(action) => self.handle_binding_action(&action),
+            TermEvent::Action(action) => self.handle_binding_action(&action)?,
             TermEvent::BackTab => self.cycle_role_group(),
             TermEvent::Escape => self.recall_queued_prompt(),
             TermEvent::Line(_) | TermEvent::Eof | TermEvent::CancelPrompt => {}
         }
+        Ok(())
     }
 
-    fn handle_binding_action(&mut self, action: &str) {
+    fn handle_binding_action(&mut self, action: &str) -> Result<(), CliError> {
         match action {
             "fast-toggle" => self.toggle_fast_service_tier(),
             "cycle-role" => self.cycle_role_inner(),
             "cycle-role-group" => self.cycle_role_group(),
             "agent-previous" => self.switch_agent_by_delta(-1),
             "agent-next" => self.switch_agent_by_delta(1),
-            "agent-pick" => self.pick_agent(path_crate_list_agents::AgentPickerFilter::Active),
-            "agent-pick-all" => self.pick_agent(path_crate_list_agents::AgentPickerFilter::All),
+            "agent-pick" => {
+                return self.pick_agent(path_crate_list_agents::AgentPickerFilter::Active);
+            }
+            "agent-pick-all" => {
+                return self.pick_agent(path_crate_list_agents::AgentPickerFilter::All);
+            }
             _ => self
                 .output
                 .system_info(&format!("binding: unknown application action `{action}`")),
         }
+        Ok(())
     }
 
     fn send_focus_changed(&self, focused: bool) {
@@ -2374,6 +2429,13 @@ impl<'a> TerminalInputSession<'a> {
         let outcome = self.handle_session_command(text)?;
         if !matches!(outcome, CommandOutcome::NotHandled) {
             return Ok(outcome);
+        }
+        if let Some(command) = parse_agent_picker_command(text) {
+            match command {
+                Ok(filter) => self.pick_agent(filter)?,
+                Err(message) => self.output.system_info(message),
+            }
+            return Ok(CommandOutcome::Continue);
         }
         if self.handle_non_session_command(text) {
             return Ok(CommandOutcome::Continue);
@@ -2632,9 +2694,6 @@ impl<'a> TerminalInputSession<'a> {
         if self.handle_debug_utility_command(text) {
             return true;
         }
-        if self.handle_agent_picker_command(text) {
-            return true;
-        }
         if self.handle_version_command(text) {
             return true;
         }
@@ -2652,18 +2711,6 @@ impl<'a> TerminalInputSession<'a> {
         }
         if text.starts_with(":session-stats ") {
             self.output.system_info(":session-stats takes no arguments");
-            return true;
-        }
-        false
-    }
-
-    /// Handles the command that opens the local agent picker.
-    fn handle_agent_picker_command(&mut self, text: &str) -> bool {
-        if let Some(command) = parse_agent_picker_command(text) {
-            match command {
-                Ok(filter) => self.pick_agent(filter),
-                Err(message) => self.output.system_info(message),
-            }
             return true;
         }
         false
@@ -3215,7 +3262,10 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
-    fn pick_agent(&mut self, filter: crate::list_agents::AgentPickerFilter) {
+    fn pick_agent(
+        &mut self,
+        filter: crate::list_agents::AgentPickerFilter,
+    ) -> Result<(), CliError> {
         let session_id = self.session_id.clone();
         let costs = self.ctx.agent_estimated_api_costs.snapshot();
         let resolution = with_agent_roster(
@@ -3250,12 +3300,16 @@ impl<'a> TerminalInputSession<'a> {
             AgentPickerResolution::Notice(message) => {
                 self.output.system_info(&format!("agent-picker: {message}"));
             }
+            AgentPickerResolution::Fatal(message) => {
+                return Err(CliError::ForegroundOwnershipUnconfirmed(message));
+            }
             AgentPickerResolution::Select(agent_id) => {
                 if self.selected_agent_id().as_deref() != Some(agent_id.as_str()) {
                     self.switch_to_agent(agent_id.to_string());
                 }
             }
         }
+        Ok(())
     }
 
     fn switch_to_agent(&mut self, agent_id: String) {
@@ -3436,6 +3490,8 @@ enum AgentPickerResolution {
     NoChange,
     /// Preserve selection and draft while showing this notice.
     Notice(String),
+    /// Exit the attachment because foreground ownership remains unconfirmed.
+    Fatal(String),
     /// Switch to this freshly revalidated agent.
     Select(tau_proto::AgentId),
 }
@@ -3456,7 +3512,7 @@ fn resolve_agent_picker(
     agents: Vec<tau_proto::SessionAgentListEntry>,
     filter: crate::list_agents::AgentPickerFilter,
     cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<crate::estimated_cost::AgentCostSnapshot>,
-    pick: impl FnOnce(&str) -> Result<Option<String>, String>,
+    pick: impl FnOnce(&str) -> Result<Option<String>, tau_cli_term::ExternalProgramError>,
     refresh: impl FnOnce() -> Option<Vec<tau_proto::SessionAgentListEntry>>,
     session_is_current: impl FnOnce() -> bool,
     agent_is_known: impl FnOnce(&str) -> bool,
@@ -3466,7 +3522,10 @@ fn resolve_agent_picker(
     let selected = match pick(&rows) {
         Ok(Some(row)) => row,
         Ok(None) => return AgentPickerResolution::NoChange,
-        Err(error) => return AgentPickerResolution::Notice(error),
+        Err(error) if error.is_foreground_ownership_unconfirmed() => {
+            return AgentPickerResolution::Fatal(error.to_string());
+        }
+        Err(error) => return AgentPickerResolution::Notice(error.to_string()),
     };
     let agent_id = match crate::list_agents::selected_agent_id(&selected) {
         Ok(agent_id) => agent_id,

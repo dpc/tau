@@ -1,7 +1,154 @@
 use std::sync::atomic::Ordering;
-use std::{process as path_std_process, time as path_std_time};
+use std::{cell as path_std_cell, process as path_std_process, time as path_std_time};
 
 use super::*;
+
+/// Checked restoration preserves successful, nonzero, and waiter-error child
+/// outcomes while classifying persistent restoration failure as fail-stop.
+#[cfg(unix)]
+#[test]
+fn restoration_failure_matrix_preserves_primary_outcomes() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let rows = [
+        (
+            Ok(BoundedCommandStatus {
+                status: path_std_process::ExitStatus::from_raw(0),
+            }),
+            "exit status: 0",
+        ),
+        (
+            Ok(BoundedCommandStatus {
+                status: path_std_process::ExitStatus::from_raw(7 << 8),
+            }),
+            "exit status: 7",
+        ),
+        (
+            Err("could not wait for command: injected waiter failure".to_owned()),
+            "injected waiter failure",
+        ),
+    ];
+
+    for (primary, expected_primary) in rows {
+        let restore_attempts = path_std_cell::Cell::new(0);
+        let error = settle_after_child_with_restore(
+            primary,
+            |output| format!("command exited with {}", output.status),
+            || {
+                restore_attempts.set(restore_attempts.get() + 1);
+                Err("could not restore Tau terminal foreground: persistent injection".to_owned())
+            },
+        )
+        .expect_err("persistent restoration failure must fail stop");
+
+        let BoundedCommandError::ForegroundOwnershipUnconfirmed {
+            primary,
+            restoration,
+        } = error
+        else {
+            panic!("wrong failure classification");
+        };
+        assert!(
+            primary.contains(expected_primary),
+            "primary was {primary:?}"
+        );
+        assert!(restoration.contains("persistent injection"));
+        assert_eq!(restore_attempts.get(), 1);
+    }
+}
+
+/// Timeout cleanup reaches bounded non-runnable child-group termination and
+/// retains both timeout and persistent foreground-restoration failures.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherited_timeout_restoration_failure_kills_child_group() {
+    let _guard = FOREGROUND_CLAIM_TEST_LOCK
+        .lock()
+        .expect("foreground restore test lock");
+    let dir = tempfile::tempdir().expect("pid directory");
+    let pid_path = dir.path().join("descendant.pid");
+    let pending_pid_path = dir.path().join("descendant.pid.pending");
+    let script = format!(
+        "sleep 30 & printf '%s\n' $! > {} && mv {} {}; wait",
+        pending_pid_path.display(),
+        pending_pid_path.display(),
+        pid_path.display()
+    );
+    let mut command = path_std_process::Command::new("sh");
+    command
+        .args(["-c", &script])
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null());
+    FOREGROUND_RESTORE_ATTEMPTS.store(0, Ordering::SeqCst);
+    FAIL_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
+    let cleanup_started = path_std_cell::Cell::new(None);
+
+    let error = run_with_inherited_stdio_after_spawn(
+        &mut command,
+        path_std_time::Duration::from_millis(100),
+        ProcessOwnership::ForegroundProcessGroup,
+        || {
+            let deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(2);
+            while !pid_path.exists() {
+                if deadline <= path_std_time::Instant::now() {
+                    return Err("descendant pid was not published".to_owned());
+                }
+                std::thread::yield_now();
+            }
+            cleanup_started.set(Some(path_std_time::Instant::now()));
+            Ok(())
+        },
+    )
+    .expect_err("timeout plus restoration failure must fail stop");
+    FAIL_FOREGROUND_RESTORE.store(false, Ordering::SeqCst);
+
+    let BoundedCommandError::ForegroundOwnershipUnconfirmed {
+        primary,
+        restoration,
+    } = error
+    else {
+        panic!("wrong failure classification");
+    };
+    assert!(primary.contains("timeout"), "primary was {primary:?}");
+    assert!(restoration.contains("restore Tau terminal foreground"));
+    assert_eq!(
+        FOREGROUND_RESTORE_ATTEMPTS.load(Ordering::SeqCst),
+        2,
+        "checked restore plus Drop fallback"
+    );
+    assert!(
+        cleanup_started
+            .get()
+            .expect("cleanup phase started")
+            .elapsed()
+            < path_std_time::Duration::from_secs(2)
+    );
+
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("descendant pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric descendant pid");
+    let cleanup_deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(1);
+    let last_state = loop {
+        let process_state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_owned()))
+            .and_then(|tail| tail.chars().next());
+        if process_state.is_none_or(|state| state == 'Z') {
+            break process_state;
+        }
+        if cleanup_deadline <= path_std_time::Instant::now() {
+            break process_state;
+        }
+        std::thread::yield_now();
+    };
+    assert!(
+        last_state.is_none_or(|state| state == 'Z'),
+        "descendant process {pid} remains runnable in state {last_state:?}"
+    );
+}
 
 /// Foreground restoration is a visible error, while the still-armed handle
 /// retains its Drop fallback for a second best-effort attempt.
@@ -15,13 +162,18 @@ fn foreground_restore_failure_is_reported() {
         child_pgid: None,
         parent_pgid: Some(nix::unistd::getpgrp()),
     };
-    FAIL_NEXT_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
+    FAIL_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
 
     let error = handle
         .restore_foreground()
         .expect_err("injected restore failure");
+    FAIL_FOREGROUND_RESTORE.store(false, Ordering::SeqCst);
 
-    assert!(error.contains("restore Tau terminal foreground"));
+    assert!(
+        error
+            .to_string()
+            .contains("restore Tau terminal foreground")
+    );
     assert!(handle.parent_pgid.is_some(), "Drop fallback remains armed");
 }
 
@@ -38,7 +190,7 @@ fn bounded_command_propagates_foreground_restore_failure() {
         .args(["-c", "printf done"])
         .stdout(path_std_process::Stdio::piped())
         .stderr(path_std_process::Stdio::null());
-    FAIL_NEXT_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
+    FAIL_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
 
     let error = run_with_bounded_stdout(
         &mut command,
@@ -48,8 +200,13 @@ fn bounded_command_propagates_foreground_restore_failure() {
         ProcessOwnership::ForegroundProcessGroup,
     )
     .expect_err("restore failure must replace otherwise successful output");
+    FAIL_FOREGROUND_RESTORE.store(false, Ordering::SeqCst);
 
-    assert!(error.contains("restore Tau terminal foreground"));
+    assert!(
+        error
+            .to_string()
+            .contains("restore Tau terminal foreground")
+    );
 }
 
 /// Prevents external prompt/completion commands from allocating unbounded
@@ -86,7 +243,7 @@ fn bounded_command_kills_child_on_stdout_overflow() {
     )
     .expect_err("overflow should fail");
 
-    assert!(err.contains("stdout exceeded"));
+    assert!(err.to_string().contains("stdout exceeded"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
 
@@ -140,7 +297,7 @@ fn bounded_command_errors_when_stdout_holder_survives_child() {
     )
     .expect_err("inherited stdout holder should fail promptly");
 
-    assert!(err.contains("stdout pipe did not close"));
+    assert!(err.to_string().contains("stdout pipe did not close"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 
     let pid: i32 = std::fs::read_to_string(&pid_path)
@@ -181,7 +338,7 @@ fn bounded_command_times_out_quiet_hung_child() {
     )
     .expect_err("quiet hung child should time out");
 
-    assert!(err.contains("timeout"));
+    assert!(err.to_string().contains("timeout"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
 
@@ -228,7 +385,7 @@ fn process_group_timeout_kills_descendant() {
         },
     )
     .expect_err("process group should time out");
-    assert!(err.contains("timeout"));
+    assert!(err.to_string().contains("timeout"));
 
     let pid: i32 = std::fs::read_to_string(&pid_path)
         .expect("pid file")
@@ -273,7 +430,7 @@ fn process_group_setup_failure_kills_spawned_child() {
         ProcessOwnership::ForegroundProcessGroup,
     )
     .expect_err("foreground handoff should fail");
-    assert!(error.contains("could not hand terminal"));
+    assert!(error.to_string().contains("could not hand terminal"));
 
     let pid = LAST_FAILED_FOREGROUND_CHILD_ID.load(Ordering::SeqCst);
     assert_ne!(pid, 0, "test seam did not record spawned child pid");
@@ -310,7 +467,7 @@ fn inherited_stdio_command_times_out_quiet_hung_child() {
     )
     .expect_err("quiet hung child should time out");
 
-    assert!(err.contains("timeout"));
+    assert!(err.to_string().contains("timeout"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
 

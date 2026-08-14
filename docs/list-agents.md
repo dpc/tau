@@ -86,6 +86,10 @@ rechecks the session, live lifecycle, and the selected picker's eligibility
 rule. Selecting through the all-agent picker does not resume a suspended agent.
 The picker never loads or resumes an unloaded agent. A later successfully
 admitted visible prompt to that selected existing agent does make it `active`.
+After settling `fzf`, Tau checks that it regained foreground terminal ownership
+before resuming raw input or redraw. The fatal restoration error preserves the
+picker outcome and restoration error, keeps terminal output paused, and exits
+only that attachment while leaving the harness available for another attach.
 
 Each attached terminal owns its selected transcript, editable prompt draft,
 runtime theme, and redraw state. These visual and editing differences do not

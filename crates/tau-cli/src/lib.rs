@@ -116,6 +116,9 @@ pub enum CliError {
     Participant(String),
     PromptStdin(PromptStdinError),
     SessionNotFound(String),
+    /// The attachment stopped because terminal foreground ownership is
+    /// unconfirmed.
+    ForegroundOwnershipUnconfirmed(String),
 }
 
 impl fmt::Display for CliError {
@@ -132,7 +135,15 @@ impl fmt::Display for CliError {
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
             Self::PromptStdin(error) => error.fmt(f),
             Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
+            Self::ForegroundOwnershipUnconfirmed(message) => f.write_str(message),
         }
+    }
+}
+
+impl CliError {
+    /// Returns whether the top-level CLI may write this failure to stderr.
+    fn should_report_to_terminal(&self) -> bool {
+        !matches!(self, Self::ForegroundOwnershipUnconfirmed(_))
     }
 }
 
@@ -1150,7 +1161,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            if error.should_report_to_terminal() {
+                eprintln!("error: {error}");
+            }
             ExitCode::FAILURE
         }
     }
