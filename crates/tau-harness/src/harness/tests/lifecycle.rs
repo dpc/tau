@@ -604,6 +604,122 @@ fn existing_agent_load_reseeds_creator_cost_topology() {
     );
 }
 
+/// Cold restore seeds only loaded durable creation edges, then attaches an
+/// already-charged pending subtree exactly once when its parent loads later.
+#[test]
+fn sparse_cold_restore_attaches_pending_creator_subtree_once() {
+    fn started(agent_id: tau_proto::AgentId, creator: Option<tau_proto::AgentCreator>) -> Event {
+        Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id,
+            creator,
+            parent_agent: None,
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        })
+    }
+
+    fn load_durable_agent(harness: &mut Harness, agent_id: &tau_proto::AgentId) {
+        let mut runtime = Agent::new(
+            agent_id.clone(),
+            harness.mint_agent_runtime_incarnation(),
+            harness.current_session_id.clone(),
+            tau_proto::PromptOriginator::User,
+            None,
+            None,
+        );
+        runtime.agent_id = Some(agent_id.to_string());
+        harness.agents.insert(agent_id.clone(), runtime);
+        harness.ensure_loaded_agent_for_agent(agent_id, agent_id.as_str());
+    }
+
+    let td = tempfile::tempdir().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let a = tau_proto::AgentId::parse("a").expect("test agent id");
+    let b = tau_proto::AgentId::parse("b").expect("test agent id");
+    let c = tau_proto::AgentId::parse("c").expect("test agent id");
+    let session_id = test_session_id("s1");
+    let mut harness = echo_harness(&state_dir).expect("harness");
+    for (agent_id, creator) in [
+        (a.clone(), Some(tau_proto::AgentCreator::User)),
+        (
+            b.clone(),
+            Some(tau_proto::AgentCreator::Agent {
+                session_id: session_id.clone(),
+                agent_id: a.clone(),
+            }),
+        ),
+        (
+            c.clone(),
+            Some(tau_proto::AgentCreator::Agent {
+                session_id,
+                agent_id: b.clone(),
+            }),
+        ),
+    ] {
+        harness
+            .append_direct_agent_semantic_event(
+                agent_id.as_str(),
+                tau_core::AgentEventParent::InheritHead,
+                started(agent_id.clone(), creator),
+            )
+            .expect("persist durable creation");
+    }
+    drop(harness);
+
+    let mut restored =
+        echo_harness_with_start_reason("s1", &state_dir, tau_proto::SessionStartReason::Resume)
+            .expect("cold restore");
+    load_durable_agent(&mut restored, &a);
+    load_durable_agent(&mut restored, &c);
+    restored.cost_ledger.add_increment(
+        &c,
+        tau_proto::EstimatedApiCost::from_picodollars(4),
+        &restored.creator_topology,
+    );
+    for agent_id in [&c, &b] {
+        assert_eq!(
+            restored
+                .cost_ledger
+                .creator_subtree_cost(agent_id)
+                .as_picodollars(),
+            4
+        );
+    }
+    assert_eq!(
+        restored
+            .cost_ledger
+            .creator_subtree_cost(&a)
+            .as_picodollars(),
+        0
+    );
+
+    load_durable_agent(&mut restored, &b);
+    for agent_id in [&a, &b, &c] {
+        assert_eq!(
+            restored
+                .cost_ledger
+                .creator_subtree_cost(agent_id)
+                .as_picodollars(),
+            4,
+            "the first deferred parent load must attach {agent_id}'s subtree cost"
+        );
+    }
+    load_durable_agent(&mut restored, &b);
+    load_durable_agent(&mut restored, &c);
+    for agent_id in [&a, &b, &c] {
+        assert_eq!(
+            restored
+                .cost_ledger
+                .creator_subtree_cost(agent_id)
+                .as_picodollars(),
+            4,
+            "repeated durable creation replay must not duplicate {agent_id}'s subtree cost"
+        );
+    }
+}
+
 fn context_text(item: &ContextItem) -> Option<&str> {
     match item {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
