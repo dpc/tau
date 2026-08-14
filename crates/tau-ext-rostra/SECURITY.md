@@ -59,8 +59,10 @@ needs a smaller surface.
 
 Tool output is capped at 128 KiB, including bounded tag count and aggregate tag
 bytes. The upstream store can still deserialize a full accepted Rostra payload
-before Tau projects it; its 16 MiB ingestion limit remains a per-record RAM
-cliff. Database open and migration can consume temporary disk. Back up
+before Tau projects it. Rostra's transport ingestion limit is 16 MiB, while the
+database materializes retained content only below its exclusive 10,000,000-byte
+limit; each notification scan requests one complete row. Database open and
+migration can consume temporary disk. Back up
 `rostra.redb` before upgrading. Schema migration is forward-only: stop Tau,
 restore the backup, and run the previous version to roll back. Locked, corrupt,
 or identity-mismatched stores fail closed.

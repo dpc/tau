@@ -4,11 +4,10 @@
 //! selects reports, while `notification_state` owns policy and checkpoints.
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rostra_client::{Client, SocialPostMaterialization};
+use rostra_client::{Client, SocialPostMaterialization, SocialPostMaterializationCursor};
 use tau_proto::{
     AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDelivered,
     MessageExtensionData, MessageFactId, MessageParty, RawMessagePublisherId,
@@ -19,6 +18,14 @@ use tokio::time::Instant as TokioInstant;
 
 use crate::notification_page::ScannedPage;
 use crate::notification_state::{MATERIALIZATION_PAGE, Pending, SCHEMA, State};
+
+/// Calls the materialization scanner with the fixed one-row request bound.
+fn scan_materialization_page<F, T>(after: SocialPostMaterializationCursor, scan: F) -> T
+where
+    F: FnOnce(Option<SocialPostMaterializationCursor>, std::num::NonZeroUsize) -> T,
+{
+    scan(Some(after), MATERIALIZATION_PAGE)
+}
 
 /// Emits a count-only wake from selected posts and the full source-page cursor.
 fn report(
@@ -150,14 +157,11 @@ async fn reconcile_agent(
         .pending
         .as_ref()
         .map_or(snapshot.committed, |pending| pending.end);
-    let page = client
-        .db()
-        .scan_social_post_materializations(
-            Some(after),
-            NonZeroUsize::new(MATERIALIZATION_PAGE).expect("nonzero fixed page"),
-        )
-        .await
-        .map_err(|_| "materialization scan")?;
+    let page = scan_materialization_page(after, |after, limit| {
+        client.db().scan_social_post_materializations(after, limit)
+    })
+    .await
+    .map_err(|_| "materialization scan")?;
     let follows = followees
         .into_iter()
         .map(|followee| (followee.followee, followee))

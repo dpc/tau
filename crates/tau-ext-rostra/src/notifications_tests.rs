@@ -249,6 +249,90 @@ fn pending_page_continuation_runs_until_a_report_is_inflight() {
     assert_eq!(state.next_deadline(), None);
 }
 
+/// Ensures sequential one-row state-machine outcomes advance filtered and
+/// selected cursors immediately, carry the final cursor into one report, and
+/// let exactly one matching canonical echo commit that cursor.
+#[test]
+fn one_row_continuation_advances_and_canonical_echo_commits_once() {
+    let (_directory, mut state) = configured_state();
+    let agent = AgentId::parse("agent").expect("agent id");
+    state.enable(agent.clone(), cursor(4)).expect("enable");
+    state.loaded(agent.clone());
+    state.replay_complete(agent.clone());
+
+    let first = state.scan_snapshot(&agent).expect("first scan");
+    state
+        .merge_page(
+            &agent,
+            &first,
+            ScannedPage {
+                scanned_through: cursor(5),
+                had_items: true,
+                exhausted: false,
+                count: 0,
+            },
+        )
+        .expect("merge filtered row");
+    assert_eq!(state.registrations[&agent].committed, cursor(5));
+    assert!(state.next_deadline().is_some_and(|deadline| {
+        deadline
+            < Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("immediate continuation bound")
+    }));
+
+    let second = state.scan_snapshot(&agent).expect("second scan");
+    state
+        .merge_page(
+            &agent,
+            &second,
+            ScannedPage {
+                scanned_through: cursor(6),
+                had_items: true,
+                exhausted: false,
+                count: 1,
+            },
+        )
+        .expect("merge selected row");
+    assert!(state.next_deadline().is_some_and(|deadline| {
+        deadline
+            < Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("selected-row continuation bound")
+    }));
+    let third = state.scan_snapshot(&agent).expect("third scan");
+    state
+        .merge_page(
+            &agent,
+            &third,
+            ScannedPage {
+                scanned_through: cursor(7),
+                had_items: true,
+                exhausted: true,
+                count: 0,
+            },
+        )
+        .expect("merge final filtered row");
+    let pending = state.registrations[&agent]
+        .pending
+        .as_ref()
+        .expect("selected batch");
+    assert_eq!(pending.end, cursor(7));
+    assert_eq!(pending.count, 1);
+    assert!(!state.continuations.contains(&agent));
+
+    state.set_pending_due(&agent, cursor(7), 1);
+    state
+        .registrations
+        .get_mut(&agent)
+        .expect("registration")
+        .inflight_end = Some(cursor(7));
+    let echo = delivered(&agent, cursor(7));
+    assert!(state.acknowledge(&echo).expect("first canonical echo"));
+    assert_eq!(state.registrations[&agent].committed, cursor(7));
+    assert!(!state.acknowledge(&echo).expect("duplicate canonical echo"));
+}
+
 /// Ensures unloading cancels a pending scan continuation rather than retaining
 /// runnable source work for an agent that no longer has a live delivery gate.
 #[test]

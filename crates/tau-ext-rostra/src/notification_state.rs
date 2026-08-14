@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,8 +23,9 @@ pub(crate) const SCHEMA: &str = "rostra-new-posts-v2";
 const STATE_SCHEMA: &str = "rostra-notifications-v1";
 /// Upper bound for the entire policy/checkpoint file.
 const MAX_STATE_FILE_BYTES: usize = 1024 * 1024;
-/// Maximum materializations resolved in one source page.
-pub(crate) const MATERIALIZATION_PAGE: usize = 128;
+/// One complete decoded row per source page bounds eager database retention
+/// before Tau filters it; the pinned API has no streaming or byte-budget scan.
+pub(crate) const MATERIALIZATION_PAGE: NonZeroUsize = NonZeroUsize::MIN;
 /// Idle time after the final eligible materialization before a report becomes
 /// due.
 pub(crate) const IDLE_DEBOUNCE: Duration = Duration::from_secs(30);

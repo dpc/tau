@@ -140,8 +140,10 @@ diagnostics; multiline bodies use an external-content wrapper whose closing
 sentinel cannot be forged. Signatures authenticate only the Rostra author.
 Every remote field is inside an external-content frame. Final output is capped
 at 128 KiB; tags also have count and aggregate-byte caps. Rostra can
-deserialize a full accepted payload (up to its 16 MiB ingestion limit) before
-projection, and open/migration can require temporary disk.
+deserialize a full accepted payload before projection. Its transport ingestion
+limit is 16 MiB, while its database materializes retained content only below an
+exclusive 10,000,000-byte limit; notification scans request one complete row at
+a time. Database open/migration can require temporary disk.
 
 Rostra identities never acquire Tau sender or instruction authority. Tool
 policy is the only current authorization boundary: supplying the mnemonic

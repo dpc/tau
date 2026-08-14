@@ -8,7 +8,7 @@ use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{AgentId, CborValue, ExtensionName};
 
 use super::*;
-use crate::notification_state::{Pending, State};
+use crate::notification_state::{MATERIALIZATION_PAGE, Pending, State};
 
 /// Returns the stable typed publisher identity used by worker tests.
 fn publisher() -> ExtensionName {
@@ -38,6 +38,18 @@ fn overdue_report_state() -> (tempfile::TempDir, AgentId, Arc<Mutex<State>>) {
 /// Decodes a native materialization cursor only in tests.
 fn cursor(position: u64) -> rostra_client::SocialPostMaterializationCursor {
     serde_json::from_value(serde_json::json!(position)).expect("opaque cursor")
+}
+
+/// Ensures the production database call can materialize only one complete
+/// upstream row before Tau filters and releases it.
+#[test]
+fn production_materialization_request_is_exactly_one_row() {
+    let after = cursor(4);
+    let observed = scan_materialization_page(after, |requested_after, requested_limit| {
+        (requested_after, requested_limit)
+    });
+    assert_eq!(observed, (Some(after), MATERIALIZATION_PAGE));
+    assert_eq!(observed.1.get(), 1);
 }
 
 /// Ensures a failed detached report enqueue consumes one durable attempt, then
@@ -70,10 +82,10 @@ fn report_enqueue_failure_waits_before_allocating_another_attempt() {
     );
 }
 
-/// Ensures either independent historical boundary excludes a post rather than
-/// admitting it when it happens to be newer than the other boundary.
+/// Ensures selection retains every self, historical, and persona gate,
+/// including either asymmetric historical boundary.
 #[test]
-fn historical_selection_rejects_each_asymmetric_boundary() {
+fn materialization_selection_retains_all_filters() {
     assert!(!selects_materialization(false, &10_u64, &11, &9, true));
     assert!(!selects_materialization(false, &10_u64, &9, &11, true));
     assert!(selects_materialization(false, &11_u64, &10, &10, true));
