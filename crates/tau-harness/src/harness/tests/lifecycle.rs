@@ -9523,11 +9523,26 @@ fn client_requested_disconnect_does_not_drain_stalled_writer() {
     assert!(exit_on_disconnect);
 }
 
+/// A protocol mismatch is client-local and must not depend on unrelated
+/// configured-extension startup or disconnect another client.
 #[test]
 fn client_hello_protocol_mismatch_disconnects_only_client() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(sp.join("config")),
+        state_dir: Some(sp.join("runtime")),
+    };
+    let mut h = Harness::from_config_without_startup_environment(
+        &Config::default(),
+        &sp,
+        dirs,
+        "s1",
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::Durable,
+    )
+    .expect("start extensionless harness");
+    let observer = connect_test_client(&mut h, "observer", tau_proto::ClientKind::Ui);
     let events = connect_test_client(&mut h, "stale-ui", tau_proto::ClientKind::Ui);
 
     let keep = h
@@ -9555,6 +9570,10 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
                     .is_some_and(|reason| reason.contains("unsupported protocol version from stale-ui"))
         )),
         "expected disconnect for stale UI, got: {events:?}"
+    );
+    assert!(
+        observer.lock().expect("observer events").is_empty(),
+        "a client-local rejection must not disconnect another client"
     );
 }
 
