@@ -1,5 +1,9 @@
 use super::*;
 
+fn central_europe_timezone() -> TimeZone {
+    TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").expect("Central European timezone")
+}
+
 /// Daily UTC schedules choose the first occurrence strictly after the
 /// scheduling instant, including an exact-minute boundary.
 #[test]
@@ -18,12 +22,12 @@ fn utc_occurrence_is_strictly_after_the_anchor() {
 #[test]
 fn nonexistent_local_time_skips_the_date() {
     let schedule = DailySchedule::parse("02:30", WallClockZone::Local).expect("schedule");
-    let warsaw = TimeZone::get("Europe/Warsaw").expect("timezone");
+    let central_europe = central_europe_timezone();
     let before_gap = UnixMicros::new(1_774_740_600_000_000); // 2026-03-28 23:30Z
 
     assert_eq!(
         schedule
-            .next_after_in_timezone(before_gap, &warsaw)
+            .next_after_in_timezone(before_gap, &central_europe)
             .expect("next"),
         UnixMicros::new(1_774_830_600_000_000) // 2026-03-30 00:30Z
     );
@@ -34,12 +38,12 @@ fn nonexistent_local_time_skips_the_date() {
 #[test]
 fn ambiguous_local_time_uses_the_earlier_occurrence() {
     let schedule = DailySchedule::parse("02:30", WallClockZone::Local).expect("schedule");
-    let warsaw = TimeZone::get("Europe/Warsaw").expect("timezone");
+    let central_europe = central_europe_timezone();
     let before_fold = UnixMicros::new(1_792_884_600_000_000); // 2026-10-24 23:30Z
 
     assert_eq!(
         schedule
-            .next_after_in_timezone(before_fold, &warsaw)
+            .next_after_in_timezone(before_fold, &central_europe)
             .expect("next"),
         UnixMicros::new(1_792_888_200_000_000) // 2026-10-25 00:30Z
     );

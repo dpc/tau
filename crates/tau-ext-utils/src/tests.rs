@@ -167,6 +167,18 @@ struct ScriptedHostTimezoneProvider {
     results: Rc<RefCell<VecDeque<Result<TimeZone, String>>>>,
 }
 
+fn central_europe_timezone() -> TimeZone {
+    TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").expect("Central European timezone")
+}
+
+fn eastern_timezone() -> TimeZone {
+    TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").expect("Eastern timezone")
+}
+
+fn japan_timezone() -> TimeZone {
+    TimeZone::posix("JST-9").expect("Japan timezone")
+}
+
 impl HostTimezoneProvider for ScriptedHostTimezoneProvider {
     fn current_timezone(&self) -> Result<TimeZone, String> {
         self.results
@@ -440,9 +452,9 @@ fn daily_schedule_arguments_are_closed_and_mutually_exclusive() {
 #[test]
 fn local_timezone_refresh_preserves_due_and_backward_clock_progress() {
     let results = Rc::new(RefCell::new(VecDeque::from([
-        Ok(TimeZone::get("Europe/Warsaw").expect("Warsaw")),
-        Ok(TimeZone::get("America/New_York").expect("New York")),
-        Ok(TimeZone::get("Asia/Tokyo").expect("Tokyo")),
+        Ok(central_europe_timezone()),
+        Ok(eastern_timezone()),
+        Ok(japan_timezone()),
     ])));
     let mut rt = runtime_with_timezone_provider(Box::new(ScriptedHostTimezoneProvider {
         results: Rc::clone(&results),
@@ -486,8 +498,8 @@ fn local_timezone_refresh_preserves_due_and_backward_clock_progress() {
 #[test]
 fn local_timezone_refresh_obeys_sixty_second_cadence() {
     let results = Rc::new(RefCell::new(VecDeque::from([
-        Ok(TimeZone::get("Europe/Warsaw").expect("Warsaw")),
-        Ok(TimeZone::get("America/New_York").expect("New York")),
+        Ok(central_europe_timezone()),
+        Ok(eastern_timezone()),
     ])));
     let mut rt = runtime_with_timezone_provider(Box::new(ScriptedHostTimezoneProvider {
         results: Rc::clone(&results),
@@ -532,7 +544,7 @@ fn local_timezone_refresh_obeys_sixty_second_cadence() {
 fn restored_local_timer_recovers_after_timezone_lookup_failure() {
     let results = Rc::new(RefCell::new(VecDeque::from([
         Err("timezone unavailable".to_owned()),
-        Ok(TimeZone::get("Europe/Warsaw").expect("Warsaw")),
+        Ok(central_europe_timezone()),
     ])));
     let mut rt = runtime_with_timezone_provider(Box::new(ScriptedHostTimezoneProvider {
         results: Rc::clone(&results),
