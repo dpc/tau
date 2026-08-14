@@ -1039,19 +1039,46 @@ fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) 
 }
 
 pub(super) fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
-    echo_harness_for("s1", state_dir)
+    echo_harness_with_storage_mode(state_dir, crate::HarnessStorageMode::Durable)
+}
+
+/// Builds the echo-provider fixture without persistent session or agent stores
+/// for tests whose assertions do not cover durability.
+fn echo_harness_memory_only(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
+    echo_harness_with_storage_mode(state_dir, crate::HarnessStorageMode::MemoryOnly)
+}
+
+fn echo_harness_with_storage_mode(
+    state_dir: impl Into<PathBuf>,
+    storage_mode: crate::HarnessStorageMode,
+) -> Result<Harness, HarnessError> {
+    echo_harness_for_with_storage_mode("s1", state_dir, storage_mode)
 }
 
 fn echo_harness_for(
     session_id: &str,
     state_dir: impl Into<PathBuf>,
 ) -> Result<Harness, HarnessError> {
+    echo_harness_for_with_storage_mode(session_id, state_dir, crate::HarnessStorageMode::Durable)
+}
+
+fn echo_harness_for_with_storage_mode(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    storage_mode: crate::HarnessStorageMode,
+) -> Result<Harness, HarnessError> {
     let state_dir = state_dir.into();
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    echo_harness_with_dirs(session_id, state_dir, dirs)
+    echo_harness_with_dirs_and_start_reason(
+        session_id,
+        state_dir,
+        dirs,
+        tau_proto::SessionStartReason::Initial,
+        storage_mode,
+    )
 }
 
 fn echo_harness_with_dirs(
@@ -1064,6 +1091,7 @@ fn echo_harness_with_dirs(
         state_dir,
         dirs,
         tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::Durable,
     )
 }
 
@@ -1077,7 +1105,13 @@ fn echo_harness_with_start_reason(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    echo_harness_with_dirs_and_start_reason(session_id, state_dir, dirs, start_reason)
+    echo_harness_with_dirs_and_start_reason(
+        session_id,
+        state_dir,
+        dirs,
+        start_reason,
+        crate::HarnessStorageMode::Durable,
+    )
 }
 
 fn echo_harness_with_dirs_and_start_reason(
@@ -1085,6 +1119,7 @@ fn echo_harness_with_dirs_and_start_reason(
     state_dir: impl Into<PathBuf>,
     dirs: tau_config::settings::TauDirs,
     start_reason: tau_proto::SessionStartReason,
+    storage_mode: crate::HarnessStorageMode,
 ) -> Result<Harness, HarnessError> {
     fn shell_runner(r: UnixStream, w: UnixStream, project_root: PathBuf) -> Result<(), String> {
         tau_ext_shell::run_for_test_harness(r, w, project_root).map_err(|e| e.to_string())
@@ -1099,7 +1134,7 @@ fn echo_harness_with_dirs_and_start_reason(
         }],
         session_id,
         start_reason,
-        crate::HarnessStorageMode::Durable,
+        storage_mode,
     )?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();

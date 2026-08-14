@@ -419,11 +419,13 @@ fn agent_unload_retires_ordinary_wait_without_notification() {
 }
 
 /// One scheduler cycle bounds overdue catch-up and retains an immediate
-/// deadline so later cycles eventually emit every remaining crossing.
+/// deadline so later cycles eventually emit every remaining crossing. The
+/// fixture stays memory-only because this oracle covers scheduling, while cold
+/// resume tests cover durable long-wait persistence separately.
 #[test]
 fn overdue_wait_threshold_catchup_is_bounded_per_scheduler_cycle() {
     let td = TempDir::new().expect("tempdir");
-    let mut harness = echo_harness(td.path().join("state")).expect("start");
+    let mut harness = echo_harness_memory_only(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut harness);
     let watcher_cid = harness.create_durable_user_agent(
         harness.current_session_id.clone(),
