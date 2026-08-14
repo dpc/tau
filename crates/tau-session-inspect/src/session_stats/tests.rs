@@ -59,6 +59,7 @@ fn record(seq: u64, event: Event) -> PersistedAgentEvent {
         source: None,
         event,
         parent: AgentEventParent::InheritHead,
+        fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
         recorded_at: UnixMicros::new(seq),
     }
 }

@@ -74,6 +74,37 @@ fn persisted_event_source_wire_shapes_round_trip() {
     }
 }
 
+/// Historical CBOR records without the private marker decode as Legacy.
+#[test]
+fn persisted_agent_event_missing_fold_semantics_defaults_to_legacy() {
+    let agent_id = agent_id();
+    let record = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([7; 16]),
+        seq: PersistedAgentEventSeq::new(0),
+        source: None,
+        event: Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id,
+            head: AgentHead::Root,
+        }),
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        recorded_at: tau_proto::UnixMicros::new(1),
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&record, &mut encoded).expect("encode record");
+    let mut value =
+        ciborium::from_reader::<ciborium::Value, _>(encoded.as_slice()).expect("decode value");
+    let ciborium::Value::Map(fields) = &mut value else {
+        panic!("record must encode as map");
+    };
+    fields.retain(|(key, _)| key != &ciborium::Value::Text("fold_semantics".to_owned()));
+    encoded.clear();
+    ciborium::into_writer(&value, &mut encoded).expect("encode historical shape");
+    let decoded = ciborium::from_reader::<PersistedAgentEvent, _>(encoded.as_slice())
+        .expect("decode historical record");
+    assert_eq!(decoded.fold_semantics, AgentJournalFoldSemantics::Legacy);
+}
+
 /// Applies one contiguous durable record through the sole canonical fold path.
 fn apply_persisted_test_record(
     tree: &mut AgentTree,
@@ -88,6 +119,7 @@ fn apply_persisted_test_record(
             source: None,
             event,
             parent,
+            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
             recorded_at: tau_proto::UnixMicros::default(),
         })
         .expect("test record is contiguous and valid");
@@ -1135,6 +1167,8 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         tree.inference_dispatches.insert(
             checkpoint.agent_prompt_id.clone(),
             InferenceDispatchFold {
+                head_move_generation: 0,
+                fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
                 checkpoint: checkpoint.clone(),
                 finished: true,
                 recovery_disposition:
@@ -1474,6 +1508,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             source: None,
             event,
             parent: AgentEventParent::InheritHead,
+            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
             recorded_at: tau_proto::UnixMicros::default(),
         }
     }
@@ -1824,9 +1859,49 @@ fn provider_tool_round_waits_for_all_terminal_results() {
     let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
     let first_call_id = ToolCallId::from("call-first");
     let second_call_id = ToolCallId::from("call-second");
+    let third_call_id = ToolCallId::from("call-third");
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::Root,
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text: "H".to_owned(),
+            inference_activation: true,
+            message_class: Default::default(),
+        }),
+    );
+    tree.apply_persisted_record(&PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([1; 16]),
+        seq: PersistedAgentEventSeq::new(1),
+        source: None,
+        event: Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: tau_proto::AgentPromptId::parse("sp-tool-round").expect("prompt id"),
+            through: AgentHead::Node(NodeId::new(0)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Root),
+        }),
+        parent: AgentEventParent::Under(NodeId::new(0)),
+        fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        recorded_at: tau_proto::UnixMicros::new(1),
+    })
+    .expect("V1 owner");
+    let (pre_response_seq, pre_response_node) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::Under(NodeId::new(0)),
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text: "accepted before tool-bearing response".to_owned(),
+            inference_activation: false,
+            message_class: Default::default(),
+        }),
+    );
+    assert!(pre_response_node.is_none());
     let assistant_node_id = tree
         .apply_event_at(
-            AgentEventParent::InheritHead,
+            AgentEventParent::Under(NodeId::new(0)),
             &Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -1839,6 +1914,14 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                     ContextItem::ToolCall(ToolCallItem {
                         call_id: first_call_id.clone(),
                         name: ToolName::new("first_tool"),
+                        tool_type: ToolType::Function,
+                        arguments: tau_proto::CborValue::Null,
+                        raw_arguments_json: None,
+                        responses_envelope: None,
+                    }),
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: third_call_id.clone(),
+                        name: ToolName::new("third_tool"),
                         tool_type: ToolType::Function,
                         arguments: tau_proto::CborValue::Null,
                         raw_arguments_json: None,
@@ -1947,6 +2030,19 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .is_none()
     );
     assert_eq!(tree.head(), Some(assistant_node_id));
+    assert!(
+        tree.apply_event_at(
+            AgentEventParent::InheritHead,
+            &Event::ToolCancelled(tau_proto::ToolCancelled {
+                presentation: Default::default(),
+                call_id: third_call_id.clone(),
+                tool_name: ToolName::new("third_tool"),
+                tool_type: ToolType::Function,
+            }),
+        )
+        .is_none()
+    );
+    assert_eq!(tree.head(), Some(assistant_node_id));
 
     let final_node_id = tree
         .apply_event_at(
@@ -1995,11 +2091,26 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             ..
         } if durable_event_seq == outbound_seq
     ));
-    let tool_results_node = tree
+    let pre_response_node = tree
         .node(
             outbound_node
                 .parent_id
-                .expect("outbound follows tool results"),
+                .expect("outbound follows pre-response input"),
+        )
+        .expect("pre-response input should exist");
+    assert!(matches!(
+        pre_response_node.entry,
+        AgentEntry::UserInput { .. }
+    ));
+    assert_eq!(
+        tree.node_for_durable_event_seq(pre_response_seq),
+        Some(pre_response_node.id)
+    );
+    let tool_results_node = tree
+        .node(
+            pre_response_node
+                .parent_id
+                .expect("pre-response input follows tool results"),
         )
         .expect("tool results node should exist");
     assert_eq!(tool_results_node.parent_id, Some(assistant_node_id));
@@ -2007,14 +2118,19 @@ fn provider_tool_round_waits_for_all_terminal_results() {
     let AgentEntry::ToolResults { items } = &tool_results_node.entry else {
         panic!("expected tool results entry");
     };
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 3);
     assert_eq!(items[0].call_id, first_call_id);
     assert!(matches!(
         items[0].status,
         ToolResultStatus::Error { ref message } if message == "first failed"
     ));
-    assert_eq!(items[1].call_id, second_call_id);
-    assert!(matches!(items[1].status, ToolResultStatus::Success));
+    assert_eq!(items[1].call_id, third_call_id);
+    assert!(matches!(
+        items[1].status,
+        ToolResultStatus::Cancelled { .. }
+    ));
+    assert_eq!(items[2].call_id, second_call_id);
+    assert!(matches!(items[2].status, ToolResultStatus::Success));
     assert!(
         tree.unresolved_foreground_tool_calls_from(Some(final_node_id))
             .is_empty()
@@ -2171,6 +2287,877 @@ fn synthetic_agent_message_folds_advance_occurrence_sequence() {
         .collect::<Vec<_>>();
     assert_eq!(sequences, vec![0, 1]);
     assert_eq!(tree.next_event_seq().get(), 2);
+}
+
+/// A V1 ordinary checkpoint owns same-branch asynchronous input until its
+/// response, and cold replay must allocate the identical single input node.
+#[test]
+fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
+    let agent_id = agent_id();
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-v1-owner").expect("test prompt id");
+    let record = |seq, parent, event, fold_semantics| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent,
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    };
+    let initial = Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        agent_id: agent_id.clone(),
+        text: "H".to_owned(),
+        inference_activation: true,
+        message_class: Default::default(),
+    });
+    let checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through: AgentHead::Node(NodeId::new(0)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Root),
+        });
+    let input = Event::AgentMessageReceived(AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("v1-input").expect("test message id"),
+        sender_id: other_agent_id(),
+        sender_session_id: None,
+        recipient_id: agent_id.clone(),
+        kind: AgentMessageKind::Message,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        message: "Q".to_owned(),
+    });
+    let second_input = Event::AgentMessageReceived(AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("v1-input-two").expect("test message id"),
+        sender_id: other_agent_id(),
+        sender_session_id: None,
+        recipient_id: agent_id.clone(),
+        kind: AgentMessageKind::Message,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        message: "Q2".to_owned(),
+    });
+    let raw_input = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::parse("v1-bridge").expect("publisher"),
+        tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+        tau_proto::MessageFactId::new("v1-raw"),
+        tau_proto::MessageParty {
+            stable_id: "external".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        "Q3",
+    ));
+    let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+    response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    response.output_items = vec![ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: "R".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    })];
+    let records = vec![
+        record(
+            0,
+            AgentEventParent::Root,
+            initial,
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        record(
+            1,
+            AgentEventParent::Under(NodeId::new(0)),
+            checkpoint,
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        record(
+            2,
+            AgentEventParent::Under(NodeId::new(0)),
+            input,
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        record(
+            3,
+            AgentEventParent::Under(NodeId::new(0)),
+            second_input,
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        record(
+            4,
+            AgentEventParent::InheritHead,
+            raw_input,
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        record(
+            5,
+            AgentEventParent::Under(NodeId::new(0)),
+            Event::ProviderResponseFinished(response),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+    ];
+    let mut live = AgentTree::from_events(agent_id.clone(), &[]);
+    for record in &records {
+        live.apply_persisted_record(record).expect("live V1 fold");
+    }
+    let replay = AgentTree::try_from_events(agent_id, &records).expect("cold V1 fold");
+    assert_eq!(live, replay);
+    assert!(matches!(
+        live.nodes()[1].entry,
+        AgentEntry::AssistantResponse { .. }
+    ));
+    assert!(matches!(
+        live.nodes()[2].entry,
+        AgentEntry::AgentMessage { durable_event_seq, .. }
+            if durable_event_seq == PersistedAgentEventSeq::new(2)
+    ));
+    assert!(matches!(
+        live.nodes()[3].entry,
+        AgentEntry::AgentMessage { durable_event_seq, .. }
+            if durable_event_seq == PersistedAgentEventSeq::new(3)
+    ));
+    assert!(matches!(
+        live.nodes()[4].entry,
+        AgentEntry::MessageFact { durable_event_seq, .. }
+            if durable_event_seq == PersistedAgentEventSeq::new(4)
+    ));
+}
+
+/// Standalone compaction preserves the exact V1 post-response suffix and never
+/// places deferred input inside an open provider tool round.
+#[test]
+fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
+    for (with_tool, reactive_recovery) in [(false, false), (true, false), (false, true)] {
+        let agent_id = agent_id();
+        let prompt_id = tau_proto::AgentPromptId::parse(match (with_tool, reactive_recovery) {
+            (true, false) => "ap-v1-compact-tool",
+            (false, true) => "ap-v1-compact-reactive",
+            (false, false) => "ap-v1-compact-text",
+            (true, true) => unreachable!("reactive rejection cannot open a tool round"),
+        })
+        .expect("prompt id");
+        let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
+        let mut records = Vec::new();
+        let mut append = |tree: &mut AgentTree,
+                          parent: AgentEventParent,
+                          event: Event,
+                          fold_semantics: AgentJournalFoldSemantics| {
+            let seq = tree.next_event_seq();
+            let record = PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::from_bytes([seq.get() as u8; 16]),
+                seq,
+                source: None,
+                event,
+                parent,
+                fold_semantics,
+                recorded_at: tau_proto::UnixMicros::new(seq.get()),
+            };
+            tree.apply_persisted_record(&record)
+                .expect("V1 compaction record");
+            records.push(record);
+        };
+        append(
+            &mut tree,
+            AgentEventParent::Root,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "H".to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+            AgentJournalFoldSemantics::Legacy,
+        );
+        if reactive_recovery {
+            let prefix_call = ToolCallId::from("call-v1-reactive-prefix");
+            append(
+                &mut tree,
+                AgentEventParent::Under(NodeId::new(0)),
+                Event::ProviderResponseFinished(tool_calling_response(
+                    &agent_id,
+                    "ap-v1-reactive-prefix",
+                    vec![prefix_call.clone()],
+                )),
+                AgentJournalFoldSemantics::Legacy,
+            );
+            append(
+                &mut tree,
+                AgentEventParent::InheritHead,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
+                    call_id: prefix_call,
+                    tool_name: ToolName::new("prefix"),
+                    tool_type: ToolType::Function,
+                    result: tau_proto::CborValue::Text("prefix done".to_owned()),
+                    provider_content: Vec::new(),
+                    kind: ToolResultKind::Final,
+                    display: None,
+                    originator: PromptOriginator::User,
+                }),
+                AgentJournalFoldSemantics::Legacy,
+            );
+        }
+        let owner_through = tree.head().expect("owner through");
+        append(
+            &mut tree,
+            AgentEventParent::Under(owner_through),
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.clone(),
+                through: AgentHead::Node(owner_through),
+                model: Some("provider/model".into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(AgentHead::Root),
+            }),
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        );
+        append(
+            &mut tree,
+            AgentEventParent::Under(owner_through),
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "Q".to_owned(),
+                inference_activation: true,
+                message_class: Default::default(),
+            }),
+            AgentJournalFoldSemantics::Legacy,
+        );
+        let call_id = ToolCallId::from("call-v1-compact");
+        let response = if reactive_recovery {
+            let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+            response.stop_reason = tau_proto::ProviderStopReason::Error;
+            response.failure_kind = Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+            response.error = Some("context overflow".to_owned());
+            response.recovery_disposition =
+                tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+            response
+        } else if with_tool {
+            tool_calling_response(&agent_id, prompt_id.as_str(), vec![call_id.clone()])
+        } else {
+            let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+            response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+            response.output_items = vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "R".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })];
+            response
+        };
+        append(
+            &mut tree,
+            AgentEventParent::Under(owner_through),
+            Event::ProviderResponseFinished(response),
+            AgentJournalFoldSemantics::Legacy,
+        );
+        if with_tool {
+            append(
+                &mut tree,
+                AgentEventParent::InheritHead,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    presentation: Default::default(),
+                    call_id,
+                    tool_name: ToolName::new("test"),
+                    tool_type: ToolType::Function,
+                    result: tau_proto::CborValue::Text("done".to_owned()),
+                    provider_content: Vec::new(),
+                    kind: ToolResultKind::Final,
+                    display: None,
+                    originator: PromptOriginator::User,
+                }),
+                AgentJournalFoldSemantics::Legacy,
+            );
+        }
+        let suffix_end = AgentHead::Node(tree.head().expect("Q suffix head"));
+        let mut started = compaction_start(match (with_tool, reactive_recovery) {
+            (true, false) => "ct-v1-compact-tool",
+            (false, true) => "ct-v1-compact-reactive",
+            (false, false) => "ct-v1-compact-text",
+            (true, true) => unreachable!("reactive rejection cannot open a tool round"),
+        });
+        started.cut = if reactive_recovery {
+            AgentHead::Root
+        } else {
+            AgentHead::Node(NodeId::new(0))
+        };
+        started.resume_through = Some(if reactive_recovery {
+            AgentHead::Node(owner_through)
+        } else {
+            suffix_end
+        });
+        if reactive_recovery {
+            started.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                failed_agent_prompt_id: prompt_id,
+            };
+        }
+        append(
+            &mut tree,
+            AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionStarted(started.clone()),
+            AgentJournalFoldSemantics::Legacy,
+        );
+        append(
+            &mut tree,
+            AgentEventParent::InheritHead,
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                agent_id: agent_id.clone(),
+                transaction_id: Some(started.transaction_id),
+                cut: Some(started.cut),
+                suffix_end: Some(suffix_end),
+                compact_prompt_id: Some(started.compact_prompt_id),
+                model: Some(started.model),
+                operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+                replacement_window: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "summary".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+            AgentJournalFoldSemantics::Legacy,
+        );
+
+        let replay =
+            AgentTree::try_from_events(agent_id, &records).expect("cold V1 compaction replay");
+        assert_eq!(
+            tree, replay,
+            "with_tool={with_tool}, reactive_recovery={reactive_recovery}"
+        );
+        let branch = tree.current_branch();
+        let q_index = branch
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    AgentEntry::UserInput { items, .. }
+                        if serde_json::to_string(items).is_ok_and(|text| text.contains('Q'))
+                )
+            })
+            .expect("Q suffix retained");
+        if !reactive_recovery {
+            let response_index = branch
+                .iter()
+                .position(|entry| matches!(entry, AgentEntry::AssistantResponse { .. }))
+                .expect("response suffix retained");
+            assert!(
+                response_index < q_index,
+                "with_tool={with_tool}, reactive_recovery={reactive_recovery}"
+            );
+        }
+        if with_tool || reactive_recovery {
+            let response_index = branch
+                .iter()
+                .position(|entry| matches!(entry, AgentEntry::AssistantResponse { .. }))
+                .expect("tool response suffix retained");
+            let results_index = branch
+                .iter()
+                .position(|entry| matches!(entry, AgentEntry::ToolResults { .. }))
+                .expect("tool aggregate retained");
+            assert!(
+                response_index < results_index,
+                "with_tool={with_tool}, reactive_recovery={reactive_recovery}"
+            );
+            assert!(
+                results_index < q_index,
+                "with_tool={with_tool}, reactive_recovery={reactive_recovery}"
+            );
+        }
+    }
+}
+
+/// Durable navigation after dispatch resets V1 eligibility for the reselected
+/// real branch; off-branch completion cannot steal selection.
+#[test]
+fn inference_deferred_input_v1_head_move_resets_branch_eligibility() {
+    let agent_id = agent_id();
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-v1-moved").expect("prompt id");
+    let record = |seq, parent, event, fold_semantics| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent,
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    };
+    let input = |text: &str| {
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text: text.to_owned(),
+            inference_activation: true,
+            message_class: Default::default(),
+        })
+    };
+    let moved = |head| {
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head,
+        })
+    };
+    let checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through: AgentHead::Node(NodeId::new(0)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Root),
+        });
+    let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+    response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    let records = vec![
+        record(0, AgentEventParent::Root, input("H"), Default::default()),
+        record(
+            1,
+            AgentEventParent::Under(NodeId::new(0)),
+            input("D"),
+            Default::default(),
+        ),
+        record(
+            2,
+            AgentEventParent::InheritHead,
+            moved(AgentHead::Node(NodeId::new(0))),
+            Default::default(),
+        ),
+        record(
+            3,
+            AgentEventParent::Under(NodeId::new(0)),
+            checkpoint,
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        record(
+            4,
+            AgentEventParent::InheritHead,
+            moved(AgentHead::Node(NodeId::new(1))),
+            Default::default(),
+        ),
+        record(
+            5,
+            AgentEventParent::Under(NodeId::new(1)),
+            input("Q"),
+            Default::default(),
+        ),
+        record(
+            6,
+            AgentEventParent::Under(NodeId::new(0)),
+            Event::ProviderResponseFinished(response),
+            Default::default(),
+        ),
+    ];
+    let tree = AgentTree::try_from_events(agent_id, &records).expect("fold moved branch");
+    assert_eq!(tree.head(), Some(NodeId::new(2)));
+    assert_eq!(
+        tree.node(NodeId::new(2)).expect("Q").parent_id,
+        Some(NodeId::new(1))
+    );
+    assert!(matches!(
+        tree.node(NodeId::new(3)).expect("response").entry,
+        AgentEntry::AssistantResponse { .. }
+    ));
+    assert_eq!(
+        tree.node(NodeId::new(3)).expect("response").parent_id,
+        Some(NodeId::new(0))
+    );
+}
+
+/// Root, ancestor, and sibling context never moves behind a V1 owner, while an
+/// exact owner-branch occurrence remains node-less until the response.
+#[test]
+fn inference_deferred_input_v1_defers_only_exact_owner_branch() {
+    let agent_id = agent_id();
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-v1-branches").expect("prompt id");
+    let record = |seq, parent, event, fold_semantics| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent,
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    };
+    let input = |text: &str| {
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text: text.to_owned(),
+            inference_activation: false,
+            message_class: Default::default(),
+        })
+    };
+    let checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through: AgentHead::Node(NodeId::new(1)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Node(NodeId::new(0))),
+        });
+    let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+    response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    let records = vec![
+        record(0, AgentEventParent::Root, input("H"), Default::default()),
+        record(
+            1,
+            AgentEventParent::Under(NodeId::new(0)),
+            input("D"),
+            Default::default(),
+        ),
+        record(
+            2,
+            AgentEventParent::Under(NodeId::new(0)),
+            input("S"),
+            Default::default(),
+        ),
+        record(
+            3,
+            AgentEventParent::InheritHead,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: agent_id.clone(),
+                head: AgentHead::Node(NodeId::new(1)),
+            }),
+            Default::default(),
+        ),
+        record(
+            4,
+            AgentEventParent::Under(NodeId::new(1)),
+            checkpoint,
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        record(5, AgentEventParent::Root, input("root"), Default::default()),
+        record(
+            6,
+            AgentEventParent::Under(NodeId::new(0)),
+            input("ancestor"),
+            Default::default(),
+        ),
+        record(
+            7,
+            AgentEventParent::Under(NodeId::new(2)),
+            input("sibling"),
+            Default::default(),
+        ),
+        record(
+            8,
+            AgentEventParent::Under(NodeId::new(1)),
+            input("owned"),
+            Default::default(),
+        ),
+        record(
+            9,
+            AgentEventParent::Under(NodeId::new(1)),
+            Event::ProviderResponseFinished(response),
+            Default::default(),
+        ),
+    ];
+    let tree = AgentTree::try_from_events(agent_id, &records).expect("branch fold");
+    assert_eq!(tree.nodes().len(), 8);
+    for (node, parent) in [
+        (NodeId::new(3), None),
+        (NodeId::new(4), Some(NodeId::new(0))),
+        (NodeId::new(5), Some(NodeId::new(2))),
+    ] {
+        assert_eq!(
+            tree.node(node).expect("immediate branch node").parent_id,
+            parent
+        );
+    }
+    assert!(matches!(
+        tree.node(NodeId::new(6)).expect("response").entry,
+        AgentEntry::AssistantResponse { .. }
+    ));
+    assert_eq!(
+        tree.node(NodeId::new(7)).expect("owned input").parent_id,
+        Some(NodeId::new(6))
+    );
+}
+
+/// Both no-response terminal reasons restore owned input at its accepted
+/// parent, and a later provider response cannot canonicalize.
+#[test]
+fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
+    for reason in [
+        tau_proto::AgentPromptTerminationReason::Canceled,
+        tau_proto::AgentPromptTerminationReason::Stale,
+    ] {
+        let agent_id = agent_id();
+        let prompt_id = tau_proto::AgentPromptId::parse(format!("ap-v1-{reason:?}").to_lowercase())
+            .expect("prompt id");
+        let record = |seq, parent, event, fold_semantics| PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+            seq: PersistedAgentEventSeq::new(seq),
+            source: None,
+            event,
+            parent,
+            fold_semantics,
+            recorded_at: tau_proto::UnixMicros::new(seq),
+        };
+        let checkpoint =
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.clone(),
+                through: AgentHead::Node(NodeId::new(0)),
+                model: Some("provider/model".into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(AgentHead::Root),
+            });
+        let records = vec![
+            record(
+                0,
+                AgentEventParent::Root,
+                Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    agent_id: agent_id.clone(),
+                    text: "H".to_owned(),
+                    inference_activation: true,
+                    message_class: Default::default(),
+                }),
+                Default::default(),
+            ),
+            record(
+                1,
+                AgentEventParent::Under(NodeId::new(0)),
+                checkpoint,
+                AgentJournalFoldSemantics::InferenceDeferredInputV1,
+            ),
+            record(
+                2,
+                AgentEventParent::Under(NodeId::new(0)),
+                Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    agent_id: agent_id.clone(),
+                    text: "Q".to_owned(),
+                    inference_activation: true,
+                    message_class: Default::default(),
+                }),
+                Default::default(),
+            ),
+            record(
+                3,
+                AgentEventParent::Under(NodeId::new(0)),
+                Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                    agent_id: agent_id.clone(),
+                    agent_prompt_id: prompt_id.clone(),
+                    reason,
+                    originator: PromptOriginator::User,
+                }),
+                Default::default(),
+            ),
+        ];
+        let mut tree =
+            AgentTree::try_from_events(agent_id.clone(), &records).expect("terminal fold");
+        assert_eq!(tree.nodes().len(), 2);
+        assert_eq!(
+            tree.node(NodeId::new(1)).expect("Q").parent_id,
+            Some(NodeId::new(0))
+        );
+        let response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+        let late = record(
+            4,
+            AgentEventParent::Under(NodeId::new(0)),
+            Event::ProviderResponseFinished(response),
+            Default::default(),
+        );
+        assert!(tree.apply_persisted_record(&late).is_err());
+        assert_eq!(tree.nodes().len(), 2);
+    }
+}
+
+/// Mixed journals preserve Legacy allocation and old explicit NodeId targets
+/// while later V1 records use response-before-input placement.
+#[test]
+fn mixed_legacy_v1_replay_preserves_old_node_targets() {
+    let agent_id = agent_id();
+    let legacy_prompt = tau_proto::AgentPromptId::parse("ap-legacy").expect("prompt id");
+    let v1_prompt = tau_proto::AgentPromptId::parse("ap-v1-mixed").expect("prompt id");
+    let record = |seq, parent, event, fold_semantics| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent,
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    };
+    let input = |text: &str| {
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text: text.to_owned(),
+            inference_activation: true,
+            message_class: Default::default(),
+        })
+    };
+    let checkpoint = |prompt_id: tau_proto::AgentPromptId, through| {
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id,
+            through,
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Root),
+        })
+    };
+    let records = vec![
+        record(0, AgentEventParent::Root, input("H"), Default::default()),
+        record(
+            1,
+            AgentEventParent::Under(NodeId::new(0)),
+            checkpoint(legacy_prompt.clone(), AgentHead::Node(NodeId::new(0))),
+            Default::default(),
+        ),
+        record(
+            2,
+            AgentEventParent::Under(NodeId::new(0)),
+            input("legacy Q"),
+            Default::default(),
+        ),
+        record(
+            3,
+            AgentEventParent::Under(NodeId::new(1)),
+            Event::ProviderResponseFinished(tool_calling_response(
+                &agent_id,
+                legacy_prompt.as_str(),
+                Vec::new(),
+            )),
+            Default::default(),
+        ),
+        record(
+            4,
+            AgentEventParent::Under(NodeId::new(2)),
+            checkpoint(v1_prompt.clone(), AgentHead::Node(NodeId::new(2))),
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        record(
+            5,
+            AgentEventParent::Under(NodeId::new(2)),
+            input("V1 Q"),
+            Default::default(),
+        ),
+        record(
+            6,
+            AgentEventParent::Under(NodeId::new(2)),
+            Event::ProviderResponseFinished(tool_calling_response(
+                &agent_id,
+                v1_prompt.as_str(),
+                Vec::new(),
+            )),
+            Default::default(),
+        ),
+        record(
+            7,
+            AgentEventParent::InheritHead,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: agent_id.clone(),
+                head: AgentHead::Node(NodeId::new(1)),
+            }),
+            Default::default(),
+        ),
+    ];
+    let tree = AgentTree::try_from_events(agent_id, &records).expect("mixed replay");
+    assert!(matches!(
+        tree.node(NodeId::new(1)).expect("legacy input").entry,
+        AgentEntry::UserInput { .. }
+    ));
+    assert!(matches!(
+        tree.node(NodeId::new(2)).expect("legacy response").entry,
+        AgentEntry::AssistantResponse { .. }
+    ));
+    assert!(matches!(
+        tree.node(NodeId::new(3)).expect("V1 response").entry,
+        AgentEntry::AssistantResponse { .. }
+    ));
+    assert_eq!(
+        tree.node(NodeId::new(4)).expect("V1 input").parent_id,
+        Some(NodeId::new(3))
+    );
+    assert_eq!(tree.head(), Some(NodeId::new(1)));
+}
+
+/// Terminal fallback reports the global last allocation separately from the
+/// selected virtual-queue tail.
+#[test]
+fn v1_terminal_fallback_restores_selected_queue_not_global_last_node() {
+    let agent_id = agent_id();
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-v1-multiqueue").expect("prompt id");
+    let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
+    for (parent, text) in [
+        (AgentEventParent::Root, "H"),
+        (AgentEventParent::Under(NodeId::new(0)), "D"),
+    ] {
+        apply_persisted_test_record(
+            &mut tree,
+            parent,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: text.to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+        );
+    }
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id.clone(),
+            head: AgentHead::Node(NodeId::new(0)),
+        }),
+    );
+    let seq = tree.next_event_seq();
+    tree.apply_persisted_record(&PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([3; 16]),
+        seq,
+        source: None,
+        event: Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through: AgentHead::Node(NodeId::new(0)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Root),
+        }),
+        parent: AgentEventParent::Under(NodeId::new(0)),
+        fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        recorded_at: tau_proto::UnixMicros::new(seq.get()),
+    })
+    .expect("owner");
+    for (parent, text) in [(NodeId::new(0), "selected Q"), (NodeId::new(1), "other Q")] {
+        let (_, node) = apply_persisted_test_record(
+            &mut tree,
+            AgentEventParent::Under(parent),
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: text.to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+        );
+        assert!(node.is_none());
+    }
+    let (_, global_last) = apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::Under(NodeId::new(0)),
+        Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+            agent_id,
+            agent_prompt_id: prompt_id,
+            reason: tau_proto::AgentPromptTerminationReason::Canceled,
+            originator: PromptOriginator::User,
+        }),
+    );
+    assert_eq!(global_last, Some(NodeId::new(3)));
+    assert_eq!(tree.head(), Some(NodeId::new(2)));
 }
 
 fn tool_calling_response(
@@ -2551,6 +3538,7 @@ fn prompt_started_requires_unique_matching_owner() {
             ))),
             event: Event::AgentPromptStarted(started.clone()),
             parent: AgentEventParent::InheritHead,
+            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
             recorded_at: tau_proto::UnixMicros::new(1),
         })
         .expect_err("compact facts must be harness-authored");
@@ -2603,6 +3591,7 @@ fn persisted_full_prompt_record_is_explicitly_unsupported() {
             source: None,
             event: Event::AgentPromptCreated(prompt),
             parent: AgentEventParent::InheritHead,
+            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
             recorded_at: tau_proto::UnixMicros::new(1),
         })
         .expect_err("cold fold must reject old full prompt records");

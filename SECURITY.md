@@ -860,11 +860,14 @@ capability remains independently disabled by default; explicitly granting it
 authorizes compaction of another loaded same-session agent but does not alter
 self-compaction policy.
 
-Ordinary-inference cancellation may release only the exact matching warm-process
-`DispatchUncertain` owner so later work on that agent can proceed. Its transient
-terminal and late-response rejection do not establish crash-exact cancellation
-persistence; standalone-compaction ownership remains covered by the durable
-rules above.
+V1-marked ordinary-inference cancellation journals the exact matching
+`AgentPromptTerminated(Canceled)` before it releases placement ownership. Cold
+replay folds that private closure and rejects a late response, subject to the
+existing asynchronous-writeback loss boundary. Legacy and unmarked ordinary
+termination remains transient. Standalone-compaction ownership remains covered by
+the separate durable rules above. See
+[`SPEC-agent-message-delivery`](specs/SPEC-agent-message-delivery.md) and
+[`GATE-asynchronous-journal-durability`](specs/GATE-asynchronous-journal-durability.md).
 
 ## Named context-size alert reliability
 

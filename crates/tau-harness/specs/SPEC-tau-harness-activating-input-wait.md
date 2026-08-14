@@ -56,8 +56,10 @@ affect it. Unload, cancellation, rollover, or shutdown drops it, with event-loop
 ordering deciding races exactly once. Cold restore does not recreate a waiter:
 the unresolved foreground tool follows standard interrupted-tool repair while
 durably accepted prompt activation remains available through normal replay.
-Agent-message replay reconstructs canonical context only; its runtime wake and
-automatic activation are intentionally not recreated, as specified by
+Agent-message replay reconstructs one payload-free wake for each uncovered
+activating durable occurrence. A node-less wake remains dormant behind its exact
+inference or tool barrier; checkpoint ancestry suppresses already-covered wakes,
+as specified by
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
 UI `:compact` may exclusively claim an activating-input wait only when it is

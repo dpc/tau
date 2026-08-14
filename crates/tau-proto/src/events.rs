@@ -4999,9 +4999,9 @@ pub enum AgentPromptTerminationReason {
 
 /// The harness ended a prompt without publishing `provider.response_finished`.
 ///
-/// This is a transient lifecycle fact for UIs and other observers that track
-/// in-flight prompts. It does not add assistant content to the agent
-/// transcript.
+/// Marked ordinary inference owners persist this exact-prompt fact so canceled
+/// or stale placement closes identically during cold replay. Other prompt
+/// lifecycles may still publish it transiently. It never adds provider context.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptTerminated {
     /// Agent whose prompt is no longer in flight.

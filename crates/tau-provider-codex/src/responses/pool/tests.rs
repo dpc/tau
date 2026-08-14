@@ -1244,15 +1244,14 @@ fn response_anchor_replays_async_input_before_in_flight_response() {
     assert_eq!(input[0]["content"][0]["text"], "continue after reviews");
 }
 
-/// A normal same-socket `C, R, suffix` continuation must retain incremental
-/// reuse; causal-prefix validation must not turn every request into a full
-/// replay.
+/// Two ordinary turns shaped by V1 placement send `H` first, then use the
+/// response anchor to send the exact once-only `Q` suffix from `H, R, Q`.
 #[test]
 fn response_anchor_keeps_compatible_incremental_reuse() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
-    let initial = user_msg("initial context");
+    let initial = user_msg("H");
     let first_state = run_context_turn(
         &mut pool,
         &config,
@@ -1272,7 +1271,7 @@ fn response_anchor_keeps_compatible_incremental_reuse() {
             usage: None,
         }),
         tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-            items: vec![user_msg("ordinary suffix")],
+            items: vec![user_msg("Q")],
         }),
     ]);
     run_context_turn(
@@ -1285,11 +1284,19 @@ fn response_anchor_keeps_compatible_incremental_reuse() {
 
     let state = server.lock_state();
     assert_eq!(state.upgrade_count, 1, "both turns must share one socket");
+    let first_request = &state.requests[0];
+    assert!(
+        first_request.get("previous_response_id").is_none(),
+        "the first request has no response anchor"
+    );
+    let first_input = first_request["input"].as_array().expect("first input");
+    assert_eq!(first_input.len(), 1);
+    assert_eq!(first_input[0]["content"][0]["text"], "H");
     let request = &state.requests[1];
     assert_eq!(request["previous_response_id"], response_id);
     let input = request["input"].as_array().expect("delta input");
     assert_eq!(input.len(), 1);
-    assert_eq!(input[0]["content"][0]["text"], "ordinary suffix");
+    assert_eq!(input[0]["content"][0]["text"], "Q");
 }
 
 /// ChatGPT requires the WebSocket upgrade to identify the upstream session and

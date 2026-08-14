@@ -7,7 +7,8 @@ The extension is intentionally small:
 
 - it performs the standard stdio extension handshake;
 - it registers `restart_test_dummy` and the image-only
-  `typed_image_test_dummy` in the `test` tool group;
+  `typed_image_test_dummy` in the `test` tool group, plus the disabled-by-default
+  `provider_context_raw_message` fixture tool;
 - it subscribes to `tool.started` and ignores replay-marked deliveries before
   performing restart/tool-result side effects;
 - it intercepts `agent.prompt_submitted` and rewrites whole-word ASCII `tao` to
@@ -24,6 +25,13 @@ The `restart_mode` config exists to make harness tests deterministic:
 in-memory 1×1 PNG as native typed provider content plus a
 bounded text result; it exists only for the deterministic durable-replay
 acceptance and does not read, decode, or write image files.
+`provider_context_raw_message: true` enables a closed message-bridge fixture
+tool. Its exact `agent_id` and `text` arguments publish one
+`message.delivered_reported` fact and return one fixed success. Only the
+provider-context placement E2E enables it; the extension otherwise leaves the
+tool unregistered. The process declares the existing static `MessageBridge`
+peer capability during handshake because capabilities precede configuration;
+the report-producing tool remains absent unless this config flag is true.
 `hold_no_side_effect` is a closed lifecycle mode: it acknowledges one live
 invocation with correlated transient progress only after a worker reaches its
 wait point, then waits for exact cancellation or a fixed terminal deadline.
@@ -80,6 +88,9 @@ Security-relevant boundaries:
 - Config parsing rejects unknown fields and invalid `restart_mode` values.
 - `typed_image_test_dummy` is foreground-only and accepts no arguments or
   runtime control; it appears only when `typed_image: true`.
+- `provider_context_raw_message` appears only when explicitly enabled and can
+  publish only the existing message-bridge report shape to its exact argument
+  target. It adds no new harness or extension protocol.
 - `hold_no_side_effect` accepts no tool arguments or external control, permits
   one active worker, bounds readiness at one second and terminal waiting at ten
   seconds, and joins that worker on cancellation or shutdown.

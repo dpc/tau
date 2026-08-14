@@ -41,6 +41,13 @@ received fact causes a payload-free wake; its one later recipient provider
 request contains exactly one canonical inbound wrapper. The gate does not
 combine restart, watch, wait, peer, or branch behavior.
 
+The gated provider-context placement exception holds one target response while
+the production `message` tool commits a typed receipt and the configured
+test-dummy raw-message tool commits one activating canonical message fact.
+Only then does a named barrier release either ordinary text or parallel dummy
+calls. The target must observe the response, and for tool calls the complete
+aggregate, before both deferred inputs in exactly one successor prompt.
+
 The fixture uses fresh private config, state, session, and artifact directories.
 It disables every unrelated built-in extension and normally enables only the
 no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled
@@ -99,6 +106,9 @@ normal interactive startup availability in
 [SPEC-tau-harness-extension-lifecycle](../../tau-harness/specs/SPEC-tau-harness-extension-lifecycle.md);
 embedded launches do not scrub the ordinary child OS environment. Spawned daemon
 acceptance clears it and supplies private HOME/XDG roots plus a fixed locale.
+The provider-context placement fixture separately exposes `message` and
+`provider_context_raw_message` to its main and `restart_test_dummy` to its
+worker; all three are closed test-only actions.
 
 `ScenarioV1` remains the closed phase-one grammar. `ScenarioV2` adds at most
 eight exact `ctx_id` lanes with independent bounded cursors. It supports typed

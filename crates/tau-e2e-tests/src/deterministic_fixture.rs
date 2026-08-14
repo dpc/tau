@@ -54,6 +54,9 @@ enum FixtureMode {
     /// Two durable roles with the production message tool enabled only for
     /// main.
     SessionMessage,
+    /// Two durable roles for live provider-context placement: main owns the
+    /// message tool and worker owns the deterministic dummy tool.
+    ProviderContextPlacement,
 }
 
 /// Closed configured-tool surface for one fixture.
@@ -336,6 +339,38 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the two-agent live provider-context placement fixture.
+    ///
+    /// The main role owns the production message tool. The worker role owns the
+    /// deterministic dummy tool, and the configured dummy extension mirrors the
+    /// first typed receipt as one activating raw message fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when fixture configuration or artifacts cannot be
+    /// prepared.
+    pub fn new_provider_context_placement(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+        dummy_tool_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface {
+                dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                dummy_mode: FixtureDummyMode::Success,
+                status_policy: false,
+            },
+            FixtureMode::ProviderContextPlacement,
+        )
+    }
+
     /// Creates the closed production core-shell cold-resume fixture.
     pub fn new_core_shell(
         name: &str,
@@ -447,6 +482,7 @@ impl DeterministicFixture {
                     "success"
                 },
                 "typed_image": dummy_mode == FixtureDummyMode::TypedImage,
+                "provider_context_raw_message": mode == FixtureMode::ProviderContextPlacement,
             });
             if dummy_mode == FixtureDummyMode::ExitOnceThenSuccess {
                 use std::os::unix::fs::DirBuilderExt;
@@ -511,9 +547,20 @@ impl DeterministicFixture {
                 | FixtureMode::SessionRestoreInterruptedTool
                 | FixtureMode::SessionRestoreMixed
                 | FixtureMode::SessionMessage
+                | FixtureMode::ProviderContextPlacement
         ) {
-            let main_tools = if mode == FixtureMode::SessionMessage {
-                serde_json::json!(["message"])
+            let main_tools = if matches!(
+                mode,
+                FixtureMode::SessionMessage | FixtureMode::ProviderContextPlacement
+            ) {
+                if mode == FixtureMode::ProviderContextPlacement {
+                    serde_json::json!([
+                        "message",
+                        tau_ext_test_dummy::PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME
+                    ])
+                } else {
+                    serde_json::json!(["message"])
+                }
             } else if mode == FixtureMode::SessionRestoreWatch {
                 serde_json::json!(["agent_start", "agent_watch"])
             } else {
@@ -526,7 +573,11 @@ impl DeterministicFixture {
                 },
                 "deterministic-worker": {
                     "model": "fake/test",
-                    "tools": if mode == FixtureMode::SessionRestoreInterruptedTool {
+                    "tools": if matches!(
+                        mode,
+                        FixtureMode::SessionRestoreInterruptedTool
+                            | FixtureMode::ProviderContextPlacement
+                    ) {
                         serde_json::json!(["restart_test_dummy"])
                     } else {
                         serde_json::json!([])

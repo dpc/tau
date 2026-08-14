@@ -27,8 +27,9 @@ use tau_client::{
     ClientResult, ExtensionBuilder, InterceptDecision, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
-    AgentPromptSubmitted, Event, EventSelector, ImageContent, ImageDetail, ImageMediaType,
-    InterceptionPriority, NoticeLevel, ToolError, ToolResult, ToolResultContentPart,
+    AgentPromptSubmitted, CborValue, Event, EventSelector, ImageContent, ImageDetail,
+    ImageMediaType, InterceptionPriority, MessageAgentTarget, MessageDelivered, MessageFactId,
+    MessageParty, NoticeLevel, RawMessagePublisherId, ToolError, ToolResult, ToolResultContentPart,
     ToolResultKind, ToolSpec,
 };
 #[cfg(test)]
@@ -41,6 +42,8 @@ pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
 
 /// Tool name reserved for the one typed-image deterministic acceptance mode.
 pub const TYPED_IMAGE_TEST_DUMMY_TOOL_NAME: &str = "typed_image_test_dummy";
+/// Tool name reserved for provider-context placement acceptance.
+pub const PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME: &str = "provider_context_raw_message";
 
 /// Fixed 1×1 indexed-color PNG emitted only by the deterministic typed-image
 /// fixture mode.
@@ -88,6 +91,8 @@ struct ExtConfig {
     restart_mode: Option<RestartMode>,
     /// Enables the separate fixed typed-image fixture tool.
     typed_image: bool,
+    /// Enables the provider-context raw-message fixture tool.
+    provider_context_raw_message: bool,
     /// Fixture-private Unix socket used by `hold_until_success_release`.
     release_socket_path: Option<PathBuf>,
     /// Fixture-generated nonce required by `hold_until_success_release`.
@@ -105,6 +110,8 @@ struct DummyState<T> {
     /// Whether the separate typed-image fixture tool may return its fixed
     /// image.
     typed_image: bool,
+    /// Whether the provider-context raw-message fixture tool is enabled.
+    provider_context_raw_message: bool,
     /// Sole bounded invocation owned by either deterministic hold mode.
     pending_hold: Option<PendingHold>,
     /// Terminal deadline for the no-side-effect hold worker.
@@ -279,6 +286,7 @@ where
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
+            .message_bridge()
             .configure::<ExtConfig>(|cx| {
                 cx.state.restart_mode = cx.config().restart_mode.unwrap_or_default();
                 let typed_image = cx.config().typed_image;
@@ -299,6 +307,24 @@ where
                         ))?;
                 }
                 cx.state.typed_image = typed_image;
+                let provider_context_raw_message = cx.config().provider_context_raw_message;
+                if provider_context_raw_message && !cx.state.provider_context_raw_message {
+                    cx.handle.register_local_tool(
+                        tau_proto::ToolRegistrationDeclared {
+                            tool: provider_context_raw_message_tool_spec(),
+                            tool_group: Some(tau_proto::ToolGroup {
+                                name: tau_proto::ToolGroupName::new("test"),
+                                prompt_fragment: None,
+                            }),
+                            prompt_fragment: None,
+                        },
+                    )?;
+                } else if !provider_context_raw_message && cx.state.provider_context_raw_message {
+                    cx.handle.unregister_local_tool(tau_proto::ToolName::new(
+                        PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME,
+                    ))?;
+                }
+                cx.state.provider_context_raw_message = provider_context_raw_message;
                 if cx.state.restart_mode == RestartMode::HoldUntilSuccessRelease {
                     let Some(socket_path) = cx.config().release_socket_path.clone() else {
                         return Err(tau_client::ClientError::handler(
@@ -393,6 +419,7 @@ where
                 |mut cx| handle_restart_invocation(&mut cx),
             )
             .on::<tau_proto::ToolStarted>(|cx| {
+                handle_provider_context_raw_message(cx.state, cx.event, &cx.handle)?;
                 handle_typed_image_invocation(cx.state, cx.event, &cx.handle)
             })
             .ready_message("test dummy tools ready");
@@ -489,6 +516,7 @@ where
         rng,
         restart_mode: RestartMode::Random,
         typed_image: false,
+        provider_context_raw_message: false,
         pending_hold: None,
         hold_timeout,
         release_config: None,
@@ -641,6 +669,31 @@ fn typed_image_tool_spec() -> ToolSpec {
         examples: Vec::new(),
     }
 }
+
+fn provider_context_raw_message_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: tau_proto::ToolName::new(PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Test-only tool that publishes one raw message fact to an explicit agent".to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": { "type": "string" },
+                "text": { "type": "string" }
+            },
+            "required": ["agent_id", "text"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support: Some(tau_proto::BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
+}
 fn intercepted_prompt_replacement(event: &Event) -> Option<Event> {
     match event {
         Event::AgentPromptSubmitted(prompt) => correct_tao_to_tau(&prompt.text).map(|fixed| {
@@ -677,6 +730,69 @@ where
         RestartMode::HoldUntilSuccessRelease => start_success_release_hold(cx, invoke),
         RestartMode::ExitOnceThenSuccess => exit_once_then_success(cx, invoke),
     }
+}
+
+fn handle_provider_context_raw_message<T>(
+    state: &DummyState<T>,
+    invoke: &tau_proto::ToolStarted,
+    handle: &tau_client::ClientHandle,
+) -> ClientResult<()>
+where
+    T: Rng,
+{
+    let expected_name = handle
+        .tool_name_scope()?
+        .wire_tool_name(&tau_proto::ToolName::new(
+            PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME,
+        ))?;
+    if !state.provider_context_raw_message || invoke.tool_name != expected_name {
+        return Ok(());
+    }
+    let CborValue::Map(fields) = &invoke.arguments else {
+        return Err(tau_client::ClientError::handler(
+            "provider-context raw message arguments must be a map",
+        ));
+    };
+    let text_field = |name: &str| {
+        fields.iter().find_map(|(key, value)| {
+            if matches!(key, CborValue::Text(key) if key == name)
+                && let CborValue::Text(value) = value
+            {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+    };
+    let agent_id = text_field("agent_id").ok_or_else(|| {
+        tau_client::ClientError::handler("provider-context raw message omitted agent_id")
+    })?;
+    let text = text_field("text").ok_or_else(|| {
+        tau_client::ClientError::handler("provider-context raw message omitted text")
+    })?;
+    handle.emit(Event::MessageDeliveredReported(MessageDelivered::new(
+        RawMessagePublisherId::new("e2e-test-dummy"),
+        MessageAgentTarget::new(agent_id),
+        MessageFactId::new("provider-context-raw-message"),
+        MessageParty {
+            stable_id: "provider-context-raw-sender".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        text,
+    )))?;
+    handle.report_tool_result(ToolResult {
+        presentation: Default::default(),
+        call_id: invoke.call_id.clone(),
+        tool_name: invoke.tool_name.clone(),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("raw message emitted".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: invoke.originator.clone(),
+    })
 }
 
 /// Emits correlated observation progress, atomically claims the configured

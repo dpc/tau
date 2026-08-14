@@ -2538,6 +2538,16 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
 
     h.remove_agent(&cid);
 
+    assert!(h.pending_prompt_dispatches.contains(&prompt_id));
+    assert!(h.prompt_agents.contains_key(prompt_id.as_str()));
+    assert_eq!(h.current_session_state.token_usage.total.requests, 1);
+    h.handle_extension_event(
+        owner,
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release parked prompt before durable unload closure");
     assert!(!h.pending_prompt_dispatches.contains(&prompt_id));
     assert!(!h.prompt_agents.contains_key(prompt_id.as_str()));
     assert!(!h.prompt_models.contains_key(&prompt_id));
@@ -2547,8 +2557,8 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
     h.shutdown().expect("shutdown");
 }
 
-/// Unload disposes bookkeeping while the compact materialization fact is
-/// parked.
+/// Unload retains bookkeeping until the parked materialization and durable
+/// cancellation have committed.
 #[test]
 fn unload_disposes_parked_prompt_materialization() {
     assert_unload_disposes_parked_prompt(
@@ -2557,8 +2567,8 @@ fn unload_disposes_parked_prompt_materialization() {
     );
 }
 
-/// Unload also disposes bookkeeping after the compact fact committed but before
-/// its transient full request left interception.
+/// Unload retains bookkeeping after the compact fact commits until the parked
+/// full request and durable cancellation have completed.
 #[test]
 fn unload_disposes_parked_prompt_delivery() {
     assert_unload_disposes_parked_prompt(

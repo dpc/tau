@@ -42,30 +42,42 @@ existing ownership and kind/state validation:
 2. While that round is open, provider inference is blocked on every branch. A
    second tool-bearing provider response is rejected before persistence and
    launches no tools.
-3. With no open round, sent and received projections materialize at the accepted
-   parent.
-4. With an open round, a projection remains pending only when the tool-calling
+3. A journal record marked `InferenceDeferredInputV1` opens one exact ordinary
+   inference owner. Covered context occurrences are
+   `AgentPromptSubmitted`, `AgentUserMessageInjected`, `AgentPromptSteered`,
+   `AgentMessageSent`, `AgentMessageReceived`, and successfully projected
+   canonical `message.*` facts. This includes nonactivating context notices.
+   Control events, compaction events, provider output, tool terminals, and
+   standalone-provider work are excluded. While the owner is unresolved, a
+   covered occurrence accepted on its branch remains node-less; receipt and
+   publication still complete immediately.
+4. A non-tool response materializes at the owner's checkpoint head and then
+   drains those inputs in durable sequence order. A tool-bearing response
+   transfers them to the tool barrier.
+5. Without a marked owner or open round, sent and received projections
+   materialize at the accepted parent. Historical records use this legacy rule.
+6. With an open round, a projection remains pending only when the tool-calling
    assistant is equal to or an ancestor of its accepted parent. Root inputs,
    inputs above the assistant, and sibling-branch inputs materialize immediately
    and are never drained by that round.
-5. Once every call has a terminal result, one complete `ToolResults` aggregate
+7. Once every call has a terminal result, one complete `ToolResults` aggregate
    materializes directly after the tool-calling assistant.
-6. Applicable pending agent messages and extension message facts then materialize
+8. Applicable pending agent messages and extension message facts then materialize
    in their common durable acceptance order, while retaining distinct typed
    variants.
-7. The fold outcome ends at the last drained node so the existing live
-   durable-head advance includes the result and every deferred input.
+9. `AgentPromptTerminated(Canceled | Stale)` closes a marked owner without an
+   assistant block and materializes pending inputs from their accepted branch
+   positions. This private durable closure folds during agent cold replay but is
+   excluded from historical subscriber catch-up.
 
 The same rules cover errors, cancellation, and background-result closure. A
 tool-calling assistant and its complete result aggregate are indivisible.
 Sender projections created by a successful message tool therefore remain on the
 active branch after that tool's compact `Message sent` result.
 
-An ordinary provider inference already in flight creates no broader deferral
-transaction. If no tool round is open, a newly accepted projection materializes
-in commit order; a response to an earlier provider request may append after it
-even though that request did not observe it. The receive wake schedules later
-provider work rather than reordering either durable occurrence.
+Only newly marked ordinary checkpoints use inference-owned placement. Legacy
+checkpoints preserve commit-order placement and node IDs. The private journal
+marker never enters provider or configured-extension DTOs.
 
 ## Canonical provider rendering
 
@@ -189,12 +201,13 @@ exact suffix content.
 ## Replay, recovery, and cleanup
 
 Replay folds each canonical fact with the same sequence-aware placement and
-rendering, but creates no wake, provider dispatch, wait completion, watch
-fanout/edge, private reply authority, peer retry, or admission ownership. A
-crash after receive commit but before its inference checkpoint intentionally
-leaves context without automatic activation. A committed checkpoint uses the
-existing dispatch-uncertain and provider-response recovery contract instead of
-recreating a message wake.
+rendering. It rebuilds one payload-free wake for each uncovered activating typed
+receive or canonical `message.*` occurrence; it does not recreate admission
+ownership, wait completion, watch fanout/edge, private reply authority, or peer
+retry. A marked uncertain ordinary dispatch with deferred activating input is
+superseded by durable `AgentPromptTerminated(Stale)` before that wake can run;
+Tau never resends the uncertain prompt. Without deferred activating input, the
+existing uncertain block remains.
 
 Completed-worker recovery derives outstanding/answered message work from typed
 received occurrence nodes, selected-branch checkpoint coverage, and a later

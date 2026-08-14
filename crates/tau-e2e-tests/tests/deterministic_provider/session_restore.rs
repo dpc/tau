@@ -1,8 +1,9 @@
-//! Cold-resume acceptance for durable worker restoration, watch recreation,
-//! and loaded/unloaded/ephemeral membership composition.
+//! Durable multi-agent acceptance for live delivery plus cold worker
+//! restoration, watch recreation, and membership composition.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
     AgentWatchResultExpectationV2, DeterministicFixture, DurableSessionSnapshot, ScenarioActionV2,
@@ -40,6 +41,321 @@ const WORKER_PROVIDER_INITIAL: &str = concat!(
     "You can use the `message` tool to communicate with agents.\n\n</tau_internal>",
     "Complete the deterministic worker instruction."
 );
+
+/// A held non-tool response durably precedes typed and raw inputs that arrive
+/// while its marked owner remains unresolved.
+#[test]
+fn deterministic_two_turn_provider_context_places_input_after_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_gated_live_provider_context_placement(false)
+}
+
+/// A held parallel tool response and its complete aggregate durably precede
+/// typed and raw inputs, with one coalesced successor.
+#[test]
+fn deterministic_parallel_tool_context_places_input_after_aggregate()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_gated_live_provider_context_placement(true)
+}
+
+fn run_gated_live_provider_context_placement(
+    parallel_tools: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const H: &str = "held provider-context history";
+    const TYPED: &str = "typed input while provider response is held";
+    const RAW: &str = "raw input while provider response is held";
+    const RELEASE: &str = "release held provider response";
+    const RESPONSE: &str = "held provider response";
+    const SUCCESSOR: &str = "deferred inputs observed once";
+    let call_id = tau_proto::ToolCallId::new("provider-context-message");
+    let tool_call_ids = vec![
+        tau_proto::ToolCallId::new("provider-context-tool-a"),
+        tau_proto::ToolCallId::new("provider-context-tool-b"),
+    ];
+    let raw_call_id = tau_proto::ToolCallId::new("provider-context-raw");
+    let target_first = if parallel_tools {
+        ScenarioActionV2::BarrierParallelDummyTools {
+            user_text: H.to_owned(),
+            barrier: "provider-context-release".to_owned(),
+            participants: 2,
+            tool_call_ids: tool_call_ids.clone(),
+        }
+    } else {
+        ScenarioActionV2::BarrierText {
+            user_text: H.to_owned(),
+            barrier: "provider-context-release".to_owned(),
+            participants: 2,
+            response: RESPONSE.to_owned(),
+        }
+    };
+    let target_successor = if parallel_tools {
+        ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+            call_id: call_id.clone(),
+            message: TYPED.to_owned(),
+            raw_text: RAW.to_owned(),
+            held_user_text: H.to_owned(),
+            tool_call_ids: tool_call_ids.clone(),
+            response: SUCCESSOR.to_owned(),
+        }
+    } else {
+        ScenarioActionV2::MessageAndRawInboundAfterHeld {
+            call_id: call_id.clone(),
+            message: TYPED.to_owned(),
+            raw_text: RAW.to_owned(),
+            held_user_text: H.to_owned(),
+            response: SUCCESSOR.to_owned(),
+        }
+    };
+    let name = if parallel_tools {
+        "deterministic_parallel_tool_context_places_input_after_aggregate"
+    } else {
+        "deterministic_two_turn_provider_context_places_input_after_response"
+    };
+    let fixture = DeterministicFixture::new_provider_context_placement(
+        name,
+        &ScenarioV2::new(
+            "gated-live-provider-context",
+            vec![
+                ScenarioLaneV2 {
+                    ctx_id: "provider-context-sender".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::MessageCall {
+                            user_text: "send while target response is held".to_owned(),
+                            call_id: call_id.clone(),
+                            message: TYPED.to_owned(),
+                        },
+                        ScenarioActionV2::MessageSenderResult {
+                            call_id,
+                            message: TYPED.to_owned(),
+                            response: "sender committed deferred inputs".to_owned(),
+                        },
+                        ScenarioActionV2::ProviderContextRawMessageCall {
+                            user_text: "publish raw input while target remains held".to_owned(),
+                            call_id: raw_call_id.clone(),
+                            raw_text: RAW.to_owned(),
+                        },
+                        ScenarioActionV2::ProviderContextRawMessageResult {
+                            call_id: raw_call_id,
+                            raw_text: RAW.to_owned(),
+                            response: "raw input committed".to_owned(),
+                        },
+                        ScenarioActionV2::BarrierText {
+                            user_text: RELEASE.to_owned(),
+                            barrier: "provider-context-release".to_owned(),
+                            participants: 2,
+                            response: "sender released target".to_owned(),
+                        },
+                    ],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "provider-context-target".to_owned(),
+                    actions: vec![target_first, target_successor],
+                },
+            ],
+        ),
+        FAKE_PROVIDER,
+        DUMMY_TOOL,
+    )?;
+    let socket = fixture.socket_path(name);
+    let daemon = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut observer = SessionRestoreObserver::connect(&socket)?;
+    let sender = observer.create_idle_main()?;
+    let target = observer.create_idle_worker(&sender)?;
+    let start = observer.events.len();
+
+    observer.submit(&target, "provider-context-target", H)?;
+    observer.recv_until(|observed| {
+        matches!(
+            &observed.event,
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == target
+        )
+    })?;
+    observer.submit(
+        &sender,
+        "provider-context-sender",
+        "send while target response is held",
+    )?;
+    observer.recv_until(|observed| {
+        matches!(
+            &observed.event,
+            Event::AgentMessageReceived(received)
+                if received.recipient_id == target && received.message == TYPED
+        )
+    })?;
+    assert!(
+        observer.events[start..].iter().all(|observed| {
+            !matches!(
+                &observed.event,
+                Event::ProviderResponseFinished(finished) if finished.agent_id == target
+            )
+        }),
+        "target response remains held until both deferred inputs commit"
+    );
+
+    observer.submit(
+        &sender,
+        "provider-context-raw",
+        "publish raw input while target remains held",
+    )?;
+    observer.recv_until(|observed| {
+        matches!(
+            &observed.event,
+            Event::MessageDelivered(delivered)
+                if delivered.agent_id.as_str() == target.as_ref() && delivered.text == RAW
+        )
+    })?;
+    assert!(
+        observer.events[start..].iter().all(|observed| {
+            !matches!(
+                &observed.event,
+                Event::ProviderResponseFinished(finished) if finished.agent_id == target
+            )
+        }),
+        "raw input commits before target response release"
+    );
+    observer.submit(&sender, "provider-context-release", RELEASE)?;
+    observer.wait_for_agent_marker(&target, SUCCESSOR, start)?;
+    observer.wait_for_agent_idle_after(&target, start)?;
+
+    let prompts = observer.events[start..]
+        .iter()
+        .filter_map(|observed| match &observed.event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == target => Some(prompt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2, "one held prompt and one successor");
+    let raw_index = observer.events[start..]
+        .iter()
+        .position(|observed| {
+            matches!(
+                &observed.event,
+                Event::MessageDelivered(delivered) if delivered.text == RAW
+            )
+        })
+        .expect("raw fact committed");
+    let response_index = observer.events[start..]
+        .iter()
+        .position(|observed| {
+            matches!(
+                &observed.event,
+                Event::ProviderResponseFinished(finished) if finished.agent_id == target
+            )
+        })
+        .expect("held response committed");
+    assert!(raw_index < response_index);
+    let context = prompts[1].context.flatten();
+    let rendered = context
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?;
+    let position = |needle: &str| {
+        rendered
+            .iter()
+            .position(|item| item.contains(needle))
+            .unwrap_or_else(|| panic!("missing provider-context marker {needle}"))
+    };
+    let typed = position(TYPED);
+    let raw = position(RAW);
+    assert!(typed < raw);
+    assert_eq!(
+        rendered.iter().filter(|item| item.contains(TYPED)).count(),
+        1
+    );
+    assert_eq!(rendered.iter().filter(|item| item.contains(RAW)).count(), 1);
+    if parallel_tools {
+        let last_call = context
+            .iter()
+            .rposition(|item| matches!(item, tau_proto::ContextItem::ToolCall(_)))
+            .expect("parallel calls remain");
+        let first_result = context
+            .iter()
+            .position(|item| matches!(item, tau_proto::ContextItem::ToolResult(_)))
+            .expect("parallel aggregate remains");
+        let last_result = context
+            .iter()
+            .rposition(|item| matches!(item, tau_proto::ContextItem::ToolResult(_)))
+            .expect("parallel aggregate remains");
+        assert_eq!(first_result, last_call + 1);
+        assert_eq!(last_result + 1, first_result + tool_call_ids.len());
+        assert!(last_result < typed);
+    } else {
+        assert!(position(RESPONSE) < typed);
+    }
+
+    disconnect_ui(&mut observer.peer)?;
+    daemon.finish()?;
+    let session_id = SessionId::parse(SESSION).expect("session id");
+    let snapshot = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    let target_records = &snapshot.agent_events[&target];
+    assert_eq!(
+        target_records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        2,
+        "held owner and one successor are the only durable checkpoints"
+    );
+    assert_eq!(
+        target_records
+            .iter()
+            .filter(|record| {
+                matches!(&record.event, Event::AgentMessageReceived(received)
+                    if received.message == TYPED)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        target_records
+            .iter()
+            .filter(|record| {
+                matches!(&record.event, Event::MessageDelivered(delivered)
+                    if delivered.text == RAW)
+            })
+            .count(),
+        1
+    );
+    let tree = tau_core::AgentTree::from_events(target.clone(), target_records);
+    let node_kinds = tree
+        .nodes()
+        .iter()
+        .filter_map(|node| match &node.entry {
+            tau_core::AgentEntry::AssistantResponse { output_items, .. }
+                if output_items
+                    .iter()
+                    .any(|item| matches!(item, tau_proto::ContextItem::ToolCall(_))) =>
+            {
+                Some("response")
+            }
+            tau_core::AgentEntry::ToolResults { items } => {
+                assert_eq!(
+                    items.iter().map(|item| &item.call_id).collect::<Vec<_>>(),
+                    tool_call_ids.iter().collect::<Vec<_>>()
+                );
+                Some("aggregate")
+            }
+            tau_core::AgentEntry::AgentMessage { message, .. } if message == TYPED => Some("typed"),
+            tau_core::AgentEntry::MessageFact { item, .. }
+                if serde_json::to_string(item).is_ok_and(|text| text.contains(RAW)) =>
+            {
+                Some("raw")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parallel_tools {
+        assert_eq!(
+            node_kinds,
+            ["response", "aggregate", "typed", "raw"],
+            "one complete aggregate sits between response and deferred inputs"
+        );
+    } else {
+        assert_eq!(node_kinds, ["typed", "raw"]);
+    }
+    fixture.assert_consumed()?;
+    Ok(())
+}
 
 /// Proves the production message tool persists both owned facts, wakes its
 /// idle recipient without creating a HumanUi prompt, and projects one inbound
@@ -241,6 +557,195 @@ fn production_message_tool_delivers_one_canonical_inbound_wrapper()
     observer.wait_for_agent_marker(&worker, "fresh worker accepted", fresh)?;
     disconnect_ui(&mut observer.peer)?;
     daemon.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
+/// A crash after durable typed receipt but before the held provider response
+/// restores as one Stale owner closure and one message-driven successor.
+#[test]
+fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    const H: &str = "hold crash target response";
+    const BODY: &str = "typed receipt before crash";
+    let session_id = SessionId::parse(SESSION).expect("session id");
+    let fixture = DeterministicFixture::new_session_message(
+        "crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once",
+        &ScenarioV2::new(
+            "crash-deferred-typed-receipt",
+            vec![
+                ScenarioLaneV2 {
+                    ctx_id: "crash-sender".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::MessageCall {
+                            user_text: "send before target crash".to_owned(),
+                            call_id: "crash-message-call".into(),
+                            message: BODY.to_owned(),
+                        },
+                        ScenarioActionV2::MessageSenderResult {
+                            call_id: "crash-message-call".into(),
+                            message: BODY.to_owned(),
+                            response: "sender committed receipt".to_owned(),
+                        },
+                        ScenarioActionV2::BarrierText {
+                            user_text: "consume abandoned barrier".to_owned(),
+                            barrier: "never-released-before-crash".to_owned(),
+                            participants: 2,
+                            response: "not released after restart".to_owned(),
+                        },
+                    ],
+                },
+                ScenarioLaneV2 {
+                    ctx_id: "crash-target".to_owned(),
+                    actions: vec![
+                        ScenarioActionV2::BarrierText {
+                            user_text: H.to_owned(),
+                            barrier: "never-released-before-crash".to_owned(),
+                            participants: 2,
+                            response: "must not be emitted".to_owned(),
+                        },
+                        ScenarioActionV2::MessageInboundAfterHeld {
+                            call_id: "crash-message-call".into(),
+                            message: BODY.to_owned(),
+                            held_user_text: H.to_owned(),
+                            response: "target resumed successor".to_owned(),
+                        },
+                    ],
+                },
+            ],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket_a = fixture.socket_path("typed-crash-a");
+    let daemon_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
+    let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
+    let sender = observer_a.create_idle_main()?;
+    let target = observer_a.create_idle_worker(&sender)?;
+    observer_a.submit(&target, "crash-target", H)?;
+    let owner_prompt_id = loop {
+        let observed = observer_a.recv_one()?;
+        if let Event::AgentPromptCreated(prompt) = observed.event
+            && prompt.agent_id == target
+        {
+            break prompt.agent_prompt_id;
+        }
+    };
+    observer_a.submit(&sender, "crash-sender", "send before target crash")?;
+    let receipt_index = loop {
+        let observed = observer_a.recv_one()?;
+        if matches!(
+            &observed.event,
+            Event::AgentMessageReceived(message)
+                if message.recipient_id == target && message.message == BODY
+        ) {
+            break observer_a.events.len() - 1;
+        }
+    };
+    observer_a.wait_for_agent_marker(&sender, "sender committed receipt", receipt_index)?;
+    let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    let target_before_crash = &snapshot_a.agent_events[&target];
+    assert_eq!(matched_action_count(&fixture)?, 3);
+    assert_eq!(
+        target_before_crash
+            .iter()
+            .filter(
+                |record| matches!(&record.event, Event::AgentMessageReceived(message)
+                if message.message == BODY)
+            )
+            .count(),
+        1
+    );
+    assert!(
+        target_before_crash
+            .iter()
+            .all(|record| !matches!(record.event, Event::AgentPromptTerminated(_)))
+    );
+    let receipt_index_before = target_before_crash
+        .iter()
+        .position(|record| matches!(record.event, Event::AgentMessageReceived(_)))
+        .expect("receipt before crash");
+    assert!(
+        target_before_crash[receipt_index_before + 1..]
+            .iter()
+            .all(|record| !matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+    );
+    let terminated = daemon_a.kill_ungracefully()?;
+    drop(observer_a);
+    terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
+
+    let socket_b = fixture.socket_path("typed-crash-b");
+    let daemon_b = spawn_daemon(
+        &fixture,
+        &socket_b,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
+    observer_b.wait_for_session_boundary(&session_id)?;
+    observer_b.wait_for_agent_marker(&target, "target resumed successor", 0)?;
+    let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    let target_records = &snapshot_b.agent_events[&target];
+    let receipts = target_records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            matches!(&record.event, Event::AgentMessageReceived(message)
+                if message.message == BODY)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1);
+    let stales = target_records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            matches!(&record.event, Event::AgentPromptTerminated(value)
+            if value.agent_prompt_id == owner_prompt_id
+                && value.reason == tau_proto::AgentPromptTerminationReason::Stale)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stales.len(), 1);
+    let successor_checkpoints = target_records
+        .iter()
+        .enumerate()
+        .filter(|(index, record)| {
+            stales[0].0 < *index && matches!(record.event, Event::AgentInferenceDispatchStarted(_))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(successor_checkpoints.len(), 1);
+    assert!(receipts[0].0 < stales[0].0);
+    let tree = tau_core::AgentTree::try_from_events(target.clone(), target_records)
+        .expect("restored target fold");
+    let receipt_node = tree
+        .node_for_durable_event_seq(receipts[0].1.seq)
+        .expect("receipt node");
+    let Event::AgentInferenceDispatchStarted(successor) = &successor_checkpoints[0].1.event else {
+        unreachable!("filtered successor checkpoint")
+    };
+    assert_eq!(successor.through, tau_proto::AgentHead::Node(receipt_node));
+    assert_eq!(
+        successor.activation_cut,
+        Some(
+            tree.node(receipt_node)
+                .and_then(|node| node.parent_id)
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+        )
+    );
+    assert!(
+        observer_b.events.iter().all(|observed| !matches!(
+            &observed.event,
+            Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == owner_prompt_id
+        )),
+        "the uncertain owner is never resent"
+    );
+    observer_b.submit(&sender, "crash-release", "consume abandoned barrier")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while matched_action_count(&fixture)? != 5 {
+        if deadline < Instant::now() {
+            return Err("resumed barrier action was not consumed".into());
+        }
+        std::thread::yield_now();
+    }
+    disconnect_ui(&mut observer_b.peer)?;
+    daemon_b.finish()?;
     fixture.assert_consumed()?;
     Ok(())
 }

@@ -154,6 +154,12 @@ type, dimensions, detail, and BLAKE3 digest in diagnostics; no image bytes enter
 the bounded provider trace, terminal metadata, or generic fixture observation.
 It adds no image file, decoder, network, shell, or runtime-control input.
 
+The provider-context placement scenario enables the test dummy's
+`provider_context_raw_message` tool only for one fixture. Its closed grammar
+supplies exact `agent_id` and `text` arguments and emits the existing
+message-bridge report shape. It adds no external ingress or production
+extension interface.
+
 The live dummy-respawn acceptance enables only `exit_once_then_success`. Its
 fixture creates a private `0700` marker root and configures one absent absolute
 leaf. The first observed live dummy call atomically claims that leaf and exits;

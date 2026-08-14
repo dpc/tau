@@ -5,6 +5,7 @@ use std::collections as path_std_collections;
 use tau_proto::ProviderFailureKind;
 
 use super::*;
+use crate::ScenarioLaneV2;
 
 pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
     if scenario.version != 0 {
@@ -69,6 +70,42 @@ pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
             && result_phase == followup_phase
             && followup_phase == challenge_phase
             && challenge_phase == terminal_phase => {}
+        [
+            ScenarioTurnV1::StatusPolicyToolCall {
+                user_text: _,
+                order: _,
+                initial_status: call_status,
+                terminal_phase: call_phase,
+            },
+            ScenarioTurnV1::StatusPolicyToolResult {
+                initial_status: result_status,
+                terminal_phase: result_phase,
+            },
+            ScenarioTurnV1::WorkingFollowupToolResult {
+                initial_status: followup_status,
+                terminal_phase: followup_phase,
+            },
+            ScenarioTurnV1::WorkingFinalStatusCall {
+                terminal_phase: challenge_phase,
+            },
+            ScenarioTurnV1::TerminalStatusResult {
+                terminal_phase,
+                response: _,
+            },
+            ScenarioTurnV1::Text {
+                user_text: _,
+                deltas,
+                response,
+            },
+        ] if call_status == result_status
+            && result_status == followup_status
+            && call_phase == result_phase
+            && result_phase == followup_phase
+            && followup_phase == challenge_phase
+            && challenge_phase == terminal_phase
+            && !deltas.is_empty()
+            && deltas.len() <= MAX_DELTAS
+            && deltas.concat() == *response => {}
         [
             ScenarioTurnV1::Text {
                 user_text: _,
@@ -206,8 +243,38 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                         "message result fields must be bounded and nonempty",
                     ));
                 }
+                ScenarioActionV2::ProviderContextRawMessageCall {
+                    call_id, raw_text, ..
+                } if call_id.is_empty()
+                    || call_id.len() > 256
+                    || raw_text.is_empty()
+                    || 4 * 1024 < raw_text.len()
+                    || !matches!(
+                        lane.actions.get(action_index + 1),
+                        Some(ScenarioActionV2::ProviderContextRawMessageResult {
+                            call_id: result_id,
+                            raw_text: result_text,
+                            ..
+                        }) if result_id == call_id && result_text == raw_text
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "raw message call must have one bounded adjacent matching result",
+                    ));
+                }
                 ScenarioActionV2::MessageInbound {
                     call_id, message, ..
+                }
+                | ScenarioActionV2::MessageInboundAfterHeld {
+                    call_id, message, ..
+                }
+                | ScenarioActionV2::MessageAndRawInboundAfterHeld {
+                    call_id, message, ..
+                }
+                | ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+                    call_id,
+                    message,
+                    ..
                 } if call_id.is_empty()
                     || call_id.len() > 256
                     || message.is_empty()
@@ -465,16 +532,25 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                     barrier,
                     participants,
                     ..
-                } if lane.actions.len() != 1
-                    || barrier.is_empty()
+                }
+                | ScenarioActionV2::BarrierParallelDummyTools {
+                    barrier,
+                    participants,
+                    ..
+                } if barrier.is_empty()
                     || barrier.len() > 64
                     || !(2..=scenario.lanes.len()).contains(participants) =>
                 {
                     return Err(ClientError::handler(
-                        "a bounded barrier must be the lane's only action",
+                        "a bounded barrier must name 2..=lane-count participants",
                     ));
                 }
                 ScenarioActionV2::BarrierText {
+                    barrier,
+                    participants,
+                    ..
+                }
+                | ScenarioActionV2::BarrierParallelDummyTools {
                     barrier,
                     participants,
                     ..
@@ -516,43 +592,97 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                     action,
                     ScenarioActionV2::MessageCall { .. }
                         | ScenarioActionV2::MessageSenderResult { .. }
+                        | ScenarioActionV2::ProviderContextRawMessageCall { .. }
+                        | ScenarioActionV2::ProviderContextRawMessageResult { .. }
                         | ScenarioActionV2::MessageInbound { .. }
+                        | ScenarioActionV2::MessageInboundAfterHeld { .. }
+                        | ScenarioActionV2::MessageAndRawInboundAfterHeld { .. }
+                        | ScenarioActionV2::MessageAndRawInboundAfterParallelTools { .. }
                 )
             })
         })
         .collect::<Vec<_>>();
+    let standard_message_shape = message_lanes.len() == 2
+        && matches!(
+            message_lanes[0].actions.as_slice(),
+            [ScenarioActionV2::MessageCall {
+                call_id,
+                message: body,
+                ..
+            }, ScenarioActionV2::MessageSenderResult {
+                call_id: result_id,
+                message: result_body,
+                ..
+            }, ScenarioActionV2::Text { .. }]
+                if call_id == result_id && body == result_body
+        )
+        && matches!(
+            message_lanes[1].actions.as_slice(),
+            [ScenarioActionV2::MessageInbound {
+                call_id: inbound_id,
+                message: inbound_body,
+                ..
+            }, ScenarioActionV2::Text { .. }]
+                if matches!(
+                    message_lanes[0].actions.first(),
+                    Some(ScenarioActionV2::MessageCall {
+                        call_id,
+                        message,
+                        ..
+                    }) if call_id == inbound_id && message == inbound_body
+                )
+        );
+    let gated_sender = message_lanes.len() == 2
+        && (matches!(
+             message_lanes[0].actions.as_slice(),
+             [ScenarioActionV2::MessageCall {
+                call_id,
+                message: body,
+                ..
+            }, ScenarioActionV2::MessageSenderResult {
+                call_id: result_id,
+                message: result_body,
+                ..
+            }, ScenarioActionV2::BarrierText { .. }]
+                if call_id == result_id && body == result_body
+        ) || matches!(
+            message_lanes[0].actions.as_slice(),
+            [ScenarioActionV2::MessageCall {
+                call_id,
+                message: body,
+                ..
+            }, ScenarioActionV2::MessageSenderResult {
+                call_id: result_id,
+                message: result_body,
+                ..
+            }]
+                if call_id == result_id && body == result_body
+        ));
+    let gated_message_shape = gated_sender
+        && matches!(
+            message_lanes[1].actions.as_slice(),
+            [ScenarioActionV2::BarrierText { .. }, ScenarioActionV2::MessageInboundAfterHeld {
+                call_id: inbound_id,
+                message: inbound_body,
+                ..
+            }]
+                if matches!(
+                    message_lanes[0].actions.first(),
+                    Some(ScenarioActionV2::MessageCall {
+                        call_id,
+                        message,
+                        ..
+                    }) if call_id == inbound_id && message == inbound_body
+                )
+        );
+    let provider_context_placement_shape = message_lanes.len() == 2
+        && exact_provider_context_placement_shape(message_lanes[0], message_lanes[1]);
     if !message_lanes.is_empty()
         && (scenario.lanes.len() != 2
             || message_lanes.len() != 2
-            || !matches!(
-                message_lanes[0].actions.as_slice(),
-                [ScenarioActionV2::MessageCall {
-                    call_id,
-                    message: body,
-                    ..
-                }, ScenarioActionV2::MessageSenderResult {
-                    call_id: result_id,
-                    message: result_body,
-                    ..
-                }, ScenarioActionV2::Text { .. }]
-                    if call_id == result_id && body == result_body
-            )
-            || !matches!(
-                message_lanes[1].actions.as_slice(),
-                [ScenarioActionV2::MessageInbound {
-                    call_id: inbound_id,
-                    message: inbound_body,
-                    ..
-                }, ScenarioActionV2::Text { .. }]
-                    if matches!(
-                        message_lanes[0].actions.first(),
-                        Some(ScenarioActionV2::MessageCall {
-                            call_id,
-                            message,
-                            ..
-                        }) if call_id == inbound_id && message == inbound_body
-                    )
-            ))
+            || (!standard_message_shape
+                && !gated_message_shape
+                && !provider_context_placement_shape))
     {
         return Err(ClientError::handler(
             "message scenario requires one closed main call/result lane and one matching inbound lane",
@@ -626,7 +756,120 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
             "barrier action count must equal participants",
         ));
     }
+    if !gated_message_shape
+        && !provider_context_placement_shape
+        && scenario.lanes.iter().any(|lane| {
+            lane.actions.len() != 1
+                && lane.actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        ScenarioActionV2::BarrierText { .. }
+                            | ScenarioActionV2::BarrierParallelDummyTools { .. }
+                    )
+                })
+        })
+    {
+        return Err(ClientError::handler(
+            "barriers may share a lane only in a closed message scenario",
+        ));
+    }
     Ok(())
+}
+
+fn exact_provider_context_placement_shape(
+    sender: &ScenarioLaneV2,
+    target: &ScenarioLaneV2,
+) -> bool {
+    let sender_fields = match sender.actions.as_slice() {
+        [
+            ScenarioActionV2::MessageCall {
+                call_id, message, ..
+            },
+            ScenarioActionV2::MessageSenderResult {
+                call_id: result_id,
+                message: result_message,
+                ..
+            },
+            ScenarioActionV2::ProviderContextRawMessageCall {
+                call_id: raw_call_id,
+                raw_text,
+                ..
+            },
+            ScenarioActionV2::ProviderContextRawMessageResult {
+                call_id: raw_result_id,
+                raw_text: result_raw_text,
+                ..
+            },
+            ScenarioActionV2::BarrierText {
+                barrier,
+                participants,
+                ..
+            },
+        ] if call_id == result_id
+            && message == result_message
+            && raw_call_id == raw_result_id
+            && raw_text == result_raw_text
+            && *participants == 2 =>
+        {
+            (call_id, message, raw_text, barrier)
+        }
+        _ => return false,
+    };
+    let (sender_call_id, sender_message, sender_raw_text, sender_barrier) = sender_fields;
+    match target.actions.as_slice() {
+        [
+            ScenarioActionV2::BarrierText {
+                user_text,
+                barrier,
+                participants,
+                ..
+            },
+            ScenarioActionV2::MessageAndRawInboundAfterHeld {
+                call_id,
+                message,
+                raw_text,
+                held_user_text,
+                ..
+            },
+        ] => {
+            *participants == 2
+                && call_id == sender_call_id
+                && message == sender_message
+                && raw_text == sender_raw_text
+                && barrier == sender_barrier
+                && held_user_text == user_text
+        }
+        [
+            ScenarioActionV2::BarrierParallelDummyTools {
+                user_text,
+                barrier,
+                participants,
+                tool_call_ids,
+            },
+            ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+                call_id,
+                message,
+                raw_text,
+                held_user_text,
+                tool_call_ids: result_tool_call_ids,
+                ..
+            },
+        ] => {
+            *participants == 2
+                && tool_call_ids.len() == 2
+                && tool_call_ids[0] != tool_call_ids[1]
+                && tool_call_ids
+                    .iter()
+                    .all(|call_id| !call_id.is_empty() && call_id.len() <= 256)
+                && tool_call_ids == result_tool_call_ids
+                && call_id == sender_call_id
+                && message == sender_message
+                && raw_text == sender_raw_text
+                && barrier == sender_barrier
+                && held_user_text == user_text
+        }
+        _ => false,
+    }
 }
 
 /// Matches the sole two-pair dummy lifecycle used to prove one live extension

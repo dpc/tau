@@ -269,9 +269,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   source disconnect, agent unload, and session rollover. The only current value
   is `timer_scheduled`; declarations never enter replay.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
-  `provider.response_finished` (stale or canceled). Runtime lifecycle state.
-  Canceling exact ordinary checkpointed inference also releases its runtime
-  dispatch ownership so a later prompt on the same agent can proceed;
+  `provider.response_finished` (stale or canceled). For a V1-marked ordinary
+  inference owner this is a required exact-prompt agent-journal fact: core folds
+  it to release deferred placement without adding provider output. It remains
+  excluded from historical subscriber catch-up. Legacy prompt termination stays
+  transient. Canceling exact ordinary checkpointed inference also releases its
+  runtime dispatch ownership so a later prompt on the same agent can proceed;
   standalone-compaction ownership remains governed by its durable recovery
   contract, and late provider terminals for the canceled id remain discarded.
 - **`agent.prompt_failed`** — Transient terminal for an accepted initial prompt

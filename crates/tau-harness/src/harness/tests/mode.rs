@@ -917,6 +917,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
         cid,
         agent_id: Some(agent_id),
         session_generation: h.current_session_generation,
+        fold_parent: None,
         suppress_activation_dispatch: false,
         continuation: None,
         notify_watchers: false,

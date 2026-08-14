@@ -33,8 +33,8 @@ use crate::agent_checkpoint::{
 };
 use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
 use crate::session::{
-    AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
-    PersistedAgentEventSeq, PersistedEventSource,
+    AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics, AgentMeta, AgentTree,
+    PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource,
 };
 
 /// Errors returned by the append-only agent store.
@@ -354,6 +354,8 @@ pub struct AgentAppendOutcome {
     /// accepted context input deferred behind that round reports `None`
     /// until closure.
     pub folded_node_id: Option<NodeId>,
+    /// Selected transcript head after folding, distinct from off-branch nodes.
+    pub selected_head_id: Option<NodeId>,
 }
 
 /// Agent protocol event store with a derived [`AgentTree`] cached in memory.
@@ -967,7 +969,7 @@ impl AgentStore {
         &mut self,
         agent_id: &str,
         source: Option<PersistedEventSource>,
-        parent: AgentEventParent,
+        mut parent: AgentEventParent,
         event: Event,
         recorded_at: UnixMicros,
         observation_id: tau_proto::ObservationId,
@@ -999,6 +1001,12 @@ impl AgentStore {
             .agents
             .entry(sid.clone())
             .or_insert_with(|| AgentTree::from_events(sid.clone(), &[]));
+        if parent == AgentEventParent::InheritHead
+            && let Event::ProviderResponseFinished(response) = &event
+            && let Some(through) = tree.marked_inference_through(&response.agent_prompt_id)
+        {
+            parent = AgentEventParent::from_head(through);
+        }
         if matches!(event, Event::AgentStarted(_)) && tree.next_event_seq().get() != 0 {
             return Err(AgentStoreError::InvalidEvent {
                 source: AgentEventValidationError::new(
@@ -1032,8 +1040,11 @@ impl AgentStore {
             source,
             event: event.clone(),
             parent,
+            fold_semantics: AgentJournalFoldSemantics::for_new_event(&event),
             recorded_at,
         };
+        tree.validate_persisted_event(&record)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         let committed_position = if persistence.is_durable() {
             Some(append_cbor_record(
                 &mut self.framed_appends,
@@ -1051,6 +1062,7 @@ impl AgentStore {
         let folded_node_id = tree
             .apply_persisted_record(&record)
             .expect("persisted record passed append-time validation");
+        let selected_head_id = tree.head();
         if matches!(event, Event::AgentStarted(_)) {
             self.created_agents.insert(sid.clone());
         }
@@ -1076,6 +1088,7 @@ impl AgentStore {
             observation_id: record.observation_id,
             seq: next_seq,
             folded_node_id,
+            selected_head_id,
         })
     }
 
@@ -1147,6 +1160,7 @@ impl AgentStore {
             source,
             event: event.clone(),
             parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
             recorded_at,
         };
         let committed_position = if persistence.is_durable() {
@@ -1165,6 +1179,7 @@ impl AgentStore {
         let folded_node_id = tree
             .apply_persisted_record(&record)
             .expect("canonical raw fact matches its journal owner and sequence");
+        let selected_head_id = tree.head();
         if let Some(position) = committed_position {
             let summary = {
                 let summary = self.summaries.entry(aid.clone()).or_default();
@@ -1183,6 +1198,7 @@ impl AgentStore {
             observation_id: record.observation_id,
             seq,
             folded_node_id,
+            selected_head_id,
         })
     }
 
@@ -1214,6 +1230,7 @@ impl AgentStore {
             source,
             event: event.clone(),
             parent,
+            fold_semantics: AgentJournalFoldSemantics::for_new_event(event),
             recorded_at,
         };
         let mut encoded = Vec::new();

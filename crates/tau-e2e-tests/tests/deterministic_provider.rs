@@ -685,6 +685,75 @@ fn deterministic_typed_error_then_later_success() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Clean restart preserves the completed `H, R` prefix and dispatches one later
+/// `Q` successor without resending the closed prompt.
+#[test]
+fn deterministic_restart_preserves_response_before_successor_input()
+-> Result<(), Box<dyn std::error::Error>> {
+    const H: &str = "restart placement H";
+    const R: &str = "restart placement R";
+    const Q: &str = "restart placement Q";
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_restart_preserves_response_before_successor_input",
+        &ScenarioV2::new(
+            "restart-provider-context-placement",
+            vec![ScenarioLaneV2 {
+                ctx_id: "restart-placement".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::Text {
+                        user_text: H.to_owned(),
+                        response: R.to_owned(),
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: Q.to_owned(),
+                        response: "restart successor".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let socket_a = fixture.socket_path("placement-boot-a");
+    let server_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
+    let mut peer_a = connect_ui(&socket_a)?;
+    create_agent(&mut peer_a, "restart-placement", H)?;
+    let first = recv_until_finished(&mut peer_a)?;
+    assert_assistant(&first.output_items, R);
+    let agent_id = first.agent_id;
+    disconnect_ui(&mut peer_a)?;
+    server_a.finish()?;
+
+    let socket_b = fixture.socket_path("placement-boot-b");
+    let server_b = spawn_daemon(
+        &fixture,
+        &socket_b,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut peer_b = connect_ui(&socket_b)?;
+    loop {
+        if matches!(
+            recv_observed(&mut peer_b)?.event,
+            Event::SessionReplayComplete(_)
+        ) {
+            break;
+        }
+    }
+    submit_prompt(&mut peer_b, &agent_id, "restart-successor", Q)?;
+    let second_prompt = recv_until_created(&mut peer_b, Some("restart-successor"))?;
+    let rendered = serde_json::to_string(&second_prompt.context)?;
+    for expected in [H, R, Q] {
+        assert_eq!(rendered.matches(expected).count(), 1, "{expected}");
+    }
+    assert!(rendered.find(H) < rendered.find(R));
+    assert!(rendered.find(R) < rendered.find(Q));
+    let second = recv_until_finished_for(&mut peer_b, &second_prompt.agent_prompt_id)?;
+    assert_assistant(&second.output_items, "restart successor");
+    disconnect_ui(&mut peer_b)?;
+    server_b.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 /// Proves a provider-side hold has a hard deadline, its worker is reaped, and
 /// an independent later agent remains live.
 #[test]

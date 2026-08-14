@@ -76,6 +76,8 @@ pub(crate) struct DeferredPromptDispatch {
     /// the selected head. `None` means the owning publish has not committed
     /// yet.
     pub(crate) activation_through: Option<tau_proto::AgentHead>,
+    /// Durable activating occurrence whose node may not exist yet.
+    pub(crate) activation_source_seq: Option<tau_core::PersistedAgentEventSeq>,
     /// Whether this entry owns a committed inference activation.
     pub(crate) committed_activation: bool,
 }
@@ -226,6 +228,8 @@ pub(crate) struct ConversationHeadSync {
     pub(crate) agent_id: Option<AgentId>,
     /// Harness session generation that owned this publication at enqueue time.
     pub(crate) session_generation: u64,
+    /// Exact durable fold parent override for inference-owned completion.
+    pub(crate) fold_parent: Option<tau_core::AgentEventParent>,
     /// Suppress the ordinary activation obligation because a stronger
     /// envelope-bound continuation owns this publication batch.
     pub(crate) suppress_activation_dispatch: bool,
@@ -1000,6 +1004,7 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id,
                 session_generation: self.current_session_generation,
+                fold_parent: None,
                 suppress_activation_dispatch: true,
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,
@@ -1269,6 +1274,7 @@ impl Harness {
                 cid,
                 activation_cut: None,
                 activation_through: None,
+                activation_source_seq: None,
                 committed_activation: false,
             });
     }
@@ -1307,6 +1313,7 @@ impl Harness {
         left.cid == right.cid
             && left.activation_cut == right.activation_cut
             && left.activation_through == right.activation_through
+            && left.activation_source_seq == right.activation_source_seq
             && left.committed_activation == right.committed_activation
     }
 
@@ -1380,6 +1387,41 @@ impl Harness {
                 cid,
                 activation_cut,
                 activation_through,
+                activation_source_seq: None,
+                committed_activation: true,
+            });
+    }
+
+    /// Queue one committed activation by durable occurrence until it
+    /// materializes.
+    pub(crate) fn enqueue_committed_activation_occurrence(
+        &mut self,
+        cid: AgentId,
+        source_seq: tau_core::PersistedAgentEventSeq,
+        activation_through: Option<tau_proto::AgentHead>,
+    ) {
+        let activation_cut = activation_through.and_then(|_| {
+            self.agents
+                .get(&cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(|tree| {
+                    tree.node_for_durable_event_seq(source_seq)
+                        .and_then(|node_id| tree.node(node_id))
+                })
+                .map(|node| {
+                    node.parent_id
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+                })
+        });
+        self.pending_publish_idle_dispatches
+            .retain(|deferred| deferred.cid != cid || deferred.committed_activation);
+        self.pending_publish_idle_dispatches
+            .push_back(DeferredPromptDispatch {
+                cid,
+                activation_cut,
+                activation_through,
+                activation_source_seq: Some(source_seq),
                 committed_activation: true,
             });
     }
@@ -1908,6 +1950,30 @@ impl Harness {
                     continue;
                 }
                 let cid = self.pending_publish_idle_dispatches[index].cid.clone();
+                if let Some(source_seq) =
+                    self.pending_publish_idle_dispatches[index].activation_source_seq
+                {
+                    let materialized = self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.agent_id.as_deref())
+                        .and_then(|agent_id| self.agent_store.agent(agent_id))
+                        .and_then(|tree| {
+                            tree.node_for_durable_event_seq(source_seq)
+                                .and_then(|node_id| {
+                                    tree.node(node_id).map(|node| (node_id, node.parent_id))
+                                })
+                        });
+                    let Some((node_id, parent_id)) = materialized else {
+                        continue;
+                    };
+                    self.pending_publish_idle_dispatches[index].activation_through =
+                        Some(tau_proto::AgentHead::Node(node_id));
+                    self.pending_publish_idle_dispatches[index].activation_cut = Some(
+                        parent_id.map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    );
+                    continue;
+                }
                 let through = self.selected_head_for_agent(&cid);
                 let cut = self.activation_cut_before_current_head(&cid);
                 self.pending_publish_idle_dispatches[index].activation_through = through;

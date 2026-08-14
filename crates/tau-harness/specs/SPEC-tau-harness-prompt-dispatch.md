@@ -224,8 +224,9 @@ deduplication or generic success publication.
 
 Committed `message.*` facts project as ordinary escaped context after universal
 field validation. Prompt assembly never adds reply routes or actionable
-capabilities; those remain private to the publishing extension. Replay restores
-context without waking the model or rebuilding extension-local authority.
+capabilities; those remain private to the publishing extension. Replay rebuilds
+payload-free activation for uncovered activating facts without rebuilding
+extension-local authority.
 
 Harness-owned agent-message facts use the analogous placement/checkpoint
 mechanics but remain a distinct typed domain. Each directional durable
@@ -233,7 +234,8 @@ occurrence remains its only payload authority. Ordinary outbound `Message`
 occurrences are omitted from sender provider context; local inbound messages
 render the escaped stable-sender `<tau_internal>` envelope from the typed fact,
 and live activation uses only a sequence-keyed payload-free wake. Replay
-reassembles the applicable provider context without waking. See
+reassembles context and rebuilds one uncovered payload-free wake per activating
+occurrence. See
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
 ## Interactive user prompt provider projection

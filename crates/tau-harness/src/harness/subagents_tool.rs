@@ -326,7 +326,9 @@ impl Harness {
 
     #[cfg(test)]
     pub(crate) fn register_harness_tools(&mut self) {
-        self.install_internal_tool_handlers(vec![std::sync::Arc::new(TestBuiltinTools)]);
+        let mut handlers = self.internal_tool_handlers.clone();
+        handlers.push(Arc::new(TestBuiltinTools));
+        self.install_internal_tool_handlers(handlers);
     }
 
     pub(crate) fn publish_delegate_roles_context(&mut self) {

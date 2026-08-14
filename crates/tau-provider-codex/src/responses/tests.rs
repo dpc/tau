@@ -905,8 +905,9 @@ fn build_request_full_replay_preserves_responses_tool_call_envelope() {
     assert_eq!(input[1]["status"], "in_progress");
 }
 
-/// Stateful-chain turn: when the harness supplies a
-/// `previous_response`, the request body slices off the prefix
+/// Inference-owned placement supplies `H, R, Q`; the exact anchor at `R`
+/// sends only the single post-response `Q` occurrence. When the harness
+/// supplies a `previous_response`, the request body slices off the prefix
 /// already covered by that response and pins the prior `response.id`.
 /// `store` stays `false` — the Codex endpoint *rejects* `store: true`
 /// (`HTTP 400 {"detail":"Store must be set to false"}`) even when
@@ -914,7 +915,7 @@ fn build_request_full_replay_preserves_responses_tool_call_envelope() {
 /// only routes Responses through Codex, so this asserts the Codex
 /// shape; a future public-API path would need a separate test.
 #[test]
-fn build_request_chain_turn_sends_delta_and_previous_response_id() {
+fn build_request_inference_deferred_placement_sends_exact_suffix_and_previous_response_id() {
     let config = chain_test_config();
     // Full transcript: 1 user, 1 assistant response, 1 user.
     // The cached response id was captured after the assistant turn, so only

@@ -222,6 +222,66 @@ pub enum ScenarioActionV2 {
         /// Complete worker response.
         response: String,
     },
+    /// Accept one exact inbound wrapper after one known held user prompt.
+    MessageInboundAfterHeld {
+        /// Exact provider-authored message-call identity.
+        call_id: ToolCallId,
+        /// Exact body delivered to the worker.
+        message: String,
+        /// Exact held user prompt preceding the wrapper.
+        held_user_text: String,
+        /// Complete worker response.
+        response: String,
+    },
+    /// Invoke the configured test-only raw-message tool for the message-call
+    /// recipient selected earlier in this lane.
+    ProviderContextRawMessageCall {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact activating raw delivered-message body.
+        raw_text: String,
+    },
+    /// Accept the raw-message tool result and complete the sender turn.
+    ProviderContextRawMessageResult {
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact activating raw delivered-message body.
+        raw_text: String,
+        /// Complete sender response.
+        response: String,
+    },
+    /// Accept one typed inbound wrapper and one raw delivered-message
+    /// projection after a known held user prompt.
+    MessageAndRawInboundAfterHeld {
+        /// Exact provider-authored message-call identity.
+        call_id: ToolCallId,
+        /// Exact typed body delivered through the production message tool.
+        message: String,
+        /// Exact activating raw delivered-message body.
+        raw_text: String,
+        /// Exact held user prompt preceding both deferred inputs.
+        held_user_text: String,
+        /// Complete worker response.
+        response: String,
+    },
+    /// Accept typed and raw deferred inputs after one complete parallel dummy
+    /// tool aggregate released from a provider barrier.
+    MessageAndRawInboundAfterParallelTools {
+        /// Exact provider-authored message-call identity.
+        call_id: ToolCallId,
+        /// Exact typed body delivered through the production message tool.
+        message: String,
+        /// Exact activating raw delivered-message body.
+        raw_text: String,
+        /// Exact held user prompt preceding the tool-bearing response.
+        held_user_text: String,
+        /// Exact parallel dummy call identities.
+        tool_call_ids: Vec<ToolCallId>,
+        /// Complete worker response.
+        response: String,
+    },
     /// Request the production harness-owned `agent_start` tool.
     AgentStartCall {
         /// Exact latest user text.
@@ -362,6 +422,18 @@ pub enum ScenarioActionV2 {
         participants: usize,
         /// Lane-local assistant response.
         response: String,
+    },
+    /// Wait at a named barrier, then return one provider response containing
+    /// parallel deterministic dummy-tool calls.
+    BarrierParallelDummyTools {
+        /// Exact latest user text.
+        user_text: String,
+        /// Fixture-global barrier name.
+        barrier: String,
+        /// Exact number of participants required to release the barrier.
+        participants: usize,
+        /// Exact parallel dummy-tool call identities.
+        tool_call_ids: Vec<ToolCallId>,
     },
 }
 

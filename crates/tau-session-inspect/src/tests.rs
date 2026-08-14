@@ -197,38 +197,55 @@ fn append_trace_provider_terminal(
     usage: Option<tau_proto::ProviderTokenUsage>,
     cost_picodollars: Option<u64>,
 ) {
+    try_append_trace_provider_terminal(
+        agents_dir,
+        agent_id,
+        prompt_id,
+        timestamp,
+        usage,
+        cost_picodollars,
+    )
+    .expect("provider terminal");
+}
+
+fn try_append_trace_provider_terminal(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    prompt_id: &str,
+    timestamp: u64,
+    usage: Option<tau_proto::ProviderTokenUsage>,
+    cost_picodollars: Option<u64>,
+) -> Result<tau_core::AgentAppendOutcome, tau_core::AgentStoreError> {
     let agent_id = AgentId::parse(agent_id).expect("agent id");
     let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
-    store
-        .append_agent_event_at(
-            agent_id.as_str(),
-            None,
-            tau_core::AgentEventParent::InheritHead,
-            Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-                agent_prompt_id: prompt_id
-                    .parse::<tau_proto::AgentPromptId>()
-                    .expect("known-safe AgentPromptId must be valid"),
-                agent_id: agent_id.clone(),
-                output_items: vec![assistant_message("private response")],
-                stop_reason: tau_proto::ProviderStopReason::EndTurn,
-                error: Some("private provider error".to_owned()),
-                failure_kind: None,
-                context_limit_telemetry: None,
-                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-                originator: tau_proto::PromptOriginator::User,
-                usage,
-                estimated_api_cost_increment: cost_picodollars
-                    .map(tau_proto::EstimatedApiCost::from_picodollars),
-                estimated_api_cost_rates: None,
-                compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
-                backend: None,
-                provider_response_id: None,
-                ws_pool_delta: None,
-            }),
-            tau_proto::UnixMicros::new(timestamp),
-        )
-        .expect("provider terminal");
+    store.append_agent_event_at(
+        agent_id.as_str(),
+        None,
+        tau_core::AgentEventParent::InheritHead,
+        Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            agent_prompt_id: prompt_id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            agent_id: agent_id.clone(),
+            output_items: vec![assistant_message("private response")],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: Some("private provider error".to_owned()),
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: tau_proto::PromptOriginator::User,
+            usage,
+            estimated_api_cost_increment: cost_picodollars
+                .map(tau_proto::EstimatedApiCost::from_picodollars),
+            estimated_api_cost_rates: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+        tau_proto::UnixMicros::new(timestamp),
+    )
 }
 
 fn append_background_tool_lifecycle(agents_dir: &std::path::Path, agent_id: &str, call_id: &str) {
@@ -1193,9 +1210,10 @@ fn agent_performance_omits_decreasing_clock_interval() {
     assert!(row.get("recorded_at_wall_elapsed_us").is_none());
 }
 
-/// Duplicate canonical terminal facts reject ambiguous projection.
+/// The V1 journal rejects a duplicate exact-owner terminal before trace
+/// projection can observe ambiguous accounting.
 #[test]
-fn agent_performance_rejects_duplicate_terminal() {
+fn agent_store_rejects_duplicate_terminal_before_trace_projection() {
     let temp = tempfile::tempdir().expect("tempdir");
     create_trace_agent(
         temp.path(),
@@ -1206,20 +1224,21 @@ fn agent_performance_rejects_duplicate_terminal() {
     );
     append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt", 10);
     append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 20, None, None);
-    append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 30, None, None);
-
-    let error = export_trace(
+    let error =
+        try_append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 30, None, None)
+            .expect_err("duplicate terminal must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("marked inference response mismatches its exact unresolved owner")
+    );
+    export_trace(
         temp.path(),
         &AgentId::parse("agent-root").expect("agent id"),
         DescendantSelection::RootOnly,
         AgentTraceFormat::AgentPerformanceJsonl,
     )
-    .expect_err("duplicate terminal must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("multiple `provider.response_finished` facts")
-    );
+    .expect("single terminal remains projectable");
 }
 
 /// Trace preparation exports a lock-held committed prefix while rejecting

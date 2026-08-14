@@ -151,3 +151,16 @@ fn late_subscriber_replays_only_completed_context_shell_fact() {
         })
     ));
 }
+
+/// Durable exact-owner termination folds during restore but remains private
+/// from historical subscriber catch-up.
+#[test]
+fn late_subscriber_excludes_durable_prompt_termination() {
+    let event = Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        agent_id: crate::parse_agent_id("worker"),
+        agent_prompt_id: tau_proto::AgentPromptId::parse("ap-terminated").expect("prompt id"),
+        reason: tau_proto::AgentPromptTerminationReason::Stale,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    assert!(!should_replay_agent_event_to_late_subscriber(&event));
+}

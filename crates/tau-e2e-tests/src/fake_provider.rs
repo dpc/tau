@@ -6,7 +6,7 @@ use std::{collections as path_std_collections, io as path_std_io};
 mod tests;
 mod validation;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
@@ -270,8 +270,16 @@ enum HoldOutcome {
 struct BarrierParticipant {
     /// Dynamic prompt identity and routing copied into the terminal response.
     prompt: tau_proto::AgentPromptCreated,
-    /// Lane-local response released when every participant arrives.
-    response: String,
+    /// Lane-local provider output released when every participant arrives.
+    output: BarrierOutput,
+}
+
+/// Closed provider output released for one barrier participant.
+enum BarrierOutput {
+    /// One ordinary assistant text response.
+    Text(String),
+    /// One tool-calling response containing parallel dummy calls.
+    ParallelDummyTools(Vec<tau_proto::ToolCallId>),
 }
 
 impl Drop for FakeState {
@@ -1517,6 +1525,10 @@ impl FakeState {
             | ScenarioActionV2::DummyToolRepair { response, .. }
             | ScenarioActionV2::MessageSenderResult { response, .. }
             | ScenarioActionV2::MessageInbound { response, .. }
+            | ScenarioActionV2::MessageInboundAfterHeld { response, .. }
+            | ScenarioActionV2::ProviderContextRawMessageResult { response, .. }
+            | ScenarioActionV2::MessageAndRawInboundAfterHeld { response, .. }
+            | ScenarioActionV2::MessageAndRawInboundAfterParallelTools { response, .. }
             | ScenarioActionV2::AgentStartResult { response, .. }
             | ScenarioActionV2::AgentWatchResult { response, .. }
             | ScenarioActionV2::WatchNotifications { response, .. }
@@ -1567,6 +1579,25 @@ impl FakeState {
                 call_id,
                 tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME,
             ),
+            ScenarioActionV2::ProviderContextRawMessageCall {
+                call_id, raw_text, ..
+            } => {
+                let recipient = self
+                    .message_recipients
+                    .get(&prompt.agent_id)
+                    .cloned()
+                    .ok_or_else(|| self.mismatch(0, "raw message tool has no recipient"))?;
+                emit_tool_call(
+                    handle,
+                    prompt,
+                    call_id,
+                    tau_ext_test_dummy::PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME,
+                    cbor_map(vec![
+                        ("agent_id", CborValue::Text(recipient.to_string())),
+                        ("text", CborValue::Text(raw_text)),
+                    ]),
+                )
+            }
             ScenarioActionV2::TypedImageToolCall { call_id, .. } => emit_dummy_tool_call(
                 prompt,
                 handle,
@@ -1623,6 +1654,18 @@ impl FakeState {
                 response,
                 ..
             } => self.emit_barrier_text(prompt, handle, barrier, participants, response),
+            ScenarioActionV2::BarrierParallelDummyTools {
+                barrier,
+                participants,
+                tool_call_ids,
+                ..
+            } => self.emit_barrier(
+                prompt,
+                handle,
+                barrier,
+                participants,
+                BarrierOutput::ParallelDummyTools(tool_call_ids),
+            ),
         }
     }
 
@@ -1636,10 +1679,29 @@ impl FakeState {
         participants: usize,
         response: String,
     ) -> ClientResult<()> {
+        self.emit_barrier(
+            prompt,
+            handle,
+            barrier,
+            participants,
+            BarrierOutput::Text(response),
+        )
+    }
+
+    /// Queues one typed participant output and releases all complete-barrier
+    /// outputs in arrival order.
+    fn emit_barrier(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        handle: &tau_client::ClientHandle,
+        barrier: String,
+        participants: usize,
+        output: BarrierOutput,
+    ) -> ClientResult<()> {
         let pending = self.barriers.entry(barrier.clone()).or_default();
         pending.push(BarrierParticipant {
             prompt: prompt.clone(),
-            response,
+            output,
         });
         if participants < pending.len() {
             return Err(ClientError::handler("barrier over-subscribed"));
@@ -1647,7 +1709,14 @@ impl FakeState {
         if pending.len() == participants {
             let completed = self.barriers.remove(&barrier).unwrap_or_default();
             for participant in completed {
-                emit_text_response(&participant.prompt, handle, participant.response)?;
+                match participant.output {
+                    BarrierOutput::Text(response) => {
+                        emit_text_response(&participant.prompt, handle, response)?;
+                    }
+                    BarrierOutput::ParallelDummyTools(call_ids) => {
+                        emit_parallel_dummy_tool_calls(&participant.prompt, handle, call_ids)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -1983,6 +2052,39 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
                 }
             }
+            ScenarioActionV2::ProviderContextRawMessageCall { .. } => {
+                let names = prompt
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<BTreeSet<_>>();
+                if names
+                    != BTreeSet::from([
+                        "message",
+                        tau_ext_test_dummy::PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME,
+                    ])
+                {
+                    return Err(self.mismatch(cursor, "raw message tool snapshot mismatch"));
+                }
+            }
+            ScenarioActionV2::ProviderContextRawMessageResult { call_id, .. } => {
+                let matches = prompt
+                    .context
+                    .flatten_iter()
+                    .filter(|item| {
+                        matches!(
+                            item,
+                            ContextItem::ToolResult(result)
+                                if result.call_id == *call_id
+                                    && result.status == tau_proto::ToolResultStatus::Success
+                                    && result.output.body == "raw message emitted"
+                        )
+                    })
+                    .count();
+                if matches != 1 {
+                    return Err(self.mismatch(cursor, "raw message tool result mismatch"));
+                }
+            }
             ScenarioActionV2::TypedImageToolResult { call_id, .. }
             | ScenarioActionV2::TypedImageReplay { call_id, .. } => {
                 require_typed_image_tool_result(prompt, call_id)
@@ -2043,28 +2145,95 @@ impl FakeState {
                     ));
                 }
             }
-            ScenarioActionV2::MessageInbound {
-                call_id: _,
+            action @ (ScenarioActionV2::MessageInbound {
+                call_id, message, ..
+            }
+            | ScenarioActionV2::MessageInboundAfterHeld {
+                call_id, message, ..
+            }
+            | ScenarioActionV2::MessageAndRawInboundAfterHeld {
+                call_id, message, ..
+            }
+            | ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+                call_id,
                 message,
                 ..
-            } => {
+            }) => {
+                let restored_sender = (|| {
+                    let Some(ScenarioConfig::V2(scenario)) = self.scenario.as_ref() else {
+                        return None;
+                    };
+                    let sender_lane = scenario.lanes.iter().position(|lane| {
+                        lane.actions.iter().any(|action| {
+                            matches!(
+                                action,
+                                ScenarioActionV2::MessageCall { call_id: candidate, .. }
+                                    if candidate == call_id
+                            )
+                        })
+                    })?;
+                    self.agent_lanes.iter().find_map(|(agent_id, lane)| {
+                        (*lane == sender_lane).then(|| agent_id.clone())
+                    })
+                })();
                 let sender = self
                     .message_recipients
                     .iter()
                     .find_map(|(sender, recipient)| {
                         (recipient == &prompt.agent_id).then(|| sender.clone())
                     })
+                    .or(restored_sender)
                     .ok_or_else(|| self.mismatch(cursor, "message worker was not selected"))?;
                 let expected = format!(
                     "<tau_internal>You have received a message from {sender}\n\n<message>\n{message}\n</message></tau_internal>"
                 );
                 let texts = provider_user_texts(prompt);
-                if texts != vec![expected.clone()] {
-                    self.trace(&format!("message expected={expected:?} actual={texts:?}"))?;
+                let exact = match action {
+                    ScenarioActionV2::MessageInboundAfterHeld { held_user_text, .. } => {
+                        texts == vec![format!("<user>{held_user_text}</user>"), expected.clone()]
+                    }
+                    ScenarioActionV2::MessageAndRawInboundAfterHeld {
+                        held_user_text,
+                        raw_text,
+                        ..
+                    }
+                    | ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+                        held_user_text,
+                        raw_text,
+                        ..
+                    } => {
+                        let raw = format!(
+                            "<message event=\"created\" publisher=\"e2e-test-dummy\" \
+                              message_ref=\"provider-context-raw-message\" \
+                              sender_ref=\"provider-context-raw-sender\" \
+                              content_trust=\"external\">{raw_text}</message>"
+                        );
+                        texts
+                            == vec![
+                                format!("<user>{held_user_text}</user>"),
+                                expected.clone(),
+                                raw,
+                            ]
+                    }
+                    ScenarioActionV2::MessageInbound { .. } => texts == vec![expected.clone()],
+                    _ => unreachable!("matched inbound action"),
+                };
+                if !exact {
+                    self.trace(&format!(
+                        "message action={action:?} expected={expected:?} actual={texts:?}"
+                    ))?;
                     return Err(self.mismatch(
                         cursor,
                         "message worker did not receive exactly one canonical inbound wrapper",
                     ));
+                }
+                if let ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+                    tool_call_ids,
+                    ..
+                } = action
+                {
+                    validate_complete_parallel_dummy_round(prompt, tool_call_ids)
+                        .map_err(|message| self.mismatch(cursor, message))?;
                 }
             }
             ScenarioActionV2::StandaloneCompaction { summary: _ }
@@ -2569,6 +2738,33 @@ fn emit_dummy_tool_call(
     )))
 }
 
+/// Publishes one tool-calling response containing the exact parallel dummy
+/// invocations.
+fn emit_parallel_dummy_tool_calls(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    call_ids: Vec<tau_proto::ToolCallId>,
+) -> ClientResult<()> {
+    let output_items = call_ids
+        .into_iter()
+        .map(|call_id| {
+            ContextItem::ToolCall(ToolCallItem {
+                call_id,
+                name: ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME),
+                tool_type: ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: Some("{}".to_owned()),
+                responses_envelope: None,
+            })
+        })
+        .collect();
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        output_items,
+        ProviderStopReason::ToolCalls,
+    )))
+}
+
 fn assistant_message(text: String) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::Assistant,
@@ -2794,7 +2990,9 @@ impl ScenarioActionV2 {
             | Self::Error { user_text, .. }
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
-            | Self::BarrierText { user_text, .. } => Some(user_text),
+            | Self::BarrierText { user_text, .. }
+            | Self::BarrierParallelDummyTools { user_text, .. }
+            | Self::ProviderContextRawMessageCall { user_text, .. } => Some(user_text),
             Self::StandaloneCompaction { summary: _ }
             | Self::StandaloneOpaqueCompaction
             | Self::ReactiveOpaqueCompaction { .. }
@@ -2807,6 +3005,10 @@ impl ScenarioActionV2 {
             | Self::TypedImageToolResult { .. }
             | Self::MessageSenderResult { .. }
             | Self::MessageInbound { .. }
+            | Self::MessageInboundAfterHeld { .. }
+            | Self::ProviderContextRawMessageResult { .. }
+            | Self::MessageAndRawInboundAfterHeld { .. }
+            | Self::MessageAndRawInboundAfterParallelTools { .. }
             | Self::WatchNotifications { .. }
             | Self::WatchNotificationChains { .. } => None,
         }
@@ -2854,6 +3056,48 @@ fn require_repaired_dummy_result(
             })
     {
         return Err("dummy tool repair continuity mismatch");
+    }
+    Ok(())
+}
+
+/// Validate one unsplit parallel dummy-tool response and complete aggregate.
+fn validate_complete_parallel_dummy_round(
+    prompt: &tau_proto::AgentPromptCreated,
+    expected_call_ids: &[tau_proto::ToolCallId],
+) -> Result<(), &'static str> {
+    let context = prompt.context.flatten();
+    let calls = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) => Some(&call.call_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let results = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(&result.call_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected = expected_call_ids.iter().collect::<Vec<_>>();
+    if calls != expected || results != expected {
+        return Err("parallel dummy round identity/order mismatch");
+    }
+    let last_call = context
+        .iter()
+        .rposition(|item| matches!(item, ContextItem::ToolCall(_)))
+        .ok_or("parallel dummy round omitted tool calls")?;
+    let first_result = context
+        .iter()
+        .position(|item| matches!(item, ContextItem::ToolResult(_)))
+        .ok_or("parallel dummy round omitted tool results")?;
+    let last_result = context
+        .iter()
+        .rposition(|item| matches!(item, ContextItem::ToolResult(_)))
+        .ok_or("parallel dummy round omitted tool results")?;
+    if first_result != last_call + 1 || last_result + 1 != first_result + expected_call_ids.len() {
+        return Err("parallel dummy round was split");
     }
     Ok(())
 }

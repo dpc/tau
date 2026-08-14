@@ -223,22 +223,37 @@ pub enum AgentEntry {
     },
 }
 
-/// One committed context input accepted on the open provider tool round's
-/// branch and waiting for its aggregate result.
+/// One committed context input whose exact marked inference owns placement.
 #[derive(Clone, Debug, PartialEq)]
-enum PendingContextInput {
-    /// Harness-owned canonical agent-message projection.
-    AgentMessage {
-        /// Exact typed entry to materialize after the tool result aggregate.
-        entry: Box<AgentEntry>,
-    },
-    /// Generic canonical external-message fact projection.
-    MessageFact {
-        /// Projected ordinary context message.
-        item: Box<tau_proto::MessageItem>,
-        /// Canonical raw fact sequence used to resolve live wakes.
-        durable_event_seq: PersistedAgentEventSeq,
-    },
+struct PendingInferenceInput {
+    /// Exact marked ordinary prompt that owns this occurrence.
+    owner_prompt_id: tau_proto::AgentPromptId,
+    /// Canonical journal occurrence order.
+    durable_event_seq: PersistedAgentEventSeq,
+    /// Real branch parent accepted before any virtual deferred tail.
+    accepted_real_parent: Option<NodeId>,
+    /// Earlier deferred occurrence on this branch, if any.
+    virtual_predecessor_seq: Option<PersistedAgentEventSeq>,
+    /// Exact typed entry to materialize once the barrier closes.
+    entry: Box<AgentEntry>,
+}
+
+/// One committed context input waiting behind an open provider tool round.
+#[derive(Clone, Debug, PartialEq)]
+struct PendingToolContextInput {
+    /// Canonical journal occurrence order.
+    durable_event_seq: PersistedAgentEventSeq,
+    /// Exact typed entry to materialize after the aggregate tool result.
+    entry: Box<AgentEntry>,
+}
+
+impl From<PendingInferenceInput> for PendingToolContextInput {
+    fn from(input: PendingInferenceInput) -> Self {
+        Self {
+            durable_event_seq: input.durable_event_seq,
+            entry: input.entry,
+        }
+    }
 }
 
 /// The sole unfinished foreground provider tool round in one agent tree.
@@ -307,6 +322,15 @@ pub enum AgentEventParent {
 }
 
 impl AgentEventParent {
+    /// Encode one exact transcript head as a persisted parent.
+    #[must_use]
+    pub const fn from_head(head: AgentHead) -> Self {
+        match head {
+            AgentHead::Root => Self::Root,
+            AgentHead::Node(node_id) => Self::Under(node_id),
+        }
+    }
+
     #[must_use]
     pub const fn resolve(self, head: Option<NodeId>) -> Option<NodeId> {
         match self {
@@ -345,6 +369,8 @@ pub struct AgentTree {
     pub(crate) agent_id: AgentId,
     pub(crate) metadata: BTreeMap<tau_proto::AgentMetadataKey, AgentMetadataEntry>,
     pub(crate) nodes: Vec<AgentNode>,
+    /// Materialized provider-context input nodes keyed by journal occurrence.
+    context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
     pub(crate) head: Option<NodeId>,
     pub(crate) display_name: Option<String>,
     /// Latest durable initialization bootstrap and frozen discovery
@@ -378,7 +404,7 @@ pub struct AgentTree {
     ///
     /// Agent messages and extension facts share exact durable acceptance order
     /// and materialize after the round's complete aggregate result.
-    pending_context_inputs: Vec<PendingContextInput>,
+    pending_context_inputs: Vec<PendingToolContextInput>,
     /// Globally unique tool calls that already have one real background
     /// completion event.
     background_completed_tool_calls: HashSet<ToolCallId>,
@@ -397,6 +423,10 @@ pub struct AgentTree {
     inference_dispatches: HashMap<tau_proto::AgentPromptId, InferenceDispatchFold>,
     /// Durable inference checkpoint insertion order.
     inference_dispatch_order: Vec<tau_proto::AgentPromptId>,
+    /// Context occurrences waiting behind marked ordinary inference ownership.
+    pending_inference_inputs: Vec<PendingInferenceInput>,
+    /// Number of durable selected-head moves folded so far.
+    head_move_generation: u64,
 }
 
 /// Folded durable state for one outer turn.
@@ -414,6 +444,10 @@ struct OuterTurnFold {
 #[derive(Clone, Debug, PartialEq)]
 struct InferenceDispatchFold {
     checkpoint: tau_proto::AgentInferenceDispatchStarted,
+    /// Journal projection semantics selected by the checkpoint record.
+    fold_semantics: AgentJournalFoldSemantics,
+    /// Selected-head generation in which this owner was opened.
+    head_move_generation: u64,
     finished: bool,
     recovery_disposition: tau_proto::ContextRecoveryDisposition,
 }
@@ -1150,6 +1184,52 @@ impl AgentTree {
         id
     }
 
+    fn append_context_node_at(
+        &mut self,
+        parent: Option<NodeId>,
+        durable_event_seq: PersistedAgentEventSeq,
+        entry: AgentEntry,
+    ) -> NodeId {
+        let node = self.append_node_at(parent, entry);
+        assert!(
+            self.context_nodes_by_event_seq
+                .insert(durable_event_seq, node)
+                .is_none(),
+            "context occurrence materialized more than once"
+        );
+        node
+    }
+
+    /// Return the single node materialized for a durable context occurrence.
+    #[must_use]
+    pub fn node_for_durable_event_seq(
+        &self,
+        durable_event_seq: PersistedAgentEventSeq,
+    ) -> Option<NodeId> {
+        self.context_nodes_by_event_seq
+            .get(&durable_event_seq)
+            .copied()
+    }
+
+    /// Return whether an unresolved marked owner holds an activating prompt
+    /// fact.
+    #[must_use]
+    pub fn marked_inference_has_deferred_prompt_activation(
+        &self,
+        owner: &tau_proto::AgentPromptId,
+    ) -> bool {
+        self.pending_inference_inputs.iter().any(|input| {
+            &input.owner_prompt_id == owner
+                && matches!(
+                    input.entry.as_ref(),
+                    AgentEntry::UserInput {
+                        inference_activation: true,
+                        ..
+                    }
+                )
+        })
+    }
+
     /// Folds a slice of durable agent events into a fresh tree.
     ///
     /// Replay is purely positional: NodeIds are assigned by insertion
@@ -1181,6 +1261,7 @@ impl AgentTree {
             agent_id,
             metadata: BTreeMap::new(),
             nodes: Vec::new(),
+            context_nodes_by_event_seq: HashMap::new(),
             head: None,
             display_name: None,
             initialization_context: None,
@@ -1201,6 +1282,8 @@ impl AgentTree {
             self_compaction_deliveries: HashMap::new(),
             inference_dispatches: HashMap::new(),
             inference_dispatch_order: Vec::new(),
+            pending_inference_inputs: Vec::new(),
+            head_move_generation: 0,
         };
         for record in events {
             tree.apply_persisted_record(record)?;
@@ -1221,6 +1304,52 @@ impl AgentTree {
     #[must_use]
     pub fn ordinary_inference_generation(&self) -> u64 {
         self.ordinary_inference_generation
+    }
+
+    /// Return the exact branch checkpoint for one unresolved V1 inference
+    /// owner.
+    #[must_use]
+    pub fn marked_inference_through(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Option<AgentHead> {
+        self.inference_dispatches
+            .get(prompt_id)
+            .and_then(|dispatch| {
+                (!dispatch.finished
+                    && dispatch.fold_semantics
+                        == AgentJournalFoldSemantics::InferenceDeferredInputV1)
+                    .then_some(dispatch.checkpoint.through)
+            })
+    }
+
+    /// Return the exact unresolved V1 ordinary inference checkpoint.
+    #[must_use]
+    pub fn marked_inference_checkpoint(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Option<&tau_proto::AgentInferenceDispatchStarted> {
+        self.inference_dispatches
+            .get(prompt_id)
+            .filter(|dispatch| {
+                !dispatch.finished
+                    && dispatch.fold_semantics
+                        == AgentJournalFoldSemantics::InferenceDeferredInputV1
+            })
+            .map(|dispatch| &dispatch.checkpoint)
+    }
+
+    /// Return the unique unresolved V1 ordinary inference checkpoint.
+    #[must_use]
+    pub fn unresolved_marked_inference_checkpoint(
+        &self,
+    ) -> Option<&tau_proto::AgentInferenceDispatchStarted> {
+        let mut unresolved = self.inference_dispatches.values().filter(|dispatch| {
+            !dispatch.finished
+                && dispatch.fold_semantics == AgentJournalFoldSemantics::InferenceDeferredInputV1
+        });
+        let checkpoint = &unresolved.next()?.checkpoint;
+        unresolved.next().is_none().then_some(checkpoint)
     }
 
     /// Bumps the cached next-event sequence after one synthetic or persisted
@@ -1260,7 +1389,12 @@ impl AgentTree {
     /// to it after a non-folding event would steal whichever other
     /// conversation's node the cursor last visited.
     pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
-        let node_id = self.apply_persisted_event_at(parent, event, self.next_event_seq);
+        let node_id = self.apply_persisted_event_at(
+            parent,
+            event,
+            self.next_event_seq,
+            AgentJournalFoldSemantics::Legacy,
+        );
         self.advance_next_event_seq();
         node_id
     }
@@ -1295,6 +1429,13 @@ impl AgentTree {
                 "agent accounting lifecycle facts must be harness-authored source-free records",
             ));
         }
+        if record.fold_semantics != AgentJournalFoldSemantics::Legacy
+            && !matches!(record.event, Event::AgentInferenceDispatchStarted(_))
+        {
+            return Err(AgentEventValidationError::new(
+                "non-checkpoint record carries inference-deferred fold semantics",
+            ));
+        }
         let node_id = if record.event.name().category() == &tau_proto::EventCategory::Message {
             if record.parent != AgentEventParent::InheritHead {
                 return Err(AgentEventValidationError::new(
@@ -1317,11 +1458,80 @@ impl AgentTree {
                     self.record_message_fact(self.head, Box::new(projection.item), record.seq)
                 })
         } else {
-            self.validate_event_at(record.parent, &record.event)?;
-            self.apply_persisted_event_at(record.parent, &record.event, record.seq)
+            self.validate_persisted_event(record)?;
+            self.apply_persisted_event_at(
+                record.parent,
+                &record.event,
+                record.seq,
+                record.fold_semantics,
+            )
         };
         self.advance_next_event_seq();
         Ok(node_id)
+    }
+
+    /// Validate record-local semantics and current-tree append constraints.
+    pub(crate) fn validate_persisted_event(
+        &self,
+        record: &PersistedAgentEvent,
+    ) -> Result<(), AgentEventValidationError> {
+        self.validate_event_at(record.parent, &record.event)?;
+        if !record.fold_semantics.validates(&record.event) {
+            return Err(AgentEventValidationError::new(
+                "inference-deferred fold semantics require one marked ordinary inference",
+            ));
+        }
+        if record.fold_semantics == AgentJournalFoldSemantics::InferenceDeferredInputV1
+            && self.inference_dispatches.values().any(|dispatch| {
+                !dispatch.finished
+                    && dispatch.fold_semantics
+                        == AgentJournalFoldSemantics::InferenceDeferredInputV1
+            })
+        {
+            return Err(AgentEventValidationError::new(
+                "overlapping inference-deferred owners are unsupported",
+            ));
+        }
+        match &record.event {
+            Event::ProviderResponseFinished(response) => {
+                if self
+                    .inference_dispatches
+                    .get(&response.agent_prompt_id)
+                    .is_some_and(|dispatch| {
+                        dispatch.fold_semantics
+                            == AgentJournalFoldSemantics::InferenceDeferredInputV1
+                            && (dispatch.finished
+                                || record.parent
+                                    != AgentEventParent::from_head(dispatch.checkpoint.through))
+                    })
+                {
+                    return Err(AgentEventValidationError::new(
+                        "marked inference response mismatches its exact unresolved owner",
+                    ));
+                }
+            }
+            Event::AgentPromptTerminated(terminated) => {
+                let Some(dispatch) = self
+                    .inference_dispatches
+                    .get(&terminated.agent_prompt_id)
+                    .filter(|dispatch| {
+                        dispatch.fold_semantics
+                            == AgentJournalFoldSemantics::InferenceDeferredInputV1
+                    })
+                else {
+                    return Err(AgentEventValidationError::new(
+                        "durable prompt termination requires a marked ordinary owner",
+                    ));
+                };
+                if dispatch.finished {
+                    return Err(AgentEventValidationError::new(
+                        "durable prompt termination duplicated a closed owner",
+                    ));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Applies one already-validated event with its owning journal sequence.
@@ -1334,11 +1544,12 @@ impl AgentTree {
         parent: AgentEventParent,
         event: &Event,
         durable_event_seq: PersistedAgentEventSeq,
+        fold_semantics: AgentJournalFoldSemantics,
     ) -> Option<NodeId> {
         self.retained_provider_image_bytes = self
             .retained_provider_image_bytes
             .saturating_add(durable_event_provider_image_bytes(event));
-        self.apply_compaction_control_event(event);
+        self.apply_compaction_control_event(event, fold_semantics);
         if self.apply_side_state_event(event) {
             return None;
         }
@@ -1357,7 +1568,11 @@ impl AgentTree {
         node
     }
 
-    fn apply_compaction_control_event(&mut self, event: &Event) {
+    fn apply_compaction_control_event(
+        &mut self,
+        event: &Event,
+        fold_semantics: AgentJournalFoldSemantics,
+    ) {
         match event {
             Event::AgentManualCompactionRequested(requested) => {
                 self.manual_compaction_request_order
@@ -1419,6 +1634,8 @@ impl AgentTree {
                     checkpoint.agent_prompt_id.clone(),
                     InferenceDispatchFold {
                         checkpoint: checkpoint.clone(),
+                        fold_semantics,
+                        head_move_generation: self.head_move_generation,
                         finished: false,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                     },
@@ -1449,6 +1666,14 @@ impl AgentTree {
                     }) {
                         transaction.inference_finished = true;
                     }
+                }
+            }
+            Event::AgentPromptTerminated(terminated) => {
+                if let Some(dispatch) = self
+                    .inference_dispatches
+                    .get_mut(&terminated.agent_prompt_id)
+                {
+                    dispatch.finished = true;
                 }
             }
             _ => {}
@@ -1535,6 +1760,7 @@ impl AgentTree {
     fn apply_head_moved(&mut self, moved: &AgentHeadMoved) {
         if moved.agent_id == self.agent_id && self.validate_head_moved(moved).is_ok() {
             self.head = moved.head.as_option();
+            self.head_move_generation = self.head_move_generation.saturating_add(1);
         }
     }
 
@@ -1545,27 +1771,36 @@ impl AgentTree {
         durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<NodeId> {
         match event {
-            Event::AgentPromptSubmitted(prompt) => Some(self.append_user_text_input(
+            Event::AgentPromptSubmitted(prompt) => self.record_context_entry(
                 parent,
-                prompt.text.clone(),
-                &prompt.trusted_internal_spans,
-                Some(prompt.submission_source.clone()),
-                prompt.inference_activation,
-            )),
-            Event::AgentUserMessageInjected(injected) => Some(self.append_user_text_input(
+                Self::user_text_input_entry(
+                    prompt.text.clone(),
+                    &prompt.trusted_internal_spans,
+                    Some(prompt.submission_source.clone()),
+                    prompt.inference_activation,
+                ),
+                durable_event_seq,
+            ),
+            Event::AgentUserMessageInjected(injected) => self.record_context_entry(
                 parent,
-                injected.text.clone(),
-                &[],
-                None,
-                injected.inference_activation,
-            )),
-            Event::AgentPromptSteered(steered) => Some(self.append_user_text_input(
+                Self::user_text_input_entry(
+                    injected.text.clone(),
+                    &[],
+                    None,
+                    injected.inference_activation,
+                ),
+                durable_event_seq,
+            ),
+            Event::AgentPromptSteered(steered) => self.record_context_entry(
                 parent,
-                steered.text.clone(),
-                &steered.trusted_internal_spans,
-                Some(steered.submission_source.clone()),
-                steered.inference_activation,
-            )),
+                Self::user_text_input_entry(
+                    steered.text.clone(),
+                    &steered.trusted_internal_spans,
+                    Some(steered.submission_source.clone()),
+                    steered.inference_activation,
+                ),
+                durable_event_seq,
+            ),
             Event::AgentCompactionTriggered(triggered) => Some(self.append_node_at(
                 parent,
                 AgentEntry::CompactionTrigger {
@@ -1583,12 +1818,15 @@ impl AgentTree {
             )),
             Event::AgentMessageSent(message) => self
                 .agent_message_entry_from_sent(message, durable_event_seq)
-                .and_then(|entry| self.record_agent_message(parent, entry)),
+                .and_then(|entry| self.record_context_entry(parent, entry, durable_event_seq)),
             Event::AgentMessageReceived(message) => self
                 .agent_message_entry_from_received(message, durable_event_seq)
-                .and_then(|entry| self.record_agent_message(parent, entry)),
+                .and_then(|entry| self.record_context_entry(parent, entry, durable_event_seq)),
             Event::ProviderResponseFinished(response) => {
                 Some(self.apply_provider_response_finished(parent, response))
+            }
+            Event::AgentPromptTerminated(terminated) => {
+                self.close_terminated_inference(&terminated.agent_prompt_id)
             }
             Event::ProviderToolResult(result) => self.record_provider_tool_result(result),
             Event::ProviderToolError(error) => self.record_provider_tool_error(error),
@@ -1597,27 +1835,22 @@ impl AgentTree {
         }
     }
 
-    fn append_user_text_input(
-        &mut self,
-        parent: Option<NodeId>,
+    fn user_text_input_entry(
         text: String,
         trusted_internal_spans: &[tau_proto::TrustedInternalSpan],
         submission_source: Option<tau_proto::PromptSubmissionSource>,
         inference_activation: bool,
-    ) -> NodeId {
-        self.append_node_at(
-            parent,
-            AgentEntry::UserInput {
-                items: vec![ContextItem::Message(MessageItem {
-                    role: ContextRole::User,
-                    content: Self::prompt_content_parts(text, trusted_internal_spans),
-                    phase: None,
-                    responses_raw_json: None,
-                })],
-                submission_source,
-                inference_activation,
-            },
-        )
+    ) -> AgentEntry {
+        AgentEntry::UserInput {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: Self::prompt_content_parts(text, trusted_internal_spans),
+                phase: None,
+                responses_raw_json: None,
+            })],
+            submission_source,
+            inference_activation,
+        }
     }
 
     /// Split trusted harness spans from ordinary prompt bytes without allowing
@@ -1654,21 +1887,40 @@ impl AgentTree {
         parts
     }
 
-    /// Fold one canonical directional agent-message occurrence without
-    /// splitting an open provider tool round.
-    fn record_agent_message(
+    /// Fold one canonical context occurrence or defer it behind its exact
+    /// owner.
+    fn record_context_entry(
         &mut self,
         parent: Option<NodeId>,
         entry: AgentEntry,
+        durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<NodeId> {
         if self.open_tool_round_applies_to(parent) {
-            self.pending_context_inputs
-                .push(PendingContextInput::AgentMessage {
-                    entry: Box::new(entry),
-                });
+            self.pending_context_inputs.push(PendingToolContextInput {
+                durable_event_seq,
+                entry: Box::new(entry),
+            });
             return None;
         }
-        Some(self.append_node_at(parent, entry))
+        if let Some(owner_prompt_id) = self.marked_inference_owner_for(parent) {
+            let virtual_predecessor_seq = self
+                .pending_inference_inputs
+                .iter()
+                .rev()
+                .find(|input| {
+                    input.owner_prompt_id == owner_prompt_id && input.accepted_real_parent == parent
+                })
+                .map(|input| input.durable_event_seq);
+            self.pending_inference_inputs.push(PendingInferenceInput {
+                owner_prompt_id,
+                durable_event_seq,
+                accepted_real_parent: parent,
+                virtual_predecessor_seq,
+                entry: Box::new(entry),
+            });
+            return None;
+        }
+        Some(self.append_context_node_at(parent, durable_event_seq, entry))
     }
 
     /// Fold one valid committed message fact behind tool adjacency when needed.
@@ -1678,21 +1930,37 @@ impl AgentTree {
         item: Box<tau_proto::MessageItem>,
         durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<NodeId> {
-        if self.open_tool_round_applies_to(parent) {
-            self.pending_context_inputs
-                .push(PendingContextInput::MessageFact {
-                    item,
-                    durable_event_seq,
-                });
-            return None;
-        }
-        Some(self.append_node_at(
+        self.record_context_entry(
             parent,
             AgentEntry::MessageFact {
                 item,
                 durable_event_seq,
             },
-        ))
+            durable_event_seq,
+        )
+    }
+
+    /// Return the unique unresolved V1 ordinary inference applicable to
+    /// `parent`.
+    fn marked_inference_owner_for(
+        &self,
+        parent: Option<NodeId>,
+    ) -> Option<tau_proto::AgentPromptId> {
+        let parent = parent?;
+        let mut owners = self.inference_dispatches.values().filter(|dispatch| {
+            !dispatch.finished
+                && dispatch.fold_semantics == AgentJournalFoldSemantics::InferenceDeferredInputV1
+                && dispatch.head_move_generation == self.head_move_generation
+                && self.is_ancestor_head(
+                    dispatch.checkpoint.through,
+                    tau_proto::AgentHead::Node(parent),
+                )
+        });
+        let owner = owners.next()?;
+        owners
+            .next()
+            .is_none()
+            .then(|| owner.checkpoint.agent_prompt_id.clone())
     }
 
     /// Returns whether the sole open foreground round owns context accepted
@@ -1716,6 +1984,7 @@ impl AgentTree {
         parent: Option<NodeId>,
         response: &tau_proto::ProviderResponseFinished,
     ) -> NodeId {
+        let selected_head = self.head;
         let node_id = self.append_node_at(
             parent,
             AgentEntry::AssistantResponse {
@@ -1726,8 +1995,75 @@ impl AgentTree {
             },
         );
         let call_order = self.provider_response_tool_call_order(&response.output_items);
+        let mut owned = self.take_pending_inference_inputs(&response.agent_prompt_id);
+        if call_order.is_empty() {
+            let tail = self.materialize_after(node_id, &mut owned);
+            if selected_head != parent {
+                self.head = selected_head;
+            }
+            return tail;
+        }
         self.open_pending_tool_round(node_id, call_order);
+        self.pending_context_inputs
+            .extend(owned.drain(..).map(PendingToolContextInput::from));
+        if selected_head != parent {
+            self.head = selected_head;
+        }
         node_id
+    }
+
+    /// Remove one inference owner's pending inputs in durable order.
+    fn take_pending_inference_inputs(
+        &mut self,
+        owner: &tau_proto::AgentPromptId,
+    ) -> Vec<PendingInferenceInput> {
+        let (mut owned, retained): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.pending_inference_inputs)
+                .into_iter()
+                .partition(|input| &input.owner_prompt_id == owner);
+        self.pending_inference_inputs = retained;
+        owned.sort_by_key(|input| input.durable_event_seq.get());
+        owned
+    }
+
+    /// Append pending typed entries as one sequence-ordered chain.
+    fn materialize_after(
+        &mut self,
+        mut head: NodeId,
+        inputs: &mut Vec<PendingInferenceInput>,
+    ) -> NodeId {
+        inputs.sort_by_key(|input| input.durable_event_seq.get());
+        for input in inputs.drain(..) {
+            head = self.append_context_node_at(Some(head), input.durable_event_seq, *input.entry);
+        }
+        head
+    }
+
+    /// Close a no-response owner and materialize each pending virtual branch.
+    fn close_terminated_inference(&mut self, owner: &tau_proto::AgentPromptId) -> Option<NodeId> {
+        let selected_head = self.head;
+        let mut owned = self.take_pending_inference_inputs(owner);
+        let mut materialized = HashMap::new();
+        let mut last = None;
+        let mut selected_seq = None;
+        let mut selected_tail = None;
+        for input in owned.drain(..) {
+            let advances_selected = input.accepted_real_parent == selected_head
+                || input.virtual_predecessor_seq == selected_seq;
+            let parent = input
+                .virtual_predecessor_seq
+                .and_then(|seq| materialized.get(&seq).copied())
+                .or(input.accepted_real_parent);
+            let node = self.append_context_node_at(parent, input.durable_event_seq, *input.entry);
+            materialized.insert(input.durable_event_seq, node);
+            if advances_selected {
+                selected_seq = Some(input.durable_event_seq);
+                selected_tail = Some(node);
+            }
+            last = Some(node);
+        }
+        self.head = selected_tail.or(selected_head);
+        last
     }
 
     fn provider_response_tool_call_order(&self, output_items: &[ContextItem]) -> Vec<ToolCallId> {
@@ -2172,6 +2508,9 @@ impl AgentTree {
             }
             Event::AgentInferenceDispatchStarted(started) if started.agent_id == self.agent_id => {
                 Some(self.validate_inference_checkpoint(started))
+            }
+            Event::AgentPromptTerminated(terminated) if terminated.agent_id == self.agent_id => {
+                Some(Ok(()))
             }
             Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Some(
                 tau_proto::validate_compaction_window(&compacted.replacement_window)
@@ -2839,6 +3178,7 @@ impl AgentTree {
                 | Event::AgentPromptStarted(_)
                 | Event::AgentUserMessageInjected(_)
                 | Event::AgentPromptSteered(_)
+                | Event::AgentPromptTerminated(_)
                 | Event::AgentCompactionTriggered(_)
                 | Event::AgentCompacted(_)
                 | Event::AgentMessageSent(_)
@@ -2943,6 +3283,13 @@ impl AgentTree {
         if round.terminal_results.len() != round.call_order.len() {
             return None;
         }
+        let selected_head = self.head;
+        let round_is_selected = selected_head.is_some_and(|selected| {
+            self.is_ancestor_head(
+                AgentHead::Node(assistant_node_id),
+                AgentHead::Node(selected),
+            )
+        });
 
         let round = self
             .pending_tool_rounds
@@ -2966,18 +3313,13 @@ impl AgentTree {
             Some(round.assistant_node_id),
             AgentEntry::ToolResults { items },
         );
-        for input in std::mem::take(&mut self.pending_context_inputs) {
-            let entry = match input {
-                PendingContextInput::AgentMessage { entry } => *entry,
-                PendingContextInput::MessageFact {
-                    item,
-                    durable_event_seq,
-                } => AgentEntry::MessageFact {
-                    item,
-                    durable_event_seq,
-                },
-            };
-            head = self.append_node_at(Some(head), entry);
+        let mut pending = std::mem::take(&mut self.pending_context_inputs);
+        pending.sort_by_key(|input| input.durable_event_seq.get());
+        for input in pending {
+            head = self.append_context_node_at(Some(head), input.durable_event_seq, *input.entry);
+        }
+        if !round_is_selected {
+            self.head = selected_head;
         }
         Some(head)
     }
@@ -3274,6 +3616,49 @@ impl PersistedEventSource {
     }
 }
 
+/// Private agent-journal transcript-fold semantics.
+///
+/// This discriminator never crosses the harness-extension protocol. Missing
+/// fields decode as [`Self::Legacy`] so historical node allocation remains
+/// byte-for-byte positional.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentJournalFoldSemantics {
+    /// Preserve historical commit-order placement.
+    #[default]
+    Legacy,
+    /// Let one marked ordinary inference own later same-branch input placement.
+    InferenceDeferredInputV1,
+}
+
+impl AgentJournalFoldSemantics {
+    /// Select semantics for one newly authored event.
+    pub(crate) fn for_new_event(event: &Event) -> Self {
+        if Self::marked_checkpoint(event).is_some() {
+            Self::InferenceDeferredInputV1
+        } else {
+            Self::Legacy
+        }
+    }
+
+    /// Return the ordinary inference checkpoint eligible for V1 ownership.
+    fn marked_checkpoint(event: &Event) -> Option<&tau_proto::AgentInferenceDispatchStarted> {
+        let Event::AgentInferenceDispatchStarted(checkpoint) = event else {
+            return None;
+        };
+        (checkpoint.transaction_id.is_none()
+            && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
+            && checkpoint.model.is_some()
+            && checkpoint.activation_cut.is_some())
+        .then_some(checkpoint)
+    }
+
+    /// Validate that this marker is legal for the event it decorates.
+    fn validates(self, event: &Event) -> bool {
+        self == Self::Legacy || Self::marked_checkpoint(event).is_some()
+    }
+}
+
 /// One durable agent-scoped protocol event.
 ///
 /// `parent` is the explicit fold parent that was passed to
@@ -3301,6 +3686,9 @@ pub struct PersistedAgentEvent {
     /// Explicit fold parent used when replaying this record into the agent
     /// tree.
     pub parent: AgentEventParent,
+    /// Private projection semantics selected for this journal occurrence.
+    #[serde(default, skip_serializing_if = "AgentJournalFoldSemantics::is_legacy")]
+    pub fold_semantics: AgentJournalFoldSemantics,
     /// Wall-clock micros since UNIX epoch when the event was
     /// appended, matching the value carried by the harness event delivery and
     /// stamped in [`crate::AgentStore::append_agent_event_at`]. `UnixMicros(0)`
@@ -3310,6 +3698,14 @@ pub struct PersistedAgentEvent {
     /// semantics.
     #[serde(default)]
     pub recorded_at: UnixMicros,
+}
+
+impl AgentJournalFoldSemantics {
+    /// Return whether this record uses historical placement.
+    #[must_use]
+    pub const fn is_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
 }
 
 /// Per-agent sidecar metadata at `<agents_dir>/<agent_id>/meta.json`.

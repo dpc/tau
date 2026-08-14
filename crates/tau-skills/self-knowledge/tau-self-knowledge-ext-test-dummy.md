@@ -19,6 +19,9 @@ advertise: false
   in-memory 1×1 PNG as typed provider content for
   the hermetic durable-replay test. It accepts no arguments and does not read or
   write image files.
+- `provider_context_raw_message: true` enables one test-only tool that publishes
+  an existing message-bridge delivered report to its exact `agent_id` and `text`
+  arguments. Gated provider-context placement E2Es are its only intended caller.
 - `hold_no_side_effect` accepts one no-argument invocation, emits correlated
   readiness progress after its bounded worker starts, and performs no
   filesystem, network, environment, or child-process operation. It joins on

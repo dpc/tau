@@ -7838,9 +7838,15 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
     let events = event_log_events(&h);
     assert!(events.iter().any(|event| matches!(
         event,
+        Event::ProviderResponseFinished(finished)
+            if finished.agent_prompt_id == agent_prompt_id
+                && finished.stop_reason == tau_proto::ProviderStopReason::Error
+                && finished.output_items.is_empty()
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
         Event::AgentPromptTerminated(terminated)
             if terminated.agent_prompt_id == agent_prompt_id
-                && terminated.reason == tau_proto::AgentPromptTerminationReason::Canceled
     )));
     assert!(events.iter().any(|event| matches!(
         event,

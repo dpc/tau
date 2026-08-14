@@ -916,10 +916,9 @@ fn metadata_only_offline_agent_message_fact_uses_session_journal() {
     );
 }
 
-/// Cold replay reconstructs an offline agent's fact projection without
-/// synthesizing a model activation.
+/// Cold replay reconstructs an offline fact and one uncovered activation.
 #[test]
-fn agent_message_fact_replay_projects_without_wake() {
+fn agent_message_fact_replay_rebuilds_uncovered_wake() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let agent_id = tau_proto::AgentId::parse("offline-agent").expect("agent id");
@@ -1002,19 +1001,19 @@ fn agent_message_fact_replay_projects_without_wake() {
         "<message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" conversation=\"general\" content_trust=\"external\">persisted message</message>"
     );
     assert!(
-        event_log_events(&resumed).iter().all(|event| !matches!(
+        event_log_events(&resumed).iter().any(|event| matches!(
             event,
             Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id
         )),
-        "journal replay must not synthesize a model activation"
+        "journal replay must activate one uncovered message fact"
     );
     resumed.shutdown().expect("shutdown");
 }
 
-/// A crash after receive commit retains the typed canonical local wrapper but
-/// cold replay must not recreate its runtime wake or dispatch provider work.
+/// A crash after receive commit retains the typed wrapper and recreates one
+/// uncovered activation.
 #[test]
-fn received_agent_message_replay_restores_context_without_wake() {
+fn received_agent_message_replay_restores_context_and_activation() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let (agent_id, live_projection) = {
@@ -1090,7 +1089,7 @@ fn received_agent_message_replay_restores_context_without_wake() {
                 )
         )
     }));
-    assert!(event_log_events(&resumed).iter().all(|event| !matches!(
+    assert!(event_log_events(&resumed).iter().any(|event| matches!(
         event,
         Event::AgentPromptCreated(prompt) if prompt.agent_id.as_str() == agent_id
     )));
@@ -1467,6 +1466,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
                 "bad owner",
             )),
             parent: tau_core::AgentEventParent::InheritHead,
+            fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
@@ -1679,6 +1679,25 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             }),
         )
         .expect("seed user prompt");
+    let through = agent_store
+        .agent("main")
+        .and_then(tau_core::AgentTree::head)
+        .expect("seeded prompt head");
+    agent_store
+        .append_agent_event(
+            "main",
+            None,
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: crate::parse_agent_id("main"),
+                transaction_id: None,
+                agent_prompt_id: "sp-restored-tools".parse().expect("prompt id"),
+                through: tau_proto::AgentHead::Node(through),
+                model: Some("echo/model".into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(tau_proto::AgentHead::Root),
+            }),
+        )
+        .expect("seed V1 inference owner");
     agent_store
         .append_agent_event(
             "main",
@@ -1749,6 +1768,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                         ctx_id: None,
                     }),
                     parent: tau_core::AgentEventParent::InheritHead,
+                    fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
                     recorded_at: tau_proto::UnixMicros::now(),
                 },
             );
@@ -1906,6 +1926,35 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     seed_restored_tool_round(&sp, &["interrupted-call"], &[]);
+    let mut agent_store = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            "main",
+            None,
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: tau_proto::AgentMessageId::parse("during-open-tool-round")
+                    .expect("message id"),
+                sender_id: tau_proto::AgentId::parse("sender").expect("sender"),
+                sender_session_id: None,
+                recipient_id: tau_proto::AgentId::parse("main").expect("recipient"),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                message: "deferred behind repaired aggregate".to_owned(),
+            }),
+        )
+        .expect("seed deferred activating input");
+    assert!(
+        agent_store
+            .agent("main")
+            .and_then(
+                |tree| tree.node_for_durable_event_seq(tau_core::PersistedAgentEventSeq::new(4))
+            )
+            .is_none(),
+        "input stays node-less behind the open tool round"
+    );
+    drop(agent_store);
 
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
@@ -1913,13 +1962,45 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
     assert_eq!(errors.len(), 1);
     assert!(errors[0].message.contains("tau_internal: true"));
     assert!(errors[0].message.contains("Side effects may have occurred"));
+    let cid = test_user_agent(&h);
+    h.resolve_materialized_message_wakes(&cid);
+    h.try_advance_queue();
 
-    append_user_message_via_event(&mut h, "s1", "after restart");
-    let spid = h.send_prompt_to_agent("s1");
-    let prompt = read_prompt_created(&h, &spid);
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt)
+                if serde_json::to_string(&prompt.context).is_ok_and(|context| {
+                    context.contains("deferred behind repaired aggregate")
+                }) =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            let cid = test_user_agent(&h);
+            panic!(
+                "deferred input did not dispatch after repair: state={:?}, wakes={:?}",
+                h.agents[&cid].turn_state, h.agents[&cid].pending_message_wakes
+            )
+        });
     let repaired = prompt_tool_result(&prompt, "interrupted-call")
         .expect("synthetic tool result should be in provider context");
     assert!(matches!(repaired.status, ToolResultStatus::Error { .. }));
+    let flattened = prompt.context.flatten();
+    let result_index = flattened
+        .iter()
+        .position(|item| matches!(item, ContextItem::ToolResult(_)))
+        .expect("repaired aggregate");
+    let input_index = flattened
+        .iter()
+        .position(|item| {
+            serde_json::to_string(item)
+                .is_ok_and(|text| text.contains("deferred behind repaired aggregate"))
+        })
+        .expect("deferred input");
+    assert!(result_index < input_index);
 
     h.shutdown().expect("shutdown");
 }

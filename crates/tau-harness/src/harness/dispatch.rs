@@ -165,6 +165,46 @@ impl Harness {
         // block the agent forever.
         if prompt.creates_inference_activation()
             && !prompt.is_internal()
+            && let Some((durable_agent_id, uncertain_prompt_id, originator)) =
+                self.agents.get(agent_id).and_then(|agent| {
+                    if agent.in_flight_prompt.is_none()
+                        && let path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
+                            agent_prompt_id,
+                            ..
+                        } = &agent.activation_dispatch
+                    {
+                        Some((
+                            agent.agent_id.clone()?,
+                            agent_prompt_id.clone(),
+                            agent.originator.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            && self
+                .agent_store
+                .agent(&durable_agent_id)
+                .and_then(|tree| tree.marked_inference_through(&uncertain_prompt_id))
+                .is_some()
+        {
+            if let Some(agent) = self.agents.get_mut(agent_id) {
+                agent.pending_prompts.push_back(prompt);
+            }
+            self.publish_for_agent(
+                agent_id,
+                tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                    agent_id: crate::parse_agent_id(&durable_agent_id),
+                    agent_prompt_id: uncertain_prompt_id,
+                    reason: tau_proto::AgentPromptTerminationReason::Stale,
+                    originator,
+                }),
+            );
+            return Ok(());
+        }
+        if prompt.creates_inference_activation()
+            && !prompt.is_internal()
             && let Some(agent) = self.agents.get_mut(agent_id)
             && agent.in_flight_prompt.is_none()
             && matches!(
@@ -396,6 +436,33 @@ impl Harness {
                 self.set_agent_turn_state(&agent_id, AgentTurnState::Idle);
             }
         }
+    }
+
+    /// Activate exact replay occurrences after restore installed all runtime
+    /// handlers and routes.
+    pub(crate) fn activate_replayed_prompt_occurrences(&mut self) {
+        let pending_stale = std::mem::take(&mut self.pending_replay_uncertain_stale);
+        for (cid, terminated) in pending_stale {
+            self.publish_event_for_agent(
+                &cid,
+                None,
+                tau_proto::Event::AgentPromptTerminated(terminated),
+            );
+        }
+        let pending = std::mem::take(&mut self.pending_replay_prompt_activation_occurrences);
+        for (cid, occurrences) in pending {
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.pending_replay_activation = false;
+            }
+            for occurrence in occurrences {
+                self.enqueue_committed_activation_occurrence(
+                    cid.clone(),
+                    occurrence.source_seq,
+                    occurrence.node_id().map(tau_proto::AgentHead::Node),
+                );
+            }
+        }
+        self.drain_publish_idle_dispatches();
     }
 
     /// Terminalize runnable prompt and message activations after provider

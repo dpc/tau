@@ -1982,6 +1982,116 @@ fn v2_validation_requires_complete_consistent_barriers() {
     );
 }
 
+/// The placement grammar accepts only the two fully cross-bound non-tool and
+/// parallel-tool shapes and rejects swapped or mismatched fields.
+#[test]
+fn v2_provider_context_placement_accepts_only_two_cross_bound_shapes() {
+    let sender = crate::ScenarioLaneV2 {
+        ctx_id: "sender".to_owned(),
+        actions: vec![
+            ScenarioActionV2::MessageCall {
+                user_text: "typed call".to_owned(),
+                call_id: "typed-id".into(),
+                message: "typed body".to_owned(),
+            },
+            ScenarioActionV2::MessageSenderResult {
+                call_id: "typed-id".into(),
+                message: "typed body".to_owned(),
+                response: "typed sent".to_owned(),
+            },
+            ScenarioActionV2::ProviderContextRawMessageCall {
+                user_text: "raw call".to_owned(),
+                call_id: "raw-id".into(),
+                raw_text: "raw body".to_owned(),
+            },
+            ScenarioActionV2::ProviderContextRawMessageResult {
+                call_id: "raw-id".into(),
+                raw_text: "raw body".to_owned(),
+                response: "raw sent".to_owned(),
+            },
+            ScenarioActionV2::BarrierText {
+                user_text: "release".to_owned(),
+                barrier: "release".to_owned(),
+                participants: 2,
+                response: "released".to_owned(),
+            },
+        ],
+    };
+    let non_tool_target = crate::ScenarioLaneV2 {
+        ctx_id: "target".to_owned(),
+        actions: vec![
+            ScenarioActionV2::BarrierText {
+                user_text: "held".to_owned(),
+                barrier: "release".to_owned(),
+                participants: 2,
+                response: "response".to_owned(),
+            },
+            ScenarioActionV2::MessageAndRawInboundAfterHeld {
+                call_id: "typed-id".into(),
+                message: "typed body".to_owned(),
+                raw_text: "raw body".to_owned(),
+                held_user_text: "held".to_owned(),
+                response: "successor".to_owned(),
+            },
+        ],
+    };
+    let valid = ScenarioV2::new(
+        "provider-context-shape",
+        vec![sender.clone(), non_tool_target.clone()],
+    );
+    assert!(validate_v2(&valid).is_ok());
+
+    let mut mismatched = valid.clone();
+    let ScenarioActionV2::MessageAndRawInboundAfterHeld { raw_text, .. } =
+        &mut mismatched.lanes[1].actions[1]
+    else {
+        unreachable!("known target action")
+    };
+    *raw_text = "other raw body".to_owned();
+    assert!(validate_v2(&mismatched).is_err());
+
+    let mut swapped = valid.clone();
+    swapped.lanes[1].actions[1] = ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+        call_id: "typed-id".into(),
+        message: "typed body".to_owned(),
+        raw_text: "raw body".to_owned(),
+        held_user_text: "held".to_owned(),
+        tool_call_ids: vec!["tool-a".into(), "tool-b".into()],
+        response: "successor".to_owned(),
+    };
+    assert!(validate_v2(&swapped).is_err());
+
+    let parallel_target = crate::ScenarioLaneV2 {
+        ctx_id: "target".to_owned(),
+        actions: vec![
+            ScenarioActionV2::BarrierParallelDummyTools {
+                user_text: "held".to_owned(),
+                barrier: "release".to_owned(),
+                participants: 2,
+                tool_call_ids: vec!["tool-a".into(), "tool-b".into()],
+            },
+            ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+                call_id: "typed-id".into(),
+                message: "typed body".to_owned(),
+                raw_text: "raw body".to_owned(),
+                held_user_text: "held".to_owned(),
+                tool_call_ids: vec!["tool-a".into(), "tool-b".into()],
+                response: "successor".to_owned(),
+            },
+        ],
+    };
+    let parallel = ScenarioV2::new("parallel-provider-context", vec![sender, parallel_target]);
+    assert!(validate_v2(&parallel).is_ok());
+    let mut duplicate = parallel;
+    let ScenarioActionV2::BarrierParallelDummyTools { tool_call_ids, .. } =
+        &mut duplicate.lanes[1].actions[0]
+    else {
+        unreachable!("known parallel barrier")
+    };
+    tool_call_ids[1] = tool_call_ids[0].clone();
+    assert!(validate_v2(&duplicate).is_err());
+}
+
 /// Rejects checkpoints whose scenario identity or durable binding is invalid.
 #[test]
 fn v2_checkpoint_rejects_changed_scenario_and_invalid_bindings() {

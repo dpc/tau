@@ -615,6 +615,7 @@ fn selectors() -> Vec<EventSelector> {
         E::AGENT_WATCHES_UPDATED,
         E::AGENT_MESSAGE_RECEIVED,
         E::AGENT_MESSAGE_SENT,
+        E::MESSAGE_DELIVERED,
         E::HARNESS_NOTICE,
         E::AGENT_REPLAY_COMPLETE,
         E::SESSION_REPLAY_COMPLETE,

@@ -40,11 +40,12 @@ pub use connection::{
 };
 pub use memory::{MemoryInbox, memory_connection};
 pub use session::{
-    AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
-    AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
-    BackgroundToolPlaceholder, InferenceDispatchRecovery, ManualCompactionOutcome,
-    ManualCompactionRecovery, NodeId, PersistedAgentEvent, PersistedAgentEventSeq,
-    PersistedEventSource, SessionMeta, StandaloneCompactionRecovery,
+    AgentEntry, AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics,
+    AgentMessageDirection, AgentMeta, AgentMetadataEntry, AgentNode, AgentTree,
+    BackgroundToolCallState, BackgroundToolCompletion, BackgroundToolPlaceholder,
+    InferenceDispatchRecovery, ManualCompactionOutcome, ManualCompactionRecovery, NodeId,
+    PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource, SessionMeta,
+    StandaloneCompactionRecovery,
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,

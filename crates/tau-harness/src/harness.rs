@@ -70,8 +70,9 @@ use self::context_limit_telemetry::{
     transcript_growth,
 };
 use crate::agent::{
-    Agent, AgentTurnState, InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger,
-    LoopTurnSignature, PendingCancel, PendingPrompt,
+    ActivationDispatchState, Agent, AgentTurnState, InferenceCheckpointOwner,
+    InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
+    PendingMessageWake, PendingMessageWakeSource, PendingPrompt,
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
@@ -2210,6 +2211,45 @@ impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
     }
 }
 
+/// Provider report whose exact marked owner must close durably before the
+/// harness releases the report and its prompt-routing state.
+struct PendingStaleProviderResponse {
+    /// Complete provider report retained solely so interception or append
+    /// failure cannot discard it before the exact marked owner closes.
+    response: ProviderResponseFinished,
+}
+
+/// Placement state for one activating prompt occurrence reconstructed from its
+/// durable sequence during cold replay.
+#[derive(Clone, Copy, Debug)]
+enum ReplayPromptActivationPlacement {
+    /// Its marked inference owner has not closed, so no context node exists
+    /// yet.
+    Deferred,
+    /// The occurrence has one materialized context node.
+    Materialized(tau_proto::NodeId),
+}
+
+/// One payload-free prompt activation obligation reconstructed from the
+/// journal.
+#[derive(Clone, Copy, Debug)]
+struct ReplayPromptActivationOccurrence {
+    /// Durable identity and ordering key for the exact activating occurrence.
+    source_seq: tau_core::PersistedAgentEventSeq,
+    /// Either the occurrence's unique folded node or an explicit statement that
+    /// its unresolved marked owner has not materialized that node yet.
+    placement: ReplayPromptActivationPlacement,
+}
+
+impl ReplayPromptActivationOccurrence {
+    fn node_id(self) -> Option<tau_proto::NodeId> {
+        match self.placement {
+            ReplayPromptActivationPlacement::Deferred => None,
+            ReplayPromptActivationPlacement::Materialized(node_id) => Some(node_id),
+        }
+    }
+}
+
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -2642,6 +2682,15 @@ pub struct Harness {
     /// Prompts for which streaming exposed semantic output, making automatic
     /// no-output recovery unsafe.
     prompt_semantic_output: HashSet<AgentPromptId>,
+    /// Stale marked-owner reports retained until their durable closer commits.
+    pending_stale_provider_responses: HashMap<AgentPromptId, PendingStaleProviderResponse>,
+    /// Exact replay prompt activations held until runtime handlers are
+    /// installed.
+    pending_replay_prompt_activation_occurrences:
+        HashMap<AgentId, Vec<ReplayPromptActivationOccurrence>>,
+    /// Exact restored uncertain owners whose Stale closer waits until provider
+    /// and session startup can dispatch the materialized activating occurrence.
+    pending_replay_uncertain_stale: HashMap<AgentId, AgentPromptTerminated>,
     /// Harness-synthesized route failures awaiting their durable terminal
     /// response commit. Provider-authored error text never controls this state.
     local_route_failure_prompts: HashSet<AgentPromptId>,
@@ -3409,6 +3458,9 @@ impl Harness {
             prompt_context_limits: HashMap::new(),
             prompt_context_size_alerts: HashMap::new(),
             prompt_semantic_output: HashSet::new(),
+            pending_stale_provider_responses: HashMap::new(),
+            pending_replay_prompt_activation_occurrences: HashMap::new(),
+            pending_replay_uncertain_stale: HashMap::new(),
             local_route_failure_prompts: HashSet::new(),
             suppressed_compaction_dispatches: HashSet::new(),
             silent_compaction_failure_prompts: HashSet::new(),
@@ -3754,6 +3806,7 @@ impl Harness {
             launch.reason,
         );
         harness.wait_for_session_init()?;
+        harness.activate_replayed_prompt_occurrences();
         harness.ensure_selected_role_available_after_required_skill_validation()?;
         Ok(harness)
     }
@@ -3919,6 +3972,7 @@ impl Harness {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
             return Err(error);
         }
+        harness.activate_replayed_prompt_occurrences();
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init complete");
         Ok((harness, initial_client_id))
     }
@@ -5422,7 +5476,7 @@ impl Harness {
             self.publish_event(source, event);
             return;
         }
-        let persist = event.defaults_to_persist();
+        let mut persist = event.defaults_to_persist();
         // Accounting lifecycle facts are harness-authored authority. Do not
         // inherit the peer/provider source of the publication whose
         // post-commit continuation generated them.
@@ -5454,10 +5508,26 @@ impl Harness {
                 AgentPublishCompletion::InitialPromptSubmission { .. }
             )
         });
+        let prompt_id = match &event {
+            Event::ProviderResponseFinished(response) => Some(&response.agent_prompt_id),
+            Event::AgentPromptTerminated(terminated) => Some(&terminated.agent_prompt_id),
+            _ => None,
+        };
+        let fold_parent = prompt_id
+            .and_then(|prompt_id| {
+                self.agents
+                    .get(cid)
+                    .and_then(|agent| agent.agent_id.as_deref())
+                    .and_then(|agent_id| self.agent_store.agent(agent_id))
+                    .and_then(|tree| tree.marked_inference_through(prompt_id))
+            })
+            .map(tau_core::AgentEventParent::from_head);
+        persist |= matches!(event, Event::AgentPromptTerminated(_)) && fold_parent.is_some();
         let sync = Some(ConversationHeadSync {
             cid: cid.clone(),
             agent_id,
             session_generation: self.current_session_generation,
+            fold_parent,
             suppress_activation_dispatch,
             continuation: completion
                 .map(Box::new)
@@ -5593,24 +5663,6 @@ impl Harness {
                     _ => None,
                 })
         });
-        if let Some(cid) = cid.as_ref() {
-            let prompt_context = self.agents.get(cid).map(|conv| {
-                (
-                    conv.session_id.clone(),
-                    conv.originator.clone(),
-                    conv.agent_id.clone(),
-                )
-            });
-            if let Some((session_id, originator, Some(_))) = prompt_context {
-                self.publish_prompt_terminated(
-                    session_id,
-                    agent_prompt_id.clone(),
-                    AgentPromptTerminationReason::Canceled,
-                    originator,
-                );
-            }
-        }
-
         self.remember_ephemeral_provider_prompt(&agent_prompt_id);
         self.dispose_prompt_dispatch_bookkeeping(&agent_prompt_id);
         self.emit_harness_failure(&format!(
@@ -5957,7 +6009,8 @@ impl Harness {
         let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() else {
             return;
         };
-        if let Some(node_id) = outcome.folded_node_id
+        if outcome.folded_node_id.is_some()
+            && let Some(node_id) = outcome.selected_head_id
             && let Some(agent) = self.agents.get_mut(&cid)
         {
             agent.head = Some(node_id);
@@ -5998,7 +6051,55 @@ impl Harness {
             None,
         );
         self.activate_waits_for(&cid, activation);
+        if self.terminalize_uncertain_marked_owner_for_live_activation(&cid) {
+            return;
+        }
         self.try_advance_queue();
+    }
+
+    /// Close an exact response-uncertain marked ordinary owner after a newly
+    /// committed live activating occurrence. The terminal publication remains
+    /// interceptable, and all runtime cleanup waits for its successful append.
+    fn terminalize_uncertain_marked_owner_for_live_activation(&mut self, cid: &AgentId) -> bool {
+        let Some((durable_agent_id, agent_prompt_id, originator)) =
+            self.agents.get(cid).and_then(|agent| {
+                if agent.in_flight_prompt.is_none()
+                    && let ActivationDispatchState::DispatchUncertain {
+                        owner: InferenceCheckpointOwner::Inference,
+                        agent_prompt_id,
+                        ..
+                    } = &agent.activation_dispatch
+                {
+                    Some((
+                        agent.agent_id.clone()?,
+                        agent_prompt_id.clone(),
+                        agent.originator.clone(),
+                    ))
+                } else {
+                    None
+                }
+            })
+        else {
+            return false;
+        };
+        if self
+            .agent_store
+            .agent(&durable_agent_id)
+            .and_then(|tree| tree.marked_inference_through(&agent_prompt_id))
+            .is_none()
+        {
+            return false;
+        }
+        self.publish_for_agent(
+            cid,
+            Event::AgentPromptTerminated(AgentPromptTerminated {
+                agent_id: crate::parse_agent_id(&durable_agent_id),
+                agent_prompt_id,
+                reason: AgentPromptTerminationReason::Stale,
+                originator,
+            }),
+        );
+        true
     }
 
     /// Final commit: persist (when applicable), append to the event
@@ -6073,18 +6174,21 @@ impl Harness {
         // `publish_for_agent_from` used to do — the explicit
         // parent in `apply_event_at` does the same job without
         // touching the global cursor.
-        let parent_for_fold = if sync_head_for
-            .as_ref()
-            .is_some_and(|s| self.agents.get(&s.cid).is_some_and(|c| c.head.is_none()))
-        {
-            tau_core::AgentEventParent::Root
-        } else {
-            sync_head_for
+        let parent_for_fold =
+            if let Some(parent) = sync_head_for.as_ref().and_then(|sync| sync.fold_parent) {
+                parent
+            } else if sync_head_for
                 .as_ref()
-                .and_then(|s| self.agents.get(&s.cid).and_then(|c| c.head))
-                .map(tau_core::AgentEventParent::Under)
-                .unwrap_or(tau_core::AgentEventParent::InheritHead)
-        };
+                .is_some_and(|s| self.agents.get(&s.cid).is_some_and(|c| c.head.is_none()))
+            {
+                tau_core::AgentEventParent::Root
+            } else {
+                sync_head_for
+                    .as_ref()
+                    .and_then(|s| self.agents.get(&s.cid).and_then(|c| c.head))
+                    .map(tau_core::AgentEventParent::Under)
+                    .unwrap_or(tau_core::AgentEventParent::InheritHead)
+            };
         // Stamp once and share with every downstream observer: the durable
         // record on disk, the debug JSONL line, and the wire delivery.
         // Sampling the clock separately would let timing analyses
@@ -6216,19 +6320,14 @@ impl Harness {
         if let Some(sync) = sync_head_for.as_ref()
             && let Some(c) = self.agents.get_mut(&sync.cid)
         {
-            match (
-                &event,
-                append_outcome
-                    .as_ref()
-                    .and_then(|outcome| outcome.folded_node_id),
-            ) {
+            match (&event, append_outcome.as_ref()) {
                 (Event::AgentHeadMoved(moved), _) => {
                     c.head = moved.head.as_option();
                     c.branch_generation = c.branch_generation.saturating_add(1);
                     c.loop_guard.invalidate_branch();
                     c.pending_prompts.retain(|prompt| !prompt.is_loop_guard());
                 }
-                (_, Some(node_id)) => {
+                (_, Some(outcome)) if outcome.folded_node_id.is_some() => {
                     // Only advance the agent's own branch cursor when
                     // the event produced a tree node. `tree.head()` is the
                     // *global* write cursor and may sit on a sibling
@@ -6237,7 +6336,7 @@ impl Harness {
                     // only tool calls) would graft this agent's next
                     // tool request onto the wrong branch and produce orphan
                     // ToolUse blocks downstream.
-                    c.head = Some(node_id);
+                    c.head = outcome.selected_head_id;
                     // Keep the dedup map's "built for" cursor in lockstep with
                     // the just-folded linear extension. The dedup-decision
                     // path already inserted any new (hash, call_id) entry
@@ -6256,7 +6355,9 @@ impl Harness {
                     // gate this call on the event variant: that would re-couple
                     // `commit_event` to per-tool semantics that the dedup
                     // module deliberately owns.
-                    c.result_dedup.note_head_advanced_to(node_id);
+                    if let Some(node_id) = outcome.selected_head_id {
+                        c.result_dedup.note_head_advanced_to(node_id);
+                    }
                 }
                 _ => {}
             }
@@ -6282,20 +6383,14 @@ impl Harness {
             let activation_through = append_outcome
                 .as_ref()
                 .and_then(|outcome| outcome.folded_node_id)
-                .map(tau_proto::AgentHead::Node)
-                .or_else(|| {
-                    self.agents.get(&sync.cid).map(|agent| {
-                        agent
-                            .head
-                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-                    })
-                });
-            let activation_cut = self.activation_cut_before_current_head(&sync.cid);
-            self.enqueue_committed_activation_dispatch(
-                sync.cid.clone(),
-                activation_cut,
-                activation_through,
-            );
+                .map(tau_proto::AgentHead::Node);
+            if let Some(outcome) = append_outcome.as_ref() {
+                self.enqueue_committed_activation_occurrence(
+                    sync.cid.clone(),
+                    outcome.seq,
+                    activation_through,
+                );
+            }
         }
         let agent_publish_completion = sync_head_for
             .as_ref()
@@ -6493,6 +6588,7 @@ impl Harness {
                     cid: sync.cid.clone(),
                     agent_id: sync.agent_id.clone(),
                     session_generation: sync.session_generation,
+                    fold_parent: None,
                     suppress_activation_dispatch: true,
                     continuation: Some(PostCommitContinuation::PromptDelivery(continuation)),
                     notify_watchers: false,
@@ -8025,6 +8121,76 @@ impl Harness {
                 self.try_advance_queue();
             }
         }
+        if let Event::AgentPromptTerminated(terminated) = event
+            && append_outcome.is_some()
+            && let Some(cid) = self
+                .runtime_agent_id_for_target_agent(Some(terminated.agent_id.as_str()))
+                .or_else(|| {
+                    self.agents.iter().find_map(|(cid, agent)| {
+                        (agent.agent_id.as_deref() == Some(terminated.agent_id.as_str()))
+                            .then(|| cid.clone())
+                    })
+                })
+        {
+            let finish_unload = self.agents.get(&cid).is_some_and(|agent| agent.terminating);
+            self.prompt_operations.remove(&terminated.agent_prompt_id);
+            self.prompt_context_limits
+                .remove(&terminated.agent_prompt_id);
+            self.prompt_context_size_alerts
+                .remove(&terminated.agent_prompt_id);
+            self.prompt_semantic_output
+                .remove(&terminated.agent_prompt_id);
+            if terminated.reason == AgentPromptTerminationReason::Canceled {
+                self.canceled_prompts
+                    .insert(terminated.agent_prompt_id.clone());
+                self.fail_pending_initial_prompts(
+                    &cid,
+                    tau_proto::AgentPromptFailureStage::Canceled,
+                    "initial prompt was canceled",
+                );
+            }
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
+                agent.in_flight_prompt = None;
+                if agent.last_prompt_id.as_ref() == Some(&terminated.agent_prompt_id) {
+                    agent.last_prompt_id = None;
+                }
+                agent.pending_cancel = None;
+                agent.work_status.clear_working_reminder();
+                if terminated.reason == AgentPromptTerminationReason::Canceled {
+                    agent.pending_prompts.clear();
+                }
+            }
+            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            self.resolve_materialized_message_wakes(&cid);
+            self.cancel_pending_context_claim(&cid);
+            self.release_start_agent_request(&cid);
+            self.remember_ephemeral_provider_prompt(&terminated.agent_prompt_id);
+            if let Some(pending) = self
+                .pending_stale_provider_responses
+                .remove(&terminated.agent_prompt_id)
+            {
+                debug_assert_eq!(pending.response.agent_prompt_id, terminated.agent_prompt_id);
+            }
+            self.discard_finished_response_prompt_tracking(&terminated.agent_prompt_id);
+            if finish_unload {
+                self.remove_agent_after_prompt_closure(&cid);
+                return;
+            }
+            self.try_advance_queue();
+        }
+        if matches!(
+            event,
+            Event::ProviderResponseFinished(_)
+                | Event::ProviderToolResult(_)
+                | Event::ProviderToolError(_)
+                | Event::ToolCancelled(_)
+        ) && let Some(agent_id) = self.agent_id_for_event(event)
+            && let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+        {
+            self.resolve_materialized_message_wakes(&cid);
+            self.try_advance_queue();
+        }
         if let Event::SessionAgentUnloaded(unloaded) = event
             && unloaded.session_id == self.current_session_id
         {
@@ -8180,7 +8346,8 @@ impl Harness {
             if self.agents.get(&cid).is_none_or(|agent| agent.terminating) {
                 return;
             }
-            if let Some(node_id) = outcome.folded_node_id
+            if outcome.folded_node_id.is_some()
+                && let Some(node_id) = outcome.selected_head_id
                 && let Some(agent) = self.agents.get_mut(&cid)
             {
                 agent.head = Some(node_id);
@@ -8235,6 +8402,9 @@ impl Harness {
             );
             self.activate_waits_for(&cid, activation);
             self.preempt_queued_tool_calls_for_message_received(&cid);
+            if self.terminalize_uncertain_marked_owner_for_live_activation(&cid) {
+                return;
+            }
             self.try_advance_queue();
             return;
         }
@@ -9003,6 +9173,7 @@ impl Harness {
             Event::AgentOuterTurnStarted(turn) => Some(turn.agent_id.clone()),
             Event::AgentOuterTurnFinished(turn) => Some(turn.agent_id.clone()),
             Event::AgentPromptCreated(prompt) => Some(prompt.agent_id.clone()),
+            Event::AgentPromptTerminated(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
             Event::AgentCompacted(compacted) => Some(compacted.agent_id.clone()),
             Event::AgentStandaloneCompactionStarted(started) => Some(started.agent_id.clone()),
@@ -16127,6 +16298,7 @@ impl Harness {
                     cid,
                     agent_id: Some(crate::parse_agent_id(agent_id)),
                     session_generation: self.current_session_generation,
+                    fold_parent: None,
                     suppress_activation_dispatch: false,
                     continuation: None,
                     notify_watchers: false,
@@ -16806,18 +16978,28 @@ impl Harness {
         else {
             return;
         };
+        let marked_owner = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|tree| tree.marked_inference_through(&canceled_prompt_id))
+            .is_some();
         self.cancel_running_compaction(cid, &canceled_prompt_id);
-        self.canceled_prompts.insert(canceled_prompt_id.clone());
-        self.prompt_operations.remove(&canceled_prompt_id);
-        self.prompt_context_limits.remove(&canceled_prompt_id);
-        self.prompt_context_size_alerts.remove(&canceled_prompt_id);
-        self.prompt_semantic_output.remove(&canceled_prompt_id);
         self.publish_prompt_terminated(
             session_id,
             canceled_prompt_id.clone(),
             AgentPromptTerminationReason::Canceled,
             originator,
         );
+        if marked_owner {
+            return;
+        }
+        self.canceled_prompts.insert(canceled_prompt_id.clone());
+        self.prompt_operations.remove(&canceled_prompt_id);
+        self.prompt_context_limits.remove(&canceled_prompt_id);
+        self.prompt_context_size_alerts.remove(&canceled_prompt_id);
+        self.prompt_semantic_output.remove(&canceled_prompt_id);
         self.fail_pending_initial_prompts(
             cid,
             tau_proto::AgentPromptFailureStage::Canceled,
@@ -17218,6 +17400,18 @@ impl Harness {
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.terminating = false;
         }
+        let marked_owner = spid.as_ref().is_some_and(|prompt_id| {
+            self.agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(|tree| tree.marked_inference_through(prompt_id))
+                .is_some()
+        });
+        if marked_owner {
+            self.remove_agent(cid);
+            return;
+        }
         self.cancel_pending_context_claim(cid);
         if let Some(spid) = spid {
             self.cancel_running_compaction(cid, &spid);
@@ -17424,8 +17618,71 @@ impl Harness {
             "the shell extension instance disconnected before the command completed",
         );
         let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
+        let lost_provider_prompts = self
+            .pending_provider_prompts
+            .iter()
+            .filter_map(|(prompt_id, provider_id)| {
+                (provider_id == connection_id).then_some(prompt_id.clone())
+            })
+            .collect::<Vec<_>>();
         self.pending_provider_prompts
             .retain(|_, provider_id| provider_id != connection_id);
+        for prompt_id in lost_provider_prompts {
+            let Some(cid) = self.prompt_agents.get(&prompt_id).cloned() else {
+                continue;
+            };
+            let deferred_activation = self.agents.get(&cid).is_some_and(|agent| {
+                agent
+                    .pending_message_wakes
+                    .iter()
+                    .any(|wake| wake.node_id.is_none())
+                    || agent
+                        .agent_id
+                        .as_deref()
+                        .and_then(|agent_id| self.agent_store.agent(agent_id))
+                        .is_some_and(|tree| {
+                            tree.marked_inference_has_deferred_prompt_activation(&prompt_id)
+                        })
+            });
+            let checkpoint = self
+                .agents
+                .get(&cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(|tree| tree.marked_inference_checkpoint(&prompt_id).cloned());
+            if let Some(checkpoint) = checkpoint {
+                if let Some(agent) = self.agents.get_mut(&cid) {
+                    agent.activation_dispatch =
+                        path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
+                            agent_prompt_id: prompt_id.clone(),
+                            through: checkpoint.through,
+                            model: checkpoint.model,
+                            operation: checkpoint.operation,
+                            activation_cut: checkpoint.activation_cut,
+                        };
+                    agent.in_flight_prompt = None;
+                }
+                if deferred_activation
+                    && let Some((agent_id, originator)) = self.agents.get(&cid).and_then(|agent| {
+                        Some((
+                            crate::parse_agent_id(agent.agent_id.as_deref()?),
+                            agent.originator.clone(),
+                        ))
+                    })
+                {
+                    self.publish_for_agent(
+                        &cid,
+                        Event::AgentPromptTerminated(AgentPromptTerminated {
+                            agent_id,
+                            agent_prompt_id: prompt_id,
+                            reason: AgentPromptTerminationReason::Stale,
+                            originator,
+                        }),
+                    );
+                }
+            }
+        }
         self.client_writers.remove(&connection_id.clone());
         self.external_message_peers.remove(&connection_id.clone());
         let canceled_peer_receives = self
@@ -18694,15 +18951,17 @@ impl Harness {
                 .and_then(|conv| conv.agent_id.clone())
                 .expect("agent has durable id"),
         );
-        self.publish_event(
-            source,
-            Event::AgentPromptTerminated(AgentPromptTerminated {
-                agent_id,
-                agent_prompt_id,
-                reason,
-                originator,
-            }),
-        );
+        let event = Event::AgentPromptTerminated(AgentPromptTerminated {
+            agent_id,
+            agent_prompt_id,
+            reason,
+            originator,
+        });
+        if let Some(cid) = cid {
+            self.publish_event_for_agent(&cid, source, event);
+        } else {
+            self.publish_event(source, event);
+        }
     }
 
     fn remove_discovered_context(&mut self, source_id: &tau_proto::ConnectionId) {
@@ -19483,6 +19742,7 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
                 session_generation: self.current_session_generation,
+                fold_parent: None,
                 suppress_activation_dispatch: false,
                 continuation: None,
                 notify_watchers: false,
@@ -21620,6 +21880,32 @@ impl Harness {
         }
 
         for (cid, prompt_session_id, spid, originator) in &to_cancel {
+            let marked_owner = self
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(|tree| tree.marked_inference_through(spid))
+                .is_some();
+            if marked_owner {
+                self.publish_prompt_terminated(
+                    prompt_session_id.clone(),
+                    spid.clone(),
+                    AgentPromptTerminationReason::Canceled,
+                    originator.clone(),
+                );
+                self.publish_event(
+                    None,
+                    Event::UiCancelPrompt(UiCancelPrompt {
+                        session_id: session_id.clone(),
+                        target_agent_id: self
+                            .target_agent_id_for_agent(cid)
+                            .map(crate::parse_agent_id),
+                        agent_prompt_id: Some(spid.clone()),
+                    }),
+                );
+                continue;
+            }
             self.cancel_pending_context_claim(cid);
             self.cancel_running_compaction(cid, spid);
             self.prompt_semantic_output.remove(spid);
@@ -21902,6 +22188,9 @@ impl Harness {
         self.prompt_context_limits.clear();
         self.prompt_context_size_alerts.clear();
         self.prompt_semantic_output.clear();
+        self.pending_stale_provider_responses.clear();
+        self.pending_replay_prompt_activation_occurrences.clear();
+        self.pending_replay_uncertain_stale.clear();
         self.local_route_failure_prompts.clear();
         self.prompt_operations.clear();
         self.prompt_tool_specs.clear();
@@ -22022,6 +22311,7 @@ impl Harness {
         }
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_agents_from_session();
+            self.activate_replayed_prompt_occurrences();
         }
         self.publish_delegate_roles_context();
 
@@ -23294,6 +23584,42 @@ impl Harness {
     }
 
     fn remove_agent(&mut self, cid: &AgentId) {
+        let marked_owner = self.agents.get(cid).and_then(|agent| {
+            let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+            let checkpoint = tree.unresolved_marked_inference_checkpoint()?;
+            Some((
+                crate::parse_agent_id(agent.agent_id.as_deref()?),
+                checkpoint.agent_prompt_id.clone(),
+                agent.session_id.clone(),
+                agent.originator.clone(),
+                agent.terminating,
+            ))
+        });
+        if let Some((agent_id, prompt_id, _session_id, originator, already_terminating)) =
+            marked_owner
+        {
+            if !already_terminating {
+                if let Some(agent) = self.agents.get_mut(cid) {
+                    agent.terminating = true;
+                }
+                self.publish_event_for_agent(
+                    cid,
+                    None,
+                    Event::AgentPromptTerminated(AgentPromptTerminated {
+                        agent_id,
+                        agent_prompt_id: prompt_id,
+                        reason: AgentPromptTerminationReason::Canceled,
+                        originator,
+                    }),
+                );
+            }
+            return;
+        }
+        self.remove_agent_after_prompt_closure(cid);
+    }
+
+    /// Tear down runtime state only after any marked prompt closure committed.
+    fn remove_agent_after_prompt_closure(&mut self, cid: &AgentId) {
         self.tombstone_ephemeral_provider_prompts_for_agent(cid);
         self.pending_agent_publish_completions.remove(cid);
         self.pending_ui_compactions_after_wait.remove(cid);
@@ -23367,9 +23693,6 @@ impl Harness {
             "agent teardown discarded initial prompt",
         );
         let Some((session_id, agent_id)) = self.agents.get_mut(cid).and_then(|conv| {
-            if conv.terminating {
-                return None;
-            }
             conv.terminating = true;
             conv.pending_prompts.clear();
             conv.pending_message_wakes.clear();
@@ -23460,6 +23783,118 @@ impl Harness {
             },
         };
         Some(prompt_id)
+    }
+
+    /// Rebuild payload-free activation obligations from uncovered durable
+    /// facts.
+    fn derive_replay_message_wakes(&self, agent_id: &str) -> VecDeque<PendingMessageWake> {
+        let Some(tree) = self.agent_store.agent(agent_id) else {
+            return VecDeque::new();
+        };
+        let Ok(records) = self.agent_store.agent_events(agent_id) else {
+            return VecDeque::new();
+        };
+        records
+            .iter()
+            .filter_map(|record| {
+                let source = match &record.event {
+                    Event::AgentMessageReceived(message) => {
+                        Some(PendingMessageWakeSource::AgentMessageReceived {
+                            durable_event_seq: record.seq,
+                            activation_class: agent_message_activation_class(message)?,
+                            peer_admission_bytes: None,
+                        })
+                    }
+                    event if event.message_agent_target().is_some() => {
+                        tau_proto::project_message_fact(event)
+                            .and_then(Result::ok)
+                            .filter(|projection| projection.activates_model)
+                            .map(|_| PendingMessageWakeSource::MessageFact {
+                                durable_event_seq: record.seq,
+                            })
+                    }
+                    _ => None,
+                }?;
+                let node_id = tree.node_for_durable_event_seq(record.seq);
+                let covered = node_id.is_some_and(|node_id| {
+                    records
+                        .iter()
+                        .skip(record.seq.get() as usize + 1)
+                        .any(|later| {
+                            matches!(
+                                &later.event,
+                                Event::AgentInferenceDispatchStarted(checkpoint)
+                                    if tree.is_ancestor_head(
+                                        tau_proto::AgentHead::Node(node_id),
+                                        checkpoint.through,
+                                    )
+                            )
+                        })
+                });
+                if covered {
+                    return None;
+                }
+                Some(crate::agent::PendingMessageWake {
+                    source,
+                    node_id,
+                    activation_observation: None,
+                    source_observation: Some(record.observation_id),
+                })
+            })
+            .collect()
+    }
+
+    /// Rebuild each uncovered activating prompt occurrence by durable sequence.
+    fn derive_replay_prompt_activations(
+        &self,
+        agent_id: &str,
+    ) -> Vec<ReplayPromptActivationOccurrence> {
+        let Some(tree) = self.agent_store.agent(agent_id) else {
+            return Vec::new();
+        };
+        let Ok(records) = self.agent_store.agent_events(agent_id) else {
+            return Vec::new();
+        };
+        records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentPromptSubmitted(prompt) if prompt.inference_activation
+                ) || matches!(
+                    &record.event,
+                    Event::AgentUserMessageInjected(prompt) if prompt.inference_activation
+                ) || matches!(
+                    &record.event,
+                    Event::AgentPromptSteered(prompt) if prompt.inference_activation
+                )
+            })
+            .filter_map(|record| {
+                let node_id = tree.node_for_durable_event_seq(record.seq);
+                let covered = node_id.is_some_and(|node_id| {
+                    records
+                        .iter()
+                        .skip(record.seq.get() as usize + 1)
+                        .any(|later| {
+                            matches!(
+                                &later.event,
+                                Event::AgentInferenceDispatchStarted(checkpoint)
+                                    if tree.is_ancestor_head(
+                                        tau_proto::AgentHead::Node(node_id),
+                                        checkpoint.through,
+                                    )
+                            )
+                        })
+                });
+                (!covered).then_some(ReplayPromptActivationOccurrence {
+                    source_seq: record.seq,
+                    placement: node_id.map_or(
+                        ReplayPromptActivationPlacement::Deferred,
+                        ReplayPromptActivationPlacement::Materialized,
+                    ),
+                })
+            })
+            .collect()
     }
 
     fn rehydrate_agents_from_session(&mut self) {
@@ -23759,78 +24194,60 @@ impl Harness {
                     "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
                 ));
             }
-            let recovery_watermark = match &restored_compaction {
-                Some(tau_core::StandaloneCompactionRecovery::Blocked { failed, .. }) => {
-                    Some(failed.cut)
-                }
-                Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. }) => None,
-                Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
-                    Some(checkpoint.through)
-                }
-                Some(tau_core::StandaloneCompactionRecovery::Interrupted(started)) => {
-                    Some(started.cut)
-                }
-                None => restored_inference.as_ref().map(|recovery| match recovery {
-                    tau_core::InferenceDispatchRecovery::CompletedThrough(through) => *through,
-                    tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint) => {
-                        checkpoint.through
-                    }
-                    tau_core::InferenceDispatchRecovery::ContextRecoveryRequired(checkpoint) => {
-                        checkpoint.activation_cut.unwrap_or(checkpoint.through)
-                    }
-                }),
-            };
             let derive_activations = !matches!(
                 restored_compaction,
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. })
             );
-            if derive_activations {
-                let has_replay_activation =
-                    self.agent_store
-                        .agent(agent_id.as_str())
-                        .is_some_and(|tree| {
-                            let branch = tree.branch_node_ids_from(head);
-                            let first_outstanding = recovery_watermark.map_or_else(
-                                || {
-                                    branch
-                                        .iter()
-                                        .rposition(|node_id| {
-                                            tree.node(*node_id).is_some_and(|node| {
-                                                matches!(
-                                                    node.entry,
-                                                    tau_core::AgentEntry::AssistantResponse { .. }
-                                                        | tau_core::AgentEntry::ToolResults { .. }
-                                                        | tau_core::AgentEntry::Compaction { .. }
-                                                )
-                                            })
-                                        })
-                                        .map_or(0, |index| index.saturating_add(1))
-                                },
-                                |watermark| {
-                                    watermark.as_option().map_or(0, |watermark_node| {
-                                        branch
-                                            .iter()
-                                            .position(|node| *node == watermark_node)
-                                            .map_or(0, |index| index.saturating_add(1))
-                                    })
-                                },
-                            );
-                            branch[first_outstanding..].iter().any(|node_id| {
-                                tree.node(*node_id).is_some_and(|node| {
-                                    matches!(
-                                        node.entry,
-                                        tau_core::AgentEntry::UserInput {
-                                            inference_activation: true,
-                                            ..
-                                        }
-                                    )
-                                })
-                            })
-                        });
-                if let Some(conv) = self.agents.get_mut(&cid) {
-                    conv.pending_message_wakes.clear();
-                    conv.pending_replay_activation = has_replay_activation;
-                }
+            let replay_message_wakes = self.derive_replay_message_wakes(agent_id.as_str());
+            let replay_prompt_activations =
+                self.derive_replay_prompt_activations(agent_id.as_str());
+            if let Some(conv) = self.agents.get_mut(&cid) {
+                conv.pending_message_wakes = replay_message_wakes;
+            }
+            if derive_activations && !replay_prompt_activations.is_empty() {
+                self.pending_replay_prompt_activation_occurrences
+                    .insert(cid.clone(), replay_prompt_activations);
+            }
+            let uncertain_prompt_activation = restored_inference.as_ref().is_some_and(|recovery| {
+                let tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint) = recovery
+                else {
+                    return false;
+                };
+                self.agent_store
+                    .agent(agent_id.as_str())
+                    .is_some_and(|tree| {
+                        tree.marked_inference_has_deferred_prompt_activation(
+                            &checkpoint.agent_prompt_id,
+                        )
+                    })
+            });
+            let uncertain_with_deferred_activation = restored_compaction.is_none()
+                && matches!(
+                    restored_inference,
+                    Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(_))
+                )
+                && (uncertain_prompt_activation
+                    || self.agents.get(&cid).is_some_and(|agent| {
+                        agent
+                            .pending_message_wakes
+                            .iter()
+                            .any(|wake| wake.node_id.is_none())
+                    }));
+            if uncertain_with_deferred_activation
+                && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
+                    restored_inference.clone()
+                && let Some(originator) =
+                    self.agents.get(&cid).map(|agent| agent.originator.clone())
+            {
+                self.pending_replay_uncertain_stale.insert(
+                    cid.clone(),
+                    AgentPromptTerminated {
+                        agent_id: agent_id.clone(),
+                        agent_prompt_id: checkpoint.agent_prompt_id,
+                        reason: AgentPromptTerminationReason::Stale,
+                        originator,
+                    },
+                );
             }
             self.session_loaded_agents.insert(agent_id.clone());
             if let Some(tau_core::StandaloneCompactionRecovery::Interrupted(started)) =
@@ -24694,6 +25111,7 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
                 session_generation: self.current_session_generation,
+                fold_parent: None,
                 suppress_activation_dispatch: false,
                 continuation: None,
                 notify_watchers: false,
@@ -24772,6 +25190,7 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
                 session_generation: self.current_session_generation,
+                fold_parent: None,
                 suppress_activation_dispatch: false,
                 continuation: None,
                 notify_watchers: false,
@@ -24857,6 +25276,7 @@ impl Harness {
                     cid: cid.clone(),
                     agent_id: Some(crate::parse_agent_id(agent_id)),
                     session_generation: self.current_session_generation,
+                    fold_parent: None,
                     suppress_activation_dispatch: false,
                     continuation: None,
                     notify_watchers: false,
@@ -24947,6 +25367,7 @@ impl Harness {
                         cid: cid.clone(),
                         agent_id: Some(agent_id_proto.clone()),
                         session_generation: self.current_session_generation,
+                        fold_parent: None,
                         suppress_activation_dispatch: false,
                         continuation: None,
                         notify_watchers: false,
@@ -25157,6 +25578,7 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id: Some(agent_id),
                 session_generation: self.current_session_generation,
+                fold_parent: None,
                 suppress_activation_dispatch: true,
                 continuation: Some(PostCommitContinuation::PromptMaterialization(
                     PromptDispatchContinuation {
@@ -27574,11 +27996,26 @@ impl Harness {
         response: &ProviderResponseFinished,
         source: Option<&tau_proto::ConnectionId>,
     ) {
+        let marked_owner = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|tree| tree.marked_inference_through(&response.agent_prompt_id))
+            .is_some();
         if let Some((session_id, originator)) = self
             .agents
             .get(cid)
             .map(|agent| (agent.session_id.clone(), agent.originator.clone()))
         {
+            if marked_owner {
+                self.pending_stale_provider_responses.insert(
+                    response.agent_prompt_id.clone(),
+                    PendingStaleProviderResponse {
+                        response: response.clone(),
+                    },
+                );
+            }
             self.publish_prompt_terminated_from(
                 session_id,
                 response.agent_prompt_id.clone(),
@@ -27586,6 +28023,9 @@ impl Harness {
                 originator,
                 source,
             );
+        }
+        if marked_owner {
+            return;
         }
         self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
         if let Some(agent) = self.agents.get_mut(cid) {
@@ -27741,11 +28181,26 @@ impl Harness {
         if !self.is_finished_response_stale(cid, &response.agent_prompt_id) {
             return false;
         }
+        let marked_owner = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|tree| tree.marked_inference_through(&response.agent_prompt_id))
+            .is_some();
         if let Some((session_id, originator)) = self
             .agents
             .get(cid)
             .map(|conv| (conv.session_id.clone(), conv.originator.clone()))
         {
+            if marked_owner {
+                self.pending_stale_provider_responses.insert(
+                    response.agent_prompt_id.clone(),
+                    PendingStaleProviderResponse {
+                        response: response.clone(),
+                    },
+                );
+            }
             self.publish_prompt_terminated_from(
                 session_id,
                 response.agent_prompt_id.clone(),
@@ -27758,7 +28213,9 @@ impl Harness {
             "discarding stale agent response for agent_prompt_id={}",
             response.agent_prompt_id
         ));
-        self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+        if !marked_owner {
+            self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+        }
         true
     }
 

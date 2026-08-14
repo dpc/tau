@@ -20,6 +20,13 @@ display metadata, and context identity.
 `typed_image` returns only a compiled fixed 1×1 PNG as native typed result
 content. It accepts no arguments or runtime control and adds no image decoding,
 filesystem, network, environment, secret, or child-process authority.
+`provider_context_raw_message` is disabled by default. The deterministic
+provider-context fixture enables it to publish one existing message-bridge
+delivered report to the exact `agent_id` and `text` arguments. It adds no
+network ingress, persistence policy, or harness protocol surface. The extension
+declares the existing `MessageBridge` peer capability statically because the
+handshake precedes config; without the flag, no report-producing tool is
+registered.
 
 `hold_no_side_effect` owns at most one worker. It publishes correlated readiness
 only after worker startup, accepts cancellation only for the exact active call,

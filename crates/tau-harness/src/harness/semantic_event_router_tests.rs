@@ -11,6 +11,21 @@ use tau_proto::{
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
 use crate::parse_agent_id;
 
+/// Prompt termination remains transient unless exact-owner routing explicitly
+/// requires its semantic append.
+#[test]
+fn prompt_termination_persists_only_when_explicitly_required() {
+    let event = Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        agent_id: parse_agent_id("terminated-agent"),
+        agent_prompt_id: tau_proto::AgentPromptId::parse("ap-terminated").expect("prompt id"),
+        reason: tau_proto::AgentPromptTerminationReason::Canceled,
+        originator: PromptOriginator::User,
+    });
+    assert!(!event.defaults_to_persist());
+    assert!(!should_persist_event(&event, false));
+    assert!(should_persist_event(&event, true));
+}
+
 /// Metadata requests never enter semantic history for either caller-selected
 /// persistence value, while their canonical successors remain durable.
 #[test]

@@ -11,6 +11,89 @@ fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFac
     }
 }
 
+/// Overlapping V1 owners fail before either the journal or cached tree mutates.
+#[test]
+fn overlapping_v1_owner_append_rejects_before_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("v1-overlap").expect("agent id");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("durable store");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "H".to_owned(),
+                inference_activation: true,
+                message_class: Default::default(),
+            }),
+        )
+        .expect("seed head");
+    let checkpoint = |prompt: &str| {
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: tau_proto::AgentPromptId::parse(prompt).expect("prompt id"),
+            through: tau_proto::AgentHead::Node(NodeId::new(0)),
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        })
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::Under(NodeId::new(0)),
+            checkpoint("ap-first"),
+            UnixMicros::new(1),
+        )
+        .expect("first owner");
+    let before = store.agent_events(agent_id.as_str()).expect("events");
+    let before_tree = store.agent(agent_id.as_str()).expect("tree").clone();
+    let journal = temp.path().join(agent_id.as_str()).join("events.cbor");
+    let before_bytes = fs::read(&journal).expect("journal bytes");
+    let error = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::Under(NodeId::new(0)),
+            checkpoint("ap-second"),
+            UnixMicros::new(2),
+        )
+        .expect_err("overlap must reject");
+    assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("events"),
+        before
+    );
+    assert_eq!(store.agent(agent_id.as_str()).expect("tree"), &before_tree);
+    assert_eq!(fs::read(&journal).expect("journal bytes"), before_bytes);
+    drop(store);
+    let mut reopened = AgentStore::open_lazy(temp.path()).expect("reopen store");
+    reopened
+        .lock_and_recover_agent(agent_id.as_str())
+        .expect("clean reopen");
+    assert_eq!(
+        reopened.agent_events(agent_id.as_str()).expect("events"),
+        before
+    );
+    let mut overlapping_replay = before.clone();
+    overlapping_replay.push(PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([9; 16]),
+        seq: PersistedAgentEventSeq::new(2),
+        source: None,
+        event: checkpoint("ap-replay-overlap"),
+        parent: AgentEventParent::Under(NodeId::new(0)),
+        fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        recorded_at: UnixMicros::new(3),
+    });
+    assert!(
+        AgentTree::try_from_events(agent_id, &overlapping_replay).is_err(),
+        "cold replay must reject overlapping marked owners"
+    );
+}
+
 /// A store-wide memory-only policy keeps unexpected agent activity replayable
 /// without consulting or creating its supplied durable root.
 #[test]
@@ -616,6 +699,7 @@ fn strict_replay_rejects_framed_record_with_malformed_agent_message_id() {
             message: "hello".to_owned(),
         }),
         parent: AgentEventParent::InheritHead,
+        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
         recorded_at: UnixMicros::new(42),
     };
     let mut malformed = serde_json::to_value(valid).expect("serialize record value");
