@@ -158,6 +158,14 @@ the terminal once before publishing editor context or accepting cloned-handle
 output. The resulting behavior is specified by
 [SPEC-tau-cli-transcript-context](SPEC-tau-cli-transcript-context.md).
 
+The visible, hidden, and no-agent presentation models and retroactive-render
+caches retain accepted transcript data until an explicit new-session reset or
+interactive UI process exit. They have no aggregate item or byte eviction.
+`redraw_history_size`, cold-attach staging, and renderer FIFO limits do not
+bound retained presentation state. Long-running or high-volume UIs can
+therefore consume increasing memory and make selection, resize, and
+retroactive display toggles expensive.
+
 The socket reader admits decoded deliveries to one FIFO bounded at 1,024 items
 and 64 MiB of encoded frames. Full admission backpressures socket reading and
 never drops a decoded delivery. Socket disconnect is the final item in that
