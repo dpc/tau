@@ -36,7 +36,8 @@ use crate::specs::{
 };
 use crate::tools::write::{
     handle as handle_signed_tool_with_limit, parse_tags, pause_before_test_publication,
-    pause_before_test_publication_with_deadline_after_entry, validate_body,
+    pause_before_test_publication_with_deadline_after_entry,
+    pause_before_test_publication_without_deadline, validate_body,
 };
 use crate::tools::{ToolFailure, tool_error};
 

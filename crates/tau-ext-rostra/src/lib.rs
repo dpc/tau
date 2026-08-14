@@ -586,6 +586,8 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
     #[cfg(test)]
     let deadline_after_publication_entry =
         tools::write::take_test_deadline_after_publication_entry(&call_id);
+    #[cfg(test)]
+    let bypass_tool_deadline = tools::write::test_tool_deadline_is_bypassed(&call_id);
     let (start_tx, start_rx) = oneshot::channel();
     let worker = cx
         .state
@@ -622,7 +624,9 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
                 publication_admitted: Arc::clone(&publication_admitted),
             };
             #[cfg(test)]
-            let completion = if let Some(deadline_start_rx) = deadline_after_publication_entry {
+            let completion = if bypass_tool_deadline {
+                Ok((&mut task.task).await)
+            } else if let Some(deadline_start_rx) = deadline_after_publication_entry {
                 tokio::select! {
                     completion = &mut task.task => {
                         tools::write::discard_test_publication_gate(&call_id);

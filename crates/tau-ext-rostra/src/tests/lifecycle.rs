@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Wait for and return the first terminal emitted for one tool call.
+fn wait_for_call_terminal(output: &SharedWriter, call_id: &tau_proto::ToolCallId) -> Event {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(event) = output_events(output).into_iter().find(|event| match event {
+            Event::ToolResultReported(result) => result.call_id == *call_id,
+            Event::ToolErrorReported(error) => error.call_id == *call_id,
+            Event::ToolCancelledReported(cancelled) => cancelled.call_id == *call_id,
+            _ => false,
+        }) {
+            return event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Rostra call terminal"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Writer that blocks on the first optional bell while the detached FIFO fills.
 struct SaturationWriter {
     /// Bytes accepted by the production protocol writer.
@@ -291,7 +311,7 @@ fn rejected_configuration_preserves_active_call_and_previous_client() {
         .expect("configure Rostra");
     let mut held = signed_invoke(POST_TOOL, serde_json::json!({"body":"original completion"}));
     held.call_id = tau_proto::ToolCallId::new("held-during-config-rejection");
-    let gate = pause_before_test_publication(held.call_id.clone());
+    let gate = pause_before_test_publication_without_deadline(held.call_id.clone());
     input
         .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
             held.clone(),
@@ -343,12 +363,19 @@ fn rejected_configuration_preserves_active_call_and_previous_client() {
     gate.committed
         .recv_timeout(TEST_GATE_WAIT)
         .expect("original call commits once");
-    wait_for_output_event(&output, |event| {
-        matches!(
-            event,
-            Event::ToolResultReported(result) if result.call_id == held.call_id
-        )
-    });
+    let held_terminal = wait_for_call_terminal(&output, &held.call_id);
+    let Event::ToolResultReported(held_result) = &held_terminal else {
+        panic!("held call's first terminal must be its result, got {held_terminal:?}");
+    };
+    let tau_proto::CborValue::Text(held_text) = &held_result.result else {
+        panic!("write result text");
+    };
+    let held_payload: serde_json::Value =
+        serde_json::from_str(held_text).expect("write result JSON");
+    assert_eq!(held_payload["identity"], secret.id().to_string());
+    assert_eq!(held_payload["operation"], "post");
+    assert_eq!(held_payload["local_state"], "stored");
+    assert_eq!(held_payload["publication"], "asynchronous_best_effort");
     let mut status = signed_invoke(STATUS_TOOL, serde_json::json!({}));
     status.call_id = tau_proto::ToolCallId::new("status-after-config-rejection");
     input
@@ -369,23 +396,16 @@ fn rejected_configuration_preserves_active_call_and_previous_client() {
         .expect("Rostra runner thread")
         .expect("Rostra runner");
     let events = output_events(&output);
-    let held_results = events
+    let held_terminals = events
         .iter()
-        .filter_map(|event| match event {
-            Event::ToolResultReported(result) if result.call_id == held.call_id => Some(result),
-            _ => None,
+        .filter(|event| match event {
+            Event::ToolResultReported(result) => result.call_id == held.call_id,
+            Event::ToolErrorReported(error) => error.call_id == held.call_id,
+            Event::ToolCancelledReported(cancelled) => cancelled.call_id == held.call_id,
+            _ => false,
         })
         .collect::<Vec<_>>();
-    assert_eq!(held_results.len(), 1);
-    let tau_proto::CborValue::Text(held_text) = &held_results[0].result else {
-        panic!("write result text");
-    };
-    let held_payload: serde_json::Value =
-        serde_json::from_str(held_text).expect("write result JSON");
-    assert_eq!(held_payload["identity"], secret.id().to_string());
-    assert_eq!(held_payload["operation"], "post");
-    assert_eq!(held_payload["local_state"], "stored");
-    assert_eq!(held_payload["publication"], "asynchronous_best_effort");
+    assert_eq!(held_terminals.len(), 1);
     let status_result = events
         .iter()
         .find_map(|event| match event {

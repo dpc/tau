@@ -37,6 +37,8 @@ struct TestPublicationGate {
     committed: mpsc::Sender<()>,
     /// Optional controlled wrapper deadline for the admitted-timeout test.
     deadline_after_entry: Option<TestDeadlineAfterPublicationEntry>,
+    /// Whether this call's fixture bypasses the wrapper deadline.
+    bypass_tool_deadline: bool,
 }
 
 #[cfg(test)]
@@ -99,7 +101,15 @@ static TEST_PUBLICATION_GATE: OnceLock<Mutex<Option<TestPublicationGate>>> = Onc
 pub(crate) fn pause_before_test_publication(
     call_id: tau_proto::ToolCallId,
 ) -> TestPublicationControl {
-    register_test_publication_gate(call_id, None)
+    register_test_publication_gate(call_id, None, false)
+}
+
+#[cfg(test)]
+/// Pause one test post without applying the wrapper deadline to that call.
+pub(crate) fn pause_before_test_publication_without_deadline(
+    call_id: tau_proto::ToolCallId,
+) -> TestPublicationControl {
+    register_test_publication_gate(call_id, None, true)
 }
 
 #[cfg(test)]
@@ -108,6 +118,7 @@ pub(crate) fn pause_before_test_publication(
 fn register_test_publication_gate(
     call_id: tau_proto::ToolCallId,
     deadline_after_entry: Option<TestDeadlineAfterPublicationEntry>,
+    bypass_tool_deadline: bool,
 ) -> TestPublicationControl {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -121,6 +132,7 @@ fn register_test_publication_gate(
         release: release_rx,
         committed: committed_tx,
         deadline_after_entry,
+        bypass_tool_deadline,
     };
     let mut slot = TEST_PUBLICATION_GATE
         .get_or_init(|| Mutex::new(None))
@@ -152,7 +164,18 @@ pub(crate) fn pause_before_test_publication_with_deadline_after_entry(
         deadline_start_tx: start_tx,
         deadline_start_rx: Some(start_rx),
     };
-    register_test_publication_gate(call_id, Some(deadline_start))
+    register_test_publication_gate(call_id, Some(deadline_start), false)
+}
+
+#[cfg(test)]
+/// Report whether the matching test call bypasses its wrapper deadline.
+pub(crate) fn test_tool_deadline_is_bypassed(call_id: &tau_proto::ToolCallId) -> bool {
+    let Some(slot) = TEST_PUBLICATION_GATE.get() else {
+        return false;
+    };
+    let slot = slot.lock().expect("test publication gate lock");
+    slot.as_ref()
+        .is_some_and(|gate| gate.call_id == *call_id && gate.bypass_tool_deadline)
 }
 
 #[cfg(test)]
