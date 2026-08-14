@@ -22218,24 +22218,9 @@ fn manual_cross_compaction_post_start_cancel_is_exact() {
     );
 }
 
-/// Cross-agent requests fail with bounded non-enumerating state categories and
-/// never persist acceptance for busy, uncertain, unsupported, unavailable, or
-/// repeat-guarded targets.
+/// A cross-agent request rejects a busy target without persisting acceptance.
 #[test]
-fn manual_cross_compaction_rejects_ineligible_target_matrix() {
-    let assert_error = |h: &Harness, call: &AgentToolCall, expected: &str| {
-        assert!(event_log_contains_any_source(h, |event| matches!(
-            event,
-            Event::ToolError(error)
-                if error.call_id == call.id && error.message == expected
-        )));
-        assert!(!event_log_contains_any_source(h, |event| matches!(
-            event,
-            Event::AgentManualCompactionRequested(requested)
-                if requested.initiating_tool_call_id == call.id
-        )));
-    };
-
+fn manual_cross_compaction_rejects_busy_target() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     h.agents.get_mut(&target).expect("target").turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("ap-busy"),
@@ -22246,8 +22231,13 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    assert_error(&h, &call, "target_busy");
+    assert_manual_cross_compaction_error(&h, &call, "target_busy");
+}
 
+/// A cross-agent request rejects uncertain dispatch without persisting
+/// acceptance.
+#[test]
+fn manual_cross_compaction_rejects_uncertain_dispatch() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     h.agents
         .get_mut(&target)
@@ -22266,8 +22256,13 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    assert_error(&h, &call, "dispatch_uncertain");
+    assert_manual_cross_compaction_error(&h, &call, "dispatch_uncertain");
+}
 
+/// A cross-agent request rejects an unsupported model without persisting
+/// acceptance.
+#[test]
+fn manual_cross_compaction_rejects_unsupported_model() {
     let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
     h.provider_model_info
         .get_mut(&"echo/model".into())
@@ -22279,8 +22274,13 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    assert_error(&h, &call, "standalone_compaction_unsupported");
+    assert_manual_cross_compaction_error(&h, &call, "standalone_compaction_unsupported");
+}
 
+/// A cross-agent request rejects an unavailable target without revealing its
+/// state.
+#[test]
+fn manual_cross_compaction_rejects_unavailable_target() {
     let (_td, mut h, caller, _target, call, _target_id) = setup_manual_cross_compaction_test();
     let unknown = tau_proto::AgentId::parse("unknown-target").expect("unknown id");
     h.request_agent_tool_compaction(
@@ -22289,8 +22289,13 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&unknown),
     );
-    assert_error(&h, &call, "target_unavailable_or_unauthorized");
+    assert_manual_cross_compaction_error(&h, &call, "target_unavailable_or_unauthorized");
+}
 
+/// A cross-agent request rejects a caller at its compaction limit without
+/// acceptance.
+#[test]
+fn manual_cross_compaction_rejects_caller_limit() {
     let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
     let caller_public = crate::parse_agent_id(
         h.agents[&caller]
@@ -22319,8 +22324,12 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    assert_error(&h, &call, "caller_compaction_limit");
+    assert_manual_cross_compaction_error(&h, &call, "caller_compaction_limit");
+}
 
+/// A repeated request and its mismatched block both preserve the repeat guard.
+#[test]
+fn manual_cross_compaction_rejects_repeat_guard_and_mismatched_block() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
@@ -22358,7 +22367,7 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    assert_error(&h, &call, "not_needed");
+    assert_manual_cross_compaction_error(&h, &call, "not_needed");
 
     let mismatched_call =
         register_manual_cross_compaction_call(&mut h, &caller, "call-mismatched-block");
@@ -22376,7 +22385,20 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    assert_error(&h, &mismatched_call, "not_needed");
+    assert_manual_cross_compaction_error(&h, &mismatched_call, "not_needed");
+}
+
+fn assert_manual_cross_compaction_error(h: &Harness, call: &AgentToolCall, expected: &str) {
+    assert!(event_log_contains_any_source(h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id == call.id && error.message == expected
+    )));
+    assert!(!event_log_contains_any_source(h, |event| matches!(
+        event,
+        Event::AgentManualCompactionRequested(requested)
+            if requested.initiating_tool_call_id == call.id
+    )));
 }
 
 fn instant_background_test_tool_spec(name: &str) -> ToolSpec {
