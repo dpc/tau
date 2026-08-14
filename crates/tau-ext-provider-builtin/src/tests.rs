@@ -391,26 +391,26 @@ fn provider_list_rejects_oversized_external_config_profile() {
 #[test]
 fn provider_list_rejects_too_many_profiles() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let store = setup_store::SetupStore::open_in(temp.path());
+    let store = setup_store::SetupStore::open_in(temp.path()).with_max_profile_files(4);
     let config_profiles = temp.path().join("config/providers/provider-builtin");
     let state_profiles = temp.path().join("providers/provider-builtin");
     std::fs::create_dir_all(&config_profiles).expect("config root");
     std::fs::create_dir_all(&state_profiles).expect("state root");
-    let config_count = tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILES / 2;
-    for index in 0..config_count {
+    for index in 0..2 {
         std::fs::write(config_profiles.join(format!("c-{index}.json")), b"{}").expect("profile");
     }
-    for index in 0..=(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILES - config_count) {
+    for index in 0..3 {
         std::fs::write(state_profiles.join(format!("s-{index}.json")), b"{}").expect("profile");
     }
     let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
 
     let error = cmd_list_from_store(&[], &extension, &store, &mut Vec::new())
-        .expect_err("too many profiles");
+        .expect_err("too many profiles")
+        .downcast::<path_std_io::Error>()
+        .expect("I/O error");
 
-    let error = error.to_string();
-    assert!(error.contains("state profile discovery"));
-    assert!(error.contains("exceeds"));
+    assert_eq!(error.kind(), path_std_io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "state profile discovery exceeds 4 files");
 }
 
 /// Proves command-level discovery applies one aggregate byte budget across

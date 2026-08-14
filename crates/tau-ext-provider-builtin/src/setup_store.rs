@@ -142,6 +142,8 @@ pub(crate) struct SetupStore {
     config_dir: PathBuf,
     /// Tau user-state root.
     state_dir: PathBuf,
+    /// Maximum number of profile files accepted across config and state.
+    max_profile_files: usize,
     /// Test-only signal after a nonblocking lock attempt confirms contention.
     #[cfg(test)]
     contention: Option<std::sync::Arc<std::sync::Barrier>>,
@@ -172,6 +174,7 @@ impl SetupStore {
         Ok(Self {
             config_dir,
             state_dir,
+            max_profile_files: MAX_PROVIDER_PROFILE_FILES,
             #[cfg(test)]
             contention: None,
             #[cfg(test)]
@@ -185,9 +188,17 @@ impl SetupStore {
         Self {
             config_dir: state_dir.join("config"),
             state_dir,
+            max_profile_files: MAX_PROVIDER_PROFILE_FILES,
             contention: None,
             acquired: None,
         }
+    }
+
+    /// Overrides the profile-file limit for focused boundary tests.
+    #[cfg(test)]
+    pub(crate) fn with_max_profile_files(mut self, max_profile_files: usize) -> Self {
+        self.max_profile_files = max_profile_files;
+        self
     }
 
     #[cfg(test)]
@@ -566,14 +577,15 @@ impl SetupStore {
                 Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
-            let remaining = MAX_PROVIDER_PROFILE_FILES.saturating_sub(files.len());
+            let remaining = self.max_profile_files.saturating_sub(files.len());
             let mut entries = entries.take(remaining + 1).collect::<Result<Vec<_>, _>>()?;
             if remaining < entries.len() {
                 return Err(path_std_io::Error::new(
                     path_std_io::ErrorKind::InvalidData,
                     format!(
-                        "{} profile discovery exceeds {MAX_PROVIDER_PROFILE_FILES} files",
-                        source.label()
+                        "{} profile discovery exceeds {} files",
+                        source.label(),
+                        self.max_profile_files
                     ),
                 ));
             }
