@@ -1,5 +1,5 @@
-//! Bounded, joined loopback Chat Completions server for provider-builtin retry
-//! acceptance.
+//! Bounded, joined loopback Chat Completions server for production
+//! provider-builtin acceptance.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -25,6 +25,15 @@ pub struct CapturedChatRequest {
     pub path: String,
     /// Parsed JSON request body.
     pub body: serde_json::Value,
+}
+
+/// Closed three-step response script selected by the fixture.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Script {
+    /// One throttle followed by two ordinary successful prompts.
+    Retry,
+    /// One single-tool round, one parallel-tool round, then visible output.
+    Qwen,
 }
 
 /// Three-step bounded loopback Chat Completions response script.
@@ -53,12 +62,19 @@ enum ScriptStep {
     P1Success,
     /// Successful completion proving the shared cooldown is released.
     P2Success,
+    /// Qwen reasoning followed by one function call.
+    QwenSingleTool,
+    /// Qwen continuation followed by two parallel function calls.
+    QwenParallelTools,
+    /// Qwen continuation followed by visible output and usage-only terminal
+    /// data.
+    QwenFinal,
 }
 
 impl ScriptedChatServer {
-    /// Starts the 429, P1-success, P2-success script on a private loopback
+    /// Starts the selected closed three-response script on a private loopback
     /// port.
-    pub(super) fn spawn() -> Result<Self, Box<dyn std::error::Error>> {
+    pub(super) fn spawn(script: Script) -> Result<Self, Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -68,11 +84,19 @@ impl ScriptedChatServer {
         let (retry_release, mut worker_retry_release) = UnixStream::pair()?;
         let (request_tx, request_rx) = mpsc::sync_channel(4);
         let worker = std::thread::spawn(move || {
-            for step in [
-                ScriptStep::Throttle,
-                ScriptStep::P1Success,
-                ScriptStep::P2Success,
-            ] {
+            let steps = match script {
+                Script::Retry => [
+                    ScriptStep::Throttle,
+                    ScriptStep::P1Success,
+                    ScriptStep::P2Success,
+                ],
+                Script::Qwen => [
+                    ScriptStep::QwenSingleTool,
+                    ScriptStep::QwenParallelTools,
+                    ScriptStep::QwenFinal,
+                ],
+            };
+            for step in steps {
                 if matches!(step, ScriptStep::P1Success) {
                     require_accepted_retry_release(&mut worker_retry_release)?;
                 }
@@ -272,7 +296,7 @@ fn read_request(stream: &mut TcpStream) -> Result<CapturedChatRequest, String> {
     Ok(CapturedChatRequest { method, path, body })
 }
 
-/// Writes one bounded HTTP response from the fixed retry script.
+/// Writes one bounded HTTP response from the selected fixed script.
 fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(), String> {
     let (status, content_type, body, retry_after) = match step {
         ScriptStep::Throttle => (
@@ -294,6 +318,35 @@ fn write_scripted_response(stream: &mut TcpStream, step: ScriptStep) -> Result<(
             "text/event-stream",
             "data: {\"choices\":[{\"delta\":{\"content\":\"P2 complete\"}}]}\n\n\
              data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::QwenSingleTool => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan one\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"calling one\\n\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"qwen-call-1\",\"type\":\"function\",\"function\":{\"name\":\"restart_test_dummy\",\"arguments\":\" { } \"}}]}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::QwenParallelTools => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan parallel\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"qwen-call-2\",\"type\":\"function\",\"function\":{\"name\":\"restart_test_dummy\",\"arguments\":\"{}\"}},{\"index\":1,\"id\":\"qwen-call-3\",\"type\":\"function\",\"function\":{\"name\":\"restart_test_dummy\",\"arguments\":\" {  } \"}}]}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+             data: [DONE]\n\n",
+            None,
+        ),
+        ScriptStep::QwenFinal => (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"final plan\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"Qwen complete ✓\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":101,\"completion_tokens\":17,\"total_tokens\":118}}\n\n\
              data: [DONE]\n\n",
             None,
         ),

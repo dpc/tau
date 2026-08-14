@@ -91,11 +91,11 @@ behavior, production retries, crash-exact action replay, or broad terminal
 rendering. Universal packaging is covered narrowly by Gate 1's CLI and Gate 2's
 bundled core-shell component.
 
-`ProviderBuiltinRetryFixture` is a third, hermetic fixture family for the
+`ProviderBuiltinFixture` is a third, hermetic fixture family for the
 production-provider boundary. It launches the exact Cargo-built
 `tau-ext-provider-builtin` through ordinary Configure/Ready supervision and
 uses only a keyless local Chat Completions profile pointed at its bounded
-`127.0.0.1` HTTP/SSE server. Its sole script parks P1 after a 429
+`127.0.0.1` HTTP/SSE server. Its retry script parks P1 after a 429
 `rate_limit_exceeded` response with a one-day `Retry-After`, releases it only
 through the ordinary UI retry request, then completes P1 and immediate P2.
 Wire capture owns upstream attempt order and prompt context; live typed events
@@ -106,6 +106,14 @@ provider debug-capture oracle, fake-provider retry imitation, clock control,
 automatic-expiry claim, cancellation, restart, or retry-class matrix. Nix
 provides the executable only through `TAU_E2E_PROVIDER_BUILTIN_BIN` after
 checking the exact current-profile path is executable.
+
+Its separate Qwen compatibility script adds only the exact Cargo-built
+`tau-ext-test-dummy` in deterministic success mode. Three bounded SSE responses
+exercise one tool call, two parallel calls, and final visible output. Captured
+requests own literal effort, template/sampling fields, and raw argument replay;
+typed provider terminals own reasoning, visible output, and terminal usage.
+This script uses no model weights, inference server, credentials, ambient
+extension, or external network.
 
 The original Unix-only core-resume topology is the deterministic fixture's
 dummy-tool public-UI boundary.

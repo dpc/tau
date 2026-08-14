@@ -545,6 +545,90 @@ The extension owns its serialized profiles, model publication, OpenRouter
 discovery, public stream sampling, retry scheduling, and provider events; the
 backend performs one finite typed attempt.
 
+### Chat Completions compatibility
+
+`compat` may appear at provider or model level. When a model has `compat`, that
+object fully replaces the provider object; fields do not merge. A configured
+`reasoning_effort` requires a non-empty list of unique Tau effort values and
+publishes exactly that set in canonical order. Its wire policy is:
+
+- `open_ai`: send OpenAI spellings and fold `xhigh`/`max` to `high`;
+- `literal`: preserve extended `xhigh`/`max` instead of folding them to `high`
+  while retaining the shared provider spellings (`off` remains `none`);
+- `omit`: publish the effective configured effort but send no top-level field.
+
+Omitting `reasoning_effort` publishes only `off` and sends no field. Use `omit`
+only for one fixed server-side effort, such as `efforts: ["xhigh"]`; publishing
+several values would imply a choice the wire cannot convey.
+`reasoning_replay` selects `reasoning_content`, `reasoning`, or `both` for
+assistant history. The default is `reasoning_content`.
+`single_initial_system_message: true` retains Tau's leading system prompt but
+rejects any later System or Developer transcript message before dispatch.
+
+### Qwen3.8 text-only local profile
+
+Use a dedicated Chat Completions profile for `Qwen/Qwen3.8-27B`. Set
+`context_window` to the server's actual `--max-model-len`, not the model's
+262,144-token architectural maximum unless the server really reserves it. This
+text-first profile intentionally does not advertise image input:
+
+```json
+{
+  "kind": "chat_completions",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "credential": {"kind": "none"},
+  "extra_body": {
+    "chat_template_kwargs": {
+      "enable_thinking": true,
+      "preserve_thinking": true
+    },
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "repetition_penalty": 1.0
+  },
+  "models": [{
+    "id": "Qwen/Qwen3.8-27B",
+    "context_window": 65536,
+    "compat": {
+      "stream_options": true,
+      "reasoning_effort": {
+        "efforts": ["low", "medium", "xhigh"],
+        "wire": "literal"
+      },
+      "reasoning_replay": "both",
+      "single_initial_system_message": true
+    }
+  }]
+}
+```
+
+Select `effort: xhigh` in the Tau role for Qwen's recommended/default thinking
+mode. The adapter sends literal `low`, `medium`, or `xhigh` only when the profile
+publishes them. Some local servers, including current llama.cpp releases, do not
+accept the top-level `reasoning_effort` extension. For those servers, configure
+`"reasoning_effort": {"efforts": ["xhigh"], "wire": "omit"}` so Tau publishes
+the effective effort while relying on Qwen's default `xhigh` template behavior.
+Keep `preserve_thinking: true` and `reasoning_replay: "both"` for tool
+continuations.
+
+For non-thinking, use a separate profile with no `reasoning_effort` block and
+set `chat_template_kwargs.enable_thinking` to `false`. Use Qwen's fixed
+non-thinking sampling values (`temperature: 0.7`, `top_p: 0.8`, `top_k: 20`,
+`min_p: 0.0`, `presence_penalty: 1.5`, `repetition_penalty: 1.0`) rather than
+changing them dynamically between turns.
+
+Start conservatively with
+`TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY=1`. Increase concurrency only after the
+server's batching, KV-cache allocation, and memory headroom are measured under
+the configured context limit. Tau supports Qwen's streamed reasoning, visible
+text, single and parallel function calls, raw JSON argument replay, terminal
+usage-only chunks, and continuation. Qwen's template does not support later
+system or Developer messages, so this profile rejects those shapes before
+dispatch while retaining the one initial system prompt.
+
 Chat Completions profiles parse provider-specific cache counters only when
 `compat.cache_usage` explicitly selects `open_ai` or `deep_seek`; omission
 ignores cache-only fields while retaining ordinary input/output usage. Public

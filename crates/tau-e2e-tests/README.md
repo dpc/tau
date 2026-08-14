@@ -2,9 +2,9 @@
 
 Hermetic deterministic end-to-end tests and separate opt-in VCR tests.
 
-## Provider-builtin retry test
+## Provider-builtin production-adapter tests
 
-The separate provider-builtin retry acceptance case runs the exact
+The separate provider-builtin acceptance cases run the exact
 `tau-ext-provider-builtin` binary with a keyless loopback Chat Completions
 profile. Build and pin that binary before running it:
 
@@ -19,6 +19,11 @@ ordinary manual retry releases it, P1 becomes one durable turn, and immediate
 P2 is not held by a stale cooldown. It needs no credentials or external
 network. The process-readiness and process-group oracle is Linux-only; other
 targets omit this integration-test case.
+
+The Qwen3.8 case uses the exact deterministic dummy-tool binary and three fixed
+SSE responses. It covers literal effort and profile fields, reasoning and
+visible output, single and parallel tool calls, byte-exact raw argument replay,
+continuation, and terminal usage without downloading or serving a model.
 
 ## Deterministic provider tests
 

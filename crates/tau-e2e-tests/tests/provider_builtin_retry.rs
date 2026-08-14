@@ -1,4 +1,4 @@
-//! Exact provider-builtin subprocess retry acceptance.
+//! Exact production provider-builtin subprocess acceptance.
 #![cfg(target_os = "linux")]
 
 #[path = "provider_builtin_retry/daemon_guard.rs"]
@@ -15,8 +15,7 @@ use lifecycle::Lifecycle;
 use nix::poll::{PollFd, PollFlags, poll};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use tau_e2e_tests::{
-    CapturedChatRequest, DurableSnapshot, PROVIDER_BUILTIN_RETRY_SESSION,
-    ProviderBuiltinRetryFixture,
+    CapturedChatRequest, DurableSnapshot, PROVIDER_BUILTIN_SESSION, ProviderBuiltinFixture,
 };
 use tau_proto::{
     ClientKind, Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
@@ -27,6 +26,8 @@ use tau_socket::{SocketPeer, SocketReceive};
 
 const P1: &str = "first retry prompt";
 const P2: &str = "later prompt";
+/// Exact deterministic tool executable built for this test target.
+const DUMMY_TOOL: &str = env!("CARGO_BIN_EXE_tau-e2e-test-dummy");
 /// Outer deadlock guard for daemon startup and each causally signaled live
 /// event.
 const EVENT_WATCHDOG: Duration = Duration::from_secs(30);
@@ -44,7 +45,7 @@ fn provider_builtin_manual_retry_releases_parked_cooldown() -> Result<(), Box<dy
         );
         return Ok(());
     };
-    let fixture = ProviderBuiltinRetryFixture::new(
+    let fixture = ProviderBuiltinFixture::new(
         "provider_builtin_manual_retry_releases_parked_cooldown",
         provider_bin,
     )?;
@@ -148,6 +149,291 @@ fn provider_builtin_manual_retry_releases_parked_cooldown() -> Result<(), Box<dy
     assert_durable_turns(&durable, &p1.agent_prompt_id, &p2.agent_prompt_id)?;
     fixture.finish()?;
     eprintln!("provider-builtin retry E2E: completed three-request script");
+    Ok(())
+}
+
+/// Exercises Qwen's literal effort, reasoning stream, single and parallel tool
+/// calls, raw argument replay, continuation, and usage-only terminal chunk
+/// through the exact production provider executable.
+#[test]
+fn provider_builtin_qwen_text_tool_continuation_is_exact() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(provider_bin) = provider_builtin_binary()? else {
+        eprintln!(
+            "skipping provider-builtin Qwen E2E: \
+             set TAU_E2E_PROVIDER_BUILTIN_BIN to the exact candidate binary"
+        );
+        return Ok(());
+    };
+    let fixture = ProviderBuiltinFixture::new_qwen(
+        "provider_builtin_qwen_text_tool_continuation_is_exact",
+        provider_bin,
+        DUMMY_TOOL,
+    )?;
+    let socket = fixture.socket_path();
+    fixture.mark_daemon_started();
+    let daemon = DaemonGuard::spawn(&fixture, &socket)?;
+    let mut peer = connect_ui(&socket)?;
+    let mut lifecycle = Lifecycle::default();
+
+    create_qwen_prompt(&mut peer)?;
+    let _prompt = wait_for_created(&mut peer, &mut lifecycle, "qwen")?;
+    let request1 = fixture.recv_request()?;
+    assert_qwen_common_request(&request1)?;
+    assert_one_user_turn(&request1, "exercise qwen tools")?;
+
+    let request2 = fixture.recv_request()?;
+    assert_qwen_common_request(&request2)?;
+    assert_qwen_round_two(&request1, &request2)?;
+
+    let request3 = fixture.recv_request()?;
+    assert_qwen_common_request(&request3)?;
+    assert_qwen_round_three(&request1, &request3)?;
+    wait_for_qwen_finished(&mut peer, &mut lifecycle)?;
+
+    disconnect_ui(&mut peer)?;
+    daemon.finish()?;
+    fixture.finish()?;
+    Ok(())
+}
+
+/// Receives the two tool terminals and final Qwen terminal for one logical
+/// harness prompt, checking reasoning and visible output at each phase.
+fn wait_for_qwen_finished(
+    peer: &mut SocketPeer,
+    lifecycle: &mut Lifecycle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminals = 0;
+    loop {
+        let event = recv_live(peer)?;
+        reject_terminated(&event)?;
+        lifecycle.record(&event);
+        let Event::ProviderResponseFinished(finished) = event else {
+            continue;
+        };
+        terminals += 1;
+        match terminals {
+            1 => {
+                assert_eq!(
+                    finished.stop_reason,
+                    tau_proto::ProviderStopReason::ToolCalls
+                );
+                assert!(contains_exact_assistant_text(
+                    &finished.output_items,
+                    "calling one\n"
+                ));
+                assert!(has_exact_reasoning_text(&finished.output_items, "plan one"));
+            }
+            2 => {
+                assert_eq!(
+                    finished.stop_reason,
+                    tau_proto::ProviderStopReason::ToolCalls
+                );
+                assert!(has_exact_reasoning_text(
+                    &finished.output_items,
+                    "plan parallel"
+                ));
+            }
+            3 => {
+                assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::EndTurn);
+                assert!(finished.error.is_none());
+                assert!(contains_exact_assistant_text(
+                    &finished.output_items,
+                    "Qwen complete ✓"
+                ));
+                assert!(has_exact_reasoning_text(
+                    &finished.output_items,
+                    "final plan"
+                ));
+                let usage = finished
+                    .usage
+                    .as_ref()
+                    .ok_or("Qwen terminal omitted usage")?;
+                assert_eq!(usage.prompt_sent_tokens, 101);
+                assert_eq!(usage.response_received_tokens, 17);
+                return Ok(());
+            }
+            _ => return Err("Qwen fixture emitted more than three provider terminals".into()),
+        }
+    }
+}
+
+/// Finds one exact accumulated reasoning item.
+fn has_exact_reasoning_text(items: &[tau_proto::ContextItem], expected: &str) -> bool {
+    items.iter().any(
+        |item| matches!(item, tau_proto::ContextItem::ReasoningText(text) if text.text == expected),
+    )
+}
+
+/// Finds one exact assistant text item among reasoning and tool output.
+fn contains_exact_assistant_text(items: &[tau_proto::ContextItem], expected: &str) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            tau_proto::ContextItem::Message(message)
+                if message.role == tau_proto::ContextRole::Assistant
+                    && matches!(
+                        message.content.as_slice(),
+                        [tau_proto::ContentPart::Text { text }] if text == expected
+                    )
+        )
+    })
+}
+
+/// Sends the one Qwen compatibility prompt.
+fn create_qwen_prompt(peer: &mut SocketPeer) -> Result<(), Box<dyn std::error::Error>> {
+    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+        UiCreateAgent {
+            request_id: "provider-builtin-qwen-create".to_owned(),
+            literal: false,
+            session_id: session_id(),
+            role: "provider-builtin-qwen".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("exercise qwen tools".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("qwen".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )))?;
+    Ok(())
+}
+
+/// Checks every fixed Qwen request field owned by profile lowering.
+fn assert_qwen_common_request(
+    request: &CapturedChatRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(request.body["stream"], true);
+    assert_eq!(request.body["model"], "Qwen/Qwen3.8-27B");
+    assert_eq!(request.body["reasoning_effort"], "xhigh");
+    assert_eq!(request.body["stream_options"]["include_usage"], true);
+    assert_eq!(
+        request.body["chat_template_kwargs"],
+        serde_json::json!({
+            "enable_thinking": true,
+            "preserve_thinking": true
+        })
+    );
+    assert_eq!(request.body["temperature"], 1.0);
+    assert_eq!(request.body["top_p"], 0.95);
+    assert_eq!(request.body["top_k"], 20);
+    assert_eq!(request.body["min_p"], 0.0);
+    assert_eq!(request.body["presence_penalty"], 0.0);
+    assert_eq!(request.body["repetition_penalty"], 1.0);
+    assert_eq!(
+        request.body["tools"][0]["function"]["name"],
+        "restart_test_dummy"
+    );
+    Ok(())
+}
+
+/// Requires the complete ordered first-tool continuation transcript.
+fn assert_qwen_round_two(
+    initial: &CapturedChatRequest,
+    continuation: &CapturedChatRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let initial_messages = initial.body["messages"]
+        .as_array()
+        .ok_or("initial Qwen messages are not an array")?;
+    assert_eq!(initial_messages.len(), 2);
+    let expected = serde_json::json!([
+        initial_messages[0].clone(),
+        {"role": "user", "content": "<user>exercise qwen tools</user>"},
+        {
+            "role": "assistant",
+            "content": "calling one\n",
+            "reasoning_content": "plan one",
+            "reasoning": "plan one",
+            "tool_calls": [{
+                "id": "qwen-call-1",
+                "type": "function",
+                "function": {
+                    "name": "restart_test_dummy",
+                    "arguments": " { } "
+                }
+            }]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "qwen-call-1",
+            "content": "restart succeeded"
+        }
+    ]);
+    assert_eq!(continuation.body["messages"], expected);
+    Ok(())
+}
+
+/// Requires the complete ordered parallel-tool continuation transcript.
+fn assert_qwen_round_three(
+    initial: &CapturedChatRequest,
+    continuation: &CapturedChatRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let initial_messages = initial.body["messages"]
+        .as_array()
+        .ok_or("initial Qwen messages are not an array")?;
+    assert_eq!(initial_messages.len(), 2);
+    let expected = serde_json::json!([
+        initial_messages[0].clone(),
+        {"role": "user", "content": "<user>exercise qwen tools</user>"},
+        {
+            "role": "assistant",
+            "content": "calling one\n",
+            "reasoning_content": "plan one",
+            "reasoning": "plan one",
+            "tool_calls": [{
+                "id": "qwen-call-1",
+                "type": "function",
+                "function": {
+                    "name": "restart_test_dummy",
+                    "arguments": " { } "
+                }
+            }]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "qwen-call-1",
+            "content": "restart succeeded"
+        },
+        {
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": "plan parallel",
+            "reasoning": "plan parallel",
+            "tool_calls": [
+                {
+                    "id": "qwen-call-2",
+                    "type": "function",
+                    "function": {
+                        "name": "restart_test_dummy",
+                        "arguments": "{}"
+                    }
+                },
+                {
+                    "id": "qwen-call-3",
+                    "type": "function",
+                    "function": {
+                        "name": "restart_test_dummy",
+                        "arguments": " {  } "
+                    }
+                }
+            ]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "qwen-call-2",
+            "content": "restart succeeded"
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "qwen-call-3",
+            "content": "restart succeeded"
+        }
+    ]);
+    assert_eq!(continuation.body["messages"], expected);
     Ok(())
 }
 
@@ -584,7 +870,7 @@ fn has_exact_assistant_text(items: &[tau_proto::ContextItem], expected_text: &st
 
 /// Returns the fixture's fixed durable session identity.
 fn session_id() -> tau_proto::SessionId {
-    PROVIDER_BUILTIN_RETRY_SESSION
+    PROVIDER_BUILTIN_SESSION
         .parse()
         .expect("known fixture session id is valid")
 }

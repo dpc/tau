@@ -110,12 +110,37 @@ pub struct AttemptCompat {
     pub parallel_tool_calls: bool,
     /// Typed OpenAI prompt-cache controls explicitly selected for this route.
     pub prompt_cache: Option<PromptCache>,
-    /// Send the selected reasoning effort.
-    pub reasoning_effort: bool,
+    /// Send the selected reasoning effort with this route's spelling policy.
+    pub reasoning_effort: Option<ReasoningEffortWire>,
+    /// Assistant reasoning fields emitted during transcript replay.
+    pub reasoning_replay: ReasoningReplay,
+    /// Reject transcript roles that would create a second system message.
+    pub single_initial_system_message: bool,
     /// Use `max_completion_tokens` rather than `max_tokens`.
     pub max_completion_tokens: bool,
     /// Explicit provider usage schema accepted from this route.
     pub cache_usage: CacheUsageCompat,
+}
+
+/// Provider-specific spelling for Tau's extended reasoning effort levels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReasoningEffortWire {
+    /// Collapse efforts above `high` to the OpenAI-compatible `high` spelling.
+    OpenAi,
+    /// Preserve extended Tau effort spellings, including literal `xhigh`.
+    Literal,
+}
+
+/// Assistant reasoning fields emitted during semantic transcript replay.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReasoningReplay {
+    /// Emit only `reasoning_content`.
+    #[default]
+    ReasoningContent,
+    /// Emit only `reasoning`.
+    Reasoning,
+    /// Emit both aliases with identical text.
+    Both,
 }
 
 /// Typed OpenAI prompt-cache controls selected for one Chat Completions route.
@@ -181,6 +206,8 @@ enum LlmError {
     RepetitionDetected(tau_provider::StreamRepetition),
     Canceled,
     UnsupportedToolType(ToolType),
+    UnsupportedMessageRole,
+    UnknownFinishReason,
     ExtraBodyCollision(String),
     InvalidCompaction(String),
     PromptCacheSystemPromptRequired,
@@ -252,6 +279,13 @@ impl std::fmt::Display for LlmError {
             Self::UnsupportedToolType(tool_type) => {
                 write!(f, "Chat Completions does not support {tool_type:?} tools")
             }
+            Self::UnsupportedMessageRole => write!(
+                f,
+                "provider chat template accepts only the initial system message"
+            ),
+            Self::UnknownFinishReason => {
+                write!(f, "provider returned an unsupported finish reason")
+            }
             Self::InvalidCompaction(message) => write!(f, "{message}"),
             Self::PromptCacheSystemPromptRequired => write!(
                 f,
@@ -274,6 +308,8 @@ impl LlmError {
             Self::RepetitionDetected(_)
             | Self::Canceled
             | Self::UnsupportedToolType(_)
+            | Self::UnsupportedMessageRole
+            | Self::UnknownFinishReason
             | Self::InvalidCompaction(_)
             | Self::PromptCacheSystemPromptRequired
             | Self::ExtraBodyCollision(_) => None,
@@ -1269,8 +1305,17 @@ fn try_build_request(
             },
         }));
     }
+    if provider.compat.single_initial_system_message
+        && prompt
+            .context
+            .blocks
+            .iter()
+            .any(context_block_has_system_authority)
+    {
+        return Err(LlmError::UnsupportedMessageRole);
+    }
     for block in &prompt.context.blocks {
-        append_context_block(block, &mut messages);
+        append_context_block(block, provider.compat.reasoning_replay, &mut messages);
     }
     let tools = prompt
         .tools
@@ -1308,12 +1353,25 @@ fn try_build_request(
         reasoning_effort: provider
             .compat
             .reasoning_effort
-            .then(|| effort_wire(prompt.model_params.effort)),
+            .map(|wire| effort_wire(prompt.model_params.effort, wire)),
         max_tokens,
         max_completion_tokens,
         extra_body: provider.extra_body.clone(),
         tools,
         tool_choice,
+    })
+}
+
+fn context_block_has_system_authority(block: &tau_proto::ContextBlock) -> bool {
+    let tau_proto::ContextBlock::UserInput(block) = block else {
+        return false;
+    };
+    block.items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(message)
+                if matches!(message.role, ContextRole::System | ContextRole::Developer)
+        )
     })
 }
 
@@ -1649,7 +1707,11 @@ fn output_token_cap_fields(provider: &AttemptConfig) -> (Option<u32>, Option<u32
     }
 }
 
-fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serde_json::Value>) {
+fn append_context_block(
+    block: &tau_proto::ContextBlock,
+    reasoning_replay: ReasoningReplay,
+    messages: &mut Vec<serde_json::Value>,
+) {
     match block {
         tau_proto::ContextBlock::UserInput(block) => {
             for item in &block.items {
@@ -1711,15 +1773,27 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
                 content: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 reasoning_content: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                reasoning: Option<String>,
                 #[serde(skip_serializing_if = "Vec::is_empty")]
                 tool_calls: Vec<serde_json::Value>,
             }
 
+            let reasoning = (!reasoning.is_empty()).then_some(reasoning);
+            let reasoning_content = match reasoning_replay {
+                ReasoningReplay::ReasoningContent | ReasoningReplay::Both => reasoning.clone(),
+                ReasoningReplay::Reasoning => None,
+            };
+            let reasoning = match reasoning_replay {
+                ReasoningReplay::Reasoning | ReasoningReplay::Both => reasoning,
+                ReasoningReplay::ReasoningContent => None,
+            };
             messages.push(
                 serde_json::to_value(AssistantReplayMessage {
                     role: "assistant",
                     content: (!text.is_empty()).then_some(text),
-                    reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                    reasoning_content,
+                    reasoning,
                     tool_calls,
                 })
                 .expect("assistant replay message serializes"),
@@ -1838,7 +1912,7 @@ fn apply_event(
         }
         return Err(error);
     }
-    apply_finish_reason(state, choice);
+    apply_finish_reason(state, choice)?;
     if state.semantic_progress == SemanticProgress::Parsed {
         on_update(state);
     }
@@ -1975,12 +2049,28 @@ fn non_empty_str(value: &serde_json::Value) -> Option<&str> {
     value.as_str().filter(|value| !value.is_empty())
 }
 
-fn apply_finish_reason(state: &mut StreamState, choice: &serde_json::Value) {
-    match choice["finish_reason"].as_str() {
-        Some("tool_calls") => state.stop_reason = ProviderStopReason::ToolCalls,
-        Some("stop") => state.stop_reason = ProviderStopReason::EndTurn,
-        Some("length") => state.stop_reason = ProviderStopReason::Length,
-        _ => {}
+fn apply_finish_reason(
+    state: &mut StreamState,
+    choice: &serde_json::Value,
+) -> Result<(), LlmError> {
+    match choice.get("finish_reason") {
+        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(serde_json::Value::String(reason)) => match reason.as_str() {
+            "tool_calls" => {
+                state.stop_reason = ProviderStopReason::ToolCalls;
+                Ok(())
+            }
+            "stop" => {
+                state.stop_reason = ProviderStopReason::EndTurn;
+                Ok(())
+            }
+            "length" => {
+                state.stop_reason = ProviderStopReason::Length;
+                Ok(())
+            }
+            _ => Err(LlmError::UnknownFinishReason),
+        },
+        Some(_) => Err(LlmError::UnknownFinishReason),
     }
 }
 
@@ -2135,15 +2225,18 @@ fn assistant_text_item(text: impl Into<String>) -> ContextItem {
     })
 }
 
-fn effort_wire(effort: tau_proto::Effort) -> &'static str {
-    match effort {
-        tau_proto::Effort::Off => "none",
-        tau_proto::Effort::Minimal => "minimal",
-        tau_proto::Effort::Low => "low",
-        tau_proto::Effort::Medium => "medium",
-        tau_proto::Effort::High => "high",
-        tau_proto::Effort::XHigh => "high",
-        tau_proto::Effort::Max => "high",
+fn effort_wire(effort: tau_proto::Effort, wire: ReasoningEffortWire) -> &'static str {
+    match (effort, wire) {
+        (tau_proto::Effort::XHigh, ReasoningEffortWire::Literal) => "xhigh",
+        (tau_proto::Effort::Max, ReasoningEffortWire::Literal) => "max",
+        (effort, _) => match effort {
+            tau_proto::Effort::Off => "none",
+            tau_proto::Effort::Minimal => "minimal",
+            tau_proto::Effort::Low => "low",
+            tau_proto::Effort::Medium => "medium",
+            tau_proto::Effort::High => "high",
+            tau_proto::Effort::XHigh | tau_proto::Effort::Max => "high",
+        },
     }
 }
 

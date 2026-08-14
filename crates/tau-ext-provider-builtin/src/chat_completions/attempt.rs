@@ -18,7 +18,7 @@ pub fn models_for_provider(
                     tags.push(tag.clone());
                 }
             }
-            let compat = model.compat.unwrap_or(provider.compat);
+            let compat = model.compat.as_ref().unwrap_or(&provider.compat);
             let builtin = super::builtin_estimated_prices(&model.id);
             let builtin_uncached = builtin.map(|prices| prices.0);
             let builtin_cached = builtin.map(|prices| prices.1);
@@ -33,18 +33,10 @@ pub fn models_for_provider(
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
                 context_window: model.context_window,
-                efforts: if compat.reasoning_effort {
-                    vec![
-                        tau_proto::Effort::Off,
-                        tau_proto::Effort::Minimal,
-                        tau_proto::Effort::Low,
-                        tau_proto::Effort::Medium,
-                        tau_proto::Effort::High,
-                        tau_proto::Effort::XHigh,
-                    ]
-                } else {
-                    vec![tau_proto::Effort::Off]
-                },
+                efforts: compat.reasoning_effort.as_ref().map_or_else(
+                    || vec![tau_proto::Effort::Off],
+                    |config| config.efforts.canonical(),
+                ),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
@@ -241,7 +233,29 @@ fn lower_compat(
                 }
             },
         }),
-        reasoning_effort: compat.reasoning_effort,
+        reasoning_effort: compat
+            .reasoning_effort
+            .and_then(|config| match config.wire {
+                super::ChatCompletionsReasoningEffortWire::OpenAi => {
+                    Some(tau_provider_chat_completions::ReasoningEffortWire::OpenAi)
+                }
+                super::ChatCompletionsReasoningEffortWire::Literal => {
+                    Some(tau_provider_chat_completions::ReasoningEffortWire::Literal)
+                }
+                super::ChatCompletionsReasoningEffortWire::Omit => None,
+            }),
+        reasoning_replay: match compat.reasoning_replay {
+            super::ChatCompletionsReasoningReplay::ReasoningContent => {
+                tau_provider_chat_completions::ReasoningReplay::ReasoningContent
+            }
+            super::ChatCompletionsReasoningReplay::Reasoning => {
+                tau_provider_chat_completions::ReasoningReplay::Reasoning
+            }
+            super::ChatCompletionsReasoningReplay::Both => {
+                tau_provider_chat_completions::ReasoningReplay::Both
+            }
+        },
+        single_initial_system_message: compat.single_initial_system_message,
         max_completion_tokens: compat.max_completion_tokens,
         cache_usage: match compat.cache_usage {
             super::CacheUsageCompat::None => tau_provider_chat_completions::CacheUsageCompat::None,

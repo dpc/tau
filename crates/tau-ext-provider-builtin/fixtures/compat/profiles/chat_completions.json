@@ -14,7 +14,17 @@
           "key": "agent",
           "retention": "in_memory"
         },
-        "reasoning_effort": true
+        "reasoning_effort": {
+          "efforts": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "wire": "open_ai"
+        }
       },
       "tags": [
         "shell:local"

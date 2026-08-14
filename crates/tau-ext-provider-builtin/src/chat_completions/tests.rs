@@ -9,6 +9,97 @@ use std::{io as path_std_io, time as path_std_time};
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 use super::*;
 
+/// Qwen3.8 profiles publish only the model's exact selectable thinking levels
+/// and retain literal `xhigh` lowering plus its first-system-only template
+/// constraint through provider/model resolution.
+#[test]
+fn qwen_reasoning_profile_publishes_exact_efforts() {
+    let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+        "models": [{
+            "id": "Qwen/Qwen3.8-27B",
+            "context_window": 262144,
+            "compat": {
+                "reasoning_effort": {
+                    "efforts": ["xhigh", "low", "medium"],
+                    "wire": "literal"
+                },
+                "reasoning_replay": "both",
+                "single_initial_system_message": true
+            }
+        }]
+    }))
+    .expect("Qwen profile");
+    provider.validate().expect("valid Qwen profile");
+
+    let models = models_for_provider(&tau_proto::ProviderName::new("qwen"), &provider);
+    assert_eq!(
+        models[0].efforts,
+        vec![
+            tau_proto::Effort::Low,
+            tau_proto::Effort::Medium,
+            tau_proto::Effort::XHigh,
+        ]
+    );
+    let encoded = serde_json::to_value(&provider).expect("serialize Qwen profile");
+    assert_eq!(
+        encoded["models"][0]["compat"]["reasoning_effort"]["efforts"],
+        serde_json::json!(["low", "medium", "xhigh"])
+    );
+    assert_eq!(
+        encoded["models"][0]["compat"]["reasoning_replay"],
+        serde_json::json!("both")
+    );
+}
+
+/// Empty and duplicate effort sets are ambiguous publication contracts and
+/// must fail while decoding the operator profile.
+#[test]
+fn reasoning_effort_profile_rejects_empty_and_duplicate_sets() {
+    for (efforts, expected) in [
+        (serde_json::json!([]), "must not be empty"),
+        (
+            serde_json::json!(["low", "low"]),
+            "must not contain duplicates",
+        ),
+    ] {
+        let error = serde_json::from_value::<ChatCompletionsProvider>(serde_json::json!({
+            "models": [{
+                "id": "model",
+                "compat": {
+                    "reasoning_effort": {
+                        "efforts": efforts,
+                        "wire": "literal"
+                    }
+                }
+            }]
+        }))
+        .expect_err("invalid effort set");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+/// Omitted wire lowering can truthfully publish only one fixed server-side
+/// effort because Tau cannot convey a per-turn selection.
+#[test]
+fn omitted_reasoning_effort_wire_requires_one_effective_effort() {
+    let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+        "models": [{
+            "id": "llama-cpp-qwen",
+            "compat": {
+                "reasoning_effort": {
+                    "efforts": ["low", "xhigh"],
+                    "wire": "omit"
+                }
+            }
+        }]
+    }))
+    .expect("syntactically valid profile");
+    assert_eq!(
+        provider.validate(),
+        Err("omitted reasoning_effort wire requires exactly one effective effort")
+    );
+}
+
 /// Cache controls must reject the retired boolean key flag so profiles cannot
 /// accidentally retain GPT-5.6 implicit caching without an explicit policy.
 #[test]

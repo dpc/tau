@@ -126,7 +126,9 @@ impl OpenRouterProfile {
                 stream_options: true,
                 parallel_tool_calls: false,
                 openai_prompt_cache: None,
-                reasoning_effort: true,
+                reasoning_effort: ChatCompletionsCompat::openai_defaults().reasoning_effort,
+                reasoning_replay: super::ChatCompletionsReasoningReplay::ReasoningContent,
+                single_initial_system_message: false,
                 max_completion_tokens: true,
                 // OpenRouter supplies this documented OpenAI-compatible usage
                 // shape. It remains response-local telemetry: selected upstream
@@ -302,7 +304,13 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             stream_options: true,
             parallel_tool_calls: false,
             openai_prompt_cache: None,
-            reasoning_effort: supports_reasoning,
+            reasoning_effort: supports_reasoning.then(|| {
+                ChatCompletionsCompat::openai_defaults()
+                    .reasoning_effort
+                    .expect("OpenAI defaults publish reasoning effort")
+            }),
+            reasoning_replay: super::ChatCompletionsReasoningReplay::ReasoningContent,
+            single_initial_system_message: false,
             max_completion_tokens: true,
             cache_usage: super::CacheUsageCompat::OpenAi,
         }),

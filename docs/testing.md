@@ -391,7 +391,7 @@ virtual monotonic time for scheduler retry and cooldown behavior, and temporary
 auth files with injected endpoint outcomes for OAuth and credential-generation
 behavior. Backend protocol matrices remain in the owning adapters.
 
-### Exact provider-builtin retry subprocess acceptance
+### Exact provider-builtin subprocess acceptance
 
 `provider_builtin_retry` is separate from `DeterministicFixture`: it runs the
 exact Cargo-built `tau-ext-provider-builtin` binary through normal
@@ -403,6 +403,13 @@ state, sends only the ordinary `UiRetryPrompt`, requires acceptance, and
 combines wire capture, live lifecycle facts, and durable journal facts to
 reject extra requests or upstream context drift, duplicate logical prompts or
 terminals, and a stuck cooldown.
+
+The same binary target also runs a closed Qwen3.8 text compatibility script
+with the exact deterministic dummy-tool extension. It verifies literal `xhigh`
+lowering, fixed template/sampling fields, streamed reasoning and visible text,
+one tool call followed by two parallel calls, byte-exact raw argument replay,
+tool continuation, and a usage-only terminal SSE chunk. It downloads no model
+and contacts no external server.
 
 Direct workspace runs intentionally skip this test when
 `TAU_E2E_PROVIDER_BUILTIN_BIN` is absent; they must never discover a binary

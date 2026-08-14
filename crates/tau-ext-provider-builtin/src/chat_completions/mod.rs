@@ -168,15 +168,163 @@ pub struct ChatCompletionsCompat {
     /// Exact OpenAI prompt-cache controls accepted by this route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_prompt_cache: Option<OpenAiPromptCache>,
-    /// Emit reasoning effort.
+    /// Exact reasoning-effort capability and wire spelling for this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ChatCompletionsReasoningEffort>,
+    /// Assistant reasoning fields emitted during transcript replay.
+    #[serde(
+        default,
+        skip_serializing_if = "ChatCompletionsReasoningReplay::is_reasoning_content"
+    )]
+    pub reasoning_replay: ChatCompletionsReasoningReplay,
+    /// Reject historical system/developer messages after the leading system
+    /// prompt.
     #[serde(default, skip_serializing_if = "is_false")]
-    pub reasoning_effort: bool,
+    pub single_initial_system_message: bool,
     /// Use `max_completion_tokens`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub max_completion_tokens: bool,
     /// Explicit provider cache usage response schema, requiring streamed usage.
     #[serde(default, skip_serializing_if = "CacheUsageCompat::is_none")]
     pub cache_usage: CacheUsageCompat,
+}
+
+/// Exact reasoning efforts and extended-level spelling accepted by one route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCompletionsReasoningEffort {
+    /// Effort levels published for model selection in canonical order.
+    pub efforts: ChatCompletionsReasoningEfforts,
+    /// Wire emission and spelling policy.
+    pub wire: ChatCompletionsReasoningEffortWire,
+}
+
+/// Validated set of reasoning effort levels accepted by a Chat Completions
+/// route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChatCompletionsReasoningEfforts(
+    /// Bit set indexed by [`tau_proto::Effort`]; constructors and
+    /// deserialization guarantee at least one bit and reject repeated
+    /// configured values.
+    u8,
+);
+
+/// Invalid exact reasoning-effort set supplied through the typed API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChatCompletionsReasoningEffortsError {
+    /// The set contains no effective effort.
+    Empty,
+    /// The input repeats an effort value.
+    Duplicate,
+}
+
+impl std::fmt::Display for ChatCompletionsReasoningEffortsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("reasoning efforts must not be empty"),
+            Self::Duplicate => formatter.write_str("reasoning efforts must not contain duplicates"),
+        }
+    }
+}
+
+impl std::error::Error for ChatCompletionsReasoningEffortsError {}
+
+impl ChatCompletionsReasoningEfforts {
+    /// Creates a validated non-empty set from unique effort values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty or repeats a value.
+    pub fn new(
+        efforts: impl IntoIterator<Item = tau_proto::Effort>,
+    ) -> Result<Self, ChatCompletionsReasoningEffortsError> {
+        let mut mask = 0_u8;
+        for effort in efforts {
+            let bit = 1_u8 << effort as u8;
+            if mask & bit != 0 {
+                return Err(ChatCompletionsReasoningEffortsError::Duplicate);
+            }
+            mask |= bit;
+        }
+        if mask == 0 {
+            return Err(ChatCompletionsReasoningEffortsError::Empty);
+        }
+        Ok(Self(mask))
+    }
+
+    /// Construct the historical OpenAI-compatible set through `xhigh`.
+    const fn open_ai() -> Self {
+        Self((1_u8 << tau_proto::Effort::Max as u8) - 1)
+    }
+
+    /// Return whether this set contains one effort level.
+    #[must_use]
+    pub fn contains(self, effort: tau_proto::Effort) -> bool {
+        self.0 & (1 << effort as u8) != 0
+    }
+
+    /// Return the set in stable model-publication order.
+    #[must_use]
+    pub fn canonical(self) -> Vec<tau_proto::Effort> {
+        tau_proto::Effort::ALL
+            .into_iter()
+            .filter(|effort| self.contains(*effort))
+            .collect()
+    }
+}
+
+impl Serialize for ChatCompletionsReasoningEfforts {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.canonical().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatCompletionsReasoningEfforts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let configured = Vec::<tau_proto::Effort>::deserialize(deserializer)?;
+        Self::new(configured).map_err(D::Error::custom)
+    }
+}
+
+/// Provider-specific emission and spelling for Tau reasoning effort.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompletionsReasoningEffortWire {
+    /// Collapse `xhigh` and `max` to OpenAI's `high`.
+    OpenAi,
+    /// Preserve extended spellings such as `xhigh` instead of folding to
+    /// `high`.
+    Literal,
+    /// Publish the configured effective effort without sending a wire field.
+    Omit,
+}
+
+/// Assistant reasoning fields emitted during semantic transcript replay.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompletionsReasoningReplay {
+    /// Emit the established OpenAI-compatible `reasoning_content` field.
+    #[default]
+    ReasoningContent,
+    /// Emit the current vLLM assistant-schema `reasoning` field.
+    Reasoning,
+    /// Emit both aliases for servers whose Qwen template accepts either shape.
+    Both,
+}
+
+impl ChatCompletionsReasoningReplay {
+    /// Returns whether serialization can omit the default replay policy.
+    fn is_reasoning_content(&self) -> bool {
+        *self == Self::ReasoningContent
+    }
 }
 
 /// Provider-specific cache usage wire schema enabled for a compatible route.
@@ -235,21 +383,34 @@ impl ChatCompletionsCompat {
             stream_options: true,
             parallel_tool_calls: true,
             openai_prompt_cache: None,
-            reasoning_effort: true,
+            reasoning_effort: Some(ChatCompletionsReasoningEffort {
+                efforts: ChatCompletionsReasoningEfforts::open_ai(),
+                wire: ChatCompletionsReasoningEffortWire::OpenAi,
+            }),
+            reasoning_replay: ChatCompletionsReasoningReplay::ReasoningContent,
+            single_initial_system_message: false,
             max_completion_tokens: true,
             cache_usage: CacheUsageCompat::OpenAi,
         }
     }
 
-    /// Reject cache telemetry without the streamed-usage request surface.
+    /// Reject internally inconsistent route compatibility.
     ///
     /// The Chat Completions adapter always streams output, but compatible
     /// servers commonly require `stream_options.include_usage` before they
     /// append usage to that stream. A selected cache schema without this
     /// capability would make telemetry depend on undocumented server defaults.
-    fn validate(self) -> Result<(), &'static str> {
+    /// Omitted effort wire fields can represent only one fixed effective
+    /// server-side effort.
+    fn validate(&self) -> Result<(), &'static str> {
         if self.cache_usage != CacheUsageCompat::None && !self.stream_options {
             return Err("cache_usage requires stream_options");
+        }
+        if self.reasoning_effort.is_some_and(|config| {
+            config.wire == ChatCompletionsReasoningEffortWire::Omit
+                && config.efforts.0.count_ones() != 1
+        }) {
+            return Err("omitted reasoning_effort wire requires exactly one effective effort");
         }
         Ok(())
     }

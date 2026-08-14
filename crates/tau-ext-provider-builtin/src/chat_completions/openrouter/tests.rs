@@ -38,7 +38,7 @@ fn authenticated_discovery_normalizes_models_and_refreshes_cache() {
     assert_eq!(models[0].id.as_str(), "vendor/model");
     assert_eq!(models[0].context_window, 1234);
     let compat = models[0].compat.as_ref().expect("compat");
-    assert!(compat.reasoning_effort);
+    assert!(compat.reasoning_effort.is_some());
     assert!(compat.stream_options);
     assert_eq!(compat.cache_usage, CacheUsageCompat::OpenAi);
     assert!(compat.openai_prompt_cache.is_none());
@@ -64,7 +64,6 @@ fn openrouter_conversion_strips_upstream_cache_contract() {
                 "key": "agent",
                 "retention": "in_memory"
             },
-            "reasoning_effort": false,
             "cache_usage": "deep_seek"
         },
         "cache_contract": {
@@ -103,7 +102,7 @@ fn openrouter_conversion_strips_upstream_cache_contract() {
     assert_eq!(compat.cache_usage, CacheUsageCompat::OpenAi);
     assert!(compat.openai_prompt_cache.is_none());
     assert!(compat.parallel_tool_calls);
-    assert!(!compat.reasoning_effort);
+    assert!(compat.reasoning_effort.is_none());
     assert_eq!(
         models_for_provider(&tau_proto::ProviderName::new("router"), &provider)[0].cache_policy,
         None

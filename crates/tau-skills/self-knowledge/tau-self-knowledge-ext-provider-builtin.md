@@ -95,6 +95,20 @@ Supported profile kinds:
   Omitted transport in an older profile means SSE. The provider-kind picker
   labels it `OpenAI Responses API`.
 
+For text-only `Qwen/Qwen3.8-27B`, configure a model-local Chat Completions
+compatibility block with literal reasoning efforts `low`, `medium`, and `xhigh`,
+plus `single_initial_system_message: true`. Select role effort `xhigh`, retain
+Qwen's fixed thinking sampler, set
+`chat_template_kwargs.preserve_thinking: true` and `reasoning_replay: both`, and use the
+server's actual context reservation as `context_window`. Non-thinking is a
+separate profile with no published reasoning effort and
+`chat_template_kwargs.enable_thinking: false`. Servers without a top-level
+`reasoning_effort` extension, including current llama.cpp releases, should publish
+only `xhigh` with wire policy `omit` and rely on Qwen's default template behavior.
+Start local
+operation with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY=1`; increase it only
+after measuring server batching, KV cache, and memory headroom.
+
 For API-key profiles, setup asks for the authority first: `Enter API key now`,
 `Use configured named secret` when declarations exist, or `No API key` where
 the profile kind supports keyless operation. Only direct entry opens the masked

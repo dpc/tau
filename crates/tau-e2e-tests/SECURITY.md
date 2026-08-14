@@ -2,10 +2,13 @@
 
 The deterministic and VCR fixture families have different trust boundaries.
 
-`ProviderBuiltinRetryFixture` is a separate hermetic production-provider
+`ProviderBuiltinFixture` is a separate hermetic production-provider
 acceptance family. It launches only the configured same-UID
 `provider-builtin` extension from an exact Cargo-built path and accepts only a
 keyless local Chat Completions profile below its private configuration root.
+The Qwen compatibility script additionally launches only the exact Cargo-built
+`tau-ext-test-dummy`, exposes its empty-argument restart tool, and fixes it to
+deterministic success mode.
 Its sole network peer is a fixture-owned bounded `127.0.0.1` listener; the
 daemon clears inherited proxy settings, sets only loopback `NO_PROXY`, and the
 server bounds request headers, bodies, connection I/O, request count, and

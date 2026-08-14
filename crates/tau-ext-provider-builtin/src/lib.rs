@@ -35,11 +35,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use cache_contract::ProviderCacheContract;
 pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
-    LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
-    OpenAiExplicitPromptCacheMode, OpenAiPromptCache as ChatCompletionsOpenAiPromptCache,
-    OpenAiPromptCacheBoundary, OpenAiPromptCacheOptions,
-    OpenAiPromptCachePolicy as ChatCompletionsOpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
-    OpenRouterDiscoveryError, OpenRouterProfile,
+    ChatCompletionsReasoningEffort, ChatCompletionsReasoningEffortWire,
+    ChatCompletionsReasoningEfforts, ChatCompletionsReasoningEffortsError,
+    ChatCompletionsReasoningReplay, LocalSummaryCompactionConfig,
+    LocalSummaryCompactionSerializationProfile, OpenAiExplicitPromptCacheMode,
+    OpenAiPromptCache as ChatCompletionsOpenAiPromptCache, OpenAiPromptCacheBoundary,
+    OpenAiPromptCacheOptions, OpenAiPromptCachePolicy as ChatCompletionsOpenAiPromptCachePolicy,
+    OpenAiPromptCacheTtl, OpenRouterDiscoveryError, OpenRouterProfile,
 };
 use chat_completions::{
     PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,

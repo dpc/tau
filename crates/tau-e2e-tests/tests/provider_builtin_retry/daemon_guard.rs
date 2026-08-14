@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
-use tau_e2e_tests::ProviderBuiltinRetryFixture;
+use tau_e2e_tests::ProviderBuiltinFixture;
 
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
 const MAX_STDERR_BYTES: u64 = 256 * 1024;
@@ -37,7 +37,7 @@ pub(super) struct DaemonGuard {
 impl DaemonGuard {
     /// Starts a private provider-builtin-only harness process group.
     pub(super) fn spawn(
-        fixture: &ProviderBuiltinRetryFixture,
+        fixture: &ProviderBuiltinFixture,
         socket: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let stderr_path = fixture.root().join("daemon.stderr");
@@ -62,6 +62,9 @@ impl DaemonGuard {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        if fixture.uses_test_dummy() {
+            command.arg("--test-dummy");
+        }
         if let Some(ca_bundle) = std::env::var_os("TAU_E2E_PROVIDER_CA_BUNDLE") {
             command.env("TAU_PROVIDER_CA_BUNDLE", ca_bundle);
         }

@@ -34,6 +34,16 @@ cache-control request behavior. OpenRouter can select a different upstream
 provider for a request, so its counters cannot establish an upstream cache
 mechanism, residency, privacy posture, renewal operation, or lifecycle.
 
+Chat Completions compatibility also owns the exact non-empty set of published
+reasoning efforts and OpenAI-compatible, extended-literal, or omitted wire
+lowering. Omitted lowering publishes one exact effective effort while relying on
+the server's fixed default. Model-level compatibility, when present, fully
+replaces rather than merges with provider-level compatibility as one complete
+route contract. The same contract selects which assistant reasoning aliases
+semantic transcript replay emits. Routes whose templates allow system authority only initially
+set `single_initial_system_message`; the adapter then rejects later System and
+Developer transcript messages before network dispatch.
+
 ChatGPT profiles capture Responses mode at process startup. Model publication,
 prompt, prewarm, retry, and quota resolution share that value; credential reload
 and OAuth refresh do not change it. An on-disk mode edit takes effect after

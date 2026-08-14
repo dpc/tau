@@ -8,6 +8,27 @@ classification, and replay conversion. Serialized profiles, OpenRouter
 discovery, model publication, public response sampling, and harness event writes
 belong to `tau-ext-provider-builtin`.
 
+## Exact route compatibility
+
+The extension selects which Tau reasoning efforts a configured model publishes
+and whether the adapter lowers them with OpenAI spellings or literal spellings.
+OpenAI lowering folds extended levels to `high`; literal lowering preserves
+`xhigh`. An omit-wire policy publishes one fixed effective server-side effort
+without sending `reasoning_effort`; absence of an effort capability publishes
+only non-reasoning operation. Provider-specific template switches such as Qwen's
+`enable_thinking` remain non-conflicting `extra_body` members.
+
+Transcript replay independently selects `reasoning_content`, `reasoning`, or
+both aliases. Qwen routes use both so current vLLM schemas and compatible servers
+receive preserved thinking on tool continuations.
+
+An opted-in route may require all system authority to be the one initial system
+message. The adapter rejects later System or Developer transcript messages for
+that route before dispatch. Stream termination accepts absent/null finish
+reasons and the known `stop`, `tool_calls`, and `length` values. Any other
+non-null finish reason is a terminal protocol error rather than successful
+completion with unknown semantics.
+
 ## Typed OpenAI prompt-cache lowering
 
 The extension may opt one exact configured route into typed OpenAI prompt-cache

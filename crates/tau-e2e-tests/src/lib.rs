@@ -2,9 +2,10 @@
 //!
 //! [`DeterministicFixture`] is always-on, uses only exact test subprocesses and
 //! synthetic inputs below a private root, and ignores ambient Tau startup
-//! overrides. [`ProviderBuiltinRetryFixture`] is a separate hermetic family
-//! that runs the exact production provider binary through one closed loopback
-//! retry script. [`VcrFixture`] is opt-in and non-hermetic: it uses a trusted
+//! overrides. [`ProviderBuiltinFixture`] is a separate hermetic family
+//! that runs the exact production provider binary through closed loopback retry
+//! and Qwen compatibility scripts. [`VcrFixture`] is opt-in and non-hermetic:
+//! it uses a trusted
 //! local `tau`, normal provider authentication, and the shell extension with
 //! user permissions. See `ARCH-tau-e2e-tests` and the crate `SECURITY.md`.
 
@@ -14,7 +15,7 @@ mod deterministic_fixture;
 mod durable_session_snapshot;
 mod durable_snapshot;
 pub mod fake_provider;
-mod provider_builtin_retry_fixture;
+mod provider_builtin_fixture;
 pub mod scenario;
 
 use std::path::{Path, PathBuf};
@@ -22,8 +23,8 @@ use std::path::{Path, PathBuf};
 pub use deterministic_fixture::DeterministicFixture;
 pub use durable_session_snapshot::DurableSessionSnapshot;
 pub use durable_snapshot::DurableSnapshot;
-pub use provider_builtin_retry_fixture::{
-    CapturedChatRequest, PROVIDER_BUILTIN_RETRY_SESSION, ProviderBuiltinRetryFixture,
+pub use provider_builtin_fixture::{
+    CapturedChatRequest, PROVIDER_BUILTIN_SESSION, ProviderBuiltinFixture,
 };
 pub use scenario::{
     AgentWatchResultExpectationV2, CANONICAL_OPAQUE_COMPACTION_JSON, FAKE_MODEL_ID,

@@ -233,7 +233,9 @@ fn provider() -> TestProvider {
             stream_options: true,
             parallel_tool_calls: true,
             prompt_cache: None,
-            reasoning_effort: true,
+            reasoning_effort: Some(ReasoningEffortWire::OpenAi),
+            reasoning_replay: ReasoningReplay::ReasoningContent,
+            single_initial_system_message: false,
             max_completion_tokens: true,
             cache_usage: CacheUsageCompat::None,
         },
@@ -1291,6 +1293,20 @@ fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
         json["messages"][0]["tool_calls"][0]["function"]["name"],
         "shell"
     );
+
+    let mut qwen_provider = provider;
+    qwen_provider.compat.reasoning_replay = ReasoningReplay::Both;
+    let request = build_request(
+        &resolved_provider(&qwen_provider),
+        &qwen_provider.models[0],
+        &replay,
+    );
+    let json = serde_json::to_value(request).expect("Qwen request json");
+    assert_eq!(
+        json["messages"][0]["reasoning_content"],
+        "need current date"
+    );
+    assert_eq!(json["messages"][0]["reasoning"], "need current date");
 }
 
 /// Ensures Chat Completions preserves provider-wire function-call argument JSON
@@ -1610,6 +1626,95 @@ fn chat_request_uses_max_completion_tokens_when_enabled() {
     assert!(json.get("max_tokens").is_none());
 }
 
+/// Qwen3.8 accepts literal `xhigh`, unlike OpenAI-compatible routes that fold
+/// extended Tau effort levels to `high`; each configured Qwen level must retain
+/// its exact wire spelling.
+#[test]
+fn qwen_reasoning_efforts_use_literal_wire_spellings() {
+    let mut provider = provider();
+    provider.compat.reasoning_effort = Some(ReasoningEffortWire::Literal);
+    for (effort, expected) in [
+        (tau_proto::Effort::Low, "low"),
+        (tau_proto::Effort::Medium, "medium"),
+        (tau_proto::Effort::XHigh, "xhigh"),
+    ] {
+        let mut prompt = prompt();
+        prompt.model_params.effort = effort;
+        let request = build_request(&resolved_provider(&provider), &provider.models[0], &prompt);
+        let json = serde_json::to_value(request).expect("request json");
+        assert_eq!(json["reasoning_effort"], expected);
+    }
+}
+
+/// Qwen non-thinking is a template choice rather than an `off`
+/// `reasoning_effort`; the profile must pass `enable_thinking: false` without
+/// publishing or sending an unsupported effort value.
+#[test]
+fn qwen_non_thinking_uses_template_switch_without_reasoning_effort() {
+    let mut provider = provider();
+    provider.compat.reasoning_effort = None;
+    provider.extra_body.insert(
+        "chat_template_kwargs".to_owned(),
+        serde_json::json!({"enable_thinking": false}),
+    );
+    provider
+        .extra_body
+        .insert("temperature".to_owned(), serde_json::json!(0.7));
+    provider
+        .extra_body
+        .insert("top_p".to_owned(), serde_json::json!(0.8));
+    provider
+        .extra_body
+        .insert("top_k".to_owned(), serde_json::json!(20));
+    provider
+        .extra_body
+        .insert("min_p".to_owned(), serde_json::json!(0.0));
+
+    let request = build_request(
+        &resolved_provider(&provider),
+        &provider.models[0],
+        &prompt(),
+    );
+    let json = serde_json::to_value(request).expect("request json");
+    assert!(json.get("reasoning_effort").is_none());
+    assert_eq!(
+        json["chat_template_kwargs"],
+        serde_json::json!({"enable_thinking": false})
+    );
+    assert_eq!(json["temperature"], 0.7);
+    assert_eq!(json["top_p"], 0.8);
+    assert_eq!(json["top_k"], 20);
+    assert_eq!(json["min_p"], 0.0);
+}
+
+/// Qwen's checked-in template permits system authority only before all ordinary
+/// transcript messages, so an opted-in route must reject later system or
+/// developer messages locally instead of sending a deterministic server error.
+#[test]
+fn qwen_single_system_compat_rejects_later_system_authority() {
+    for role in [ContextRole::System, ContextRole::Developer] {
+        let mut provider = provider();
+        provider.compat.single_initial_system_message = true;
+        let mut prompt = prompt();
+        prompt.system_prompt = "leading authority".to_owned();
+        let tau_proto::ContextBlock::UserInput(block) = &mut prompt.context.blocks[0] else {
+            panic!("fixture begins with user input");
+        };
+        block
+            .items
+            .push(ContextItem::Message(tau_proto::MessageItem {
+                role,
+                content: vec![ContentPart::Text {
+                    text: "later authority".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }));
+        let result = try_build_request(&resolved_provider(&provider), &provider.models[0], &prompt);
+        assert!(matches!(result, Err(LlmError::UnsupportedMessageRole)));
+    }
+}
+
 #[test]
 fn extra_body_rejects_every_reserved_request_member() {
     // A flattened duplicate would make request meaning serializer-dependent.
@@ -1683,6 +1788,27 @@ fn length_finish_reason_maps_to_length_stop_reason() {
     .expect("stream event should apply");
 
     assert_eq!(state.stop_reason, ProviderStopReason::Length);
+}
+
+/// A non-null provider terminal outside Tau's supported stop contract must fail
+/// explicitly rather than inheriting the stream state's default successful
+/// end-turn classification.
+#[test]
+fn unknown_non_null_finish_reason_is_not_a_success() {
+    for finish_reason in [serde_json::json!("content_filter"), serde_json::json!(17)] {
+        let mut state = StreamState::new();
+        let result = apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{
+                    "delta": {"content": "tentative"},
+                    "finish_reason": finish_reason
+                }]
+            }),
+            &mut |_| {},
+        );
+        assert!(matches!(result, Err(LlmError::UnknownFinishReason)));
+    }
 }
 
 #[test]

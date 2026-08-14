@@ -55,9 +55,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ProviderMode::Fake
     };
-    if provider_mode == ProviderMode::Builtin && test_dummy {
-        return Err("provider-builtin daemon cannot enable the test dummy".into());
-    }
     let (socket, harness_state, config_dir, state_dir, status, core_shell_cwd) =
         match args.as_slice() {
             [socket, harness_state, config_dir, state_dir, status] => {
@@ -74,7 +71,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 return Err(
                     "expected SOCKET HARNESS_STATE CONFIG_DIR STATE_DIR {new|resumed} \
-                     [CORE_SHELL_CWD] [--test-dummy|--provider-builtin]"
+                     [CORE_SHELL_CWD] [--provider-builtin] [--test-dummy]"
                         .into(),
                 );
             }

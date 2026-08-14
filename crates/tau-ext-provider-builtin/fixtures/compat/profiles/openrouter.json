@@ -8,7 +8,17 @@
       "context_window": 131072,
       "compat": {
         "stream_options": true,
-        "reasoning_effort": true,
+        "reasoning_effort": {
+          "efforts": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "wire": "open_ai"
+        },
         "max_completion_tokens": true
       },
       "tags": [

@@ -832,7 +832,17 @@
             "retention": "in_memory"
           },
           "parallel_tool_calls": true,
-          "reasoning_effort": true,
+          "reasoning_effort": {
+            "efforts": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "wire": "open_ai"
+          },
           "stream_options": true
         },
         "context_window": 32768,
@@ -867,7 +877,17 @@
         "compat": {
           "cache_usage": "open_ai",
           "max_completion_tokens": true,
-          "reasoning_effort": true,
+          "reasoning_effort": {
+            "efforts": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "wire": "open_ai"
+          },
           "stream_options": true
         },
         "context_window": 131072,
@@ -882,7 +902,17 @@
         "compat": {
           "cache_usage": "open_ai",
           "max_completion_tokens": true,
-          "reasoning_effort": true,
+          "reasoning_effort": {
+            "efforts": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "wire": "open_ai"
+          },
           "stream_options": true
         },
         "credential_present": true,
