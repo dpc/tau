@@ -34073,6 +34073,113 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
     h.shutdown().expect("shutdown");
 }
 
+/// An old outbound callback must lose authority during S -> other -> S before
+/// its queued worker completion is consumed, so a reused session id cannot
+/// admit the abandoned request or let its eventual completion affect the
+/// replacement generation.
+#[test]
+fn stale_external_message_callback_after_session_round_trip_is_rejected_before_completion() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let sender_id =
+        crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("sender public id"));
+    let call_id: tau_proto::ToolCallId = "stale-round-trip-call".into();
+    let message_id = tau_proto::AgentMessageId::parse("stale-round-trip-message")
+        .expect("test identifier must satisfy its grammar");
+    let old_generation = h.current_session_generation;
+    let request = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "stale-round-trip-auth".to_owned(),
+        message_id: message_id.clone(),
+        capability: "stale-round-trip-capability".to_owned(),
+        sender_session_id: h.current_session_id.clone(),
+        sender_id: sender_id.clone(),
+        recipient_session_id: test_session_id("target-session"),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+            "recipient-agent",
+        )),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "old generation body".to_owned(),
+    };
+    h.pending_external_message_auth.insert(
+        message_id.clone(),
+        crate::harness::PendingExternalAgentMessageAuth {
+            capability: request.capability.clone(),
+            sender_session_id: request.sender_session_id.clone(),
+            sender_id: request.sender_id.clone(),
+            recipient_session_id: request.recipient_session_id.clone(),
+            recipient: request.recipient.clone(),
+            kind: request.kind,
+            message: request.message.clone(),
+        },
+    );
+    let cancellation = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
+    h.peer_io_cancellations
+        .push(path_std_sync::Arc::downgrade(&cancellation));
+
+    // Retain the old worker completion, roll away and back, then deliver its
+    // callback before consuming the completion.
+    let completion = path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+        crate::event::ExternalMessageToolCompletedCommand {
+            _permit: None,
+            conversation_id: cid,
+            session_generation: old_generation,
+            call_id: call_id.clone(),
+            tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+            tool_type: tau_proto::ToolType::Function,
+            result: Ok((crate::parse_agent_id("recipient-agent"), false)),
+            details: CborValue::Null,
+            auth_message_id: message_id.clone(),
+            publish_sent: true,
+            sender_id,
+            recipient_session_id: request.recipient_session_id.clone(),
+            kind: request.kind,
+            message: request.message.clone(),
+        },
+    ));
+    h.switch_session(
+        test_session_id("other-session"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch away");
+    assert!(
+        cancellation.load(path_std_sync_atomic::Ordering::Acquire),
+        "rollover must preserve outbound worker cancellation"
+    );
+    h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::New)
+        .expect("switch back");
+
+    assert!(
+        !h.pending_external_message_auth.contains_key(&message_id),
+        "generation rollover must synchronously remove the old callback capability"
+    );
+    let result = h.handle_external_agent_message_auth_request(request);
+    assert!(!result.authorized);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("unknown external message capability")
+    );
+
+    h.handle_harness_command(completion)
+        .expect("consume stale completion after callback rejection");
+    let events = event_log_events(&h);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentMessageSent(message) if message.message_id == message_id
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ToolResult(result) if result.call_id == call_id
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id == call_id
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// `:session new` reuses the daemon process, so the daemon's runtime discovery
 /// metadata must advertise the new active session and stop matching the stale
 /// old session after `switch_session` succeeds.

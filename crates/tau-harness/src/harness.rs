@@ -22108,6 +22108,10 @@ impl Harness {
         // interception. Observation events may still commit, but their captured
         // admission generation can no longer create or retarget work.
         self.current_session_generation = self.current_session_generation.saturating_add(1);
+        // Callback capabilities are live only for the generation that issued
+        // them. Clearing them before a session id can be selected again makes
+        // an old callback fail even after an S -> other -> S rollover.
+        self.pending_external_message_auth.clear();
         self.publish_event(
             None,
             Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
