@@ -190,6 +190,7 @@ fn valid_headless_noop(text: &str) -> bool {
             | ":role"
             | ":pick-agent"
             | ":pick-agent-all"]
+            | [":session-stats"]
             | [":new"]
             | [":new", _]
             | [":name", _, ..]

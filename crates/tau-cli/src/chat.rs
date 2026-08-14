@@ -627,6 +627,10 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
         "Manage chat sessions (e.g. :session new starts a fresh session)",
     ),
     (
+        ":session-stats",
+        "Print flat token totals for the current session",
+    ),
+    (
         ":tree",
         "Print prompt rewind anchors (`:tree <anchor>` rewinds before that prompt)",
     ),
@@ -1346,6 +1350,7 @@ pub(crate) fn run_chat(
                         RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
                         RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
                         RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
+                        RendererCmd::ShowSessionStats => renderer.show_session_token_stats(),
                         RendererCmd::ActionInvoked {
                             invocation_id,
                             owner_agent_id,
@@ -1630,6 +1635,8 @@ enum RendererCmd {
         /// Fully resolved process-local theme.
         theme: tau_themes::Theme,
     },
+    /// `:session-stats` — print flat totals after admitted remote events.
+    ShowSessionStats,
     /// Dynamic extension action was invoked from the current viewed transcript.
     ActionInvoked {
         /// Correlation identity for the later action result.
@@ -2619,6 +2626,9 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_command(&mut self, text: &str) -> bool {
+        if self.handle_session_stats_command(text) {
+            return true;
+        }
         if self.handle_debug_utility_command(text) {
             return true;
         }
@@ -2632,6 +2642,19 @@ impl<'a> TerminalInputSession<'a> {
             return true;
         }
         self.handle_utility_alias_command(text)
+    }
+
+    /// Handles the local session-wide token totals command.
+    fn handle_session_stats_command(&self, text: &str) -> bool {
+        if text == ":session-stats" {
+            let _ = self.ctx.renderer_tx.send(RendererCmd::ShowSessionStats);
+            return true;
+        }
+        if text.starts_with(":session-stats ") {
+            self.output.system_info(":session-stats takes no arguments");
+            return true;
+        }
+        false
     }
 
     /// Handles the command that opens the local agent picker.
@@ -3965,6 +3988,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":pick-agent"
             | ":pick-agent-all"
             | ":session"
+            | ":session-stats"
             | ":tree"
             | ":compact"
             | ":fast"

@@ -39,9 +39,9 @@ use crate::tool_render::{
     format_token_count, pending_tool_call_display, render_action_output_block,
     render_compaction_block, render_diff_tool_block, render_harness_notice,
     render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
-    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
-    tool_duration_suffix, ui_dir_block,
+    render_tool_use_state_without_status, render_turn_stats_block_with_cumulative_usage,
+    session_status_block, streaming_block, streaming_block_with_indicator_suffix,
+    synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
 use crate::{
@@ -471,6 +471,8 @@ pub(crate) struct EventRenderer {
     model_status_block: Option<tau_cli_term::BlockId>,
     /// Current session id used to scope events and detect session transitions.
     current_session_id: Option<tau_proto::SessionId>,
+    /// Flat totals folded from every durable provider terminal in this session.
+    session_token_usage: tau_proto::TokenUsageCounts,
     /// Named profile resolved before this UI started its daemon.
     startup_profile: Option<String>,
     /// Filesystem context used to rebuild the right prompt after session
@@ -600,6 +602,8 @@ pub(crate) struct EventRenderer {
     cli_state_mirror: std::sync::Arc<std::sync::Mutex<tau_config::settings::CliState>>,
     /// Cumulative end-to-end time spent waiting for agent responses.
     cumulative_agent_latency: Duration,
+    /// Token totals from completed provider responses owned by this agent.
+    cumulative_agent_token_usage: tau_proto::TokenUsageCounts,
     /// Shared effort mirror kept in sync with harness state.
     effort_state: std::sync::Arc<path_std_sync::atomic::AtomicU8>,
     /// Shared fast-service-tier mirror for the input thread's `fast-toggle`
@@ -712,6 +716,8 @@ struct AgentUiState {
     /// Whether this snapshot contains all-agent overview message output.
     contains_overview_message: bool,
     cumulative_agent_latency: Duration,
+    /// Durable terminal-response token fold for this agent's transcript.
+    cumulative_agent_token_usage: tau_proto::TokenUsageCounts,
     agent_activity: AgentActivity,
 }
 
@@ -1205,6 +1211,8 @@ fn role_command_completions(
 struct TurnStatsBlockEntry {
     block_id: tau_cli_term::BlockId,
     usage: tau_proto::ProviderTokenUsage,
+    /// Owning agent's total at the time this response completed.
+    cumulative_usage: tau_proto::TokenUsageCounts,
     /// Same-agent previous response usage captured when this block was
     /// recorded. Re-render paths must use this stored baseline instead of
     /// recomputing from whichever agent/transcript is currently visible.
@@ -1775,6 +1783,7 @@ impl EventRenderer {
             ready_extensions: HashSet::new(),
             model_status_block: None,
             current_session_id: None,
+            session_token_usage: tau_proto::TokenUsageCounts::default(),
             startup_profile: None,
             right_prompt_paths: None,
             diff_blocks: Vec::new(),
@@ -1819,6 +1828,7 @@ impl EventRenderer {
             last_full_render_count: 0,
             last_full_render_at: None,
             cumulative_agent_latency: Duration::ZERO,
+            cumulative_agent_token_usage: tau_proto::TokenUsageCounts::default(),
             effort_state: path_std_sync::Arc::new(path_std_sync_atomic::AtomicU8::new(
                 tau_proto::Effort::Off.as_u8(),
             )),
@@ -2539,6 +2549,7 @@ impl EventRenderer {
             contains_global_message_fact: std::mem::take(&mut self.contains_global_message_fact),
             contains_overview_message: std::mem::take(&mut self.contains_overview_message),
             cumulative_agent_latency: std::mem::take(&mut self.cumulative_agent_latency),
+            cumulative_agent_token_usage: std::mem::take(&mut self.cumulative_agent_token_usage),
             agent_activity: std::mem::take(&mut self.agent_activity),
         }
     }
@@ -2590,6 +2601,7 @@ impl EventRenderer {
         self.contains_global_message_fact = state.contains_global_message_fact;
         self.contains_overview_message = state.contains_overview_message;
         self.cumulative_agent_latency = state.cumulative_agent_latency;
+        self.cumulative_agent_token_usage = state.cumulative_agent_token_usage;
         self.agent_activity = state.agent_activity;
     }
 
@@ -3032,9 +3044,10 @@ impl EventRenderer {
     }
     fn render_turn_stats_entry(&self, entry: &TurnStatsBlockEntry) -> tau_cli_term::StyledBlock {
         if self.show_turn_stats {
-            render_turn_stats_block(
+            render_turn_stats_block_with_cumulative_usage(
                 &self.theme,
                 &entry.usage,
+                &entry.cumulative_usage,
                 entry.previous_usage.as_ref(),
                 entry.turn_latency,
                 entry.total_latency,
@@ -3367,6 +3380,7 @@ impl EventRenderer {
         self.watched_agent_work_statuses.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
+        self.session_token_usage = tau_proto::TokenUsageCounts::default();
         self.clear_watched_agent_blocks();
         if let Ok(mut agents) = self.known_agents.lock() {
             agents.clear();
@@ -3422,6 +3436,7 @@ impl EventRenderer {
         self.main_agent_turn_active = false;
         self.main_tools_visible = false;
         self.cumulative_agent_latency = Duration::ZERO;
+        self.cumulative_agent_token_usage = tau_proto::TokenUsageCounts::default();
         self.agent_activity.clear();
         self.update_agent_in_progress();
         self.handle.clear_output();
@@ -4232,6 +4247,7 @@ impl EventRenderer {
             event_name,
             started_at: Instant::now(),
         };
+        self.record_session_token_usage(event);
         self.learn_agent_metadata(event);
         if let Event::HarnessAgentContextInitialized(initialized) = event
             && self.current_agent_id.is_none()
@@ -4335,6 +4351,50 @@ impl EventRenderer {
 
         self.handle_recorded_at_for_hidden_agent(event, recorded_at, target_agent_id);
         self.update_agent_in_progress();
+    }
+
+    /// Folds a terminal provider response into the session-wide command total.
+    ///
+    /// This runs before transcript routing so an owning agent's hidden-state
+    /// projection cannot cause the same durable occurrence to be counted twice.
+    fn record_session_token_usage(&mut self, event: &Event) {
+        let Event::ProviderResponseFinished(finished) = event else {
+            return;
+        };
+        let Some(usage) = finished.usage.as_ref() else {
+            return;
+        };
+        Self::add_finished_token_usage(&mut self.session_token_usage, usage);
+    }
+
+    /// Returns the flat token total exposed by `:session-stats`.
+    pub(crate) fn session_token_stats_text(&self) -> String {
+        let usage = &self.session_token_usage;
+        format!(
+            "session token totals: ↑{}/{} ↓{}",
+            format_token_count(usage.cached_tokens),
+            format_token_count(usage.sent_tokens),
+            format_token_count(usage.received_tokens),
+        )
+    }
+
+    /// Prints the flat session-wide provider token total.
+    pub(crate) fn show_session_token_stats(&mut self) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        self.handle.print_output(
+            "session-stats",
+            themed_block(
+                &self.theme,
+                names::SYSTEM_INFO,
+                format!(
+                    "{}{}",
+                    crate::transcript_markers::NOTICE,
+                    self.session_token_stats_text()
+                ),
+            ),
+        );
     }
 
     /// Copy one semantic inter-agent message into the no-agent overview.
@@ -5606,6 +5666,7 @@ impl EventRenderer {
         self.watched_agent_work_statuses.clear();
         if self.current_session_id.as_ref() != Some(&started.session_id) {
             self.agent_estimated_api_costs.clear();
+            self.session_token_usage = tau_proto::TokenUsageCounts::default();
             self.clear_agent_display_names();
             self.rerender_message_history();
         }
@@ -6596,14 +6657,17 @@ impl EventRenderer {
         let Some(usage) = finished.usage.clone() else {
             return;
         };
+        Self::add_finished_token_usage(&mut self.cumulative_agent_token_usage, &usage);
+        let cumulative_usage = self.cumulative_agent_token_usage;
         let previous_usage = self
             .turn_stats_history
             .last()
             .map(|entry| entry.usage.clone());
         let block = if self.show_turn_stats {
-            render_turn_stats_block(
+            render_turn_stats_block_with_cumulative_usage(
                 &self.theme,
                 &usage,
+                &cumulative_usage,
                 previous_usage.as_ref(),
                 turn_latency,
                 Some(self.cumulative_agent_latency),
@@ -6615,10 +6679,25 @@ impl EventRenderer {
         self.turn_stats_history.push(TurnStatsBlockEntry {
             block_id: bid,
             usage,
+            cumulative_usage,
             previous_usage,
             turn_latency,
             total_latency: Some(self.cumulative_agent_latency),
         });
+    }
+
+    /// Adds a durable terminal response's token delta to one UI-owned total.
+    fn add_finished_token_usage(
+        total: &mut tau_proto::TokenUsageCounts,
+        usage: &tau_proto::ProviderTokenUsage,
+    ) {
+        total.sent_tokens = total.sent_tokens.saturating_add(usage.prompt_sent_tokens);
+        total.cached_tokens = total
+            .cached_tokens
+            .saturating_add(usage.prompt_cached_tokens);
+        total.received_tokens = total
+            .received_tokens
+            .saturating_add(usage.response_received_tokens);
     }
 
     fn render_user_provider_response_items(

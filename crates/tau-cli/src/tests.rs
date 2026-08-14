@@ -1242,6 +1242,7 @@ fn known_static_commands_are_identified_for_history_rendering() {
     assert!(is_known_static_command(":model engineer"));
     assert!(is_known_static_command(":set show-tools compact"));
     assert!(is_known_static_command(":theme dpc"));
+    assert!(is_known_static_command(":session-stats"));
     assert!(is_known_static_command(":debug-show-ui-event-stats"));
     assert!(is_known_static_command(":debug-show-event-stats std-shell"));
     assert!(is_known_static_command(":quit"));
@@ -4263,6 +4264,116 @@ fn switching_to_hidden_agent_preserves_estimated_cache_efficiency() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "Δ95%? 19k/20k?"));
+}
+
+/// Keeps turn-stat Σ totals with the response-owning agent while retaining a
+/// separate flat total that cold-attach replay can reconstruct from every
+/// durable provider terminal.
+#[test]
+fn turn_stats_and_session_stats_keep_token_scopes_separate() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-turn-stats", "true");
+    renderer.switch_agent("worker-1".to_owned());
+
+    let mut first = finished_response_with_usage(
+        "worker-1-sp-0",
+        "worker-1",
+        100,
+        50,
+        10,
+        "first worker response",
+    );
+    first.usage.as_mut().expect("usage").stats.total = tau_proto::TokenUsageCounts {
+        sent_tokens: 100,
+        cached_tokens: 50,
+        received_tokens: 10,
+        ..Default::default()
+    };
+    renderer.handle(&Event::ProviderResponseFinished(first));
+
+    let mut other_agent = finished_response_with_usage(
+        "worker-2-sp-0",
+        "worker-2",
+        700,
+        600,
+        80,
+        "other worker response",
+    );
+    other_agent.usage.as_mut().expect("usage").stats.total = tau_proto::TokenUsageCounts {
+        sent_tokens: 800,
+        cached_tokens: 650,
+        received_tokens: 90,
+        ..Default::default()
+    };
+    renderer.handle(&Event::ProviderResponseFinished(other_agent));
+
+    let mut second = finished_response_with_usage(
+        "worker-1-sp-1",
+        "worker-1",
+        50,
+        20,
+        5,
+        "second worker response",
+    );
+    second.usage.as_mut().expect("usage").stats.total = tau_proto::TokenUsageCounts {
+        sent_tokens: 850,
+        cached_tokens: 670,
+        received_tokens: 95,
+        ..Default::default()
+    };
+    renderer.handle(&Event::ProviderResponseFinished(second));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "Σ↑70/150 ↓15"));
+    assert!(!vt.screen_contains(80, "Σ↑670/850 ↓95"));
+    assert_eq!(
+        renderer.session_token_stats_text(),
+        "session token totals: ↑670/850 ↓95"
+    );
+    renderer.show_session_token_stats();
+    sync(&handle);
+    assert!(vt.screen_contains(80, "session token totals: ↑670/850 ↓95"));
+}
+
+/// Replayed terminals after an existing-session switch must replace, rather
+/// than add to, the flat totals from the former session.
+#[test]
+fn session_stats_reset_before_resumed_session_replay() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("session-a"),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage("agent-a-sp-0", "agent-a", 100, 90, 10, "session A response"),
+    ));
+    assert_eq!(
+        renderer.session_token_stats_text(),
+        "session token totals: ↑90/100 ↓10"
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("session-b"),
+        reason: SessionStartReason::Resume,
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage("agent-b-sp-0", "agent-b", 7, 3, 2, "session B replay"),
+    ));
+
+    assert_eq!(
+        renderer.session_token_stats_text(),
+        "session token totals: ↑3/7 ↓2"
+    );
 }
 
 #[test]

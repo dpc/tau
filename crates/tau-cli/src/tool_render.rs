@@ -15,15 +15,45 @@ pub(crate) fn format_turn_stats_line(
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
-    turn_stats_parts(usage, previous_usage, turn_latency, total_latency)
-        .into_iter()
-        .map(|part| part.text)
-        .collect()
+    turn_stats_parts(
+        usage,
+        &usage.stats.total,
+        previous_usage,
+        turn_latency,
+        total_latency,
+    )
+    .into_iter()
+    .map(|part| part.text)
+    .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn render_turn_stats_block(
     theme: &tau_themes::Theme,
     usage: &tau_proto::ProviderTokenUsage,
+    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> tau_cli_term::StyledBlock {
+    render_turn_stats_block_with_cumulative_usage(
+        theme,
+        usage,
+        &usage.stats.total,
+        previous_usage,
+        turn_latency,
+        total_latency,
+    )
+}
+
+/// Render a turn-stat block with the supplied owning-agent token total.
+///
+/// The provider payload's embedded total is session-wide. The transcript
+/// renderer supplies its durable per-agent fold here so the Σ token and latency
+/// fields have the same scope.
+pub(crate) fn render_turn_stats_block_with_cumulative_usage(
+    theme: &tau_themes::Theme,
+    usage: &tau_proto::ProviderTokenUsage,
+    cumulative_usage: &tau_proto::TokenUsageCounts,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
@@ -34,7 +64,13 @@ pub(crate) fn render_turn_stats_block(
     let mut themed = ThemedText::new();
     let root = themed.add_style(names::TOKEN_STATS);
     let mut children = Vec::new();
-    for part in turn_stats_parts(usage, previous_usage, turn_latency, total_latency) {
+    for part in turn_stats_parts(
+        usage,
+        cumulative_usage,
+        previous_usage,
+        turn_latency,
+        total_latency,
+    ) {
         let style = themed.add_style(part.style_name);
         children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));
     }
@@ -78,6 +114,7 @@ impl TurnStatsPart {
 
 fn turn_stats_parts(
     usage: &tau_proto::ProviderTokenUsage,
+    cumulative_usage: &tau_proto::TokenUsageCounts,
     previous_usage: Option<&tau_proto::ProviderTokenUsage>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
@@ -156,14 +193,14 @@ fn turn_stats_parts(
     parts.push(TurnStatsPart::new(
         format!(
             "{}/{}",
-            format_token_count(usage.stats.total.cached_tokens),
-            format_token_count(usage.stats.total.sent_tokens),
+            format_token_count(cumulative_usage.cached_tokens),
+            format_token_count(cumulative_usage.sent_tokens),
         ),
         names::TOKEN_STATS_INPUT,
     ));
     parts.push(TurnStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
     parts.push(TurnStatsPart::new(
-        format_token_count(usage.stats.total.received_tokens),
+        format_token_count(cumulative_usage.received_tokens),
         names::TOKEN_STATS_OUTPUT,
     ));
     if let Some(latency) = total_latency {

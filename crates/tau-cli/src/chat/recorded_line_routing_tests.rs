@@ -157,6 +157,17 @@ fn retry_is_static_exact_and_never_falls_through_to_prompt_submission() {
     );
 }
 
+/// Session token totals are a local command, so completion and command-mode
+/// routing must reserve both its exact spelling and malformed argument forms.
+#[test]
+fn session_stats_is_static_with_user_facing_help() {
+    assert!(BUILTIN_COMMANDS.iter().any(|(name, description)| {
+        *name == ":session-stats" && description.contains("flat token totals")
+    }));
+    assert!(is_known_static_command(":session-stats"));
+    assert!(is_known_static_command(":session-stats unexpected"));
+}
+
 /// Both attached picker variants must remain discoverable static commands so
 /// users can invoke them without reserving another terminal key chord.
 #[test]

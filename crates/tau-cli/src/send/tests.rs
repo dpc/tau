@@ -64,6 +64,17 @@ fn agent_picker_commands_are_exact_headless_no_ops() {
     }
 }
 
+/// `:session-stats` is interactive-only, so headless send accepts its exact
+/// form without daemon contact while rejecting accidental arguments.
+#[test]
+fn session_stats_is_an_exact_headless_no_op() {
+    run_send("definitely-not-running", ":session-stats")
+        .expect("exact session stats command must be a no-op");
+    let error = run_send("definitely-not-running", ":session-stats unexpected")
+        .expect_err("session stats arguments must fail before daemon lookup");
+    assert!(error.to_string().contains("unknown or unsupported command"));
+}
+
 /// `:cancel` maps to the broadcast cancel form; the harness may later
 /// retarget it.
 #[test]
