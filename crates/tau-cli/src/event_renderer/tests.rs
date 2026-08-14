@@ -110,6 +110,255 @@ fn rendered_tool_block_text(display: &crate::tool_render::ToolCallDisplay) -> St
     format!("{header}{body}")
 }
 
+/// Canonical terminal outcomes replace contradictory status hints while
+/// preserving valid warnings, aligned error labels, and unrelated metadata.
+#[test]
+fn canonical_terminal_outcome_owns_status_matrix() {
+    use tau_proto::ToolUseStatus::{Error, InProgress, Success, Warning};
+
+    let cases = [
+        (
+            Success,
+            "custom-success",
+            super::TerminalToolOutcome::SuccessResult,
+            Success,
+            "ok",
+        ),
+        (
+            Error,
+            "false-error",
+            super::TerminalToolOutcome::SuccessResult,
+            Success,
+            "ok",
+        ),
+        (
+            InProgress,
+            "still-running",
+            super::TerminalToolOutcome::SuccessResult,
+            Success,
+            "ok",
+        ),
+        (
+            Warning,
+            "timeout",
+            super::TerminalToolOutcome::SuccessResult,
+            Warning,
+            "timeout",
+        ),
+        (
+            Warning,
+            "",
+            super::TerminalToolOutcome::SuccessResult,
+            Warning,
+            "warn",
+        ),
+        (
+            Success,
+            "false-ok",
+            super::TerminalToolOutcome::Error {
+                canonical_message: "\n canonical-failure\ntrailing",
+            },
+            Error,
+            "canonical-failure",
+        ),
+        (
+            Warning,
+            "false-warning",
+            super::TerminalToolOutcome::Error {
+                canonical_message: "canonical-failure",
+            },
+            Error,
+            "canonical-failure",
+        ),
+        (
+            InProgress,
+            "still-running",
+            super::TerminalToolOutcome::Error {
+                canonical_message: "canonical-failure",
+            },
+            Error,
+            "canonical-failure",
+        ),
+        (
+            Error,
+            "custom-error",
+            super::TerminalToolOutcome::Error {
+                canonical_message: "canonical-failure",
+            },
+            Error,
+            "custom-error",
+        ),
+        (
+            Error,
+            " ",
+            super::TerminalToolOutcome::Error {
+                canonical_message: "",
+            },
+            Error,
+            "err",
+        ),
+    ];
+
+    for (descriptor_status, descriptor_text, outcome, expected_status, expected_text) in cases {
+        let descriptor = tau_proto::ToolUseState {
+            args: "terminal-args".to_owned(),
+            info_chips: vec!["metadata-sentinel".to_owned()],
+            status: descriptor_status,
+            status_text: descriptor_text.to_owned(),
+            ..Default::default()
+        };
+        let normalized = super::normalize_terminal_tool_use_state(descriptor, outcome);
+
+        assert_eq!(normalized.status, expected_status);
+        assert_eq!(normalized.status_text, expected_text);
+        assert_eq!(normalized.args, "terminal-args");
+        assert_eq!(normalized.info_chips, ["metadata-sentinel"]);
+    }
+}
+
+/// The foreground builders apply canonical status classes while retaining
+/// terminal metadata and the existing compact status wording.
+#[test]
+fn terminal_builders_render_canonical_status_wording() {
+    let result = tau_proto::ToolResultDisplay {
+        call_id: "result-call".into(),
+        tool_name: tau_proto::ToolName::new("generic"),
+        tool_type: tau_proto::ToolType::Function,
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(tau_proto::ToolUseState {
+            args: "terminal-args".to_owned(),
+            status: tau_proto::ToolUseStatus::Error,
+            status_text: "false-error".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    assert_eq!(
+        rendered_tool_header(&super::EventRenderer::tool_result_display(&result)),
+        "generic terminal-args ok"
+    );
+
+    let error = tau_proto::ToolError {
+        presentation: Default::default(),
+        call_id: "error-call".into(),
+        tool_name: tau_proto::ToolName::new("generic"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "canonical-failure".to_owned(),
+        details: None,
+        display: Some(tau_proto::ToolUseState {
+            args: "terminal-args".to_owned(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "false-ok".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    assert_eq!(
+        rendered_tool_header(&super::EventRenderer::tool_error_display(&error)),
+        "generic terminal-args err: canonical-failure"
+    );
+}
+
+/// Delegate error fallback metadata survives normalization when `agent_start`
+/// has no producer descriptor.
+#[test]
+fn delegate_error_fallback_retains_stats_and_canonical_wording() {
+    let error = tau_proto::ToolError {
+        presentation: Default::default(),
+        call_id: "delegate-error".into(),
+        tool_name: tau_proto::ToolName::new("agent_start"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "canonical-delegate-failure".to_owned(),
+        details: Some(tau_proto::CborValue::Text("line one\nline two".to_owned())),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    assert_eq!(
+        rendered_tool_header(&super::EventRenderer::tool_error_display(&error)),
+        "agent_start 2L, 17B err: canonical-delegate-failure"
+    );
+}
+
+/// Background result and error handlers pass contradictory descriptors through
+/// the same canonical terminal normalization as foreground completions.
+#[test]
+fn background_terminal_handlers_normalize_status() {
+    let mut renderer = renderer_for_agent_id_tests();
+    for call_id in ["background-result", "background-error"] {
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+                call_id: call_id.into(),
+                tool_name: tau_proto::ToolName::new("generic"),
+                arguments: tau_proto::CborValue::Map(Vec::new()),
+                agent_id: agent_id("background-agent"),
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(1),
+            1,
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolResultDisplay(tau_proto::ToolResultDisplay {
+                call_id: call_id.into(),
+                tool_name: tau_proto::ToolName::new("generic"),
+                tool_type: tau_proto::ToolType::Function,
+                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(2),
+            2,
+        );
+    }
+
+    renderer.handle_socket_delivery(
+        &tau_proto::Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay {
+            call_id: "background-result".into(),
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            display: Some(tau_proto::ToolUseState {
+                args: "result-metadata".to_owned(),
+                status: tau_proto::ToolUseStatus::Error,
+                status_text: "false-error".to_owned(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(3),
+        3,
+    );
+    renderer.handle_socket_delivery(
+        &tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+            call_id: "background-error".into(),
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "background-failure".to_owned(),
+            details: None,
+            display: Some(tau_proto::ToolUseState {
+                args: "error-metadata".to_owned(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "false-ok".to_owned(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(4),
+        4,
+    );
+
+    let headers = renderer
+        .tool_history
+        .iter()
+        .map(|entry| rendered_tool_header(&entry.display))
+        .collect::<Vec<_>>();
+    assert_eq!(headers[0], "generic result-metadata 0s ok");
+    assert_eq!(
+        headers[1],
+        "generic error-metadata 0s err: background-failure"
+    );
+    assert!(renderer.tool_calls.is_empty());
+}
+
 /// Blocker action labels stay visible from the live start through each terminal
 /// lifecycle, without exposing other structured invocation or terminal fields.
 #[test]

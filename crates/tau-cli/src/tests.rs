@@ -12733,8 +12733,8 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
             result: CborValue::Text("done".into()),
             display: Some(tau_proto::ToolUseState {
                 args: "ro sleep 10".into(),
-                status: tau_proto::ToolUseStatus::Success,
-                status_text: "ok".into(),
+                status: tau_proto::ToolUseStatus::Error,
+                status_text: "false-error".into(),
                 ..Default::default()
             }),
             originator: tau_proto::PromptOriginator::User,

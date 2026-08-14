@@ -59,6 +59,60 @@ const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
 static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
     path_std_sync::OnceLock::new();
 
+/// Canonical outcome that owns a terminal tool row's displayed status.
+#[derive(Clone, Copy)]
+enum TerminalToolOutcome<'a> {
+    /// The terminal event reports successful completion.
+    SuccessResult,
+    /// The terminal event reports failure with this canonical message.
+    Error { canonical_message: &'a str },
+}
+
+/// Makes a producer descriptor's status agree with its canonical terminal
+/// event.
+///
+/// The descriptor still owns all non-status presentation metadata. A successful
+/// terminal may retain a completed warning, while an error descriptor may
+/// retain its nonempty label only when it already described an error.
+fn normalize_terminal_tool_use_state(
+    mut descriptor: tau_proto::ToolUseState,
+    outcome: TerminalToolOutcome<'_>,
+) -> tau_proto::ToolUseState {
+    match outcome {
+        TerminalToolOutcome::SuccessResult => {
+            if descriptor.status == tau_proto::ToolUseStatus::Warning {
+                if descriptor.status_text.trim().is_empty() {
+                    descriptor.status_text = "warn".to_owned();
+                }
+            } else {
+                descriptor.status = tau_proto::ToolUseStatus::Success;
+                descriptor.status_text = "ok".to_owned();
+            }
+        }
+        TerminalToolOutcome::Error { canonical_message } => {
+            let retain_producer_label = descriptor.status == tau_proto::ToolUseStatus::Error
+                && !descriptor.status_text.trim().is_empty();
+            descriptor.status = tau_proto::ToolUseStatus::Error;
+            if !retain_producer_label {
+                descriptor.status_text = {
+                    if canonical_message.trim().is_empty() {
+                        "err".to_owned()
+                    } else {
+                        let fallback =
+                            synthesize_fallback_display("", Some(canonical_message)).status_text;
+                        if fallback.trim().is_empty() {
+                            "err".to_owned()
+                        } else {
+                            fallback
+                        }
+                    }
+                };
+            }
+        }
+    }
+    descriptor
+}
+
 /// One safe, finite action accepted by the bundled Swarm blocker tool.
 #[derive(Clone, Copy)]
 enum BlockerAction {
@@ -7353,14 +7407,13 @@ impl EventRenderer {
     }
 
     fn tool_result_display(result: &tau_proto::ToolResultDisplay) -> ToolCallDisplay {
-        if let Some(descriptor) = &result.display {
-            render_tool_use_state(&result.tool_name, descriptor)
-        } else {
-            render_tool_use_state(
-                &result.tool_name,
-                &synthesize_fallback_display(&result.tool_name, None),
-            )
-        }
+        let descriptor = result
+            .display
+            .clone()
+            .unwrap_or_else(|| synthesize_fallback_display(&result.tool_name, None));
+        let descriptor =
+            normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::SuccessResult);
+        render_tool_use_state(&result.tool_name, &descriptor)
     }
 
     fn finished_tool_duration(prior: &ToolCallState, finished_at: UnixMicros) -> Option<Duration> {
@@ -7492,24 +7545,28 @@ impl EventRenderer {
 
     fn tool_error_display(error: &tau_proto::ToolError) -> ToolCallDisplay {
         let cbor = error.details.as_ref();
-        if error.tool_name.as_str() == AGENT_START_TOOL_NAME {
+        let descriptor = if error.tool_name.as_str() == AGENT_START_TOOL_NAME {
             if let Some(descriptor) = &error.display {
-                return render_tool_use_state(&error.tool_name, descriptor);
+                descriptor.clone()
+            } else {
+                build_delegate_completion_display(
+                    None,
+                    cbor.unwrap_or(&CborValue::Null),
+                    Some(&error.message),
+                )
             }
-            let descriptor = build_delegate_completion_display(
-                None,
-                cbor.unwrap_or(&CborValue::Null),
-                Some(&error.message),
-            );
-            render_tool_use_state(&error.tool_name, &descriptor)
         } else if let Some(descriptor) = &error.display {
-            render_tool_use_state(&error.tool_name, descriptor)
+            descriptor.clone()
         } else {
-            render_tool_use_state(
-                &error.tool_name,
-                &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
-            )
-        }
+            synthesize_fallback_display(&error.tool_name, Some(&error.message))
+        };
+        let descriptor = normalize_terminal_tool_use_state(
+            descriptor,
+            TerminalToolOutcome::Error {
+                canonical_message: &error.message,
+            },
+        );
+        render_tool_use_state(&error.tool_name, &descriptor)
     }
 
     fn handle_tool_cancelled(
