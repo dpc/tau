@@ -12,8 +12,10 @@ use std::{fs, thread};
 
 use rostra_client::{Client, Database, ExternalEventId};
 use rostra_client_db::social::EventPaginationCursor;
-use rostra_core::event::PersonaTag;
-use rostra_core::event::content_kind::PersonasTagsSelector;
+use rostra_core::event::content_kind::{EventContentKind as _, Follow, PersonasTagsSelector};
+use rostra_core::event::{
+    Event as RostraEvent, EventKind, PersonaTag, VerifiedEvent, VerifiedEventContent,
+};
 use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{
     Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
@@ -169,6 +171,90 @@ fn following_selectors_apply_only_and_except_tags() {
     assert!(only_personal.matches_tags(&post_tags));
     assert!(!only_professional.matches_tags(&post_tags));
     assert!(except_professional.matches_tags(&post_tags));
+}
+
+/// Ensures status reports exact direct and two-hop counts for signed hostile
+/// fan-out through the production dispatcher.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_counts_signed_fanout_without_database_visits() {
+    const FANOUT: usize = 64;
+
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let self_secret = RostraIdSecretKey::generate();
+    let self_id = self_secret.id();
+    let hostile_secret = RostraIdSecretKey::generate();
+    let database = Database::open(temporary.path().join("rostra.redb"), self_id)
+        .await
+        .expect("database");
+    let client = Client::builder(self_id)
+        .start_background_tasks(false)
+        .db(database)
+        .public_mode(false)
+        .build()
+        .await
+        .expect("client");
+
+    client
+        .follow(
+            self_secret,
+            hostile_secret.id(),
+            PersonasTagsSelector::default(),
+        )
+        .await
+        .expect("direct follow");
+    let mut parent = None;
+    for _ in 0..FANOUT {
+        let followee = RostraIdSecretKey::generate().id();
+        let content = Follow {
+            followee,
+            persona: None,
+            selector: None,
+            persona_tags_selector: Some(PersonasTagsSelector::default()),
+        }
+        .serialize_cbor()
+        .expect("follow content");
+        let event = RostraEvent::builder_raw_content()
+            .author(hostile_secret.id())
+            .kind(EventKind::FOLLOW)
+            .content(&content)
+            .maybe_parent_prev(parent)
+            .build();
+        let signed = event.signed_by(hostile_secret);
+        let verified = VerifiedEvent::verify_signed(hostile_secret.id(), signed)
+            .expect("signed hostile follow");
+        let verified = VerifiedEventContent::assume_verified(verified, content);
+        parent = Some(verified.event_id().into());
+        client.db().process_event_with_content(&verified).await;
+    }
+
+    let wot = client.self_wot_subscribe().snapshot();
+    assert_eq!(wot.followees.len(), 1);
+    assert_eq!(wot.extended.len(), FANOUT);
+
+    let output = crate::tools::dispatch(
+        &signed_invoke(STATUS_TOOL, serde_json::json!({})),
+        &client,
+        None,
+        Arc::new(AsyncMutex::new(())),
+        PostRateLimit::default(),
+        Arc::new(Mutex::new(PostRateLimitWindow::default())),
+        write_boundary(),
+    )
+    .await
+    .expect("status");
+    assert!(output.contains("known_direct_followees: 1\n"));
+    assert!(output.contains(&format!("known_two_hop_identities: {FANOUT}\n")));
+}
+
+/// Ensures status owns no database traversal and obtains both graph counts
+/// from exactly one coherent retained snapshot.
+#[test]
+fn status_uses_exactly_one_retained_snapshot_and_no_database() {
+    let status_source = include_str!("tools/status.rs");
+    assert_eq!(status_source.matches(".db()").count(), 0);
+    assert_eq!(status_source.matches("get_followees").count(), 0);
+    assert_eq!(status_source.matches("self_wot_subscribe").count(), 1);
+    assert_eq!(status_source.matches(".snapshot()").count(), 1);
 }
 
 /// Ensures configuration accepts only a Tau secret reference and an optional
