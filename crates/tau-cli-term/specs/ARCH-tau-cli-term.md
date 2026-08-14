@@ -15,6 +15,10 @@ literal-prompt escape: the high-level terminal canonicalizes it to one leading
 colon in prompt history and replaces the raw terminal's last submitted entry
 with that canonical spelling. `tau-cli-term-raw` remains syntax-agnostic; it
 only exposes the history-replacement operation used by the high-level layer.
+The high-level terminal also exposes a syntax-agnostic operation that replaces
+its most recent search-history entry and the raw terminal's matching navigation
+entry together. This lets `tau-cli` substitute an approved safe presentation
+without teaching either terminal crate action-specific syntax.
 Routing and typed literal provenance belong to `tau-cli`, as specified by
 [`SPEC-tau-cli-command-mode`](../../tau-cli/specs/SPEC-tau-cli-command-mode.md).
 

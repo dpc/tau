@@ -426,6 +426,19 @@ impl HighTerm {
         self.handle.redraw();
     }
 
+    /// Replaces the most recently submitted prompt in navigation and search
+    /// history.
+    ///
+    /// Higher layers use this when a submitted line has a safer presentation
+    /// form than the raw value that must remain available to the immediate
+    /// routing stack.
+    pub fn replace_last_submitted_prompt(&mut self, text: String) {
+        if let Some(last) = self.prompt_history.last_mut() {
+            *last = text.clone();
+        }
+        self.term.replace_last_submitted_input(text);
+    }
+
     /// Runs the optional `fzf` agent-row picker while safely releasing raw
     /// mode.
     ///

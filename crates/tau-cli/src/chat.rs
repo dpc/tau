@@ -769,7 +769,11 @@ pub(crate) fn queue_prompt_draft_snapshot(
 ) {
     let (mtx, cv) = handle;
     if let Ok(mut g) = mtx.lock() {
-        let text = g.send_content.then_some(text);
+        let text = g.send_content.then(|| {
+            let canonical = tau_cli_term::canonical_literal_colon_prompt(text.trim());
+            let classification_text = canonical.as_deref().unwrap_or_else(|| text.trim());
+            redact_sensitive_action_line(classification_text).unwrap_or(text)
+        });
         g.pending = Some((
             g.epoch,
             UiPromptDraft {
@@ -2009,6 +2013,30 @@ trait RecordedLineHandlers {
     fn system_info(&mut self, message: &str);
 }
 
+/// Side effects driven by submitted-line orchestration.
+///
+/// Implementations may use raw `routing_text` only for command/action ownership
+/// and ephemeral-target routing classification. Presentation and persistence
+/// owners may retain only `presentation_text`.
+trait SubmittedLineHandlers: RecordedLineHandlers {
+    fn replace_last_submitted_prompt(&mut self, text: String);
+    fn record_prompt_line(&mut self, record: SubmittedLineRecord<'_>);
+    fn is_known_command_or_action(&self, text: &str) -> bool;
+    fn command_echo(&mut self, text: &str);
+    fn submit_literal_prompt(&mut self, text: &str) -> Option<InputLoopExit>;
+}
+
+/// Named text views passed to submitted history and editor recording.
+struct SubmittedLineRecord<'a> {
+    /// Original or literal-canonical history candidate used only when the
+    /// presentation is non-sensitive.
+    history_fallback: &'a str,
+    /// Safe text retained by history and editor presentation owners.
+    presentation_text: &'a str,
+    /// Raw text limited to ownership and ephemeral-target routing decisions.
+    routing_text: &'a str,
+}
+
 /// Mutable state for one terminal input loop invocation.
 ///
 /// Keeping the borrows and owned context together lets each command-family
@@ -2390,36 +2418,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_line(&mut self, line: &str) -> Result<Option<InputLoopExit>, CliError> {
-        let text = line.trim();
-        if text.is_empty() {
-            return Ok(None);
-        }
-
-        if let Some(canonical_line) = tau_cli_term::canonical_literal_colon_prompt(line) {
-            let canonical_text = canonical_line.trim();
-            self.record_prompt_line_if_persistent_with_routing(
-                &canonical_line,
-                canonical_text,
-                text,
-            );
-            if let Ok(mut context) = self.ctx.editor_context.lock() {
-                context.previous_prompt = Some(canonical_text.to_owned());
-            }
-            return Ok(self.submit_literal_prompt(canonical_text));
-        }
-
-        // Preserve the original side-effect order: every non-empty line is
-        // recorded before command handling, and local commands are echoed
-        // before they produce validation errors or exit the loop.
-        self.record_prompt_line_if_persistent(line, text);
-        if is_known_static_command(text) || self.ctx.action_state.is_known_action_line(text) {
-            self.output.command_echo(&redacted_command_echo_line(text));
-        }
-        self.handle_recorded_line(text)
-    }
-
-    fn handle_recorded_line(&mut self, text: &str) -> Result<Option<InputLoopExit>, CliError> {
-        handle_recorded_line_with_handlers(text, self)
+        handle_submitted_line_with_handlers(line, self)
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
@@ -2493,23 +2492,19 @@ impl<'a> TerminalInputSession<'a> {
         )
     }
 
-    fn record_prompt_line_if_persistent(&self, line: &str, text: &str) {
-        self.record_prompt_line_if_persistent_with_routing(line, text, text);
-    }
-
     fn record_prompt_line_if_persistent_with_routing(
         &self,
         line: &str,
         text: &str,
         routing_text: &str,
     ) {
+        let history_line = redacted_prompt_history_line(line, text);
         if self.prompt_line_targets_ephemeral_agent(routing_text) {
             if let Ok(mut context) = self.ctx.editor_context.lock() {
-                context.previous_prompt = Some(text.to_owned());
+                context.previous_prompt = Some(history_line);
             }
             return;
         }
-        let history_line = redacted_prompt_history_line(line, text);
         match self.ctx.prompt_history.append(&history_line) {
             PromptHistoryAdmission::Queued | PromptHistoryAdmission::IgnoredEmpty => {}
             PromptHistoryAdmission::DroppedFull => {
@@ -2526,7 +2521,7 @@ impl<'a> TerminalInputSession<'a> {
             }
         }
         if let Ok(mut context) = self.ctx.editor_context.lock() {
-            context.previous_prompt = Some(text.to_owned());
+            context.previous_prompt = Some(history_line);
         }
     }
 
@@ -3558,6 +3553,32 @@ impl RecordedLineHandlers for TerminalInputSession<'_> {
     }
 }
 
+impl SubmittedLineHandlers for TerminalInputSession<'_> {
+    fn replace_last_submitted_prompt(&mut self, text: String) {
+        self.term.replace_last_submitted_prompt(text);
+    }
+
+    fn record_prompt_line(&mut self, record: SubmittedLineRecord<'_>) {
+        self.record_prompt_line_if_persistent_with_routing(
+            record.history_fallback,
+            record.presentation_text,
+            record.routing_text,
+        );
+    }
+
+    fn is_known_command_or_action(&self, text: &str) -> bool {
+        is_known_static_command(text) || self.ctx.action_state.is_known_action_line(text)
+    }
+
+    fn command_echo(&mut self, text: &str) {
+        self.output.command_echo(text);
+    }
+
+    fn submit_literal_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        TerminalInputSession::submit_literal_prompt(self, text)
+    }
+}
+
 pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String>>>) -> bool {
     current_agent_state
         .lock()
@@ -4031,6 +4052,49 @@ fn handle_recorded_line_with_handlers(
         CommandOutcome::Continue => Ok(None),
         CommandOutcome::Exit(exit) => Ok(Some(exit)),
     }
+}
+
+fn handle_submitted_line_with_handlers(
+    line: &str,
+    handlers: &mut impl SubmittedLineHandlers,
+) -> Result<Option<InputLoopExit>, CliError> {
+    let text = line.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(redacted) = redact_sensitive_action_line(text) {
+        handlers.replace_last_submitted_prompt(redacted);
+    }
+
+    if let Some(canonical_line) = tau_cli_term::canonical_literal_colon_prompt(line) {
+        let canonical_text = canonical_line.trim();
+        let submitted_text = redact_sensitive_action_line(canonical_text)
+            .unwrap_or_else(|| canonical_text.to_owned());
+        if submitted_text != canonical_text {
+            handlers.replace_last_submitted_prompt(submitted_text.clone());
+        }
+        handlers.record_prompt_line(SubmittedLineRecord {
+            history_fallback: &canonical_line,
+            presentation_text: &submitted_text,
+            routing_text: text,
+        });
+        return Ok(handlers.submit_literal_prompt(&submitted_text));
+    }
+
+    // Preserve the original side-effect order: every non-empty line is
+    // recorded before command handling, and local commands are echoed before
+    // they produce validation errors or exit the loop.
+    let presentation_text = redacted_command_echo_line(text);
+    handlers.record_prompt_line(SubmittedLineRecord {
+        history_fallback: line,
+        presentation_text: &presentation_text,
+        routing_text: text,
+    });
+    if handlers.is_known_command_or_action(text) {
+        handlers.command_echo(&presentation_text);
+    }
+    handle_recorded_line_with_handlers(text, handlers)
 }
 
 pub(crate) fn is_known_static_command(text: &str) -> bool {

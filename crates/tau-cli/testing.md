@@ -38,6 +38,17 @@ test-only worker barrier to observe accepted writes; they deliberately do not
 test shutdown draining because production never joins or drains that
 best-effort worker. They do not require interactive terminal E2E checks.
 
+Gmail OAuth finish redaction uses layered ownership oracles with distinct
+code/state sentinels. `tau-cli-term-raw` and `tau-cli-term` own recalled-source
+navigation, undo/redo, search-row, preview, and selection safety; `tau-cli` owns
+sensitive command classification, editor context, persistent history, dynamic
+action parsing, content-free/contentful drafts, literal escapes, and exact raw
+action construction. Harness action tests own exact-provider routing and
+requester-only results, debug-log tests own complete serialized publication
+absence, and PIM tests own OAuth exchange/result sanitization. A change to this
+exception must run the focused owners together; helper-only classifier coverage
+cannot replace production input-loop and wire assertions.
+
 Developer prompt and tool-preview startup regressions execute the bundled `tau`
 binary with isolated home and working directories. They assert observable rendered
 contributions rather than only parsed overrides or child-command construction.

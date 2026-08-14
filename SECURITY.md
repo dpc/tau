@@ -210,6 +210,9 @@ only the canonical single-colon text. This prevents canonical `:skill` prompt
 text from being reinterpreted after the CLI removes the escape. `--prompt-stdin`
 instead preserves its complete stdin text and marks it literal, so its initial
 agent prompt bypasses CLI commands/actions and harness skill expansion.
+The Gmail OAuth finish exception still applies after interactive literal
+canonicalization: `::email auth google finish ...` becomes the fixed redacted
+literal and never sends its code or state as a model prompt.
 
 Only attached socket UIs may send `ui.create_agent`. The harness returns its
 bounded, sanitized admission result directly to that live connection without
@@ -220,10 +223,14 @@ metadata as transient `agent.prompt_failed` terminals; canonical provider
 failures retain their existing prompt-id lifecycle. See
 [SPEC-ui-create-agent-admission](specs/SPEC-ui-create-agent-admission.md).
 
-Gmail OAuth finish arguments remain raw only for exact-owner extension routing.
-The CLI redacts them from command echo and persistent prompt history, and the
-harness excludes transient inbound invokes from debug JSONL and redacts the
-published debug-log copy. Re-check stale
+The active editor temporarily contains Gmail OAuth finish arguments while the
+user types them. After submission, they remain raw only on the immediate
+parse/routing stack and in the single successful `ActionInvoke` delivered to
+the exact owning PIM extension. The CLI uses exactly `:email auth google finish
+<redacted>` for command echo, in-process and persistent history,
+external-editor context, and content-enabled `ui.prompt_draft` publication.
+Content-free drafts remain content-free. The harness excludes transient inbound
+invokes from debug JSONL and redacts the published debug-log copy. Re-check stale
 user-facing command instructions, interactive/headless parity, completion
 precedence, literal escape handling around skills, and both debug-log paths
 whenever command routing or action logging changes. See
@@ -231,6 +238,9 @@ whenever command routing or action logging changes. See
 [SPEC-tau-cli-command-mode](crates/tau-cli/specs/SPEC-tau-cli-command-mode.md),
 and
 [SPEC-tau-harness-session-state](crates/tau-harness/specs/SPEC-tau-harness-session-state.md).
+This exact-owner rule governs recognized interactive actions. `--prompt-stdin`
+remains an explicitly literal model-prompt interface and does not invoke this
+OAuth action classifier.
 
 Peer harness messaging is cooperative same-UID local IPC, not a hostile-process
 sandbox or per-sender ACL. Harness instances for one user are mutually trusted

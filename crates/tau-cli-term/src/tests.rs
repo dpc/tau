@@ -127,6 +127,62 @@ fn send_key_with_modifiers(
         .expect("send key");
 }
 
+/// Replacing a submitted prompt must rewrite both history owners and discard
+/// the submitted draft's old undo state so navigation, search, previews, and
+/// undo cannot recover the original text.
+#[test]
+fn submitted_prompt_replacement_rewrites_every_terminal_history_view() {
+    const CODE: &str = "CODE_SENTINEL_46";
+    const STATE: &str = "STATE_SENTINEL_46";
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let sensitive_suffix =
+        format!(":email auth google finish work http://127.0.0.1:54321/?code={CODE}&state={STATE}");
+    let (mut term, handle, input_tx) = new_test_term(vec![]);
+    submit(&mut term, &handle, &input_tx, "old");
+    term.term.trigger_history_step(-1);
+    input_tx
+        .send(TestRawEvent::Paste(sensitive_suffix))
+        .expect("paste sensitive line");
+    assert!(matches!(
+        term.get_next_event().expect("paste sensitive line"),
+        Event::BufferChanged
+    ));
+    send_submit(&input_tx);
+    let submitted = match term.get_next_event().expect("submitted line") {
+        Event::Line(submitted) => submitted,
+        _ => panic!("expected submitted line"),
+    };
+    assert!(submitted.contains(CODE));
+    assert!(submitted.contains(STATE));
+
+    term.replace_last_submitted_prompt(REDACTED.to_owned());
+
+    assert_eq!(term.prompt_history, ["old", REDACTED]);
+    let rows = prompt_history_search_rows(&term.prompt_history);
+    let previews = prompt_history_preview_dir(&term.prompt_history).expect("preview directory");
+    let serialized = format!(
+        "{:?}\n{rows}\n{}",
+        term.prompt_history,
+        std::fs::read_to_string(previews.path().join("0")).expect("preview")
+    );
+    assert!(!serialized.contains(CODE));
+    assert!(!serialized.contains(STATE));
+    assert!(serialized.contains(REDACTED));
+
+    term.term.trigger_history_step(-1);
+    assert_eq!(handle.get_buffer(), REDACTED);
+    assert!(!term.term.trigger_undo());
+    assert!(!term.term.trigger_redo());
+    term.term.trigger_history_step(-1);
+    assert_eq!(handle.get_buffer(), REDACTED);
+    assert!(!term.term.trigger_undo());
+    assert!(!term.term.trigger_redo());
+    term.term.trigger_history_step(1);
+    assert_eq!(handle.get_buffer(), REDACTED);
+    term.term.trigger_history_step(1);
+    assert_eq!(handle.get_buffer(), "");
+}
+
 fn send_submit(input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>) {
     send_key_with_modifiers(input_tx, KeyCode::Enter, KeyModifiers::CONTROL);
 }

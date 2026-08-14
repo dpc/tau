@@ -286,6 +286,8 @@ struct SharedState {
     current_redo: Vec<PromptSnapshot>,
     /// Active history navigation, if any. Independent of `completion`.
     history_nav: Option<HistoryNav>,
+    /// Source history entry edited by the most recent submitted line.
+    last_submitted_recalled_source: Option<usize>,
     /// Active completion menu, if any. Independent of `history_nav`.
     completion: Option<CompletionMenu>,
     /// First visual input row rendered in the prompt-local capped viewport.
@@ -359,6 +361,7 @@ impl SharedState {
             current_undo: Vec::new(),
             current_redo: Vec::new(),
             history_nav: None,
+            last_submitted_recalled_source: None,
             completion: None,
             input_viewport_start: 0,
             show_prompt_scroll_indicator: true,
@@ -2071,16 +2074,24 @@ impl Term {
         st.history_nav = None;
     }
 
-    /// Replaces the most recently submitted input-history entry.
+    /// Replaces the most recently submitted input-history entry and any
+    /// recalled source entry that the submission edited.
     ///
     /// Higher layers use this after canonicalizing prompt syntax that the raw
     /// editor intentionally does not interpret.
     pub fn replace_last_submitted_input(&mut self, text: String) {
         let mut st = self.handle.lock();
+        let recalled_source = st.last_submitted_recalled_source;
+        if let Some(index) = recalled_source
+            && let Some(source) = st.input_history.get_mut(index)
+        {
+            *source = PromptDraft::submitted(text.clone());
+        }
         if let Some(last) = st.input_history.last_mut() {
             *last = PromptDraft::submitted(text);
         }
         st.history_nav = None;
+        st.completion = None;
     }
 
     /// Re-evaluates the completion source against the current buffer
@@ -2644,6 +2655,7 @@ impl Term {
         let line = {
             let mut st = self.handle.lock();
             st.completion = None;
+            st.last_submitted_recalled_source = st.history_nav.as_ref().map(|nav| nav.index);
             st.history_nav = None;
             let line = st.buffer.clone();
             st.push_current_as_history_entry();

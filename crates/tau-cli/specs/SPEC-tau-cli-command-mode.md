@@ -27,10 +27,14 @@ provider owner, then directs the correlated typed result only to the invoking UI
 Provider-side transfer behavior is specified by
 [SPEC-tau-ext-provider-builtin-retry-scheduler](../../tau-ext-provider-builtin/specs/SPEC-tau-ext-provider-builtin-retry-scheduler.md).
 
-The CLI has one narrow action-specific redaction exception: `:email auth google finish ...` is redacted
-in command echo and persistent prompt history because its pasted loopback URL
-contains a one-time OAuth authorization code. The raw `ActionInvoke` still goes
-to the owning extension so the action can complete.
+The CLI has one narrow action-specific redaction exception: after submission,
+`:email auth google finish ...` is represented as exactly `:email auth google
+finish <redacted>` in command echo, in-process navigation and search history,
+persistent prompt history, external-editor context, and content-enabled prompt
+draft events. The pasted loopback URL contains a one-time OAuth authorization
+code. The active editor and immediate parse/routing stack retain the raw line,
+and the single successful raw `ActionInvoke` still goes to the exact owning
+extension so the action can complete.
 
 `:model <provider>/<model>` has two CLI-owned paths: with a selected agent it
 emits a targeted `ui.agent_model_select`; after `:new`, with no selected agent,
@@ -72,6 +76,9 @@ tokens later in a line.
 text `:text`. Tau removes exactly one colon before in-process and persistent
 history, external-editor context, routing, durable prompt events, skill
 processing, or provider projection; the escape prefix is never stored or sent.
+The Gmail OAuth finish redaction exception applies after this canonicalization:
+an escaped sensitive action becomes the fixed redacted literal rather than
+exposing its code and state as a model prompt.
 The CLI carries typed literal provenance beside that canonical text in its UI
 request so downstream command processors bypass it rather than interpreting the
 canonical leading colon again. The harness preserves the canonical text and

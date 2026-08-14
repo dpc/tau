@@ -1274,6 +1274,10 @@ fn known_static_commands_are_identified_for_history_rendering() {
     assert!(!is_known_static_command("hello :model engineer"));
 }
 
+/// Gmail OAuth finish input must use one fixed presentation across direct and
+/// literal-escaped command spellings so code/state never enters echo or
+/// history. The adjacent startup-profile assertion keeps the original refusal
+/// regression covered after sharing this command-classification test location.
 #[test]
 fn gmail_oauth_finish_redirect_url_is_redacted_from_echo_and_prompt_history() {
     let line = ":email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
@@ -1291,11 +1295,118 @@ fn gmail_oauth_finish_redirect_url_is_redacted_from_echo_and_prompt_history() {
         redacted_command_echo_line(":email auth google start work"),
         ":email auth google start work"
     );
+    let escaped = tau_cli_term::canonical_literal_colon_prompt(
+        "::email auth google finish work http://localhost/?code=auth-code-secret",
+    )
+    .expect("literal escape canonicalizes");
+    assert_eq!(
+        redacted_prompt_history_line(&escaped, escaped.trim()),
+        redacted
+    );
 
     let profile_error =
         super::reject_dev_tmux_startup_overrides(Some("focused"), None, &[], &[], &[])
             .expect_err("profile refused");
     assert!(profile_error.to_string().contains("configuration profile"));
+}
+
+/// Content-enabled draft publication must preserve ordinary text while
+/// replacing every recognizable Gmail OAuth finish buffer before serialization.
+#[test]
+fn contentful_prompt_drafts_redact_gmail_oauth_finish_buffers() {
+    const CODE: &str = "CODE_SENTINEL_46";
+    const STATE: &str = "STATE_SENTINEL_46";
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let handle = (
+        Mutex::new(DraftSlot {
+            send_content: true,
+            ..DraftSlot::default()
+        }),
+        path_std_sync::Condvar::new(),
+    );
+    let sensitive =
+        format!(":email auth google finish work http://127.0.0.1:54321/?code={CODE}&state={STATE}");
+
+    queue_prompt_draft_snapshot(&handle, test_session_id("s1"), None, sensitive);
+    let encoded = {
+        let (mtx, _cv) = &handle;
+        let slot = super::locked(mtx);
+        let (_, draft) = slot.pending.as_ref().expect("pending sensitive draft");
+        serde_json::to_vec(draft).expect("serialize sensitive draft")
+    };
+    assert!(
+        !encoded
+            .windows(CODE.len())
+            .any(|window| window == CODE.as_bytes())
+    );
+    assert!(
+        !encoded
+            .windows(STATE.len())
+            .any(|window| window == STATE.as_bytes())
+    );
+    assert!(String::from_utf8(encoded).expect("JSON").contains(REDACTED));
+
+    queue_prompt_draft_snapshot(
+        &handle,
+        test_session_id("s1"),
+        None,
+        format!(
+            "::email auth google finish work http://127.0.0.1:54321/?code={CODE}&state={STATE}"
+        ),
+    );
+    let escaped_encoded = {
+        let (mtx, _cv) = &handle;
+        let slot = super::locked(mtx);
+        let (_, draft) = slot.pending.as_ref().expect("pending escaped draft");
+        serde_json::to_vec(draft).expect("serialize escaped draft")
+    };
+    assert!(
+        !escaped_encoded
+            .windows(CODE.len())
+            .any(|window| window == CODE.as_bytes())
+    );
+    assert!(
+        !escaped_encoded
+            .windows(STATE.len())
+            .any(|window| window == STATE.as_bytes())
+    );
+    assert!(
+        String::from_utf8(escaped_encoded)
+            .expect("JSON")
+            .contains(REDACTED)
+    );
+
+    queue_prompt_draft_snapshot(
+        &handle,
+        test_session_id("s1"),
+        None,
+        "  ordinary draft  ".to_owned(),
+    );
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    let (_, draft) = slot.pending.as_ref().expect("pending ordinary draft");
+    assert_eq!(draft.text.as_deref(), Some("  ordinary draft  "));
+}
+
+/// Content-free prompt drafts must stay content-free even when the active
+/// editor contains a recognizable Gmail OAuth finish buffer.
+#[test]
+fn content_free_prompt_drafts_do_not_add_gmail_redaction_text() {
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
+    queue_prompt_draft_snapshot(
+        &handle,
+        test_session_id("s1"),
+        None,
+        ":email auth google finish account http://localhost/?code=secret".to_owned(),
+    );
+
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    let (_, draft) = slot.pending.as_ref().expect("pending draft");
+    assert_eq!(draft.text, None);
 }
 
 #[test]

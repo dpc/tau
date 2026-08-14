@@ -115,12 +115,15 @@ before stdout is touched; a stdout write failure can leave a written prefix
 because arbitrary output streams cannot be rolled back. The command only
 inspects runtime candidates and does not create or clean up state.
 
-There is also a narrow temporary action-input redaction exception: `:email auth
-google finish ...` command echo and prompt-history entries are redacted because
-the pasted Gmail loopback URL contains a one-time OAuth authorization code and
-the action schema does not yet provide sensitive-argument metadata. The emitted
-`ActionInvoke` still carries the raw argument to the owning extension; this UI
-special case should be replaced with schema/protocol metadata when available.
+There is also a narrow temporary action-input redaction exception:
+content-enabled prompt drafts represent a recognizable `:email auth google
+finish ...` buffer as exactly `:email auth google finish <redacted>` during
+composition. After submission, every history/editor presentation uses that same
+fixed line. The pasted Gmail loopback URL contains a one-time OAuth authorization
+code and the action schema does not yet provide sensitive-argument metadata.
+Only the active editor, immediate routing stack, and exact owning action
+extension retain the raw line; this UI special case should be replaced with
+schema/protocol metadata when available.
 
 ## Threading and shutdown direction
 

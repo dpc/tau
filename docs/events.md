@@ -733,7 +733,10 @@ intent.
   stores and historical replay for either persistence value. The CLI omits
   prompt content by default;
   set `send_prompt_draft_content: true` in `cli.yaml` or a `cli.d` layer to
-  include the full current buffer. Carries the viewed
+  include the full current buffer, except that a buffer recognizable as
+  `:email auth google finish ...`—including the one-colon escaped spelling
+  `::email auth google finish ...`—is published as exactly `:email auth google
+  finish <redacted>`. Carries the viewed
   `target_agent_id` when the draft belongs to an existing agent transcript;
   modern producers must set it in that case. Absence means the draft is
   session-level/unscoped, normally the start-new-agent prompt. Legacy peers whose

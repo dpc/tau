@@ -42,8 +42,11 @@ requires a separate approved interface or persistence change.
 A draft carries the attached session, optional viewed agent, and optional full
 current prompt buffer. The interactive CLI defaults to content-free drafts;
 `send_prompt_draft_content: true` in layered `cli.yaml`/`cli.d` config includes
-the full current buffer. `None` is omitted from the wire representation rather
-than serialized as `null`. Modern producers use `Some(agent_id)` for an existing
+the full current buffer except that a buffer recognizable as `:email auth
+google finish ...`, including the one-colon escaped spelling `::email auth
+google finish ...`, is published as exactly `:email auth google finish
+<redacted>`. `None` is omitted from the wire representation rather than
+serialized as `null`. Modern producers use `Some(agent_id)` for an existing
 viewed transcript and `None` for an unscoped or new-agent draft. Absence must
 not be reinterpreted as the current agent.
 

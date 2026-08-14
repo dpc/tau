@@ -138,6 +138,161 @@ fn route_line(line: &str, dynamic_consumes: bool) -> Vec<String> {
     handlers.outputs
 }
 
+/// Simulated dynamic-action outcome for submitted-line confidentiality tests.
+#[derive(Clone, Copy)]
+enum SensitiveDynamicOutcome {
+    /// One exact owner receives the raw invocation.
+    Invoke,
+    /// Local parsing rejects the line without dispatch.
+    ParseError,
+    /// The action schema no longer recognizes the submitted command.
+    StaleSchema,
+}
+
+/// Captures every confidentiality-relevant side effect of the production
+/// submitted-line orchestration seam.
+struct SensitiveSubmissionHandlers {
+    /// Simulated dynamic action parser/schema outcome.
+    outcome: SensitiveDynamicOutcome,
+    /// Whether prompt persistence is bypassed for an ephemeral target.
+    ephemeral: bool,
+    /// Safe replacements requested for terminal history owners.
+    replacements: Vec<String>,
+    /// Most recent safe external-editor context value.
+    editor_context: Option<String>,
+    /// Safe prompt-history values admitted for persistence.
+    persistent_history: Vec<String>,
+    /// Serialized non-owner echo, notice, or literal-prompt views.
+    presentation: Vec<String>,
+    /// Raw lines delivered to the simulated exact action owner.
+    invokes: Vec<String>,
+}
+
+impl SensitiveSubmissionHandlers {
+    fn new(outcome: SensitiveDynamicOutcome, ephemeral: bool) -> Self {
+        Self {
+            outcome,
+            ephemeral,
+            replacements: Vec::new(),
+            editor_context: None,
+            persistent_history: Vec::new(),
+            presentation: Vec::new(),
+            invokes: Vec::new(),
+        }
+    }
+}
+
+impl RecordedLineHandlers for SensitiveSubmissionHandlers {
+    fn handle_known_command(&mut self, _text: &str) -> Result<CommandOutcome, CliError> {
+        Ok(CommandOutcome::NotHandled)
+    }
+
+    fn handle_dynamic_action(&mut self, text: &str) -> CommandOutcome {
+        match self.outcome {
+            SensitiveDynamicOutcome::Invoke => {
+                self.invokes.push(text.to_owned());
+                CommandOutcome::Continue
+            }
+            SensitiveDynamicOutcome::ParseError => {
+                self.presentation
+                    .push("usage: :email auth google finish <account> <redirect_url>".to_owned());
+                CommandOutcome::Continue
+            }
+            SensitiveDynamicOutcome::StaleSchema => CommandOutcome::NotHandled,
+        }
+    }
+
+    fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        self.presentation.push(format!("prompt:{text}"));
+        None
+    }
+
+    fn system_info(&mut self, message: &str) {
+        self.presentation.push(message.to_owned());
+    }
+}
+
+impl SubmittedLineHandlers for SensitiveSubmissionHandlers {
+    fn replace_last_submitted_prompt(&mut self, text: String) {
+        self.replacements.push(text);
+    }
+
+    fn record_prompt_line(&mut self, record: SubmittedLineRecord<'_>) {
+        self.editor_context = Some(record.presentation_text.to_owned());
+        if !self.ephemeral {
+            self.persistent_history
+                .push(record.presentation_text.to_owned());
+        }
+    }
+
+    fn is_known_command_or_action(&self, _text: &str) -> bool {
+        !matches!(self.outcome, SensitiveDynamicOutcome::StaleSchema)
+    }
+
+    fn command_echo(&mut self, text: &str) {
+        self.presentation.push(text.to_owned());
+    }
+
+    fn submit_literal_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        self.presentation.push(format!("literal:{text}"));
+        None
+    }
+}
+
+/// The production submitted-line orchestrator must keep raw Gmail OAuth
+/// code/state in exactly one successful action handoff while every persistent
+/// or ephemeral editor, history, echo, parse-error, and stale-schema view uses
+/// only the fixed presentation.
+#[test]
+fn sensitive_submission_orchestration_separates_action_authority_from_presentation() {
+    const CODE: &str = "CODE_SENTINEL_46";
+    const STATE: &str = "STATE_SENTINEL_46";
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let raw = format!(":email auth google finish work http://localhost/?code={CODE}&state={STATE}");
+
+    for (outcome, ephemeral) in [
+        (SensitiveDynamicOutcome::Invoke, false),
+        (SensitiveDynamicOutcome::ParseError, true),
+        (SensitiveDynamicOutcome::StaleSchema, false),
+    ] {
+        let mut handlers = SensitiveSubmissionHandlers::new(outcome, ephemeral);
+        handle_submitted_line_with_handlers(&raw, &mut handlers).expect("submission handled");
+
+        assert_eq!(handlers.replacements, [REDACTED]);
+        assert_eq!(handlers.editor_context.as_deref(), Some(REDACTED));
+        if ephemeral {
+            assert!(handlers.persistent_history.is_empty());
+        } else {
+            assert_eq!(handlers.persistent_history, [REDACTED]);
+        }
+        match outcome {
+            SensitiveDynamicOutcome::Invoke => assert_eq!(handlers.invokes, [raw.as_str()]),
+            SensitiveDynamicOutcome::ParseError | SensitiveDynamicOutcome::StaleSchema => {
+                assert!(handlers.invokes.is_empty());
+            }
+        }
+        let serialized =
+            serde_json::to_vec(&handlers.presentation).expect("serialize non-owner outputs");
+        assert!(
+            !serialized
+                .windows(CODE.len())
+                .any(|window| window == CODE.as_bytes())
+        );
+        assert!(
+            !serialized
+                .windows(STATE.len())
+                .any(|window| window == STATE.as_bytes())
+        );
+    }
+
+    let mut escaped = SensitiveSubmissionHandlers::new(SensitiveDynamicOutcome::StaleSchema, false);
+    handle_submitted_line_with_handlers(&format!(":{raw}"), &mut escaped)
+        .expect("escaped literal handled");
+    assert!(escaped.invokes.is_empty());
+    assert_eq!(escaped.editor_context.as_deref(), Some(REDACTED));
+    assert_eq!(escaped.presentation, [format!("literal:{REDACTED}")]);
+}
+
 /// The core retry command must remain in static completion and only its exact
 /// argument-free spelling may be consumed locally; malformed variants must not
 /// become an accidental prompt resubmission.
