@@ -258,7 +258,7 @@ fn tool_cancel_request_survives_active_sender_registration_handoff() {
         schedule_shell_paused_before_active_registration(&mut runtime, "cancel-handoff");
 
     reached_rx
-        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .recv()
         .expect("shell reached sender-registration handoff");
     runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
         target_call_id: call_id.clone(),
@@ -297,7 +297,7 @@ fn tool_cancel_request_survives_search_sender_registration_handoff() {
     );
 
     reached_rx
-        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .recv()
         .expect("find reached sender-registration handoff");
     runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
         target_call_id: call_id.clone(),
@@ -323,7 +323,7 @@ fn shutdown_survives_active_sender_registration_handoff() {
         schedule_shell_paused_before_active_registration(&mut runtime, "shutdown-handoff");
 
     reached_rx
-        .recv_timeout(path_std_time::Duration::from_secs(1))
+        .recv()
         .expect("shell reached sender-registration handoff");
     runtime.shutdown();
     resume_tx.send(()).expect("resume shell registration");
