@@ -14,8 +14,12 @@ use tau_proto::{
 
 use super::*;
 
-/// Exact text used to synchronize the hold-disconnect fixture.
-const HOLD_READY_MARKER: &[u8] = b"hold_no_side_effect ready";
+/// Exact no-side-effect readiness text used to synchronize its disconnect
+/// fixture.
+const NO_SIDE_EFFECT_READY_MARKER: &[u8] = b"hold_no_side_effect ready";
+/// Exact release-hold readiness text used to synchronize its disconnect
+/// fixture.
+const RELEASE_HOLD_READY_MARKER: &[u8] = b"hold_until_success_release ready";
 
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -39,16 +43,32 @@ struct SharedWriter {
 
 impl Default for SharedWriter {
     fn default() -> Self {
+        Self::with_readiness_marker(&[])
+    }
+}
+
+impl SharedWriter {
+    /// Creates an output sink that publishes the specified detached readiness
+    /// marker only after its containing output has been flushed.
+    fn with_readiness_marker(marker: &[u8]) -> Self {
         Self {
             bytes: Arc::default(),
-            readiness: Arc::new((Mutex::new(ReadinessState::default()), Condvar::new())),
+            readiness: Arc::new((
+                Mutex::new(ReadinessState {
+                    marker: marker.to_vec(),
+                    marker_seen: false,
+                    published: false,
+                }),
+                Condvar::new(),
+            )),
         }
     }
 }
 
 /// Tracks whether the exact detached readiness frame reached the test writer.
-#[derive(Default)]
 struct ReadinessState {
+    /// Exact fixture readiness marker expected in emitted protocol bytes.
+    marker: Vec<u8>,
     /// Whether emitted bytes contain the sole fixture readiness marker.
     marker_seen: bool,
     /// Whether a flush completed after the marker was emitted.
@@ -59,15 +79,14 @@ impl std::io::Write for SharedWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let mut bytes = self.bytes.lock().expect("output lock");
         bytes.extend_from_slice(buffer);
-        if bytes
-            .windows(HOLD_READY_MARKER.len())
-            .any(|window| window == HOLD_READY_MARKER)
+        let (state, _) = &*self.readiness;
+        let mut state = state.lock().expect("readiness state");
+        if !state.marker.is_empty()
+            && bytes
+                .windows(state.marker.len())
+                .any(|window| window == state.marker)
         {
-            self.readiness
-                .0
-                .lock()
-                .expect("readiness state")
-                .marker_seen = true;
+            state.marker_seen = true;
         }
         Ok(buffer.len())
     }
@@ -909,7 +928,7 @@ fn hold_no_side_effect_reports_ready_then_cancels() {
 fn hold_no_side_effect_disconnect_has_no_terminal_output() {
     let prefix = restart_input(&[restart_config("hold_no_side_effect"), invoke_restart()]);
     let suffix = protocol_input(&[disconnect()]);
-    let output = SharedWriter::default();
+    let output = SharedWriter::with_readiness_marker(NO_SIDE_EFFECT_READY_MARKER);
     let reader = ReadinessGatedReader {
         prefix: Cursor::new(prefix),
         suffix: Cursor::new(suffix),
@@ -1338,19 +1357,36 @@ fn release_hold_saturation_cancels_and_cleans_up_without_success() {
 #[test]
 fn hold_until_success_release_disconnect_cleans_up_without_success() {
     let socket_path = unique_socket_path("disconnect");
-    let frames = run_restart_frames(
-        &[
-            release_config(&socket_path, "fixture-nonce"),
-            invoke_restart(),
-            disconnect(),
-        ],
-        1,
-    );
-    assert!(
-        frames
-            .iter()
-            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResultReported(_))))
-    );
+    let prefix = restart_input(&[
+        release_config(&socket_path, "fixture-nonce"),
+        invoke_restart(),
+    ]);
+    let suffix = protocol_input(&[disconnect()]);
+    let output = SharedWriter::with_readiness_marker(RELEASE_HOLD_READY_MARKER);
+    let reader = ReadinessGatedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        readiness: output.readiness_barrier(),
+        released: false,
+    };
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, output.clone(), &mut rng).expect("run");
+    let frames = decode_output(output.snapshot());
+    assert!(frames.iter().any(|frame| {
+        matches!(
+            emitted_event(frame),
+            Some(Event::ToolProgressReported(progress))
+                if progress.call_id.as_str() == "call-1"
+                    && progress.message.as_deref()
+                        == Some("hold_until_success_release ready")
+        )
+    }));
+    assert!(frames.iter().all(|frame| !matches!(
+        emitted_event(frame),
+        Some(Event::ToolResultReported(_))
+            | Some(Event::ToolErrorReported(_))
+            | Some(Event::ToolCancelledReported(_))
+    )));
     assert!(!socket_path.exists());
     std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
 }
