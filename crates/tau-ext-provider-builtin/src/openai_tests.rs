@@ -2216,6 +2216,7 @@ fn retry_schedule_rejects_duplicate_prompt_identity() {
 /// succeeds without duplicating the logical prompt lifecycle.
 #[test]
 fn retryable_attempt_is_rescheduled_then_finishes_once() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     input.push(encode_frames(&[live_event(
         11,
@@ -2256,14 +2257,19 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
     let writer = SharedWriter::default();
     let output = writer.clone();
     let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock;
     let runtime = thread::spawn(move || {
-        run_inner_with_prompt_executor(
+        run_inner_with_executors_and_clock(
             runtime_input,
             writer,
             profiles,
             move || prompt_profiles.clone(),
             1,
-            executor,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
         )
         .expect("run provider");
     });
@@ -2352,6 +2358,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
 /// the main loop, so EOF can finish after the admitted attempt completes.
 #[test]
 fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     input.push(encode_frames(&[live_event(
         11,
@@ -2393,14 +2400,19 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
     let output = SharedWriter::default();
     let runtime_output = output.clone();
     let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock;
     let runtime = thread::spawn(move || {
-        run_inner_with_prompt_executor(
+        run_inner_with_executors_and_clock(
             runtime_input,
             runtime_output,
             profiles,
             move || prompt_profiles.clone(),
             1,
-            executor,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
         )
         .expect("run provider");
     });
