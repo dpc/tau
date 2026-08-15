@@ -1,8 +1,12 @@
+use std::io::Cursor;
 use std::time as path_std_time;
 
 use tau_proto::{AgentPromptCreated, MessageItem, PromptOriginator, ProviderStopReason};
 
 use super::*;
+
+const HOSTILE_TEXT: &str = "A\x1b[31mB\x1b[0mC\x1b]52;c;WA==\x07D\u{009B}31mE";
+const SAFE_TEXT: &str = "ABCDE";
 
 #[test]
 fn prompt_stdin_role_uses_startup_role_or_default() {
@@ -504,9 +508,168 @@ fn one_shot_output_writes_thinking_to_stderr_and_answer_to_stdout() {
     let mut stderr = Vec::new();
 
     output
-        .write_to(&mut stdout, &mut stderr)
+        .write_to(
+            &mut stdout,
+            OutputPolicy::NonTerminal,
+            &mut stderr,
+            OutputPolicy::NonTerminal,
+        )
         .expect("write one-shot output");
 
     assert_eq!(stdout, b"answer\n");
     assert_eq!(stderr, b"first plan\n\nfinal plan\n");
+}
+
+/// Terminal-item answer and reasoning bodies use their own descriptor policies,
+/// covering ESC CSI, OSC through BEL, and C1 CSI without changing framing.
+#[test]
+fn one_shot_terminal_items_sanitize_each_terminal_destination_independently() {
+    let mut finished = assistant_finished("sp-final", HOSTILE_TEXT, ProviderStopReason::EndTurn);
+    finished.output_items.insert(
+        0,
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: HOSTILE_TEXT.to_owned(),
+        }),
+    );
+    let mut output = OneShotOutput::default();
+    assert!(output.capture_finished(&finished));
+
+    for (stdout_policy, stderr_policy, expected_stdout, expected_stderr) in [
+        (
+            OutputPolicy::Terminal,
+            OutputPolicy::NonTerminal,
+            format!("{SAFE_TEXT}\n").into_bytes(),
+            format!("{HOSTILE_TEXT}\n").into_bytes(),
+        ),
+        (
+            OutputPolicy::NonTerminal,
+            OutputPolicy::Terminal,
+            format!("{HOSTILE_TEXT}\n").into_bytes(),
+            format!("{SAFE_TEXT}\n").into_bytes(),
+        ),
+    ] {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        output
+            .write_to(&mut stdout, stdout_policy, &mut stderr, stderr_policy)
+            .expect("write terminal items");
+        assert_eq!(stdout, expected_stdout);
+        assert_eq!(stderr, expected_stderr);
+    }
+}
+
+/// Streaming fallback retains the same destination-sensitive policy as final
+/// items, including two-block reasoning separators and each trailing LF.
+#[test]
+fn one_shot_streaming_fallback_uses_destination_policy_and_existing_framing() {
+    let mut output = OneShotOutput::default();
+    output.capture_update(&user_update("sp-tool", "", Some(HOSTILE_TEXT)));
+    assert!(!output.capture_finished(&ProviderResponseFinished {
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::ToolCalls,
+        ..assistant_finished("sp-tool", "", ProviderStopReason::ToolCalls)
+    }));
+    output.capture_update(&user_update("sp-final", HOSTILE_TEXT, Some(HOSTILE_TEXT)));
+    assert!(output.capture_finished(&ProviderResponseFinished {
+        output_items: Vec::new(),
+        ..assistant_finished("sp-final", "", ProviderStopReason::EndTurn)
+    }));
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    output
+        .write_to(
+            &mut stdout,
+            OutputPolicy::NonTerminal,
+            &mut stderr,
+            OutputPolicy::Terminal,
+        )
+        .expect("write streaming fallback");
+    assert_eq!(stdout, format!("{HOSTILE_TEXT}\n").as_bytes());
+    assert_eq!(stderr, format!("{SAFE_TEXT}\n\n{SAFE_TEXT}\n").as_bytes());
+}
+
+/// Prompt-failure, provider-failure, and admission-rejection bodies sanitize
+/// only for terminal stderr while their fixed prefixes remain unchanged.
+#[test]
+fn prompt_stdin_error_policy_sanitizes_only_dynamic_terminal_bodies() {
+    let expected_prefixes = [
+        "create-agent request failed (role_unavailable): ",
+        "initial prompt failed (preprocessing): ",
+        "initial prompt failed (execution): ",
+    ];
+
+    for (policy, expected_body) in [
+        (OutputPolicy::Terminal, SAFE_TEXT),
+        (OutputPolicy::NonTerminal, HOSTILE_TEXT),
+    ] {
+        for (error, prefix) in hostile_prompt_stdin_errors()
+            .into_iter()
+            .zip(expected_prefixes)
+        {
+            let rendered = sanitize_prompt_stdin_error(error, policy);
+            assert_eq!(rendered.to_string(), format!("{prefix}{expected_body}"));
+        }
+    }
+}
+
+/// Construct every prompt-stdin error variant with a dynamic body.
+fn hostile_prompt_stdin_errors() -> [CliError; 3] {
+    [
+        CliError::PromptStdin(PromptStdinError::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::RoleUnavailable,
+            message: HOSTILE_TEXT.to_owned(),
+        }),
+        CliError::PromptStdin(PromptStdinError::PromptFailed {
+            stage: tau_proto::AgentPromptFailureStage::Preprocessing,
+            message: HOSTILE_TEXT.to_owned(),
+        }),
+        CliError::PromptStdin(PromptStdinError::ExecutionFailed {
+            message: HOSTILE_TEXT.to_owned(),
+        }),
+    ]
+}
+
+/// Role values share stderr's injected policy, preserving plain multiline
+/// Unicode while removing the full hostile control-sequence matrix on a TTY.
+#[test]
+fn prompt_stdin_role_uses_stderr_destination_policy() {
+    let plain = "réviewer\nsecond line";
+    assert_eq!(
+        OutputPolicy::Terminal.dynamic_text(plain),
+        OutputPolicy::NonTerminal.dynamic_text(plain),
+    );
+    assert_eq!(OutputPolicy::Terminal.dynamic_text(HOSTILE_TEXT), SAFE_TEXT,);
+    assert_eq!(
+        OutputPolicy::NonTerminal.dynamic_text(HOSTILE_TEXT),
+        HOSTILE_TEXT,
+    );
+
+    for (policy, expected_role) in [
+        (OutputPolicy::Terminal, SAFE_TEXT),
+        (OutputPolicy::NonTerminal, HOSTILE_TEXT),
+    ] {
+        let mut stderr = Vec::new();
+        print_prompt_stdin_headers(&mut stderr, "session-1", Some(HOSTILE_TEXT), policy);
+        assert_eq!(
+            stderr,
+            format!("session_id: session-1\nrole: {expected_role}\n").as_bytes(),
+        );
+    }
+}
+
+/// Header rendering must surface a closed or exhausted stderr sink instead of
+/// running provider work after prompt-stdin failed to present its headers.
+#[test]
+#[should_panic(expected = "failed to print prompt-stdin headers")]
+fn prompt_stdin_headers_preserve_write_failures() {
+    let mut storage = [];
+    print_prompt_stdin_headers(
+        &mut Cursor::new(&mut storage[..]),
+        "session-1",
+        Some("engineer"),
+        OutputPolicy::NonTerminal,
+    );
+    panic!("provider continuation ran after header failure");
 }

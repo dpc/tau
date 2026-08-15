@@ -73,6 +73,10 @@ arms sticky monitoring before the fresh turn to reject later pending repaints. A
 replay-aware side UI observer and typed
 CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
 stable identity, unchanged durable prefix, and one fresh same-agent prompt.
+The gate also owns real-process `--prompt-stdin` coverage. A piped invocation
+proves raw semantic response bytes and framing remain unchanged, while a
+one-shot PTY invocation proves destination detection sanitizes the same hostile
+provider response and inspects capture only after child exit and reader drain.
 Two live-attach variants compare the exact unique dummy-tool row in both PTYs
 after completion and during a release-held invocation. The held case waits for
 the durable tool request and live correlated readiness, sends one bounded authenticated

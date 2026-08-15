@@ -36,6 +36,7 @@ const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DEADLINE: Duration = Duration::from_secs(20);
 const DUMMY_ROLE: &str = "deterministic-e2e";
 const DUMMY_TOOL: &str = "restart_test_dummy";
+const HOSTILE_TERMINAL_TEXT: &str = "A\x1b[31mB\x1b[0mC\x1b]52;c;WA==\x07D\u{009B}31mE";
 
 /// The real prompt-stdin process reports unavailable-role admission exactly as
 /// stderr diagnostics with empty stdout and a failing exit status.
@@ -110,6 +111,78 @@ fn prompt_stdin_accepted_prompt_prints_correlated_completion()
     let output = child.wait_with_output()?;
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stdout)?, "correlated completion\n");
+    fixture.complete();
+    Ok(())
+}
+
+/// A real process with piped descriptors preserves every provider-authored
+/// semantic UTF-8 byte and the existing trailing LF for machine consumers.
+#[test]
+fn prompt_stdin_piped_output_preserves_terminal_control_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "prompt-stdin-piped-terminal-controls",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>piped terminal controls\n</user>".to_owned(),
+                response: HOSTILE_TERMINAL_TEXT.to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut command = fixture.command(None);
+    command
+        .arg("--prompt-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("prompt stdin")
+        .write_all(b"piped terminal controls\n")?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        format!("{HOSTILE_TERMINAL_TEXT}\n").as_bytes()
+    );
+    fixture.complete();
+    Ok(())
+}
+
+/// A real PTY makes inherited stdout terminal-bound, so prompt-stdin removes
+/// ESC CSI, OSC/BEL, and C1 CSI while retaining the readable answer and LF.
+#[test]
+fn prompt_stdin_pty_output_sanitizes_terminal_control_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "prompt-stdin-pty-terminal-controls",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>pty terminal controls\n</user>".to_owned(),
+                response: HOSTILE_TERMINAL_TEXT.to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut command = fixture.command(None);
+    command.arg("--prompt-stdin");
+    let mut process = PtyProcess::spawn(command, false, None)?;
+    process.send_text("pty terminal controls\n\u{4}")?;
+    process.wait_for("ABCDE", Instant::now() + DEADLINE)?;
+    let raw = process.finish_exited()?;
+    assert!(
+        raw.windows(b"ABCDE\r\n".len())
+            .any(|bytes| bytes == b"ABCDE\r\n")
+    );
+    assert!(!raw.contains(&0x1b));
+    assert!(!raw.contains(&0x07));
+    assert!(!raw.windows(2).any(|bytes| bytes == b"\xc2\x9b"));
+    assert!(!raw.windows(b"WA==".len()).any(|bytes| bytes == b"WA=="));
     fixture.complete();
     Ok(())
 }

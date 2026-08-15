@@ -166,6 +166,17 @@ sidecar, and configured-endpoint boundary are documented in
 Tool, provider, extension, and user-derived presentation text is not trusted
 terminal control. Themes resolve to structured styles rather than inline escape
 bytes, and terminal cell conversion sanitizes control characters before output.
+The one-shot `--prompt-stdin` path checks inherited stdout and stderr
+independently. It sanitizes dynamic answer text only when stdout is a terminal,
+and sanitizes dynamic reasoning, role, and `PromptStdinError` bodies only when
+stderr is a terminal. Pipes and files preserve semantic UTF-8 body bytes inside
+the existing framing; that raw nonterminal output is not terminal-safe and
+should not be forwarded to a terminal without equivalent sanitization.
+
+When changing one-shot rendering or terminal detection, re-check final-item and
+streaming-fallback output, role and error bodies, crossed stdout/stderr terminal
+policies, and exact nonterminal body bytes, prefixes, separators, and trailing
+newlines.
 Adaptive one-row layout measures complete Unicode graphemes by terminal display
 columns and middle-truncates only at grapheme boundaries. Tool headers treat
 identity and explicit lifecycle/result status as one essential set: a terminal

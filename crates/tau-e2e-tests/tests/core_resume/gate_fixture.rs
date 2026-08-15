@@ -1,6 +1,7 @@
 //! Private-root configuration and artifact ownership for the Gate 1 PTY test.
 
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::fs as path_std_fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -219,9 +220,10 @@ impl GateFixture {
             },
             "extensions": extensions,
         });
+        let harness_json = serde_json::to_string_pretty(&harness)?;
         std::fs::write(
             tau_config.join("harness.yaml"),
-            serde_json::to_vec_pretty(&harness)?,
+            escape_c1_for_yaml(&harness_json),
         )?;
         let show_internal_prompts = if mode == FixtureMode::MultiAgent {
             // S8 deliberately asserts the harness-authored initial worker
@@ -443,6 +445,20 @@ impl GateFixture {
     pub(super) fn complete(&self) {
         self.completed.set(true);
     }
+}
+
+/// Escape JSON-valid C1 scalars that YAML forbids in parsed configuration.
+fn escape_c1_for_yaml(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len());
+    for character in json.chars() {
+        if ('\u{0080}'..='\u{009F}').contains(&character) {
+            write!(&mut escaped, "\\u{:04x}", character as u32)
+                .expect("writing to String cannot fail");
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 /// Closed role/extension surface selected for one core-resume scenario.

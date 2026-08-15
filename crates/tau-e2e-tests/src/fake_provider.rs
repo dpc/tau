@@ -46,6 +46,8 @@ const PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS: &[&str] = &[
     "spawned-tau-cold-resume",
     "live-dual-pty-attach",
     "prompt-stdin-literal-colon",
+    "prompt-stdin-piped-terminal-controls",
+    "prompt-stdin-pty-terminal-controls",
     "prompt-stdin-success",
     "prompt-stdin-provider-failure",
 ];

@@ -105,6 +105,11 @@ pub struct RunArgs {
     pub config: Option<PathBuf>,
 
     /// Read one prompt from stdin, submit it, print final output, and exit.
+    ///
+    /// Answers go to stdout; reasoning, headers, and errors go to stderr.
+    /// Each destination's terminal state is checked independently, and dynamic
+    /// bodies are sanitized only when that destination is a terminal. Pipes and
+    /// files retain semantic UTF-8 bytes and existing framing.
     #[arg(long = "prompt-stdin")]
     pub prompt_stdin: bool,
 

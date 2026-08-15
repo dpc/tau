@@ -20,6 +20,15 @@ requests their event names only in its live selector set and independently drops
 replay-marked terminal-output deliveries before rendering. See
 [SPEC-terminal-output-side-effect-events](../../../specs/SPEC-terminal-output-side-effect-events.md).
 
+The one-shot `--prompt-stdin` sink chooses presentation policy independently
+for inherited stdout and stderr. When stdout is a terminal, it applies the
+terminal-body sanitizer only to dynamic answer text. When stderr is a terminal,
+it applies the same sanitizer only to dynamic reasoning, role, rejection,
+prompt-failure, and provider-failure bodies. Nonterminal descriptors retain the
+captured semantic UTF-8 bytes inside the existing headers, prefixes, separators,
+and trailing newlines. This presentation boundary does not modify stdin,
+canonical events, protocol traffic, transcripts, journals, or persistence.
+
 The terminal UI executes trusted local configuration and environment-derived
 commands, including key-binding shell snippets, completion commands, `$EDITOR`,
 and `$VISUAL`. Treat `cli.yaml`, inherited environment variables, and PATH as

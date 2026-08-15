@@ -92,6 +92,16 @@ pending row. The interruption case separately permits one bounded
 agree on selected-agent and pending/settled status while typed lifecycle facts
 prove runtime; attachment itself consumes no provider action or tool invocation.
 The snapshot assertions do not claim an absence of intermediate redraw flicker.
+
+The one-shot `core_resume` cases
+`prompt-stdin-literal-colon`, `prompt-stdin-success`,
+`prompt-stdin-provider-failure`, `prompt-stdin-piped-terminal-controls`, and
+`prompt-stdin-pty-terminal-controls` use that same closed single-lane
+`ui-prompt-*` binding exception. The last two send one exact hostile semantic
+response through the real prompt-stdin process: the piped case owns raw
+nonterminal byte/framing assertions, while the PTY case owns terminal
+sanitization and drains the child and PTY reader before inspecting raw capture.
+
 The two-agent attached-UI case first completes the deterministic main/worker
 scenario and correlates both stable IDs and idle readiness through typed facts.
 Each UI then selects both IDs independently. Exact fake traces, typed provider

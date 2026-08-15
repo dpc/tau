@@ -26,6 +26,15 @@ const ROWS: u16 = 40;
 const MAX_RAW_BYTES: usize = 256 * 1024;
 const MAX_FRAMES: usize = 512;
 
+/// How the PTY reader should stop while the child process is reaped.
+#[derive(Clone, Copy)]
+enum ReaderShutdown {
+    /// Keep reading through the slave-side close and natural EOF.
+    NaturalEof,
+    /// Stop promptly for cleanup paths that do not inspect complete capture.
+    StopEarly,
+}
+
 /// Named terminal cell dimensions shared by the kernel PTY and semantic VT.
 pub(super) struct TerminalSize {
     /// Visible terminal columns.
@@ -492,7 +501,18 @@ impl PtyProcess {
     /// Requests `:quit`, then reaps the whole owned process tree within bounds.
     pub(super) fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.send_line(":quit")?;
-        let status = self.reap(Duration::from_secs(3))?;
+        self.reap_successfully()
+    }
+
+    /// Reap a bounded one-shot process and return raw bytes after reader drain.
+    pub(super) fn finish_exited(mut self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        self.reap_successfully()?;
+        self.raw()
+    }
+
+    /// Wait for successful process exit and natural PTY EOF before returning.
+    fn reap_successfully(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let status = self.reap(Duration::from_secs(3), ReaderShutdown::NaturalEof)?;
         if !status.success() {
             return Err(format!("Tau PTY process exited with {status}").into());
         }
@@ -503,8 +523,11 @@ impl PtyProcess {
     fn reap(
         &mut self,
         graceful: Duration,
+        reader_shutdown: ReaderShutdown,
     ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-        self.reader_stop.store(true, Ordering::Release);
+        if matches!(reader_shutdown, ReaderShutdown::StopEarly) {
+            self.reader_stop.store(true, Ordering::Release);
+        }
         let child = self.child.as_mut().ok_or("PTY child already reaped")?;
         let pgid = Pid::from_raw(child.id() as i32);
         let first_deadline = Instant::now() + graceful;
@@ -600,7 +623,7 @@ impl Drop for PtyProcess {
         if self.child.is_none() {
             return;
         }
-        let _ = self.reap(Duration::ZERO);
+        let _ = self.reap(Duration::ZERO, ReaderShutdown::StopEarly);
         let _ = self.write_artifacts();
     }
 }
@@ -956,7 +979,7 @@ fn complete_frame_wait_rejects_idle_only_generation() {
             .expect("flush selected status process release");
     });
     process
-        .reap(Duration::from_secs(1))
+        .reap(Duration::from_secs(1), ReaderShutdown::StopEarly)
         .expect("reap redraw process");
 }
 
@@ -1092,7 +1115,7 @@ fn cleanup_reaps_descendant_after_process_group_leader_exits() {
         .expect("descendant readiness");
     let started = Instant::now();
     let status = process
-        .reap(Duration::from_millis(20))
+        .reap(Duration::from_millis(20), ReaderShutdown::StopEarly)
         .expect("bounded group cleanup");
     assert!(status.success());
     assert!(started.elapsed() >= Duration::from_millis(900));

@@ -1,7 +1,8 @@
 //! One-shot stdin prompt client.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::sync::mpsc;
 use std::time as path_std_time;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use crate::daemon::{
     DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon,
     storage_mode_from_ephemeral,
 };
+use crate::terminal_text::sanitize_terminal_body;
 use crate::ui_prompt::{
     CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, PromptCommandHandling,
     create_user_agent_prompt,
@@ -35,12 +37,19 @@ pub(crate) fn run_prompt_stdin(
     cli_overrides: DaemonCliOverrides<'_>,
     ephemeral: bool,
 ) -> Result<(), CliError> {
+    let stdout_policy = OutputPolicy::from_terminal(io::stdout().is_terminal());
+    let stderr_policy = OutputPolicy::from_terminal(io::stderr().is_terminal());
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt)?;
     if prompt.is_empty() {
         return Ok(());
     }
-    print_prompt_stdin_headers(session_id.as_str(), startup_role);
+    print_prompt_stdin_headers(
+        &mut io::stderr().lock(),
+        session_id.as_str(),
+        startup_role,
+        stderr_policy,
+    );
 
     let daemon_output = if attach {
         None
@@ -76,7 +85,7 @@ pub(crate) fn run_prompt_stdin(
             ..OneShotOutput::default()
         };
         read_one_shot_result(&messages, &mut output)?;
-        output.write()?;
+        output.write(stdout_policy, stderr_policy)?;
         Ok(())
     })();
 
@@ -84,15 +93,35 @@ pub(crate) fn run_prompt_stdin(
     drop(writer);
     drop(daemon);
 
-    result
+    result.map_err(|error| sanitize_prompt_stdin_error(error, stderr_policy))
 }
 
 type OneShotReader = crate::ui_client::UiInputReader;
 type OneShotWriter = crate::ui_client::UiOutputWriter;
 
-fn print_prompt_stdin_headers(session_id: &str, startup_role: Option<&str>) {
-    eprintln!("session_id: {session_id}");
-    eprintln!("role: {}", prompt_stdin_role(startup_role));
+fn print_prompt_stdin_headers(
+    stderr: &mut impl Write,
+    session_id: &str,
+    startup_role: Option<&str>,
+    stderr_policy: OutputPolicy,
+) {
+    write_prompt_stdin_headers(stderr, session_id, startup_role, stderr_policy)
+        .expect("failed to print prompt-stdin headers");
+}
+
+/// Write fixed one-shot headers with only the dynamic role under sink policy.
+fn write_prompt_stdin_headers(
+    stderr: &mut impl Write,
+    session_id: &str,
+    startup_role: Option<&str>,
+    stderr_policy: OutputPolicy,
+) -> io::Result<()> {
+    writeln!(stderr, "session_id: {session_id}")?;
+    writeln!(
+        stderr,
+        "role: {}",
+        stderr_policy.dynamic_text(prompt_stdin_role(startup_role))
+    )
 }
 
 fn prompt_stdin_role(startup_role: Option<&str>) -> &str {
@@ -481,16 +510,22 @@ impl OneShotOutput {
             })
     }
 
-    fn write(&self) -> io::Result<()> {
+    fn write(&self, stdout_policy: OutputPolicy, stderr_policy: OutputPolicy) -> io::Result<()> {
         let mut stdout = io::stdout().lock();
         let mut stderr = io::stderr().lock();
-        self.write_to(&mut stdout, &mut stderr)
+        self.write_to(&mut stdout, stdout_policy, &mut stderr, stderr_policy)
     }
 
-    fn write_to(&self, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Result<()> {
+    fn write_to(
+        &self,
+        stdout: &mut impl Write,
+        stdout_policy: OutputPolicy,
+        stderr: &mut impl Write,
+        stderr_policy: OutputPolicy,
+    ) -> io::Result<()> {
         let mut wrote_thinking = false;
         for thinking in &self.thinking_blocks {
-            write_text_block(stderr, &mut wrote_thinking, thinking)?;
+            write_text_block(stderr, stderr_policy, &mut wrote_thinking, thinking)?;
         }
         if wrote_thinking {
             stderr.write_all(b"\n")?;
@@ -498,7 +533,7 @@ impl OneShotOutput {
 
         let mut wrote_response = false;
         if let Some(response) = self.final_response.as_deref() {
-            write_text_block(stdout, &mut wrote_response, response)?;
+            write_text_block(stdout, stdout_policy, &mut wrote_response, response)?;
         }
         if wrote_response {
             stdout.write_all(b"\n")?;
@@ -508,15 +543,78 @@ impl OneShotOutput {
     }
 }
 
+/// Presentation policy for one inherited output descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputPolicy {
+    /// Remove terminal controls before writing dynamic text to a terminal.
+    Terminal,
+    /// Preserve semantic UTF-8 bytes for a pipe or file.
+    NonTerminal,
+}
+
+impl OutputPolicy {
+    /// Select a presentation policy from one descriptor's terminal state.
+    fn from_terminal(is_terminal: bool) -> Self {
+        if is_terminal {
+            Self::Terminal
+        } else {
+            Self::NonTerminal
+        }
+    }
+
+    /// Return dynamic text in the representation appropriate for this sink.
+    fn dynamic_text(self, text: &str) -> Cow<'_, str> {
+        match self {
+            Self::Terminal => Cow::Owned(sanitize_terminal_body(text)),
+            Self::NonTerminal => Cow::Borrowed(text),
+        }
+    }
+
+    /// Convert an owned dynamic body without cloning raw nonterminal text.
+    fn dynamic_string(self, text: String) -> String {
+        match self {
+            Self::Terminal => sanitize_terminal_body(&text),
+            Self::NonTerminal => text,
+        }
+    }
+}
+
+/// Apply the stderr presentation policy only to prompt-stdin error bodies.
+fn sanitize_prompt_stdin_error(error: CliError, policy: OutputPolicy) -> CliError {
+    let CliError::PromptStdin(error) = error else {
+        return error;
+    };
+    let error = match error {
+        PromptStdinError::Rejected { reason, message } => PromptStdinError::Rejected {
+            reason,
+            message: policy.dynamic_string(message),
+        },
+        PromptStdinError::PromptFailed { stage, message } => PromptStdinError::PromptFailed {
+            stage,
+            message: policy.dynamic_string(message),
+        },
+        PromptStdinError::ExecutionFailed { message } => PromptStdinError::ExecutionFailed {
+            message: policy.dynamic_string(message),
+        },
+        error @ PromptStdinError::AdmissionTimeout { .. } => error,
+    };
+    CliError::PromptStdin(error)
+}
+
 fn parse_agent_prompt_index(prompt_id: &tau_proto::AgentPromptId) -> Option<u64> {
     prompt_id.as_str().rsplit_once('-')?.1.parse().ok()
 }
 
-fn write_text_block(output: &mut impl Write, wrote_block: &mut bool, text: &str) -> io::Result<()> {
+fn write_text_block(
+    output: &mut impl Write,
+    policy: OutputPolicy,
+    wrote_block: &mut bool,
+    text: &str,
+) -> io::Result<()> {
     if *wrote_block {
         output.write_all(b"\n\n")?;
     }
-    output.write_all(text.as_bytes())?;
+    output.write_all(policy.dynamic_text(text).as_bytes())?;
     *wrote_block = true;
     Ok(())
 }
