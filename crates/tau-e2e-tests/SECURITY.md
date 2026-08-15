@@ -225,7 +225,7 @@ observer provider/stats facts, and typed durable snapshots independently prove
 that these actions submit no model work, mutate no agent runtime stats, and
 append no authoritative semantic event. The observer does require the expected
 live-only prompt-draft liveness rows, which are not durable semantic state.
-One PTY alone is resized from 120x40 to 80x24; ordered transcript classes, one
+One PTY alone is resized from 120x40 to 72x24; ordered transcript classes, one
 selected stable ID and its cell style, and the separate idle class remain
 authoritative while wrapping, adaptive field elision, spacing, and truncation
 positions may differ.

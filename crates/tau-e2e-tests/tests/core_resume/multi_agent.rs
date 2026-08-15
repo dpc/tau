@@ -277,7 +277,7 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     }
 
     let before_resize = second.read_generation()?;
-    second.resize(TerminalSize { cols: 80, rows: 24 })?;
+    second.resize(TerminalSize { cols: 72, rows: 24 })?;
     let prefix_compact = narrow_prompt_prefix
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -297,11 +297,11 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         assert_worker_size_projection(&second_narrow, &identities.worker, &identities)?;
     if second_worker_projection != narrow_projection {
         return Err(
-            format!("80x24 projection changed worker semantics: {narrow_projection:?}").into(),
+            format!("72x24 projection changed worker semantics: {narrow_projection:?}").into(),
         );
     }
     if second.marker_styles(identities.worker.as_str())? != second_worker_style {
-        return Err("80x24 resize changed the selected worker's critical status style".into());
+        return Err("72x24 resize changed the selected worker's critical status style".into());
     }
     let first_after_peer_resize =
         repaint_barrier(&mut first, "wide-peer-resize-barrier", deadline)?;
