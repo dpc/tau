@@ -9,6 +9,24 @@ semantic attributes. They assert text preservation except for documented
 display-only transforms and verify semantic styling on resolved spans. Built-in
 theme tests only check parsing and intentional theme-level invariants.
 
+## Markdown renderer fuzz properties
+
+The bounded Markdown renderer properties use the existing `proptest` framework.
+They run 64 arbitrary Unicode cases and 64 delimiter-heavy cases in ordinary CI,
+covering static rendering plus every UTF-8-safe append-only streaming snapshot.
+They require the sealed streaming spans to match static rendering exactly before
+one styled live progress marker, so malformed input cannot panic or alter
+finalized content.
+
+The ignored `markdown_heavy_fuzz_harness` compiles with the normal test binary but
+does not run in `cargo nextest` or selfci, keeping CI bounded. It defaults to 1,000
+larger generated cases. Run a deeper local workload deliberately:
+
+```sh
+TAU_MARKDOWN_FUZZ_CASES=20000 \
+  cargo test -p tau-cli markdown_heavy_fuzz_harness -- --ignored
+```
+
 Input-loop routing tests cover emitted notices and harness events or prompts,
 including the shared surface syntax of CLI commands, extension actions,
 harness-owned prompt commands, and unknown leading-colon fallback.

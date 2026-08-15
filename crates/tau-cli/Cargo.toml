@@ -47,6 +47,7 @@ unicode-width.workspace = true
 built.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tau-cli-term-raw = { workspace = true }
 tau-term-screen.workspace = true
 tau-test-support.workspace = true

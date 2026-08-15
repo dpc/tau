@@ -1,3 +1,8 @@
+use std::env::VarError;
+
+use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
+
 use super::*;
 
 fn markdown_test_theme() -> tau_themes::Theme {
@@ -21,6 +26,197 @@ fn markdown_test_theme() -> tau_themes::Theme {
         }"##,
     )
     .expect("valid markdown test theme")
+}
+
+fn arbitrary_markdown_source(max_chars: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(any::<char>(), 0..=max_chars)
+        .prop_map(|characters| characters.into_iter().collect())
+}
+
+fn delimiter_heavy_markdown_source(max_tokens: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            Just(" "),
+            Just("\t"),
+            Just("\n"),
+            Just("*"),
+            Just("**"),
+            Just("***"),
+            Just("****"),
+            Just("_"),
+            Just("__"),
+            Just("~~"),
+            Just("`"),
+            Just("```"),
+            Just("~~~"),
+            Just("\\"),
+            Just("["),
+            Just("]"),
+            Just("("),
+            Just(")"),
+            Just("<"),
+            Just(">"),
+            Just("|"),
+            Just("#"),
+            Just("- "),
+            Just("---"),
+            Just(":---:"),
+            Just("| heading | value |\n| --- | :---: |\n| cell | row |\n"),
+            Just("https://example.test/path"),
+            Just("é"),
+        ],
+        0..=max_tokens,
+    )
+    .prop_map(|tokens| tokens.concat())
+}
+
+fn parse_heavy_fuzz_cases(value: Option<&str>) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(1_000);
+    };
+    let cases = value
+        .parse()
+        .map_err(|_| "TAU_MARKDOWN_FUZZ_CASES must be a positive u32".to_owned())?;
+    if cases == 0 {
+        return Err("TAU_MARKDOWN_FUZZ_CASES must be a positive u32".to_owned());
+    }
+    Ok(cases)
+}
+
+fn heavy_fuzz_cases() -> Result<u32, String> {
+    match std::env::var("TAU_MARKDOWN_FUZZ_CASES") {
+        Ok(value) => parse_heavy_fuzz_cases(Some(&value)),
+        Err(VarError::NotPresent) => parse_heavy_fuzz_cases(None),
+        Err(VarError::NotUnicode(_)) => {
+            Err("TAU_MARKDOWN_FUZZ_CASES must be valid Unicode".to_owned())
+        }
+    }
+}
+
+fn normalized_spans(
+    spans: &[tau_cli_term::Span],
+) -> Vec<(String, tau_cli_term::Style, Option<std::sync::Arc<str>>)> {
+    let mut normalized: Vec<(String, tau_cli_term::Style, Option<std::sync::Arc<str>>)> =
+        Vec::new();
+    for span in spans {
+        if let Some((text, style, hyperlink)) = normalized.last_mut()
+            && *style == span.style
+            && *hyperlink == span.hyperlink
+        {
+            text.push_str(&span.text);
+        } else {
+            normalized.push((span.text.clone(), span.style, span.hyperlink.clone()));
+        }
+    }
+    normalized
+}
+
+fn assert_markdown_rendering_property(
+    theme: &tau_themes::Theme,
+    source: &str,
+) -> Result<(), TestCaseError> {
+    let _ = markdown_block(theme, names::AGENT_RESPONSE, source);
+
+    let mut cache = MarkdownStreamCache::default();
+    for end in source
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+    {
+        let _ = markdown_streaming_block(theme, names::AGENT_RESPONSE, &source[..end], &mut cache);
+    }
+
+    let completed = format!("{source}\n\n");
+    let static_block = markdown_block(theme, names::AGENT_RESPONSE, &completed);
+    let streaming_block =
+        markdown_streaming_block(theme, names::AGENT_RESPONSE, &completed, &mut cache);
+    let static_spans = static_block.content.spans();
+    let streaming_spans = streaming_block.content.spans();
+    let Some((progress, streaming_body)) = streaming_spans.split_last() else {
+        return Err(TestCaseError::fail(
+            "streaming rendering must include progress",
+        ));
+    };
+    prop_assert_eq!(
+        normalized_spans(streaming_body),
+        normalized_spans(static_spans)
+    );
+    prop_assert_eq!(&progress.text, tau_proto::PROGRESS_INDICATOR_TEXT);
+    prop_assert_eq!(
+        progress.style,
+        tau_cli_term::Style {
+            fg: Some(tau_cli_term::Color::Cyan),
+            ..tau_cli_term::Style::default()
+        }
+    );
+    prop_assert_eq!(&progress.hyperlink, &None);
+    Ok(())
+}
+
+/// Rejects invalid local fuzz-depth overrides before creating the heavy runner,
+/// so a typo cannot silently select a different stress workload.
+#[test]
+fn markdown_heavy_fuzz_cases_reject_invalid_values() {
+    assert_eq!(parse_heavy_fuzz_cases(None), Ok(1_000));
+    assert_eq!(parse_heavy_fuzz_cases(Some("42")), Ok(42));
+    assert!(parse_heavy_fuzz_cases(Some("0")).is_err());
+    assert!(parse_heavy_fuzz_cases(Some("many")).is_err());
+    assert!(parse_heavy_fuzz_cases(Some("4294967296")).is_err());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        max_shrink_iters: 0,
+        .. ProptestConfig::default()
+    })]
+
+    /// Exercises arbitrary bounded Unicode through static and append-only
+    /// Markdown rendering, ensuring malformed text cannot panic and sealed
+    /// streaming output retains its static rendering before the progress marker.
+    #[test]
+    fn arbitrary_markdown_rendering_is_panic_free(source in arbitrary_markdown_source(96)) {
+        let theme = markdown_test_theme();
+        assert_markdown_rendering_property(&theme, &source)?;
+    }
+
+    /// Targets the delimiter combinations that drive the Markdown-lite parser,
+    /// guarding against malformed runs, escapes, links, fences, and tables
+    /// panicking in either static or streaming rendering.
+    #[test]
+    fn delimiter_heavy_markdown_rendering_is_panic_free(
+        source in delimiter_heavy_markdown_source(128)
+    ) {
+        let theme = markdown_test_theme();
+        assert_markdown_rendering_property(&theme, &source)?;
+    }
+}
+
+/// Runs a deeper reusable fuzz workload over both arbitrary Unicode and
+/// delimiter-heavy Markdown. Ordinary nextest and selfci runs compile this
+/// ignored test but do not execute it; run
+/// `TAU_MARKDOWN_FUZZ_CASES=20000 cargo test -p tau-cli
+/// markdown_heavy_fuzz_harness -- --ignored` locally when deliberately
+/// stress-testing the renderer. The default is 1,000 cases.
+#[test]
+#[ignore = "heavy Markdown fuzz workload is compile-only in ordinary CI"]
+fn markdown_heavy_fuzz_harness() {
+    let strategy = prop_oneof![
+        arbitrary_markdown_source(256),
+        delimiter_heavy_markdown_source(384),
+    ];
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: heavy_fuzz_cases().expect("TAU_MARKDOWN_FUZZ_CASES must be valid and positive"),
+        max_shrink_iters: 0,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    });
+    let theme = markdown_test_theme();
+
+    runner
+        .run(&strategy, |source| {
+            assert_markdown_rendering_property(&theme, &source)
+        })
+        .expect("heavy Markdown fuzz workload must preserve static and streaming rendering");
 }
 
 /// Markdown links keep only their labels while inline, autolink, bare,
