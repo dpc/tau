@@ -831,6 +831,23 @@ fn live_stream_formats_complete_lines_and_leaves_current_line_plain() {
     assert!(!next.style.bold);
 }
 
+/// Prevents malformed adjacent asterisk runs from reaching the styled-span
+/// slicer with reversed bounds when static or completed streamed assistant text
+/// is parsed.
+#[test]
+fn markdown_adjacent_asterisk_runs_preserve_text_without_panicking() {
+    let theme = markdown_test_theme();
+    for source in ["***", "****"] {
+        let block = markdown_block(&theme, names::AGENT_RESPONSE, source);
+        assert_eq!(rendered_text(&block), source);
+
+        let mut cache = MarkdownStreamCache::default();
+        let complete = format!("{source}\n");
+        let block = markdown_streaming_block(&theme, names::AGENT_RESPONSE, &complete, &mut cache);
+        assert_eq!(rendered_text(&block), format!("{complete}…"));
+    }
+}
+
 /// Ensures the live parser applies line-level and inline Markdown-lite styling
 /// to newline-terminated text even before a blank line finalizes the block.
 #[test]

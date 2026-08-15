@@ -857,7 +857,7 @@ fn parse_inline_with_style(
             && rest.starts_with("***")
             && let Some(end) = find_closing_sequence(text, index, "***")
         {
-            push_styled_inline(runs, &text[index..end], MarkdownStyle::StrongEmphasis);
+            push_styled_inline(runs, &text[index..end], MarkdownStyle::StrongEmphasis, 3);
             index = end;
             continue;
         }
@@ -865,7 +865,7 @@ fn parse_inline_with_style(
             && rest.starts_with("**")
             && let Some(end) = find_closing_sequence(text, index, "**")
         {
-            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strong);
+            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strong, 2);
             index = end;
             continue;
         }
@@ -873,7 +873,7 @@ fn parse_inline_with_style(
             && rest.starts_with("~~")
             && let Some(end) = find_closing_sequence(text, index, "~~")
         {
-            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strikethrough);
+            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strikethrough, 2);
             index = end;
             continue;
         }
@@ -887,7 +887,7 @@ fn parse_inline_with_style(
             } else {
                 MarkdownStyle::Emphasis
             };
-            push_styled_inline(runs, &text[index..end], style);
+            push_styled_inline(runs, &text[index..end], style, ch.len_utf8());
             index = end;
             continue;
         }
@@ -898,15 +898,17 @@ fn parse_inline_with_style(
 }
 
 /// Parses links inside a uniformly styled delimiter-preserving span.
-fn push_styled_inline(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
-    let delimiter_len = match style {
-        MarkdownStyle::StrongEmphasis => 3,
-        MarkdownStyle::Strikethrough => 2,
-        MarkdownStyle::Strong if text.starts_with("**") => 2,
-        MarkdownStyle::Strong | MarkdownStyle::Emphasis => 1,
-        _ => 0,
-    };
+fn push_styled_inline(
+    runs: &mut Vec<MarkdownRun>,
+    text: &str,
+    style: MarkdownStyle,
+    delimiter_len: usize,
+) {
     let content_end = text.len().saturating_sub(delimiter_len);
+    if content_end < delimiter_len {
+        push_run(runs, text, style);
+        return;
+    }
     push_run(runs, &text[..delimiter_len], style);
     parse_inline_with_style(&text[delimiter_len..content_end], runs, style, false);
     push_run(runs, &text[content_end..], style);
