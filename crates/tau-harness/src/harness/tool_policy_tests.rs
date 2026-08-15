@@ -120,9 +120,11 @@ fn policy_harness_for_model(
         name: ToolGroupName::new("shell"),
         prompt_fragment: None,
     };
+    let mut replace = tagged_tool("replace", false, &["shell:edit", "shell:edit:replace"]);
+    replace.model_visible_name = Some(ToolName::new("edit"));
     for spec in [
         tagged_tool("edit", true, &["shell:edit", "shell:edit:line"]),
-        tagged_tool("replace", false, &["shell:edit", "shell:edit:replace"]),
+        replace,
         tagged_tool(
             "apply_patch",
             false,
@@ -300,8 +302,8 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         .collect()
 }
 
-/// Ensures provider style tags choose exactly one editing surface before role
-/// controls, including the DeepSeek wire-name default when no tag is present.
+/// Ensures untagged models select the exact-text implementation while explicit
+/// tags still choose exactly one editing surface before role controls.
 #[test]
 fn shell_tool_style_selects_one_edit_surface() {
     let tagged = policy_harness(&["shell:tool-style:replace"], AgentRole::default());
@@ -310,35 +312,17 @@ fn shell_tool_style_selects_one_edit_surface() {
     assert!(!tools.contains(&"edit".to_owned()));
     assert!(!tools.contains(&"apply_patch".to_owned()));
 
-    let mut deepseek = policy_harness(&[], AgentRole::default());
-    let model = deepseek.harness.selected_model.clone().expect("model");
-    deepseek
-        .harness
-        .provider_model_info
-        .get_mut(&model)
-        .expect("model info")
-        .id
-        .model = ModelName::new("deepseek-v4-flash");
-    deepseek.harness.selected_model = Some(ModelId::new(
-        ProviderName::new("provider"),
-        ModelName::new("deepseek-v4-flash"),
-    ));
-    let tools = effective_tool_names(&deepseek.harness);
+    let ordinary = policy_harness_for_model("arbitrary-model", &[], AgentRole::default());
+    let tools = effective_tool_names(&ordinary.harness);
     assert!(tools.contains(&"replace".to_owned()));
     assert!(!tools.contains(&"edit".to_owned()));
 }
 
-/// Ensures every supported Qwen 27B and 35B model keeps the exact-text editor
-/// default while adjacent Qwen sizes retain the ordinary line-oriented default.
+/// Ensures explicit model and global selectors retain their implementation
+/// meanings while every untagged ordinary model gets exact-text editing.
 #[test]
-fn qwen_27b_and_35b_models_default_to_replace() {
-    for model_name in [
-        "Qwen/Qwen3.5-27B",
-        "Qwen/Qwen3.5-35B-A3B",
-        "Qwen/Qwen3.6-27B",
-        "Qwen/Qwen3.6-35B-A3B",
-        "Qwen/Qwen3.8-27B",
-    ] {
+fn shell_tool_style_selectors_override_exact_text_default() {
+    for model_name in ["small-local", "large-hosted", "future-model"] {
         let policy = policy_harness_for_model(model_name, &[], AgentRole::default());
         let tools = effective_tool_names(&policy.harness);
         assert!(
@@ -351,21 +335,8 @@ fn qwen_27b_and_35b_models_default_to_replace() {
         );
     }
 
-    for model_name in ["Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-122B-A10B"] {
-        let policy = policy_harness_for_model(model_name, &[], AgentRole::default());
-        let tools = effective_tool_names(&policy.harness);
-        assert!(
-            tools.contains(&"edit".to_owned()),
-            "{model_name} must retain edit"
-        );
-        assert!(
-            !tools.contains(&"replace".to_owned()),
-            "{model_name} must not expose replace"
-        );
-    }
-
     let provider_override = policy_harness_for_model(
-        "Qwen/Qwen3.5-27B",
+        "arbitrary-model",
         &["shell:tool-style:edit"],
         AgentRole::default(),
     );
@@ -374,7 +345,7 @@ fn qwen_27b_and_35b_models_default_to_replace() {
     assert!(!provider_tools.contains(&"replace".to_owned()));
 
     let mut global_override =
-        policy_harness_for_model("Qwen/Qwen3.5-27B", &[], AgentRole::default());
+        policy_harness_for_model("arbitrary-model", &[], AgentRole::default());
     global_override.harness.tool_policy = ToolPolicy {
         default_shell_tool_style: Some(ShellToolStyle::Edit),
         ..ToolPolicy::default()
@@ -716,14 +687,14 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
     assert!(specs.iter().any(|spec| spec.name.as_str() == "custom_text"));
 }
 
-/// Ensures untagged models keep generic edit/shell defaults and do not see the
-/// ChatGPT-oriented alternatives by implicit promotion.
+/// Ensures untagged models use exact-text editing with generic shell defaults,
+/// without implicitly promoting ChatGPT-oriented alternatives.
 #[test]
 fn generic_model_gets_generic_shell_alternatives() {
     let policy = policy_harness(&[], AgentRole::default());
     let tools = effective_tool_names(&policy.harness);
 
-    assert!(tools.contains(&"edit".to_owned()));
+    assert!(tools.contains(&"replace".to_owned()));
     assert!(tools.contains(&"shell".to_owned()));
     assert!(tools.contains(&"dir_lock".to_owned()));
     assert!(!tools.contains(&"apply_patch".to_owned()));
@@ -955,6 +926,34 @@ fn effective_tool_surface_detects_visible_alias_collision() {
     assert_eq!(
         super::duplicate_model_visible_tool_name(&[spec("provider_a")]),
         None
+    );
+}
+
+/// Ensures enabling both shell editor implementations rejects their shared
+/// provider-visible `edit` name before prompt construction.
+#[test]
+fn role_cannot_enable_both_shell_editors_with_shared_visible_name() {
+    let policy = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: vec![ToolName::new("edit"), ToolName::new("replace")],
+            ..AgentRole::default()
+        },
+    );
+    let model = policy.harness.selected_model.as_ref().expect("model");
+    let specs = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
+    assert!(specs.iter().any(|spec| spec.name == "edit"));
+    assert!(specs.iter().any(|spec| spec.name == "replace"));
+    let error = policy
+        .harness
+        .try_build_system_prompt_for_role_and_agent(ROLE, None, None, &specs, None, false)
+        .expect_err("both editors must collide as visible edit");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate model-visible name `edit`")
     );
 }
 

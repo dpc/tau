@@ -675,7 +675,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     };
     let replace_tool = ToolSpec {
         name: tau_proto::ToolName::new(REPLACE_TOOL_NAME),
-        model_visible_name: None,
+        model_visible_name: Some(tau_proto::ToolName::new(EDIT_TOOL_NAME)),
         description: Some(
             "Replace exact text in one existing UTF-8 file. Each oldText must occur exactly \
              once in the same original file snapshot; all edits apply atomically. Matching \

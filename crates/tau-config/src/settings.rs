@@ -999,8 +999,8 @@ impl<'de> Deserialize<'de> for HarnessSettings {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolPolicy {
-    /// Optional global shell edit surface override. `None` uses the selected
-    /// model's declared preference or legacy model default.
+    /// Optional global shell edit implementation override. `None` uses the
+    /// selected model's declared preference, or exact-text except for ChatGPT.
     #[serde(default, deserialize_with = "deserialize_shell_tool_style")]
     pub default_shell_tool_style: Option<ShellToolStyle>,
     /// Rules keyed by stable names so higher-precedence config can override or

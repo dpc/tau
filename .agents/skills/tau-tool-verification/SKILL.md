@@ -14,15 +14,19 @@ Use when asked to verify Tau tool behavior or Tau tool-verification skills.
 Tau exposes different tool sets depending on configuration, provider/model
 capabilities, and extension setup. Common sets include:
 
-* ext-shell's `read`, `read_image`, `edit`, `replace`, and `shell` tools, plus related
+* ext-shell's `read`, `read_image`, `edit`, and `shell` tools, plus related
   tools such as `dir_lock`; `read_image` appears only on explicitly
   image-capable provider routes;
 * provider/native tools such as `apply_patch` and `shell_command`.
 
 If not explicitly stated, start from the tools that are actually exposed in the
 current session. For older/full ext-shell sessions, the default core set is
-`read`, `edit`, and `shell`. `replace` appears when the selected model style
-chooses its exact-text surface. For provider/native sessions, map the same checks to
+`read`, `edit`, and `shell`. For ordinary models, `edit` uses the exact-text
+internal `replace` implementation; its provider definition, model calls, and
+canonical results remain `edit`, while ext-shell started/result lifecycle
+events use `replace`. The `shell:tool-style:edit` selector instead exposes the
+legacy line-coordinate implementation as `edit`; ChatGPT/Codex uses
+`apply_patch`. For provider/native sessions, map the same checks to
 `shell_command` and `apply_patch` where possible, and explicitly report any
 tool-specific checks that cannot be run because the corresponding tool is not
 available.
@@ -160,9 +164,10 @@ Tool description should be short but informative. They should mention the line p
 Load the focused skill for every tool group in scope. The index contains shared
 output rules; the focused skills contain the detailed tool-specific plans.
 
-* `tau-tool-verification-file-shell` — `read`, `edit`, `replace`, `apply_patch`, `shell`,
-  and `shell_command`, including ranges, UTF-8, truncation, diffs, timeouts,
-  mutation safety, and shell lock coverage.
+* `tau-tool-verification-file-shell` — `read`, both `edit` implementations
+  (including the internal exact-text `replace` lifecycle name), `apply_patch`,
+  `shell`, and `shell_command`, including ranges, UTF-8, truncation, diffs,
+  timeouts, mutation safety, and shell lock coverage.
 * `tau-tool-verification-background-cancel` — background tool completion,
   `wait`, `cancel`, and the required background/active-wait `agent_start`
   interruption probes, including consumption races, prompt suppression,

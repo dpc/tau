@@ -395,8 +395,8 @@ fn read_image_schema_exposes_bounded_overview_and_complete_region() {
     );
 }
 
-/// Locks the provider-visible replace schema to its strict, non-legacy
-/// snapshot-replacement contract so model repair cannot widen the surface.
+/// Locks the internal `replace` implementation to its visible `edit` alias and
+/// strict snapshot-replacement schema so model repair cannot widen the surface.
 #[test]
 fn replace_schema_is_strict_and_default_disabled() {
     let tool = registered_tool_specs(false)
@@ -404,6 +404,7 @@ fn replace_schema_is_strict_and_default_disabled() {
         .find(|tool| tool.name == REPLACE_TOOL_NAME)
         .expect("replace tool");
     assert!(!tool.enabled_by_default);
+    assert_eq!(tool.model_visible_name.as_deref(), Some(EDIT_TOOL_NAME));
     assert_eq!(
         tool.parameters.expect("parameters"),
         serde_json::json!({

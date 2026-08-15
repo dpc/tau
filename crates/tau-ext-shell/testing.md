@@ -20,10 +20,12 @@ separate semantic coverage. Runtime tests lock startup subscriptions and
 publications before `Ready`. UI tests assert `ToolUseState` progress and terminal
 projection, including inferred directory-lock modes.
 
-`replace` tests cover strict object shape, snapshot-wide exact matching,
-all-or-nothing failure, BOM and mixed-line-ending preservation, local inserted
-line endings, compact results, no-op diff suppression, and the ordinary durable
-structured diff for changed UTF-8 files.
+The internal `replace` / provider-visible `edit` tests cover strict object
+shape, alias registration, snapshot-wide exact matching, all-or-nothing
+failure, BOM and mixed-line-ending preservation, local inserted line endings,
+compact results, no-op diff suppression, and the ordinary durable structured
+diff for changed UTF-8 files. Harness lifecycle coverage preserves visible
+`edit` requests and terminals while ext-shell receives and reports `replace`.
 
 `apply_patch` tests retain path-labelled UI-only diffs for every changed file,
 including single-file updates, add/modify/delete multi-file patches, moves,

@@ -73,6 +73,12 @@ retains existing result/error safety validation, tool-name/type enrichment,
 result deduplication, wait completion, failure-loop tracking, agent attribution,
 tool-turn completion, and provider projection behavior.
 
+Exact-text ext-shell editing retains its internal `replace` name in routed
+`tool.started` and extension result/error reports. The harness restores the
+provider-visible `edit` name on the corresponding canonical provider terminal,
+matching the prompt definition and model call without changing the extension's
+routing identity.
+
 If a call already runs in the background, a valid result report publishes
 `tool.background_result`; an error or cancellation report publishes
 `tool.background_error`. These protected harness-sourced facts preserve the

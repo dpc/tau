@@ -190,7 +190,13 @@ manual runtime be finished so the protocol writer can flush and join.
 `shell:exec:shell_command`, and `shell:workdir`. The extension must not decide which
 model gets which
 surface; `workdir` carries `shell:workdir`. The harness interprets these tags together with provider-published
-model tags and role configuration.
+model tags and role configuration. The exact-text implementation retains its
+internal `replace` identity for configuration and extension lifecycle events,
+but advertises the provider-visible `edit` alias. Its routed `tool.started`
+and terminal reports therefore use `replace`, while its provider definition,
+model call, and canonical terminal use `edit`. The line-coordinate
+implementation also remains internally `edit`, so prompt construction rejects
+a policy that enables both implementations together.
 
 ## Skill and instruction discovery
 

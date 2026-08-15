@@ -68,9 +68,17 @@ Extensions and providers publish metadata only: tools declare neutral `ToolTag`s
 providers publish model `ModelTag`s (such as `shell:chatgpt` and
 `shell:tool-style:replace`). The harness owns all matching policy.
 
-Before ordinary policy, the harness selects one shell edit surface from
+Before ordinary policy, the harness selects one shell edit implementation from
 `tool_policy.default_shell_tool_style`, one explicit `shell:tool-style:*` model
-tag, or the legacy model default. Conflicting explicit style tags fail closed.
+tag, or its default. Untagged non-ChatGPT models use the exact-text `replace`
+implementation by default; `shell:chatgpt` models use the Codex `apply_patch`
+surface. The `edit`, `replace`, and `codex` selectors continue to choose the
+line-coordinate, exact-text, and apply-patch implementations respectively.
+Both non-Codex implementations are provider-visible as `edit`, while extension
+routing retains their distinct internal names. For exact-text calls, the
+provider definition and canonical request/result use `edit`, while routed
+`tool.started` and ext-shell reports use internal `replace`. Conflicting explicit
+style tags fail closed.
 Tool enablement then starts from that selected surface and each extension's
 `enabled_by_default`, then matching
 harness `tool_policy.rules` run deterministically by `(priority, rule name)`,

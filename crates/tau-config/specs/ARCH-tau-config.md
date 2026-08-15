@@ -131,9 +131,13 @@ escaping scheme is added. Rule aliases such as `enabled` must normalize inside
 each keyed rule before source layers merge, otherwise a higher-precedence alias
 can collide with a lower-precedence canonical key instead of overriding it.
 
-`tool_policy.default_shell_tool_style` selects `codex`, `edit`, or `replace`
-before rules and role controls run. Missing, null, or whitespace-only values
-reset to the selected model default; any other nonblank value is a config error.
+`tool_policy.default_shell_tool_style` selects the `codex` apply-patch, `edit`
+line-coordinate, or `replace` exact-text implementation before rules and role
+controls run. Both non-Codex implementations are provider-visible as `edit`;
+their selector and internal tool names remain distinct. Missing, null, or
+whitespace-only values reset to the selected model default: exact-text
+`replace` except ChatGPT/Codex `apply_patch`. Any other nonblank value is a
+config error.
 
 ## Harness role merging
 

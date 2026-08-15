@@ -8895,6 +8895,11 @@ fn provider_response_stats_are_public_provider_updates() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures read and edit dispatch immediately without harness-global
+/// serialization because ext-shell coordinates their concurrent work.
+///
+/// This fixture explicitly selects the line-coordinate editor because untagged
+/// models now default to exact-text editing.
 #[test]
 fn tool_turn_dispatches_provider_calls_without_global_locking() {
     let td = TempDir::new().expect("tempdir");
@@ -8904,6 +8909,9 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
     // Pre-seed turn state as if the agent had just been prompted
     // and is about to respond with tool calls.
     h.selected_model = Some("test/model".into());
+    // This test needs the line-oriented schema below, not the untagged
+    // exact-text default.
+    h.tool_policy.default_shell_tool_style = Some(path_tau_config_settings::ShellToolStyle::Edit);
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_agents.insert(test_agent_prompt_id("sp-x"), cid);
@@ -9018,6 +9026,206 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
     h.shutdown().expect("shutdown");
 }
 
+/// Pumps until ext-shell reports one terminal for `call_id`, then returns the
+/// raw extension report after committing it through the production harness
+/// path.
+fn drive_harness_until_extension_tool_report(h: &mut Harness, call_id: &str) -> Event {
+    let started = Instant::now();
+    loop {
+        if Duration::from_secs(3) <= started.elapsed() {
+            panic!("timed out waiting for ext-shell report for {call_id}");
+        }
+        let Ok(event) = h.rx.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        let event = h.expand_component_ingress_wake(event);
+        match event {
+            HarnessEvent::FromConnection {
+                connection_id,
+                message,
+                ..
+            } => {
+                let terminal_report = match message.as_ref() {
+                    HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                        Event::ToolResultReported(result) if result.call_id.as_str() == call_id => {
+                            Some(emit.event.as_ref().clone())
+                        }
+                        Event::ToolErrorReported(error) if error.call_id.as_str() == call_id => {
+                            Some(emit.event.as_ref().clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                h.handle_extension_message(&connection_id, *message)
+                    .expect("handle");
+                if let Some(report) = terminal_report {
+                    return report;
+                }
+            }
+            HarnessEvent::Disconnected { connection_id } => {
+                h.handle_disconnect(&connection_id);
+            }
+            HarnessEvent::ReadFailed { connection_id, .. } => {
+                h.handle_disconnect(&connection_id);
+            }
+            HarnessEvent::NewClient(_) => {}
+            HarnessEvent::SupervisedWriterCleanupComplete { connection_id } => h
+                .handle_supervised_writer_cleanup_complete_at(&connection_id, Instant::now())
+                .expect("supervised cleanup"),
+            HarnessEvent::ComponentIngressReady => unreachable!("wake expanded"),
+            HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
+        }
+    }
+}
+
+/// Ensures the exact-text editor retains `replace` only for ext-shell routing
+/// and reports, while the provider-visible request and terminal facts use
+/// `edit` for both successful and failed calls.
+#[test]
+fn exact_text_edit_alias_preserves_canonical_and_extension_lifecycle_names() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let file = td.path().join("exact-text.txt");
+    std::fs::write(&file, "before\n").expect("seed exact-text file");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+
+    let exact_text_arguments = |old_text: &str| {
+        CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(file.display().to_string()),
+            ),
+            (
+                CborValue::Text("edits".to_owned()),
+                CborValue::Array(vec![CborValue::Map(vec![
+                    (
+                        CborValue::Text("oldText".to_owned()),
+                        CborValue::Text(old_text.to_owned()),
+                    ),
+                    (
+                        CborValue::Text("newText".to_owned()),
+                        CborValue::Text("after\n".to_owned()),
+                    ),
+                ])]),
+            ),
+        ])
+    };
+    let dispatch_response =
+        |h: &mut Harness, prompt_id: AgentPromptId, call_id: &str, arguments: CborValue| {
+            h.handle_provider_response_finished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+                agent_prompt_id: prompt_id,
+                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: call_id.into(),
+                    name: ToolName::new("edit"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments,
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            })
+            .expect("dispatch visible edit");
+        };
+
+    let success_prompt = test_agent_prompt_id("exact-text-success-prompt");
+    seed_agent_thinking(&mut h, &cid, success_prompt.as_str());
+    h.prompt_agents.insert(success_prompt.clone(), cid.clone());
+    dispatch_response(
+        &mut h,
+        success_prompt,
+        "exact-text-success",
+        exact_text_arguments("before\n"),
+    );
+    let successful_report = drive_harness_until_extension_tool_report(&mut h, "exact-text-success");
+    drive_harness_until_tool_turn_empty(&mut h);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read changed file"),
+        "after\n"
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(request)
+            if request.call_id.as_str() == "exact-text-success"
+                && request.tool_name.as_str() == "edit"
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolStarted(started)
+            if started.call_id.as_str() == "exact-text-success"
+                && started.tool_name.as_str() == "replace"
+    )));
+    assert!(matches!(
+        successful_report,
+        Event::ToolResultReported(result)
+            if result.tool_name.as_str() == "replace"
+    ));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderToolResult(result)
+            if result.call_id.as_str() == "exact-text-success"
+                && result.tool_name.as_str() == "edit"
+    )));
+
+    h.shutdown().expect("shutdown successful-call harness");
+
+    let mut h = echo_harness(td.path().join("error-state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let error_prompt = test_agent_prompt_id("exact-text-error-prompt");
+    seed_agent_thinking(&mut h, &cid, error_prompt.as_str());
+    h.prompt_agents.insert(error_prompt.clone(), cid.clone());
+    dispatch_response(
+        &mut h,
+        error_prompt,
+        "exact-text-error",
+        exact_text_arguments("missing"),
+    );
+    let error_report = drive_harness_until_extension_tool_report(&mut h, "exact-text-error");
+    drive_harness_until_tool_turn_empty(&mut h);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolRequest(request)
+            if request.call_id.as_str() == "exact-text-error"
+                && request.tool_name.as_str() == "edit"
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolStarted(started)
+            if started.call_id.as_str() == "exact-text-error"
+                && started.tool_name.as_str() == "replace"
+    )));
+    assert!(matches!(
+        error_report,
+        Event::ToolErrorReported(error)
+            if error.tool_name.as_str() == "replace"
+    ));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderToolError(error)
+            if error.call_id.as_str() == "exact-text-error"
+                && error.tool_name.as_str() == "edit"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A provider response remains lossless even when it returns multiple calls
 /// after declaring parallel calls unsupported. Every sequentially completed
 /// result must reach the follow-up prompt; otherwise a stale local tree head
@@ -9037,6 +9245,9 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
+    // This oracle exercises the legacy line editor's independent multi-call
+    // lifecycle. Untagged models now use the exact-text implementation.
+    h.tool_policy.default_shell_tool_style = Some(path_tau_config_settings::ShellToolStyle::Edit);
     let model_id: tau_proto::ModelId = "test/model".parse().expect("model id");
     let mut model_info = provider_model_info(model_id.clone(), 1_000);
     model_info.supports_parallel_tool_calls = false;
@@ -9648,6 +9859,11 @@ fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
     );
 }
 
+/// Ensures a prompt submitted during a tool call steers the tool-result
+/// follow-up instead of starting a later turn.
+///
+/// This fixture explicitly selects the line-coordinate editor rather than
+/// silently relying on the ordinary exact-text default.
 #[test]
 fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // While the agent is mid-turn (a tool is in flight), a fresh user
@@ -9661,6 +9877,9 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
+    // This test supplies line-coordinate edit arguments, so retain that
+    // implementation rather than the untagged exact-text default.
+    h.tool_policy.default_shell_tool_style = Some(path_tau_config_settings::ShellToolStyle::Edit);
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");

@@ -1049,6 +1049,15 @@ pub(crate) struct PendingTool {
     pub(crate) allows_provider_image: bool,
 }
 
+impl PendingTool {
+    /// Restores a routed extension result to this call's provider-visible name
+    /// and declared type.
+    fn restore_terminal_result_metadata(&self, result: &mut ToolResult) {
+        result.tool_name = self.name.clone();
+        result.tool_type = self.tool_type;
+    }
+}
+
 #[derive(Default)]
 struct NormalizedFinishedToolCalls {
     /// Tool-call validation failures keyed by the normalized call id.
@@ -14897,8 +14906,7 @@ impl Harness {
         } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
             let mut allows_provider_image = false;
             if let Some(tool) = self.pending_tools.get(&result.call_id) {
-                result.tool_name = tool.name.clone();
-                result.tool_type = tool.tool_type;
+                tool.restore_terminal_result_metadata(&mut result);
                 allows_provider_image = tool.allows_provider_image;
             }
             let has_provider_image = !result.provider_content.is_empty();
@@ -26611,7 +26619,7 @@ impl Harness {
             .and_then(|model| self.provider_model_info.get(model))
             .map(|info| info.tags.as_slice())
             .unwrap_or(&[]);
-        match self.shell_tool_style_for_base_enablement(model, model_tags) {
+        match self.shell_tool_style_for_base_enablement(model_tags) {
             Some(ShellToolStyle::Codex)
                 if spec
                     .tags
@@ -26640,7 +26648,7 @@ impl Harness {
                 });
             }
             Some(_) => {}
-            None if self.shell_tool_style(model, model_tags).is_none()
+            None if self.shell_tool_style(model_tags).is_none()
                 && spec.tags.iter().any(|tag| tag.as_str() == "shell:edit") =>
             {
                 enabled = false;
@@ -26709,11 +26717,7 @@ impl Harness {
 
     /// Resolves the requested shell surface before ordinary policy and role
     /// controls.
-    fn shell_tool_style(
-        &self,
-        model: Option<&ModelId>,
-        model_tags: &[tau_proto::ModelTag],
-    ) -> Option<ShellToolStyle> {
+    fn shell_tool_style(&self, model_tags: &[tau_proto::ModelTag]) -> Option<ShellToolStyle> {
         if let Some(style) = self.tool_policy.default_shell_tool_style {
             return Some(style);
         }
@@ -26730,10 +26734,8 @@ impl Harness {
             0 => {
                 if model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt") {
                     Some(ShellToolStyle::Codex)
-                } else if model.is_some_and(Self::uses_replace_shell_tool_style) {
-                    Some(ShellToolStyle::Replace)
                 } else {
-                    Some(ShellToolStyle::Edit)
+                    Some(ShellToolStyle::Replace)
                 }
             }
             1 => explicit.iter().copied().next(),
@@ -26741,25 +26743,10 @@ impl Harness {
         }
     }
 
-    /// Returns whether an untagged model uses Tau's exact-text editor by
-    /// default.
-    fn uses_replace_shell_tool_style(model: &ModelId) -> bool {
-        matches!(
-            model.model.as_str(),
-            "deepseek-v4-flash"
-                | "Qwen/Qwen3.5-27B"
-                | "Qwen/Qwen3.5-35B-A3B"
-                | "Qwen/Qwen3.6-27B"
-                | "Qwen/Qwen3.6-35B-A3B"
-                | "Qwen/Qwen3.8-27B"
-        )
-    }
-
     /// Leaves legacy ChatGPT/Codex models to their existing configurable policy
     /// rule, preserving the documented escape hatch that disables that bundle.
     fn shell_tool_style_for_base_enablement(
         &self,
-        model: Option<&ModelId>,
         model_tags: &[tau_proto::ModelTag],
     ) -> Option<ShellToolStyle> {
         (self.tool_policy.default_shell_tool_style.is_some()
@@ -26770,7 +26757,7 @@ impl Harness {
                 )
             })
             || !model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt"))
-        .then(|| self.shell_tool_style(model, model_tags))
+        .then(|| self.shell_tool_style(model_tags))
         .flatten()
     }
 
@@ -29427,8 +29414,7 @@ impl Harness {
         };
         let call_id = result.call_id.clone();
         if let Some(tool) = self.pending_tools.get(&result.call_id) {
-            result.tool_name = tool.name.clone();
-            result.tool_type = tool.tool_type;
+            tool.restore_terminal_result_metadata(&mut result);
         }
         let background = ToolBackgroundResult {
             call_id: result.call_id,
