@@ -85,6 +85,14 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
 }
 
 fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
+    policy_harness_for_model("model", model_tags, role)
+}
+
+fn policy_harness_for_model(
+    model_name: &str,
+    model_tags: &[&str],
+    role: AgentRole,
+) -> PolicyHarness {
     let temp_dir = TempDir::new().expect("temp dir");
     let state_dir = temp_dir.path().join("state");
     let dirs = TauDirs {
@@ -102,7 +110,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
     )
     .expect("harness");
     harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
-    let model = ModelId::new(ProviderName::new("provider"), ModelName::new("model"));
+    let model = ModelId::new(ProviderName::new("provider"), ModelName::new(model_name));
     harness.provider_model_info = HashMap::from([(model.clone(), model_info(&model, model_tags))]);
     harness.provider_model_routes =
         HashMap::from([(model.clone(), crate::test_connection_id("provider"))]);
@@ -318,6 +326,62 @@ fn shell_tool_style_selects_one_edit_surface() {
     let tools = effective_tool_names(&deepseek.harness);
     assert!(tools.contains(&"replace".to_owned()));
     assert!(!tools.contains(&"edit".to_owned()));
+}
+
+/// Ensures every supported Qwen 27B and 35B model keeps the exact-text editor
+/// default while adjacent Qwen sizes retain the ordinary line-oriented default.
+#[test]
+fn qwen_27b_and_35b_models_default_to_replace() {
+    for model_name in [
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-27B",
+        "Qwen/Qwen3.6-35B-A3B",
+        "Qwen/Qwen3.8-27B",
+    ] {
+        let policy = policy_harness_for_model(model_name, &[], AgentRole::default());
+        let tools = effective_tool_names(&policy.harness);
+        assert!(
+            tools.contains(&"replace".to_owned()),
+            "{model_name} must expose replace"
+        );
+        assert!(
+            !tools.contains(&"edit".to_owned()),
+            "{model_name} must not expose edit"
+        );
+    }
+
+    for model_name in ["Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-122B-A10B"] {
+        let policy = policy_harness_for_model(model_name, &[], AgentRole::default());
+        let tools = effective_tool_names(&policy.harness);
+        assert!(
+            tools.contains(&"edit".to_owned()),
+            "{model_name} must retain edit"
+        );
+        assert!(
+            !tools.contains(&"replace".to_owned()),
+            "{model_name} must not expose replace"
+        );
+    }
+
+    let provider_override = policy_harness_for_model(
+        "Qwen/Qwen3.5-27B",
+        &["shell:tool-style:edit"],
+        AgentRole::default(),
+    );
+    let provider_tools = effective_tool_names(&provider_override.harness);
+    assert!(provider_tools.contains(&"edit".to_owned()));
+    assert!(!provider_tools.contains(&"replace".to_owned()));
+
+    let mut global_override =
+        policy_harness_for_model("Qwen/Qwen3.5-27B", &[], AgentRole::default());
+    global_override.harness.tool_policy = ToolPolicy {
+        default_shell_tool_style: Some(ShellToolStyle::Edit),
+        ..ToolPolicy::default()
+    };
+    let global_tools = effective_tool_names(&global_override.harness);
+    assert!(global_tools.contains(&"edit".to_owned()));
+    assert!(!global_tools.contains(&"replace".to_owned()));
 }
 
 /// Ensures a configured global style wins over the model default while ordinary

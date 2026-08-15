@@ -26730,7 +26730,7 @@ impl Harness {
             0 => {
                 if model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt") {
                     Some(ShellToolStyle::Codex)
-                } else if model.is_some_and(|id| id.model.as_str() == "deepseek-v4-flash") {
+                } else if model.is_some_and(Self::uses_replace_shell_tool_style) {
                     Some(ShellToolStyle::Replace)
                 } else {
                     Some(ShellToolStyle::Edit)
@@ -26739,6 +26739,20 @@ impl Harness {
             1 => explicit.iter().copied().next(),
             _ => None,
         }
+    }
+
+    /// Returns whether an untagged model uses Tau's exact-text editor by
+    /// default.
+    fn uses_replace_shell_tool_style(model: &ModelId) -> bool {
+        matches!(
+            model.model.as_str(),
+            "deepseek-v4-flash"
+                | "Qwen/Qwen3.5-27B"
+                | "Qwen/Qwen3.5-35B-A3B"
+                | "Qwen/Qwen3.6-27B"
+                | "Qwen/Qwen3.6-35B-A3B"
+                | "Qwen/Qwen3.8-27B"
+        )
     }
 
     /// Leaves legacy ChatGPT/Codex models to their existing configurable policy
