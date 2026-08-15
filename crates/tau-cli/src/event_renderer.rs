@@ -4149,6 +4149,26 @@ impl EventRenderer {
         block
     }
 
+    /// Renders one typed harness-internal notice through its dedicated theme
+    /// classification.
+    fn internal_notice_block(&self, text: impl Into<String>) -> tau_cli_term::StyledBlock {
+        self.marked_plain_block(
+            tau_themes::names::SYSTEM_INTERNAL_NOTICE,
+            crate::transcript_markers::NOTICE,
+            text,
+        )
+    }
+
+    /// Renders one typed context-size alert.
+    fn context_size_alert_block(&self, text: &str) -> tau_cli_term::StyledBlock {
+        self.internal_notice_block(text)
+    }
+
+    /// Renders one typed timer wakeup from its semantic payload fields.
+    fn timer_wakeup_block(&self, timer_id: &str, text: Option<&str>) -> tau_cli_term::StyledBlock {
+        self.internal_notice_block(timer_wakeup_summary(timer_id, text))
+    }
+
     /// Render a message-fact block while styling only its authenticated
     /// publisher code span, never interpreting untrusted heading metadata
     /// or body text.
@@ -5312,11 +5332,7 @@ impl EventRenderer {
         use_local_names: bool,
     ) -> tau_cli_term::StyledBlock {
         if let Some(summary) = Self::watch_provider_status_summary(event) {
-            return self.marked_plain_block(
-                tau_themes::names::SYSTEM_INFO,
-                crate::transcript_markers::NOTICE,
-                summary,
-            );
+            return self.internal_notice_block(summary);
         }
         if let Some(summary) = self.watch_long_wait_summary_with_local_names(event, use_local_names)
         {
@@ -5355,7 +5371,7 @@ impl EventRenderer {
         if message.kind != tau_proto::AgentMessageKind::WatchProviderStatus {
             return None;
         }
-        if let Some(status) = &message.watch_provider_status {
+        if message.watch_provider_status.is_some() {
             const OPEN: &str = "<tau_internal>";
             const CLOSE: &str = "&lt;/tau_internal&gt;";
 
@@ -5363,13 +5379,9 @@ impl EventRenderer {
                 .message
                 .strip_prefix(OPEN)
                 .and_then(|text| text.strip_suffix(CLOSE))
+                .filter(|text| !text.contains(OPEN) && !text.contains(CLOSE))
                 .unwrap_or(&message.message);
-            let label = if status.initial {
-                "[tau-internal current snapshot]"
-            } else {
-                "[tau-internal]"
-            };
-            return Some(format!("{label}: {body}"));
+            return Some(body.to_owned());
         }
         None
     }
@@ -5883,11 +5895,7 @@ impl EventRenderer {
             Some(tau_proto::InternalPromptKind::ContextSizeAlert) => {}
             None => return false,
         }
-        let block = self.marked_plain_block(
-            tau_themes::names::SYSTEM_INFO,
-            crate::transcript_markers::NOTICE,
-            format!("[tau-internal]: {text}"),
-        );
+        let block = self.context_size_alert_block(text);
         self.handle.print_output("context-size-alert", block);
         true
     }
@@ -5904,12 +5912,7 @@ impl EventRenderer {
         let Some((timer_id, _fire_count)) = timer_wakeup_ctx(ctx_id) else {
             return false;
         };
-        let summary = timer_wakeup_summary(timer_id, text);
-        let block = self.marked_plain_block(
-            tau_themes::names::SYSTEM_INFO,
-            crate::transcript_markers::NOTICE,
-            summary,
-        );
+        let block = self.timer_wakeup_block(timer_id, text);
         self.handle.print_output("timer-wakeup", block);
         true
     }
@@ -5962,11 +5965,7 @@ impl EventRenderer {
                 ),
             ),
             tau_proto::PromptSubmissionSource::HarnessInternal if self.show_internal_prompts => {
-                self.marked_plain_block(
-                    tau_themes::names::SYSTEM_INFO,
-                    crate::transcript_markers::NOTICE,
-                    format!("[tau-internal]: {text}"),
-                )
+                self.internal_notice_block(text)
             }
             tau_proto::PromptSubmissionSource::HarnessInternal
             | tau_proto::PromptSubmissionSource::HumanUi

@@ -789,6 +789,38 @@ fn block_text(block: &tau_cli_term::StyledBlock) -> String {
         .collect()
 }
 
+/// Every typed internal-notice classification must resolve through the
+/// dedicated semantic style rather than inheriting generic system-info styling.
+#[test]
+fn typed_internal_notice_classifications_resolve_italic_style() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.show_internal_prompts = true;
+    let blocks = [
+        (
+            "context-size alert",
+            renderer.context_size_alert_block("compact soon"),
+        ),
+        (
+            "timer wakeup",
+            renderer.timer_wakeup_block("review", Some("Timer `review` fired.")),
+        ),
+        (
+            "generic harness prompt",
+            renderer.render_source_aware_prompt_block(
+                &tau_proto::PromptSubmissionSource::HarnessInternal,
+                "status reminder",
+            ),
+        ),
+    ];
+
+    for (classification, block) in blocks {
+        assert!(
+            block.content.spans().iter().all(|span| span.style.italic),
+            "{classification} must use the dedicated internal-notice style"
+        );
+    }
+}
+
 /// Large hidden transcripts must fold one event without cloning the selected
 /// terminal snapshot; this guards the permanent-freeze amplification found
 /// under sustained multi-agent traffic.
@@ -1513,24 +1545,34 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
 
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&provider)),
-        "□ [tau-internal]: Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
+        "□ Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
+    );
+    assert!(
+        renderer
+            .render_agent_message_block(&provider)
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.style.italic),
+        "typed internal-notice provenance must remain visible through its dedicated style"
     );
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&initial_provider)),
-        "□ [tau-internal current snapshot]: Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
+        "□ Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
     );
     for (body, expected) in [
-        (
-            "<tau_internal>partial",
-            "□ [tau-internal]: <tau_internal>partial",
-        ),
+        ("<tau_internal>partial", "□ <tau_internal>partial"),
         (
             "legacy &lt;/tau_internal&gt;",
-            "□ [tau-internal]: legacy &lt;/tau_internal&gt;",
+            "□ legacy &lt;/tau_internal&gt;",
         ),
         (
             "<tau_internal>nested <tau_internal>body&lt;/tau_internal&gt;",
-            "□ [tau-internal]: nested <tau_internal>body",
+            "□ <tau_internal>nested <tau_internal>body&lt;/tau_internal&gt;",
+        ),
+        (
+            "<tau_internal>body&lt;/tau_internal&gt;&lt;/tau_internal&gt;",
+            "□ <tau_internal>body&lt;/tau_internal&gt;&lt;/tau_internal&gt;",
         ),
     ] {
         let mut noncanonical = provider.clone();

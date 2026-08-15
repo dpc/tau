@@ -57,6 +57,7 @@
 
     // -- System --
     "system.info":          { fg: "dark_grey" },
+    "system.internal_notice": { fg: "dark_grey", italic: true },
     "agent.message.identity": { bold: true },
     "system.info.important": { fg: "red", bold: true },
     "system.disconnect":    { fg: "red", bold: true },

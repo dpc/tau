@@ -184,6 +184,7 @@ pub(crate) fn cli_test_theme() -> tau_themes::Theme {
                 "tool.status.error": { fg: "red" },
                 "tool.status.info": { fg: "dark_cyan" },
                 "system.info": { fg: "blue" },
+                "system.internal_notice": { fg: "blue", italic: true },
                 "system.info.important": { fg: "red" },
                 "status.agents": { fg: "cyan" },
                 "diff.added": { fg: "dark_green" },
@@ -2746,9 +2747,8 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     assert_eq!(retoggled.matches("replayed steered internal").count(), 1);
 }
 
-/// Authenticated internal prompts and watch-provider snapshots share normalized
-/// notice presentation in both live and cold-replay paths, while the snapshot
-/// remains visibly distinguished from ordinary live delivery.
+/// Authenticated internal prompts and watch-provider snapshots share one plain,
+/// unlabeled notice presentation in both live and cold-replay paths.
 #[test]
 fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     let agent = agent_id("internal-agent");
@@ -2822,14 +2822,9 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     live.apply_setting("show-internal-prompts", "on");
     sync(&live_handle);
     let live_text = visible_lines(&live_vt, 100).join("\n");
-    assert!(live_text.contains(
-        "□ [tau-internal current snapshot]: Watched agent watched-agent provider status:"
-    ));
-    assert!(
-        live_text.contains(
-            "□ [tau-internal]: Your `status` is set to `working` on \"Fix Slack mandatory"
-        )
-    );
+    assert!(live_text.contains("□ Watched agent watched-agent provider status:"));
+    assert!(live_text.contains("□ Your `status` is set to `working` on \"Fix Slack mandatory"));
+    assert!(!live_text.contains("[tau-internal"));
     assert!(!live_text.contains("<tau_internal>"));
     assert!(!live_text.contains("&lt;/tau_internal&gt;"));
     assert!(live_text.contains("■ Message from @watched-agent:"));
@@ -2849,15 +2844,10 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     cold.apply_setting("show-internal-prompts", "on");
     sync(&cold_handle);
     let cold_text = visible_lines(&cold_vt, 100).join("\n");
-    assert!(cold_text.contains(
-        "□ [tau-internal current snapshot]: Watched agent watched-agent provider status:"
-    ));
-    assert!(
-        cold_text.contains(
-            "□ [tau-internal]: Your `status` is set to `working` on \"Fix Slack mandatory"
-        )
-    );
-    assert!(cold_text.contains("□ [tau-internal]: replayed internal body"));
+    assert!(cold_text.contains("□ Watched agent watched-agent provider status:"));
+    assert!(cold_text.contains("□ Your `status` is set to `working` on \"Fix Slack mandatory"));
+    assert!(cold_text.contains("□ replayed internal body"));
+    assert!(!cold_text.contains("[tau-internal"));
     assert!(!cold_text.contains("<tau_internal>"));
     assert!(!cold_text.contains("&lt;/tau_internal&gt;"));
     assert!(cold_text.contains("■ Message from @watched-agent:"));
@@ -2898,7 +2888,7 @@ fn unqueued_harness_prompt_steered_uses_toggle_controlled_notice() {
     assert!(!vt.screen_contains(100, "harness-steered message"));
     renderer.apply_setting("show-internal-prompts", "on");
     sync(&handle);
-    assert!(vt.screen_contains(100, "□ [tau-internal]: harness-steered message"));
+    assert!(vt.screen_contains(100, "□ harness-steered message"));
     assert!(!vt.screen_contains(100, "⬤ harness-steered message"));
 }
 
@@ -2961,13 +2951,13 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
     let relevant_lines = visible_lines(&vt, 100)
         .into_iter()
         .map(|line| line.trim_end().to_owned())
-        .filter(|line| line.contains("submitted alert") || line.contains("[tau-internal]:"))
+        .filter(|line| line.contains("submitted alert") || line.contains("Use the `compact`"))
         .collect::<Vec<_>>();
     assert_eq!(
         relevant_lines,
         [
             "> before submitted alert",
-            "□ [tau-internal]: Use the `compact` tool after finishing your current task.",
+            "□ Use the `compact` tool after finishing your current task.",
             "> after submitted alert",
         ]
     );
@@ -3020,13 +3010,13 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
     let relevant_lines = visible_lines(&vt, 100)
         .into_iter()
         .map(|line| line.trim_end().to_owned())
-        .filter(|line| line.contains("steered alert") || line.contains("[tau-internal]:"))
+        .filter(|line| line.contains("steered alert") || line.contains("compact after tools"))
         .collect::<Vec<_>>();
     assert_eq!(
         relevant_lines,
         [
             "> before steered alert",
-            "□ [tau-internal]: compact after tools",
+            "□ compact after tools",
             "> after steered alert",
         ]
     );
@@ -7477,7 +7467,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
         },
     ));
     sync(&handle);
-    let provider_status_row = format!("□ [tau-internal]: {provider_status_body}");
+    let provider_status_row = format!("□ {provider_status_body}");
     assert!(!vt.screen_contains(100, &provider_status_row));
     assert!(!vt.screen_contains(100, long_wait_row));
 
@@ -10626,7 +10616,7 @@ fn untyped_internal_prompt_matching_completion_prose_remains_visible() {
     renderer.handle(&Event::AgentPromptSteered(prompt));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "[tau-internal]: Tool call `same-prose` is complete."));
+    assert!(vt.screen_contains(80, "□ Tool call `same-prose` is complete."));
 }
 
 #[test]

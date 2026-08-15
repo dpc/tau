@@ -61,6 +61,8 @@ pub const SESSION_STATUS: &str = "session.status";
 
 // -- System --
 pub const SYSTEM_INFO: &str = "system.info";
+/// Harness-authored internal notices shown in human-facing transcripts.
+pub const SYSTEM_INTERNAL_NOTICE: &str = "system.internal_notice";
 /// Sender and recipient identities in agent-message routing headers.
 pub const AGENT_MESSAGE_IDENTITY: &str = "agent.message.identity";
 pub const SYSTEM_INFO_IMPORTANT: &str = "system.info.important";

@@ -38,6 +38,7 @@
     "action.error":         { fg: "red" },
 
     // -- System --
+    "system.internal_notice": { italic: true },
     "agent.message.identity": { bold: true },
     "system.info.important": { fg: "red", bold: true },
     "system.disconnect":    { fg: "red", bold: true },

@@ -28,10 +28,10 @@
 #   required_skills: [company-policy]
 #   # Optional named internal prompts fired after provider-reported input usage
 #   # strictly exceeds the threshold. Committed deliveries appear in UI history
-#   # as `[tau-internal]: <configured message>`. `enable` defaults true; `message`
-#   # defaults to asking the agent to use `compact` after its current task. Every
-#   # new alert requires a positive threshold, and an explicit message cannot be
-#   # empty.
+#   # as `□ <configured message>` in the dedicated internal-notice style. `enable`
+#   # defaults true; `message` defaults to asking the agent to use `compact` after
+#   # its current task. Every new alert requires a positive threshold, and an
+#   # explicit message cannot be empty.
 #   context_size_alerts:
 #     compact-soon:
 #       threshold: 160000

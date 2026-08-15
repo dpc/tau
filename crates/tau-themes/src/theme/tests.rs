@@ -1,5 +1,17 @@
 use super::*;
 
+/// Built-in themes must present typed internal notices consistently even when
+/// their color palettes differ.
+#[test]
+fn builtins_italicize_internal_notices() {
+    let name = crate::StyleName::new(crate::names::SYSTEM_INTERNAL_NOTICE);
+    for builtin_name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(builtin_name)
+            .unwrap_or_else(|| panic!("registered built-in theme `{builtin_name}` must resolve"));
+        assert!(theme.resolve_style(&name).italic);
+    }
+}
+
 /// Ensures an empty theme is safe to use and leaves all text unstyled rather
 /// than requiring callers to special-case missing theme configuration.
 #[test]

@@ -350,6 +350,7 @@ default text asks the agent to use the separately authorized `compact` tool afte
 finishing its current task. When the prompt actually reaches the agent, its
 existing durable submitted or steered fact carries the
 `context_size_alert` internal kind. UIs render that fact in journal order as
-`[tau-internal]: <exact configured text>` during live delivery and replay.
+a `□ <exact configured text>` notice in the dedicated internal-notice style
+during live delivery and replay.
 Crossing, queued-delivery, and one-shot suppression state remains runtime-only;
 cleared alerts do not gain synthetic history.

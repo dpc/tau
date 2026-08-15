@@ -31,7 +31,7 @@ A role can also set:
   prompt catalog; defaults to `true`
 - `context_size_alerts`: named token thresholds that queue configurable internal
   prompts after a turn; committed deliveries appear in UI history as
-  `[tau-internal]: <configured message>`
+  `□ <configured message>` in the dedicated internal-notice style
 - `prompt_fragments`: role-specific prompt fragments
 - `prompt_override`: system prompt template name
 - `tools`: explicit internal tools enabled for this role
@@ -204,8 +204,9 @@ agents:
 When completed inference reports input usage strictly above the threshold, Tau
 queues the message as an internal prompt after the current response and any tool
 calls. When it reaches the agent, the UI history shows
-`[tau-internal]: <configured message>` at that delivery point, including after
-late attach or resume. Failed and compaction responses do not fire alerts.
+`□ <configured message>` in the dedicated internal-notice style at that delivery
+point, including after late attach or resume. Failed and compaction responses do
+not fire alerts.
 During one running Tau daemon, each alert fires once until usage falls back to
 or below its threshold or context accounting resets. Alert crossing and
 queued-delivery state is advisory runtime state and is not reconstructed after
