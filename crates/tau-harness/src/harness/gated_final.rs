@@ -9,12 +9,12 @@ use tau_proto::{ConnectionId, ProviderResponseFinished};
 pub(crate) enum GatedFinalDisposition {
     /// Queue the next same-outer-turn reminder after the candidate commits.
     Challenge {
-        /// Canonical work title captured with the candidate.
-        title: String,
+        /// Validated unresolved status captured with the candidate.
+        challenge: crate::agent::FinalStatusChallenge,
     },
-    /// Invalidate Working and perform ordinary or delegated terminal
-    /// projection.
-    AcceptUnknown {
+    /// Perform ordinary or delegated terminal projection, invalidating Working
+    /// when it remains current.
+    Accept {
         /// Complete response-time state needed after the append boundary.
         terminal: Box<CommittedGatedFinal>,
     },

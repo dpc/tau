@@ -160,12 +160,16 @@ The harness also owns the detailed transient turn-activity reducer. It combines
 provider activity, prompt-frozen static tool categories, and the union of
 configured Tool/Core ambient-indicator contributions without changing binary
 runtime or outer-turn semantics.
-Successful no-tool responses while Working remain durable assistant transcript
-entries but withhold watch, worker-result, and detach projections. Each such
-candidate starts another challenge in the same outer turn, without a challenge
-budget, until the agent reports Done or Blocked. The first subsequent successful
-final projects only after its exact append commits. Unsuccessful terminals
-instead invalidate Working to Unknown without a challenge.
+Successful no-tool responses while Working, or while Unreported for a prompt
+whose frozen tool surface exposes `status`, remain durable assistant transcript
+entries but withhold watch, worker-result, and detach projections for at most two
+challenges in each unresolved phase. Entering Working resets the budget even
+after Unreported challenges in the same outer turn. Done or Blocked permits the
+next successful final to project; otherwise the third successful final within
+the current unresolved phase escapes the guard. Working becomes Unknown on
+escape, while Unreported remains unchanged. Agents without `status` remain
+unaffected. Every accepted final projects only after its exact append commits.
+Unsuccessful terminals invalidate Working to Unknown without a challenge.
 
 ## Tool-surface and extension-instance ownership
 

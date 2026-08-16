@@ -23,7 +23,9 @@ use tau_proto::{
     ToolCallId, ToolUseStats,
 };
 pub use work_status::WorkStatusReport;
-pub(crate) use work_status::{CrossedWaitThresholds, WorkStatus, WorkingFinalDecision};
+pub(crate) use work_status::{
+    CrossedWaitThresholds, FinalStatusChallenge, FinalStatusDecision, FinalStatusInput, WorkStatus,
+};
 
 use crate::dedup::ResultDedupMap;
 

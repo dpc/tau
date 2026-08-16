@@ -8,6 +8,13 @@ fn report(status: &mut WorkStatus, phase: AgentWorkStatusPhase, title: &str) -> 
     )
 }
 
+fn final_input(successful: bool, status_was_available: bool) -> FinalStatusInput {
+    FinalStatusInput {
+        successful,
+        status_was_available,
+    }
+}
+
 /// Runtime mutation rejects protocol-only phases and noncanonical titles in
 /// release-effective validation.
 #[test]
@@ -100,39 +107,106 @@ fn rejected_status_report_does_not_suppress_working_reminder() {
     assert!(status.take_working_reminder());
 }
 
-/// Every successful final remains challenged while Working; only Done or
-/// Blocked disables the gate, while an unsuccessful terminal invalidates it.
+/// Working receives two successful-final challenges before the escape accepts
+/// the third; unsuccessful terminals still take the invalidating accept path.
 #[test]
-fn working_final_gate_has_no_challenge_budget() {
+fn working_final_gate_has_bounded_escape() {
     let mut status = WorkStatus::default();
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Working,
         "must finish explicitly"
     ));
-    for _ in 0..4 {
+    for _ in 0..2 {
+        let Some(FinalStatusDecision::Challenge(challenge)) =
+            status.decide_final(final_input(true, true))
+        else {
+            panic!("Working final must be challenged");
+        };
         assert_eq!(
-            status.decide_final(true),
-            Some(WorkingFinalDecision::Challenge)
+            challenge,
+            FinalStatusChallenge::Working {
+                title: "must finish explicitly".to_owned()
+            }
         );
+        status.record_final_challenge(&challenge);
     }
     assert_eq!(
-        status.decide_final(false),
-        Some(WorkingFinalDecision::AcceptUnknown)
+        status.decide_final(final_input(true, true)),
+        Some(FinalStatusDecision::Accept)
+    );
+    assert_eq!(
+        status.decide_final(final_input(false, true)),
+        Some(FinalStatusDecision::Accept)
     );
     assert!(status.invalidate_working());
-    assert_eq!(status.decide_final(true), None);
+    assert_eq!(status.decide_final(final_input(true, true)), None);
 }
 
-/// Done and Blocked disable the Working final gate without changing the runtime
-/// into another implicit Working epoch.
+/// Unreported finals use the same two-challenge escape only when the immutable
+/// prompt surface exposed status; status-less agents remain unaffected.
 #[test]
-fn terminal_reports_disable_only_the_working_gate() {
+fn unreported_final_gate_requires_status_tool_and_has_bounded_escape() {
+    let mut status = WorkStatus::default();
+    assert_eq!(status.decide_final(final_input(true, false)), None);
+    assert_eq!(status.decide_final(final_input(false, true)), None);
+    for _ in 0..2 {
+        let Some(FinalStatusDecision::Challenge(challenge)) =
+            status.decide_final(final_input(true, true))
+        else {
+            panic!("Unreported final must be challenged");
+        };
+        assert_eq!(challenge, FinalStatusChallenge::Unreported);
+        status.record_final_challenge(&challenge);
+    }
+    assert_eq!(
+        status.decide_final(final_input(true, true)),
+        Some(FinalStatusDecision::Accept)
+    );
+    assert_eq!(status.phase(), AgentWorkStatusPhase::Unreported);
+}
+
+/// An accepted Unreported-to-Working transition starts a distinct Working epoch
+/// with its own two-challenge budget.
+#[test]
+fn working_epoch_resets_unreported_final_challenge_budget() {
+    let mut status = WorkStatus::default();
+    for _ in 0..2 {
+        let Some(FinalStatusDecision::Challenge(challenge)) =
+            status.decide_final(final_input(true, true))
+        else {
+            panic!("Unreported final must be challenged");
+        };
+        status.record_final_challenge(&challenge);
+    }
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Working,
+        "new working epoch"
+    ));
+    for _ in 0..2 {
+        let Some(FinalStatusDecision::Challenge(challenge)) =
+            status.decide_final(final_input(true, true))
+        else {
+            panic!("Working final must receive a fresh challenge budget");
+        };
+        status.record_final_challenge(&challenge);
+    }
+    assert_eq!(
+        status.decide_final(final_input(true, true)),
+        Some(FinalStatusDecision::Accept)
+    );
+}
+
+/// Done and Blocked disable final-status gating without changing the runtime
+/// into an implicit Working epoch.
+#[test]
+fn terminal_reports_disable_final_status_gate() {
     for phase in [AgentWorkStatusPhase::Done, AgentWorkStatusPhase::Blocked] {
         let mut status = WorkStatus::default();
         assert!(report(&mut status, phase, "terminal report"));
         assert_eq!(status.phase(), phase);
-        assert_eq!(status.decide_final(true), None);
+        assert_eq!(status.decide_final(final_input(true, true)), None);
         assert_eq!(status.epoch(), 0);
     }
 }

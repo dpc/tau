@@ -649,9 +649,10 @@ independently parsed JSONL items.
 
 `tau-harness-tools` owns focused status argument validation. `tau-harness` owns
 WorkStatus transitions, frozen status-capable tool-surface qualification,
-foreground reminder settlement, persistent Working state, post-append final
-challenge, delegated completion/detach, append failure, and interception
-regressions. The deterministic provider lane owns parallel accepted/rejected
+foreground reminder settlement, persistent Working state, bounded post-append
+Working and Unreported final challenges, status-unavailable bypass, delegated
+completion/detach, append failure, and interception regressions. The
+deterministic provider lane owns parallel accepted/rejected
 Working calls, repeated work, Done/Blocked release, exact production watch
 grammar, durable projection, and cold-replay oracles. Keep
 parser-only tests as focused validation supplements; add production-boundary

@@ -116,14 +116,19 @@ accepted or current status. This event-payload semantic was explicitly approved
 under
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 
-Successful no-tool finals while Working are durable candidate responses. Watch,
-delegated result, and detach projections for each challenged candidate remain
-permanently withheld after its semantic append; post-commit handling only queues
-guidance and continues the same outer turn. An accepted Done or Blocked transition
-allows a distinct later successful final to project and finish the turn after that
-final's own exact append commits. Working has no per-activation acknowledgement
-and no successful-final challenge budget. Unsuccessful terminals bypass the
-challenge and change Working to Unknown once.
+Successful no-tool finals while Working, and while Unreported when the immutable
+dispatched prompt tool surface exposes model-visible `status`, are durable
+candidate responses. Watch, delegated result, and detach projections for each
+challenged candidate remain permanently withheld after its semantic append;
+post-commit handling only queues guidance and continues the same outer turn.
+Each unresolved phase has its own two-challenge budget; entering Working resets
+the budget even when Unreported challenges already occurred in the same outer
+turn. An accepted Done or Blocked transition, or the third successful final
+within the current unresolved phase, allows that later final to project and
+finish the turn after its own exact append commits. Budget escape changes
+Working to Unknown and leaves Unreported unchanged. Agents whose
+dispatched prompt did not expose `status` remain unaffected. Unsuccessful
+terminals bypass the challenge and change Working to Unknown once.
 Current status is runtime-only; durable typed message facts provide projection
 and replay authority. A newly enabled watcher receives only the current snapshot,
 never historical transitions or thresholds.

@@ -437,13 +437,18 @@ The harness validates the closed phase and canonical 160-byte, single-line title
 at both tool and durable boundaries. A challenged successful response remains
 permanently withheld from watch, delegated-result, and detach projection even
 though its semantic append remains in the transcript; post-commit handling only
-queues guidance. After an accepted Done or Blocked transition, a distinct later
-successful final may project and complete the outer turn, but only after its own
-exact append commits. Successful finals have no challenge budget: a provider that
-repeatedly refuses to leave Working can keep the outer turn alive indefinitely.
+queues guidance. The same guard applies while status remains Unreported only
+when the immutable dispatched prompt surface exposed model-visible `status`.
+After an accepted Done or Blocked transition, a distinct later successful final
+may project and complete the outer turn, but only after its own exact append
+commits. Each unresolved phase has its own bounded escape: it challenges at most
+two successful finals, and the third within that phase projects even if status
+remains unresolved. Entering Working resets the budget even after Unreported
+challenges in the same outer turn. Escape invalidates Working to Unknown but
+leaves Unreported unchanged. Prompts without `status` bypass this guard.
 Done, Blocked, an unsuccessful terminal that invalidates Working to Unknown,
-unload, and session rollover release that runtime ownership; append failure and
-interception rejection cannot project a challenged candidate. Work-status state
+budget escape, unload, and session rollover release that runtime ownership;
+append failure and interception rejection cannot project a challenged candidate. Work-status state
 tests, harness gated-final/interception tests, and the deterministic current-status
 provider scenario cover these boundaries. Revisit them whenever internal-tool
 ownership, response interception, final projection, or agent teardown changes.

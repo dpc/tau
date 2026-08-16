@@ -6,6 +6,9 @@ use tau_proto::AgentWorkStatusPhase;
 
 /// First whole-minute threshold for long-wait watcher notifications.
 const FIRST_WAIT_THRESHOLD_MINUTES: u32 = 15;
+/// Maximum number of committed successful finals challenged while one
+/// unresolved status phase remains current.
+const MAX_FINAL_CHALLENGES: u8 = 2;
 
 /// Compact ordered range of crossed long-wait thresholds.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,13 +90,44 @@ impl WorkStatusReport {
     }
 }
 
-/// Gate decision for one no-tool final while Working.
+/// Semantic unresolved status captured for one final challenge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FinalStatusChallenge {
+    /// No status report has been accepted.
+    Unreported,
+    /// Working remains current with its canonical title.
+    Working {
+        /// Canonical title from the accepted Working report.
+        title: String,
+    },
+}
+
+impl FinalStatusChallenge {
+    /// Return the closed phase represented by this challenge.
+    fn phase(&self) -> AgentWorkStatusPhase {
+        match self {
+            Self::Unreported => AgentWorkStatusPhase::Unreported,
+            Self::Working { .. } => AgentWorkStatusPhase::Working,
+        }
+    }
+}
+
+/// Named inputs to final-status gate evaluation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkingFinalDecision {
+pub(crate) struct FinalStatusInput {
+    /// Whether the provider response is a successful terminal.
+    pub(crate) successful: bool,
+    /// Whether the immutable dispatched prompt surface exposed `status`.
+    pub(crate) status_was_available: bool,
+}
+
+/// Gate decision for one no-tool final with unresolved status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FinalStatusDecision {
     /// Retain the outer turn and continue after commit.
-    Challenge,
-    /// Invalidate Working and terminalize after commit.
-    AcceptUnknown,
+    Challenge(FinalStatusChallenge),
+    /// Terminalize after commit, invalidating Working when current.
+    Accept,
 }
 
 /// Runtime-only self-reported work state for one loaded agent.
@@ -108,6 +142,9 @@ pub(crate) struct WorkStatus {
     /// Whether the current foreground tool round began substantive work before
     /// an accepted Working report.
     working_reminder_pending: bool,
+    /// Number of committed successful finals challenged while the current
+    /// Unreported or Working phase remains unresolved.
+    final_challenges_sent: u8,
     /// Wait duration completed during the current Working epoch.
     completed_wait: Duration,
     /// Monotonic start of the current union-of-waits interval.
@@ -126,6 +163,7 @@ impl Default for WorkStatus {
             title: None,
             epoch: 0,
             working_reminder_pending: false,
+            final_challenges_sent: 0,
             completed_wait: Duration::ZERO,
             wait_started_at: None,
             next_wait_threshold_minutes: Some(FIRST_WAIT_THRESHOLD_MINUTES),
@@ -168,6 +206,7 @@ impl WorkStatus {
         }
         if phase == AgentWorkStatusPhase::Working && self.phase != AgentWorkStatusPhase::Working {
             self.epoch = self.epoch.saturating_add(1);
+            self.final_challenges_sent = 0;
             self.completed_wait = Duration::ZERO;
             self.wait_started_at = wait_installed.then_some(now);
             self.next_wait_threshold_minutes = Some(FIRST_WAIT_THRESHOLD_MINUTES);
@@ -307,14 +346,40 @@ impl WorkStatus {
     }
 
     /// Decide the exact post-commit behavior for one no-tool final.
-    pub(crate) fn decide_final(&self, successful: bool) -> Option<WorkingFinalDecision> {
-        if self.phase != AgentWorkStatusPhase::Working {
+    pub(crate) fn decide_final(&self, input: FinalStatusInput) -> Option<FinalStatusDecision> {
+        let gated = self.phase == AgentWorkStatusPhase::Working
+            || (self.phase == AgentWorkStatusPhase::Unreported && input.status_was_available);
+        if !gated {
             return None;
         }
-        if !successful {
-            return Some(WorkingFinalDecision::AcceptUnknown);
+        if !input.successful {
+            return (self.phase == AgentWorkStatusPhase::Working)
+                .then_some(FinalStatusDecision::Accept);
         }
-        Some(WorkingFinalDecision::Challenge)
+        if MAX_FINAL_CHALLENGES <= self.final_challenges_sent {
+            return Some(FinalStatusDecision::Accept);
+        }
+        let challenge = match self.phase {
+            AgentWorkStatusPhase::Unreported => FinalStatusChallenge::Unreported,
+            AgentWorkStatusPhase::Working => FinalStatusChallenge::Working {
+                title: self
+                    .title
+                    .clone()
+                    .expect("Working status has an accepted title"),
+            },
+            AgentWorkStatusPhase::Done
+            | AgentWorkStatusPhase::Blocked
+            | AgentWorkStatusPhase::Unknown => return None,
+        };
+        Some(FinalStatusDecision::Challenge(challenge))
+    }
+
+    /// Record one committed challenged response if its captured unresolved
+    /// phase remains current.
+    pub(crate) fn record_final_challenge(&mut self, challenge: &FinalStatusChallenge) {
+        if self.phase == challenge.phase() {
+            self.final_challenges_sent = self.final_challenges_sent.saturating_add(1);
+        }
     }
 
     /// Record admitted substantive tool work while the current status is not
@@ -336,7 +401,8 @@ impl WorkStatus {
         self.working_reminder_pending = false;
     }
 
-    /// Invalidate Working after an unsuccessful terminal.
+    /// Invalidate Working after an unsuccessful terminal or successful budget
+    /// escape.
     pub(crate) fn invalidate_working(&mut self) -> bool {
         if self.phase != AgentWorkStatusPhase::Working {
             return false;

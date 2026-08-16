@@ -14,9 +14,10 @@ use crate::harness::{
     BackgroundCompletionPromptMode, PendingRenderedPreview, PendingRenderedPrompt, PendingTool,
     RestoredCheckpointAuthority, STATUS_REMINDER, agent_message_activation_class,
     background_completion_prompt, extension_disconnected_background_tool_call_error_message,
-    extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
-    restore_notice_prompt_for_elapsed, self_compaction_terminal_pending_prompt,
-    self_compaction_terminal_prompt, unavailable_tool_error_message, working_status_reminder,
+    extension_disconnected_tool_call_error_message, final_status_reminder,
+    is_restore_notice_prompt_text, restore_notice_prompt_for_elapsed,
+    self_compaction_terminal_pending_prompt, self_compaction_terminal_prompt,
+    unavailable_tool_error_message,
 };
 use crate::{
     AgentId, agent as path_crate_agent, discovery as path_crate_discovery,
@@ -25,13 +26,19 @@ use crate::{
     internal_tools as path_crate_internal_tools,
 };
 
-/// Still-Working steering uses the concise generic wording approved for status
-/// lifecycle guidance.
+/// Final-status steering uses the concise generic wording approved for both
+/// unresolved phases.
 #[test]
-fn working_status_reminder_uses_approved_wording() {
+fn final_status_reminders_use_approved_wording() {
     assert_eq!(
-        working_status_reminder("STATUS-WATCH-4D8B"),
+        final_status_reminder(&crate::agent::FinalStatusChallenge::Working {
+            title: "STATUS-WATCH-4D8B".to_owned(),
+        }),
         "Your `status` is set to `working` on \"STATUS-WATCH-4D8B\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
+    );
+    assert_eq!(
+        final_status_reminder(&crate::agent::FinalStatusChallenge::Unreported),
+        "You have not reported `status`. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
     );
 }
 
@@ -30758,10 +30765,10 @@ fn agent_stats_snapshots_publish_work_status_transitions_and_replay() {
     h.shutdown().expect("shutdown");
 }
 
-/// The production response handler challenges every successful final while
-/// Working and releases exactly one candidate only after Done.
+/// The production response handler challenges two successful finals while
+/// Working, then accepts the third through the bounded escape.
 #[test]
-fn working_final_gate_requires_terminal_status_without_exhaustion() {
+fn working_final_gate_uses_bounded_escape() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -30790,7 +30797,7 @@ fn working_final_gate_requires_terminal_status_without_exhaustion() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish gate".to_owned()))
         .expect("dispatch production user prompt");
     let outer_generation = h.agents[&cid].turn_generation;
-    for index in 0..3 {
+    for index in 0..2 {
         let prompt_id = match &h.agents[&cid].turn_state {
             AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
             state => panic!("candidate {index} lacks an active prompt: {state:?}"),
@@ -30816,18 +30823,9 @@ fn working_final_gate_requires_terminal_status_without_exhaustion() {
             AgentTurnState::AgentThinking { .. }
         ));
     }
-    h.report_agent_work_status(
-        &cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "finish gate".to_owned(),
-        )
-        .expect("valid Done report"),
-    )
-    .expect("accept Done");
     let final_prompt_id = match &h.agents[&cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
-        state => panic!("Done continuation lacks an active prompt: {state:?}"),
+        state => panic!("escape continuation lacks an active prompt: {state:?}"),
     };
     assert!(
         !h.agents[&cid].lifecycle_notification_only_turn,
@@ -30836,13 +30834,13 @@ fn working_final_gate_requires_terminal_status_without_exhaustion() {
     h.handle_provider_response_finished(provider_text_response(
         &final_prompt_id,
         agent_id.clone(),
-        "accepted after Done",
+        "accepted by bounded escape",
     ))
-    .expect("finish after Done");
+    .expect("finish through bounded escape");
     let agent = h.agents.get(&cid).expect("agent");
     assert_eq!(
         agent.work_status.phase(),
-        tau_proto::AgentWorkStatusPhase::Done
+        tau_proto::AgentWorkStatusPhase::Unknown
     );
     let watch_responses = session_agent_message_received_events(&h)
         .into_iter()
@@ -30855,10 +30853,10 @@ fn working_final_gate_requires_terminal_status_without_exhaustion() {
     assert_eq!(
         watch_responses.len(),
         1,
-        "Done releases exactly one later final response to the watcher"
+        "the bounded escape releases exactly one later final response to the watcher"
     );
     assert_eq!(
-        watch_responses[0].message, "accepted after Done",
+        watch_responses[0].message, "accepted by bounded escape",
         "challenged candidate text must remain permanently withheld"
     );
     assert_eq!(agent.turn_generation, outer_generation);
@@ -30868,16 +30866,121 @@ fn working_final_gate_requires_terminal_status_without_exhaustion() {
             .iter()
             .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
             .count(),
-        4
+        3
     );
     h.shutdown().expect("shutdown");
 }
 
-/// Repeated Working finals from a tool-backed delegate project neither a
-/// delegated result nor detachment; Done releases exactly one result and then
+/// Unreported agents with a frozen status-capable prompt surface receive two
+/// final challenges, while a prompt whose frozen surface lacks status finishes
+/// immediately.
+#[test]
+fn unreported_final_gate_uses_frozen_status_availability_and_bounded_escape() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(RejectingStatusTool)]);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("report status".to_owned()))
+        .expect("dispatch status-capable prompt");
+    let mut completed_prompt_ids = Vec::new();
+    for index in 0..2 {
+        let prompt_id = match &h.agents[&cid].turn_state {
+            AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+            state => panic!("candidate {index} lacks an active prompt: {state:?}"),
+        };
+        assert!(
+            h.prompt_tool_specs[&prompt_id]
+                .iter()
+                .any(|spec| h.tool_model_visible_name(spec).as_str() == "status"),
+            "the immutable dispatched prompt surface must expose status"
+        );
+        h.handle_provider_response_finished(provider_text_response(
+            &prompt_id,
+            agent_id.clone(),
+            &format!("unreported candidate {index}"),
+        ))
+        .expect("challenge unreported final");
+        completed_prompt_ids.push(prompt_id);
+        assert!(matches!(
+            h.agents[&cid].turn_state,
+            AgentTurnState::AgentThinking { .. }
+        ));
+    }
+    let escape_prompt_id = match &h.agents[&cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("escape lacks an active prompt: {state:?}"),
+    };
+    h.handle_provider_response_finished(provider_text_response(
+        &escape_prompt_id,
+        agent_id,
+        "accepted unreported final",
+    ))
+    .expect("accept bounded unreported escape");
+    completed_prompt_ids.push(escape_prompt_id);
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert_eq!(
+        h.agents[&cid].work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Unreported
+    );
+    assert!(
+        completed_prompt_ids
+            .iter()
+            .all(|prompt_id| !h.prompt_tool_specs.contains_key(prompt_id)),
+        "every completed no-tool prompt must release its frozen tool surface"
+    );
+
+    h.shutdown().expect("shutdown status-capable harness");
+
+    let mut statusless_h =
+        echo_harness(td.path().join("statusless-state")).expect("start status-less harness");
+    let statusless_cid = ensure_test_user_agent(&mut statusless_h);
+    let statusless_id = durable_agent_id_for_conversation(&statusless_h, &statusless_cid);
+    statusless_h
+        .dispatch_prompt_for_agent(
+            &statusless_cid,
+            PendingPrompt::user("finish without status tool".to_owned()),
+        )
+        .expect("dispatch status-less prompt");
+    let statusless_prompt_id = match &statusless_h.agents[&statusless_cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("status-less prompt is not active: {state:?}"),
+    };
+    assert!(
+        statusless_h.prompt_tool_specs[&statusless_prompt_id]
+            .iter()
+            .all(|spec| statusless_h.tool_model_visible_name(spec).as_str() != "status"),
+        "the immutable dispatched prompt surface must not expose status"
+    );
+    statusless_h
+        .handle_provider_response_finished(provider_text_response(
+            &statusless_prompt_id,
+            statusless_id,
+            "status-less final",
+        ))
+        .expect("accept status-less final");
+    assert!(matches!(
+        statusless_h.agents[&statusless_cid].turn_state,
+        AgentTurnState::Idle
+    ));
+    assert_eq!(
+        event_log_events(&statusless_h)
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        1
+    );
+    statusless_h
+        .shutdown()
+        .expect("shutdown status-less harness");
+}
+
+/// Two Working finals from a tool-backed delegate project neither a delegated
+/// result nor detachment; the bounded escape releases the third result and
 /// detaches the child.
 #[test]
-fn delegated_working_final_projects_only_after_done() {
+fn delegated_working_final_projects_after_bounded_escape() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
@@ -30915,7 +31018,7 @@ fn delegated_working_final_projects_only_after_done() {
         query_id: "q-working-final".to_owned(),
     };
 
-    for index in 0..3 {
+    for index in 0..2 {
         let prompt_id = h
             .prompt_agents
             .iter()
@@ -30944,15 +31047,6 @@ fn delegated_working_final_projects_only_after_done() {
         }));
     }
 
-    h.report_agent_work_status(
-        &child_cid,
-        crate::WorkStatusReport::new(
-            tau_proto::AgentWorkStatusPhase::Done,
-            "delegated final".to_owned(),
-        )
-        .expect("valid Done report"),
-    )
-    .expect("accept Done");
     let final_prompt_id = h
         .prompt_agents
         .iter()
@@ -30981,6 +31075,10 @@ fn delegated_working_final_projects_only_after_done() {
     assert!(child.parent_tool_call_id.is_none());
     assert!(child.parent_agent_id.is_none());
     assert!(matches!(child.turn_state, AgentTurnState::Idle));
+    assert_eq!(
+        child.work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Unknown
+    );
     assert!(h.session_loaded_agents.contains(&child_agent_id));
     h.shutdown().expect("shutdown");
 }

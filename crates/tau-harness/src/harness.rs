@@ -70,9 +70,9 @@ use self::context_limit_telemetry::{
     transcript_growth,
 };
 use crate::agent::{
-    ActivationDispatchState, Agent, AgentTurnState, InferenceCheckpointOwner,
-    InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
-    PendingMessageWake, PendingMessageWakeSource, PendingPrompt,
+    ActivationDispatchState, Agent, AgentTurnState, FinalStatusChallenge, FinalStatusInput,
+    InferenceCheckpointOwner, InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger,
+    LoopTurnSignature, PendingCancel, PendingMessageWake, PendingMessageWakeSource, PendingPrompt,
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
@@ -6820,15 +6820,16 @@ impl Harness {
         }
         if let AgentPublishCompletion::GatedFinal { disposition, .. } = completion {
             match disposition {
-                GatedFinalDisposition::Challenge { title } => {
+                GatedFinalDisposition::Challenge { challenge } => {
                     if let Some(agent) = self.agents.get_mut(cid) {
+                        agent.work_status.record_final_challenge(&challenge);
                         agent
                             .pending_prompts
-                            .push_back(PendingPrompt::internal(working_status_reminder(&title)));
+                            .push_back(PendingPrompt::internal(final_status_reminder(&challenge)));
                     }
                     self.continue_after_gated_final_challenge(cid);
                 }
-                GatedFinalDisposition::AcceptUnknown { terminal } => {
+                GatedFinalDisposition::Accept { terminal } => {
                     if self
                         .agents
                         .get_mut(cid)
@@ -6836,7 +6837,7 @@ impl Harness {
                     {
                         self.notify_work_status_transition(cid);
                     }
-                    self.complete_committed_working_final(cid, *terminal);
+                    self.complete_committed_gated_final(cid, *terminal);
                 }
             }
             return;
@@ -6852,7 +6853,7 @@ impl Harness {
             ..
         } = completion
         else {
-            unreachable!("working final returned above")
+            unreachable!("gated final returned above")
         };
         if !complete_on_commit {
             return;
@@ -27407,36 +27408,30 @@ impl Harness {
                 response.stop_reason,
                 ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
             );
-        let working_status_gate = (!requested_tool_calls)
-            .then(|| self.apply_working_final_response_gate(&cid, &response))
+        let final_status_gate = (!requested_tool_calls)
+            .then(|| self.apply_final_status_response_gate(&cid, &response))
             .flatten();
-        let completion = match working_status_gate {
-            Some(path_crate_agent::WorkingFinalDecision::Challenge) => {
+        let final_status_gated = final_status_gate.is_some();
+        let completion = match final_status_gate {
+            Some(path_crate_agent::FinalStatusDecision::Challenge(challenge)) => {
                 Some(AgentPublishCompletion::GatedFinal {
                     batch_parent: self
                         .agents
                         .get(&cid)
                         .and_then(|agent| agent.head)
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    disposition: GatedFinalDisposition::Challenge {
-                        title: self
-                            .agents
-                            .get(&cid)
-                            .and_then(|agent| agent.work_status.title())
-                            .unwrap_or_default()
-                            .to_owned(),
-                    },
+                    disposition: GatedFinalDisposition::Challenge { challenge },
                     retry_event: None,
                 })
             }
-            Some(path_crate_agent::WorkingFinalDecision::AcceptUnknown) => {
+            Some(path_crate_agent::FinalStatusDecision::Accept) => {
                 Some(AgentPublishCompletion::GatedFinal {
                     batch_parent: self
                         .agents
                         .get(&cid)
                         .and_then(|agent| agent.head)
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    disposition: GatedFinalDisposition::AcceptUnknown {
+                    disposition: GatedFinalDisposition::Accept {
                         terminal: Box::new(CommittedGatedFinal {
                             response: response.clone(),
                             response_contains_compaction,
@@ -27470,7 +27465,10 @@ impl Harness {
             completion,
             notify_watchers_after_commit,
         );
-        if working_status_gate.is_some() {
+        if !requested_tool_calls {
+            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        }
+        if final_status_gated {
             return Ok(());
         }
         if response_contains_compaction {
@@ -29121,23 +29119,37 @@ impl Harness {
 
     /// Apply the common successful-terminal gate before ordinary or delegated
     /// completion can project the candidate response.
-    fn apply_working_final_response_gate(
+    fn apply_final_status_response_gate(
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-    ) -> Option<crate::agent::WorkingFinalDecision> {
+    ) -> Option<crate::agent::FinalStatusDecision> {
         let successful = response.error.is_none()
             && response.failure_kind.is_none()
             && !matches!(
                 response.stop_reason,
                 ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
             );
-        self.agents.get(cid)?.work_status.decide_final(successful)
+        let status_was_available = self
+            .prompt_tool_specs
+            .get(&response.agent_prompt_id)
+            .is_some_and(|specs| {
+                specs
+                    .iter()
+                    .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+            });
+        self.agents
+            .get(cid)?
+            .work_status
+            .decide_final(FinalStatusInput {
+                successful,
+                status_was_available,
+            })
     }
 
-    /// Perform ordinary or delegated completion only after an accepted Working
+    /// Perform ordinary or delegated completion only after an accepted gated
     /// final crossed its semantic append boundary.
-    fn complete_committed_working_final(&mut self, cid: &AgentId, terminal: CommittedGatedFinal) {
+    fn complete_committed_gated_final(&mut self, cid: &AgentId, terminal: CommittedGatedFinal) {
         let CommittedGatedFinal {
             response,
             response_contains_compaction,
@@ -30730,11 +30742,18 @@ impl Harness {
     }
 }
 
-/// Render the exact model-visible reminder for a final response left Working.
-fn working_status_reminder(title: &str) -> String {
-    format!(
-        "Your `status` is set to `working` on {title:?}. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
-    )
+/// Render the exact model-visible reminder for a final response with unresolved
+/// status.
+fn final_status_reminder(challenge: &FinalStatusChallenge) -> String {
+    match challenge {
+        FinalStatusChallenge::Unreported => {
+            "You have not reported `status`. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.".to_owned()
+        }
+        FinalStatusChallenge::Working { title } => format!(
+            "Your `status` is set to `working` on {:?}. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.",
+            title
+        ),
+    }
 }
 
 /// Return the first duplicate alias in a simultaneously advertised effective

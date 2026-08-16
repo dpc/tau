@@ -612,7 +612,9 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
     let make_completion = |batch_parent, suffix: &str| AgentPublishCompletion::GatedFinal {
         batch_parent,
         disposition: GatedFinalDisposition::Challenge {
-            title: "exact parent".to_owned(),
+            challenge: path_crate_agent::FinalStatusChallenge::Working {
+                title: "exact parent".to_owned(),
+            },
         },
         retry_event: Some(Box::new(Event::ProviderResponseFinished(
             provider_text_response(
