@@ -33,6 +33,12 @@ A journal may end after the owner and before prompt-start. Duplicate prompt-star
 facts are invalid. Persisted full `agent.prompt_created` records are unsupported;
 Tau provides no migration, backfill, dual-read, or mixed-format precedence.
 
+An output-length continuation follows the same owner and prompt-start authority.
+Its embedded response plan may repair only the missing internal steer and missing
+owner. Once the owner exists, the ordinary conservative boundary applies:
+missing prompt-start or missing provider terminal is dispatch-uncertain and Tau
+never reconstructs or resends the request.
+
 Historical subscriber catch-up excludes prompt-start facts. Best-effort debug
 output contains only a bounded content-free summary. Optional exact request
 capture is diagnostic output with explicit bounded retention and is never

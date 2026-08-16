@@ -22,6 +22,56 @@ const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DUMMY_TOOL: &str = env!("CARGO_BIN_EXE_tau-e2e-test-dummy");
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
 
+/// Proves the supervised provider sees exactly one replay-safe output-limit
+/// successor whose request retains the source reasoning and internal
+/// instruction.
+#[test]
+fn deterministic_output_length_continues_once_with_exact_replay()
+-> Result<(), Box<dyn std::error::Error>> {
+    const USER: &str = "finish the bounded answer";
+    const REASONING: &str = "retained deterministic plan";
+    const ANSWER: &str = "completed after one continuation";
+    let scenario = ScenarioV2::new(
+        "output-length",
+        vec![ScenarioLaneV2 {
+            ctx_id: "output-length".to_owned(),
+            actions: vec![
+                ScenarioActionV2::OutputLengthReasoning {
+                    user_text: USER.to_owned(),
+                    reasoning: REASONING.to_owned(),
+                    report_usage: true,
+                },
+                ScenarioActionV2::OutputLengthContinuation {
+                    user_text: USER.to_owned(),
+                    reasoning: REASONING.to_owned(),
+                    response: ANSWER.to_owned(),
+                    report_usage: true,
+                },
+            ],
+        }],
+    );
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_output_length_continues_once_with_exact_replay",
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let outcome = fixture.run_turn(USER)?;
+    assert_eq!(outcome.response, ANSWER);
+    assert!(outcome.tool_calls.is_empty());
+    assert!(outcome.tool_results.is_empty());
+
+    let events = fixture.published_trace_events()?;
+    assert_output_length_provider_sequence(&events, REASONING, ANSWER);
+    let snapshot = DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    assert_output_length_durable_sequence(&snapshot, ANSWER);
+    assert_eq!(fixture.trace()?.matches(" matched ").count(), 2);
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 /// Proves the real supervised provider route preserves two append deltas and a
 /// complete durable final assistant response without any live provider.
 #[test]
@@ -1383,6 +1433,260 @@ fn provider_lifecycle(events: &[tau_proto::Event]) -> Vec<ProviderLifecycle<'_>>
             _ => None,
         })
         .collect()
+}
+
+fn assert_output_length_provider_sequence(events: &[Event], reasoning: &str, answer: &str) {
+    let lifecycle = provider_lifecycle(events);
+    let [
+        ProviderLifecycle::Submitted(first_request),
+        ProviderLifecycle::Finished(source),
+        ProviderLifecycle::Submitted(second_request),
+        ProviderLifecycle::Finished(successor),
+    ] = lifecycle.as_slice()
+    else {
+        panic!("unexpected output-length provider lifecycle: {lifecycle:?}");
+    };
+    assert_ne!(
+        first_request.agent_prompt_id,
+        second_request.agent_prompt_id
+    );
+    assert_eq!(source.agent_prompt_id, first_request.agent_prompt_id);
+    assert_eq!(successor.agent_prompt_id, second_request.agent_prompt_id);
+    assert_eq!(source.stop_reason, tau_proto::ProviderStopReason::Length);
+    assert!(matches!(
+        source.output_items.as_slice(),
+        [ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text,
+        })] if text == reasoning
+    ));
+    assert!(matches!(
+        source.output_length_disposition,
+        tau_proto::OutputLengthDisposition::ContinuationPlanned {
+            ordinal: 1,
+            limit: 1,
+            ..
+        }
+    ));
+    assert_eq!(
+        successor.stop_reason,
+        tau_proto::ProviderStopReason::EndTurn
+    );
+    assert_assistant(&successor.output_items, answer);
+    assert!(matches!(
+        successor.output_length_disposition,
+        tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            ordinal: 1,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Completed,
+            ..
+        }
+    ));
+    let source_usage = source.usage.as_ref().expect("source usage");
+    assert_eq!(source_usage.prompt_sent_tokens, 10);
+    assert_eq!(source_usage.prompt_cached_tokens, 2);
+    assert_eq!(source_usage.response_received_tokens, 3);
+    assert_eq!(source_usage.stats.total.requests, 1);
+    assert_eq!(source_usage.stats.total.sent_tokens, 10);
+    assert_eq!(source_usage.stats.total.cached_tokens, 2);
+    assert_eq!(source_usage.stats.total.received_tokens, 3);
+    let successor_usage = successor.usage.as_ref().expect("successor usage");
+    assert_eq!(successor_usage.prompt_sent_tokens, 20);
+    assert_eq!(successor_usage.prompt_cached_tokens, 5);
+    assert_eq!(successor_usage.response_received_tokens, 7);
+    assert_eq!(successor_usage.stats.total.requests, 2);
+    assert_eq!(successor_usage.stats.total.sent_tokens, 30);
+    assert_eq!(successor_usage.stats.total.cached_tokens, 7);
+    assert_eq!(successor_usage.stats.total.received_tokens, 10);
+    for response in [source, successor] {
+        let rates = response
+            .estimated_api_cost_rates
+            .expect("captured nonzero rates");
+        assert_eq!(rates.uncached_input.as_micro_usd(), 2_000_000);
+        assert_eq!(rates.cached_input.as_micro_usd(), 1_000_000);
+        assert_eq!(rates.output.as_micro_usd(), 4_000_000);
+    }
+    // Each accepted response keeps its own backend, response id, and cache
+    // observation; the pair must never collapse into one shared record.
+    assert_eq!(
+        source.backend.as_ref().map(|backend| &backend.kind),
+        Some(&tau_proto::ProviderBackendKind::ChatCompletions)
+    );
+    assert_eq!(
+        successor.backend.as_ref().map(|backend| &backend.kind),
+        Some(&tau_proto::ProviderBackendKind::ChatCompletions)
+    );
+    assert_eq!(
+        source.provider_response_id.as_deref(),
+        Some("resp-output-length-source")
+    );
+    assert_eq!(
+        successor.provider_response_id.as_deref(),
+        Some("resp-output-length-successor")
+    );
+    assert_ne!(source.provider_response_id, successor.provider_response_id);
+    assert_ne!(
+        source_usage.prompt_cached_tokens,
+        successor_usage.prompt_cached_tokens
+    );
+    assert_eq!(
+        source
+            .estimated_api_cost_increment
+            .expect("source cost")
+            .as_picodollars(),
+        30_000_000
+    );
+    assert_eq!(
+        successor
+            .estimated_api_cost_increment
+            .expect("successor cost")
+            .as_picodollars(),
+        63_000_000
+    );
+    let successor_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == successor.agent_prompt_id
+            )
+        })
+        .expect("successor response position");
+    let final_stats = events[successor_position + 1..]
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentStatsUpdated(stats) if stats.agent_id == successor.agent_id => Some(stats),
+            _ => None,
+        })
+        .next_back()
+        .expect("final post-successor stats");
+    assert_eq!(
+        final_stats.estimated_api_cost.as_picodollars(),
+        93_000_000,
+        "response increments contribute to the final aggregate exactly once"
+    );
+}
+
+fn assert_output_length_durable_sequence(snapshot: &DurableSnapshot, answer: &str) {
+    let position = |predicate: &dyn Fn(&Event) -> bool| {
+        snapshot
+            .agent_events
+            .iter()
+            .position(|record| predicate(&record.event))
+            .expect("required durable output-length fact")
+    };
+    let source = position(&|event| {
+        matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if matches!(
+                    response.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                )
+        )
+    });
+    let steer = position(&|event| {
+        matches!(
+            event,
+            Event::AgentPromptSteered(steer)
+                if steer.internal_kind
+                    == Some(tau_proto::InternalPromptKind::OutputLengthContinuation)
+                    && steer.text == tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+        )
+    });
+    let owner = position(&|event| {
+        matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(owner)
+                if owner.output_length_continuation.is_some()
+        )
+    });
+    let start = position(&|event| {
+        matches!(
+            event,
+            Event::AgentPromptStarted(started)
+                if snapshot.agent_events.iter().any(|record| matches!(
+                    &record.event,
+                    Event::AgentInferenceDispatchStarted(owner)
+                        if owner.output_length_continuation.is_some()
+                            && owner.agent_prompt_id == started.agent_prompt_id
+                ))
+        )
+    });
+    let terminal = position(&|event| {
+        matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if matches!(
+                    response.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                )
+                    && response.output_items.iter().any(|item| matches!(
+                        item,
+                        ContextItem::Message(message)
+                            if message.content == [tau_proto::ContentPart::Text {
+                                text: answer.to_owned()
+                            }]
+                    ))
+        )
+    });
+    let finish = position(&|event| matches!(event, Event::AgentOuterTurnFinished(_)));
+    assert!(
+        source < steer && steer < owner && owner < start && start < terminal && terminal < finish
+    );
+    let durable_responses = snapshot
+        .agent_events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response) => Some(response),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(durable_responses.len(), 2);
+    assert_eq!(
+        durable_responses[0].provider_response_id.as_deref(),
+        Some("resp-output-length-source"),
+        "the cold snapshot preserves each response's own provider response id"
+    );
+    assert_eq!(
+        durable_responses[1].provider_response_id.as_deref(),
+        Some("resp-output-length-successor")
+    );
+    assert_ne!(
+        durable_responses[0].provider_response_id,
+        durable_responses[1].provider_response_id
+    );
+    assert!(durable_responses.iter().all(|response| {
+        response
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.kind == tau_proto::ProviderBackendKind::ChatCompletions)
+    }));
+    let durable_cached = durable_responses
+        .iter()
+        .map(|response| {
+            response
+                .usage
+                .as_ref()
+                .expect("reported usage survives cold reload")
+                .prompt_cached_tokens
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(durable_cached, vec![2, 5]);
+    assert_eq!(
+        snapshot
+            .agent_events
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                    internal_kind: Some(tau_proto::InternalPromptKind::OutputLengthContinuation),
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
 }
 
 fn outcome_tool_call_projection() -> tau_proto::ToolCallItem {

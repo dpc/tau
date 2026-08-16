@@ -66,6 +66,18 @@ synchronized held-worker crash followed by two dispatch-uncertain fail-closed
 resumes, an acknowledged interrupted worker foreground tool repaired exactly
 once across two cold resumes, and startup rejection of invalid
 scenario config.
+
+Output-length acceptance uses one closed Chat Completions-shaped pair. The live
+case proves a reasoning-only `Length` response creates exactly one successor,
+whose provider context retains the original user input, full reasoning, and
+shared harness-internal instruction in order. It then proves one normal answer,
+two separate terminal facts, and no third request. The cold-crash case stops at
+the planned-response and continuation-steer write-complete boundaries, kills the
+private process group, and proves resume appends only the missing lineage step
+before the same single successor. See
+[`SPEC-tau-e2e-deterministic-provider`](specs/SPEC-tau-e2e-deterministic-provider.md)
+and the crate [security boundaries](SECURITY.md).
+
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
 with explicit `tau resume <session-id>`, checks the restored terminal row, then

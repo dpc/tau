@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::ExtensionName;
 
+/// Exact harness-owned instruction used for the sole output-length
+/// continuation.
+///
+/// Core validates this value byte-for-byte and provider prompt projection uses
+/// it as a trusted user-role internal instruction.
+pub const OUTPUT_LENGTH_CONTINUATION_INSTRUCTION: &str = "The prior model response reached its output-token limit before producing an answer or tool request. Continue the same task from the retained reasoning. Do not repeat prior work.";
+
 /// Harness-owned subtype selecting specialized UI treatment for an internal
 /// prompt, including mandatory display or lifecycle suppression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -13,6 +20,9 @@ pub enum InternalPromptKind {
     ContextSizeAlert,
     /// Harness lifecycle notice emitted for a completed background tool.
     BackgroundToolCompletion,
+    /// Harness instruction that resumes replay-safe reasoning after an output
+    /// cap.
+    OutputLengthContinuation,
 }
 
 /// Prompt submission provenance stamped by the harness boundary.

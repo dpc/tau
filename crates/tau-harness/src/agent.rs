@@ -115,6 +115,119 @@ pub(crate) struct InferenceDispatchOwnership {
     pub(crate) activation_cut: tau_proto::AgentHead,
 }
 
+/// Runtime plan whose exact steer has not committed yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutputLengthContinuationPlan {
+    /// Reserved provider prompt correlation.
+    pub(crate) agent_prompt_id: AgentPromptId,
+    /// Durable source and outer-turn correlation.
+    pub(crate) owner: tau_proto::OutputLengthContinuationOwner,
+    /// Provider model and immutable activation authority captured by the
+    /// source.
+    pub(crate) dispatch: InferenceDispatchOwnership,
+}
+
+/// Owner-ready runtime data after the exact continuation steer commits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutputLengthContinuationDispatch {
+    /// Reserved prompt, source owner, and provider dispatch authority.
+    pub(crate) plan: OutputLengthContinuationPlan,
+    /// Exact committed steer cut that the successor owner must extend.
+    pub(crate) through: tau_proto::AgentHead,
+}
+
+/// Runtime ownership of one ordinary outer turn and its durable finish.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum OuterTurnRuntimeState {
+    /// No ordinary outer turn is open.
+    #[default]
+    None,
+    /// The turn is open and may own same-turn continuation work.
+    Active(tau_proto::AgentOuterTurnId),
+    /// The exact settled finish is queued or intercepted.
+    FinishInFlight(tau_proto::AgentOuterTurnId),
+    /// The exact settled finish was append-rejected and may be retried.
+    FinishRetry(tau_proto::AgentOuterTurnId),
+}
+
+impl OuterTurnRuntimeState {
+    /// Returns the turn id only while new same-turn work remains legal.
+    pub(crate) fn active_id(&self) -> Option<&tau_proto::AgentOuterTurnId> {
+        match self {
+            Self::Active(id) => Some(id),
+            Self::None | Self::FinishInFlight(_) | Self::FinishRetry(_) => None,
+        }
+    }
+
+    /// Returns the turn id in every open or finish-pending phase.
+    pub(crate) fn owned_id(&self) -> Option<&tau_proto::AgentOuterTurnId> {
+        match self {
+            Self::Active(id) | Self::FinishInFlight(id) | Self::FinishRetry(id) => Some(id),
+            Self::None => None,
+        }
+    }
+}
+
+/// Runtime projection of the one-per-outer-turn output-length budget.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum OutputLengthContinuationState {
+    /// This outer turn has not planned a continuation.
+    #[default]
+    None,
+    /// The plan committed and its exact continuation steer remains owed.
+    Planned(OutputLengthContinuationPlan),
+    /// The steer committed and its reserved successor awaits dispatch
+    /// ownership.
+    OwnerReady(OutputLengthContinuationDispatch),
+    /// The successor owner publication was claimed but has not committed.
+    OwnerPending(OutputLengthContinuationDispatch),
+    /// The successor owner committed and now permits one terminal response.
+    Active(OutputLengthContinuationDispatch),
+    /// The continuation ended while the outer turn remains open.
+    Spent {
+        /// Outer turn whose sole continuation budget was consumed.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+    },
+}
+
+impl OutputLengthContinuationState {
+    /// Atomically claim the pending successor for either dispatch path.
+    pub(crate) fn claim_pending(&mut self) -> Option<OutputLengthContinuationDispatch> {
+        let Self::OwnerReady(dispatch) = self else {
+            return None;
+        };
+        let dispatch = dispatch.clone();
+        *self = Self::OwnerPending(dispatch.clone());
+        Some(dispatch)
+    }
+
+    /// Return the outer turn that has consumed its continuation budget.
+    pub(crate) fn outer_turn_id(&self) -> Option<&tau_proto::AgentOuterTurnId> {
+        match self {
+            Self::None => None,
+            Self::Planned(dispatch) => Some(&dispatch.owner.outer_turn_id),
+            Self::OwnerReady(dispatch) | Self::OwnerPending(dispatch) | Self::Active(dispatch) => {
+                Some(&dispatch.plan.owner.outer_turn_id)
+            }
+            Self::Spent { outer_turn_id } => Some(outer_turn_id),
+        }
+    }
+
+    /// Whether a committed continuation owner pins this prompt to this model.
+    pub(crate) fn owns_prompt_model(
+        &self,
+        agent_prompt_id: &AgentPromptId,
+        model: &ModelId,
+    ) -> bool {
+        matches!(
+            self,
+            Self::Active(dispatch)
+                if &dispatch.plan.agent_prompt_id == agent_prompt_id
+                    && &dispatch.plan.dispatch.model == model
+        )
+    }
+}
+
 /// Durable inference checkpoint ownership.
 #[derive(Clone, Debug)]
 pub(crate) enum InferenceCheckpointOwner {
@@ -339,8 +452,10 @@ pub(crate) struct Agent {
     pub(crate) turn_generation: u64,
     /// Runtime-only semantic progress reported through the status tool.
     pub(crate) work_status: WorkStatus,
-    /// Durable identity of the currently running ordinary outer turn.
-    pub(crate) active_outer_turn_id: Option<tau_proto::AgentOuterTurnId>,
+    /// Typed runtime ownership of the open turn and its write-pending finish.
+    pub(crate) outer_turn: OuterTurnRuntimeState,
+    /// Named runtime state for the one output-length continuation budget.
+    pub(crate) output_length_continuation: OutputLengthContinuationState,
     /// Whether the current turn was caused only by lifecycle notifications.
     pub(crate) lifecycle_notification_only_turn: bool,
     /// For side agents spawned by a tool-implementing extension
@@ -437,6 +552,8 @@ pub(crate) enum PendingPromptSource {
     PassiveBackgroundCompletion,
     /// A harness-authored restore notice that waits for a separate activation.
     PassiveRestoreNotice,
+    /// Harness-owned continuation after replay-safe reasoning reached its cap.
+    OutputLengthContinuation,
 }
 
 /// A queued prompt plus its user/internal classification.
@@ -594,6 +711,20 @@ impl PendingPrompt {
         prompt
     }
 
+    /// Create the exact inference-activating output-length instruction.
+    pub(crate) fn output_length_continuation() -> Self {
+        let mut prompt =
+            Self::internal(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned());
+        prompt.source = PendingPromptSource::OutputLengthContinuation;
+        prompt
+    }
+
+    /// Return whether this prompt is the reserved durable length successor
+    /// steer.
+    pub(crate) fn is_output_length_continuation(&self) -> bool {
+        self.source == PendingPromptSource::OutputLengthContinuation
+    }
+
     /// Attach a caller correlation id to this exact queued prompt.
     pub(crate) fn with_ctx_id(mut self, ctx_id: Option<String>) -> Self {
         self.ctx_id = ctx_id;
@@ -659,6 +790,9 @@ impl PendingPrompt {
             PendingPromptSource::PassiveBackgroundCompletion => {
                 Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
             }
+            PendingPromptSource::OutputLengthContinuation => {
+                Some(tau_proto::InternalPromptKind::OutputLengthContinuation)
+            }
             PendingPromptSource::General
             | PendingPromptSource::WatchNotifiedUser
             | PendingPromptSource::LoopGuard
@@ -706,6 +840,9 @@ impl PendingPrompt {
                 tau_proto::ActivationKind::VisibleUser
             }
             PendingPromptSource::General | PendingPromptSource::ContextSizeAlert => {
+                tau_proto::ActivationKind::InternalPrompt
+            }
+            PendingPromptSource::OutputLengthContinuation => {
                 tau_proto::ActivationKind::InternalPrompt
             }
             PendingPromptSource::PassiveBackgroundCompletion
@@ -756,7 +893,8 @@ impl Agent {
             published_runtime_state: tau_proto::AgentRuntimeState::Idle,
             turn_generation: 0,
             work_status: WorkStatus::default(),
-            active_outer_turn_id: None,
+            outer_turn: OuterTurnRuntimeState::None,
+            output_length_continuation: OutputLengthContinuationState::None,
             lifecycle_notification_only_turn: false,
             parent_tool_call_id: None,
             parent_agent_id: None,

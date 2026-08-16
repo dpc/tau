@@ -22,7 +22,7 @@ use tau_proto::{AgentId, Event, SessionId};
 use crate::agent as path_crate_agent;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
-use crate::harness::{AgentPublishCompletion, Harness};
+use crate::harness::{AgentPublishCompletion, Harness, InferenceDispatchSelectionError};
 
 const NO_PROVIDER_MODELS_MESSAGE: &str = "No provider models are available. Run `tau provider list` to inspect provider status, then configure or enable a provider before submitting another prompt.";
 
@@ -271,12 +271,23 @@ impl Harness {
         {
             return;
         }
-        if self.selected_model.is_none() && self.provider_model_info.is_empty() {
-            self.reject_runnable_activations_without_provider_models();
-            return;
-        }
-
-        while let Some(agent_id) = self.next_runnable_agent() {
+        loop {
+            let has_captured_output_length_owner = self.agents.values().any(|agent| {
+                matches!(
+                    agent.output_length_continuation,
+                    path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                )
+            });
+            if self.selected_model.is_none()
+                && self.provider_model_info.is_empty()
+                && !has_captured_output_length_owner
+            {
+                self.reject_runnable_activations_without_provider_models();
+                return;
+            }
+            let Some(agent_id) = self.next_runnable_agent() else {
+                break;
+            };
             let session_id = self
                 .agents
                 .get(&agent_id)
@@ -317,10 +328,19 @@ impl Harness {
                     }
                     self.fold_pending_prompts_as_steered(&agent_id);
                 }
-                if self.schedule_standalone_auto_compaction(&agent_id) {
+                let output_length_owner_ready = self.agents.get(&agent_id).is_some_and(|agent| {
+                    matches!(
+                        agent.output_length_continuation,
+                        path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                    )
+                });
+                if !output_length_owner_ready && self.schedule_standalone_auto_compaction(&agent_id)
+                {
                     continue;
                 }
-                if !self.validate_prompt_render_for_dispatch(&agent_id) {
+                if !output_length_owner_ready
+                    && !self.validate_prompt_render_for_dispatch(&agent_id)
+                {
                     return;
                 }
                 if let Some(activation_class) =
@@ -330,18 +350,6 @@ impl Harness {
                     agent.lifecycle_notification_only_turn = activation_class
                         == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification;
                 }
-                let model = self
-                    .agents
-                    .get(&agent_id)
-                    .and_then(|agent| self.model_for_agent_role(agent));
-                let Some(model) = model else {
-                    let role_name = self.role_name_for_agent_id(&agent_id);
-                    self.emit_info(&format!(
-                        "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
-                    ));
-                    self.set_agent_turn_state(&agent_id, path_crate_agent::AgentTurnState::Idle);
-                    return;
-                };
                 let captured_activation_cut = self.agents.get(&agent_id).and_then(|agent| {
                     let durable_agent_id = agent.agent_id.as_deref()?;
                     agent
@@ -351,51 +359,45 @@ impl Harness {
                         .map(tau_proto::AgentHead::Node)
                         .or(Some(tau_proto::AgentHead::Root))
                 });
-                let Some(activation_cut) =
-                    self.earliest_activation_cut(&agent_id, captured_activation_cut)
-                else {
-                    return;
+                let selection = match self
+                    .select_inference_dispatch(&agent_id, captured_activation_cut)
+                {
+                    Ok(selection) => selection,
+                    Err(InferenceDispatchSelectionError::MissingModel) => {
+                        let role_name = self.role_name_for_agent_id(&agent_id);
+                        self.emit_info(&format!(
+                                "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
+                            ));
+                        self.set_agent_turn_state(
+                            &agent_id,
+                            path_crate_agent::AgentTurnState::Idle,
+                        );
+                        return;
+                    }
+                    Err(InferenceDispatchSelectionError::OutputLengthBranchInvalid) => {
+                        self.repair_dormant_output_length_lineage(&agent_id);
+                        return;
+                    }
+                    Err(InferenceDispatchSelectionError::MissingActivationCut) => {
+                        return;
+                    }
                 };
                 self.record_durable_agent_session_activity(&agent_id);
-                let Some((durable_agent_id, prompt_id, through, activation_cut)) =
-                    self.agents.get_mut(&agent_id).and_then(|agent| {
-                        let durable_agent_id = agent.agent_id.clone()?;
-                        let prompt_id = tau_proto::AgentPromptId::parse(format!(
-                            "ap-{durable_agent_id}-{}",
-                            agent.next_prompt_index
-                        ))
-                        .expect("known-safe AgentPromptId must be valid");
-                        agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-                        let through = agent
-                            .head
-                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-                        agent.activation_dispatch =
-                            path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
-                                owner: path_crate_agent::InferenceCheckpointOwner::Inference,
-                                agent_prompt_id: prompt_id.clone(),
-                                through,
-                                dispatch: crate::agent::InferenceDispatchOwnership {
-                                    model: model.clone(),
-                                    operation: tau_proto::PromptOperation::Inference,
-                                    activation_cut,
-                                },
-                            };
-                        Some((durable_agent_id, prompt_id, through, activation_cut))
-                    })
-                else {
+                let Some(checkpoint) = self.claim_inference_checkpoint(&agent_id, selection) else {
                     continue;
                 };
                 self.publish_for_agent(
                     &agent_id,
                     tau_proto::Event::AgentInferenceDispatchStarted(
                         tau_proto::AgentInferenceDispatchStarted {
-                            agent_id: crate::parse_agent_id(&durable_agent_id),
+                            agent_id: checkpoint.durable_agent_id,
                             transaction_id: None,
-                            agent_prompt_id: prompt_id,
-                            through,
-                            model: Some(model),
-                            operation: Some(tau_proto::PromptOperation::Inference),
-                            activation_cut: Some(activation_cut),
+                            agent_prompt_id: checkpoint.agent_prompt_id,
+                            through: checkpoint.through,
+                            model: Some(checkpoint.selection.model),
+                            operation: Some(checkpoint.selection.operation),
+                            activation_cut: Some(checkpoint.selection.activation_cut),
+                            output_length_continuation: checkpoint.output_length_continuation,
                         },
                     ),
                 );
@@ -537,10 +539,11 @@ impl Harness {
         }
     }
 
-    pub(crate) fn next_runnable_agent(&self) -> Option<AgentId> {
-        self.agents
+    fn next_runnable_agent(&self) -> Option<AgentId> {
+        let runnable = self
+            .agents
             .iter()
-            .find(|(agent_id, conv)| {
+            .filter(|(agent_id, conv)| {
                 (conv
                     .pending_prompts
                     .iter()
@@ -562,7 +565,17 @@ impl Harness {
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
                     && !self.agent_has_open_foreground_tool_round(agent_id)
             })
-            .map(|(agent_id, _)| agent_id.clone())
+            .collect::<Vec<_>>();
+        runnable
+            .iter()
+            .find(|(_, agent)| {
+                matches!(
+                    agent.output_length_continuation,
+                    path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                )
+            })
+            .or_else(|| runnable.first())
+            .map(|(agent_id, _)| (*agent_id).clone())
     }
 
     fn pop_next_runnable_prompt(&mut self, agent_id: &AgentId) -> Option<PendingPrompt> {

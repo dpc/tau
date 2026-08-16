@@ -1091,6 +1091,42 @@ Revisit this boundary before adding user-selected output files, redaction modes,
 provider HTTP-body or streaming-delta capture, new timing authority, or any
 persisted trace state.
 
+
+## Output-length continuation failure boundary
+
+`ProviderStopReason::Length` is never semantic success. Tau permits at most one
+successor in an ordinary user outer turn, and only when the accepted response
+contains reasoning the selected Chat Completions adapter can replay exactly and
+contains no assistant message or tool call.
+
+The durable authority chain is
+`provider.response_finished(plan)` → exact trusted internal steer → matching
+inference owner → `agent.prompt_started`. Each append must complete before its
+successor begins. After the owner commits, restart never reconstructs or resends
+the provider request. A successor terminal may repair one missing settled
+outer-turn finish only when its validated `outer_turn_finish_owed` bit says so.
+
+Cancellation, branch-lineage loss, and missing or changed logical model routes
+fail closed. They neither redirect retained reasoning nor reset the one-shot
+budget. Branch loss closes the dormant original lineage with its exact steer,
+owner, pre-start failure, and owed finish; it never dispatches the successor or
+folds those facts into the selected sibling. A reserved successor's reactive
+context recovery carries only recovery authority, while its exact
+transaction-owned descendant retains the spent output-length lineage.
+This dormant synthetic failure is authorized only before the reserved
+successor's durable prompt-start. After prompt-start, branch movement cannot mint
+a competing failure; the already-dispatched owner remains the sole terminal
+authority.
+
+Each accepted response keeps its own usage, cost increment, and harness-derived
+finite provider attempt, including the incomplete source and successor. Cold
+recovery may repair the plan-to-steer and steer-to-owner cuts, reconstruct sticky
+terminal-incomplete attempt state, and apply the separately stamped
+terminal-to-finish cut above. Malformed, duplicate, or unrelated lineage facts
+block without dispatch. Revisit this boundary before adding
+provider-native continuation, more than one successor, unchanged-request retry,
+or any broader replay capability.
+
 ## Tau Swarm extension
 
 `std-swarm` is a configured local extension that connects to one

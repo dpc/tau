@@ -452,6 +452,111 @@ struct InferenceDispatchFold {
     head_move_generation: u64,
     finished: bool,
     recovery_disposition: tau_proto::ContextRecoveryDisposition,
+    /// Output-length terminal or plan recorded by this exact response owner.
+    output_length_disposition: tau_proto::OutputLengthDisposition,
+    /// Harness-authored finite transport attempt for the terminal response.
+    provider_attempt: Option<tau_proto::ProviderAttempt>,
+    /// Canonical provider stop reason retained for cold terminal projection.
+    provider_stop_reason: Option<tau_proto::ProviderStopReason>,
+    /// Transcript node containing this dispatch's planned length response.
+    output_length_plan_node: Option<NodeId>,
+    /// Exact trusted steer node that claimed this dispatch's plan.
+    output_length_steer_node: Option<NodeId>,
+    /// Transcript node containing this dispatch's terminal response.
+    response_node: Option<NodeId>,
+}
+
+/// Selected-branch repair state for one durable output-length continuation.
+///
+/// The projection deliberately stops at the durable dispatch-owner boundary.
+/// Once an owner exists, restart must not reconstruct or resend its request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutputLengthContinuationRecovery {
+    /// The planned response committed but its exact internal steer did not.
+    SteerNeeded {
+        /// Source inference checkpoint that captured model and branch
+        /// authority.
+        source: tau_proto::AgentInferenceDispatchStarted,
+        /// Reserved successor provider prompt.
+        successor_agent_prompt_id: tau_proto::AgentPromptId,
+        /// Outer turn retained by the successor.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+    },
+    /// The exact steer committed but its matching dispatch owner did not.
+    OwnerNeeded {
+        /// Source inference checkpoint that captured model and branch
+        /// authority.
+        source: tau_proto::AgentInferenceDispatchStarted,
+        /// Reserved successor provider prompt.
+        successor_agent_prompt_id: tau_proto::AgentPromptId,
+        /// Outer turn retained by the successor.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+        /// Selected transcript through which the successor must dispatch.
+        through: tau_proto::AgentHead,
+    },
+    /// The active turn's plan or steer is no longer the exact selected head.
+    BranchInvalid {
+        /// Source inference checkpoint that owns the stranded plan.
+        source: tau_proto::AgentInferenceDispatchStarted,
+        /// Reserved successor provider prompt.
+        successor_agent_prompt_id: tau_proto::AgentPromptId,
+        /// Outer turn whose budget remains spent.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+    },
+}
+
+/// Exact next durable fact needed to close an output-length lineage whose plan
+/// branch is dormant after selected-head movement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutputLengthDormantRepair {
+    /// Append the reserved internal steer beneath the dormant plan response.
+    Steer {
+        /// Durable source checkpoint that captured dispatch authority.
+        source: tau_proto::AgentInferenceDispatchStarted,
+        /// Reserved successor provider prompt.
+        successor_agent_prompt_id: tau_proto::AgentPromptId,
+        /// Outer turn retained by the successor.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+        /// Exact dormant plan node that must parent the steer.
+        parent: tau_proto::AgentHead,
+    },
+    /// Append the reserved successor owner beneath the dormant steer.
+    Owner {
+        /// Durable source checkpoint that captured dispatch authority.
+        source: tau_proto::AgentInferenceDispatchStarted,
+        /// Reserved successor provider prompt.
+        successor_agent_prompt_id: tau_proto::AgentPromptId,
+        /// Outer turn retained by the successor.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+        /// Exact dormant steer head owned by the successor.
+        through: tau_proto::AgentHead,
+        /// Exact planned-response parent consumed by the dormant steer.
+        plan_parent: tau_proto::AgentHead,
+    },
+    /// Append one harness failure beneath the dormant steer without
+    /// prompt-start.
+    Terminal {
+        /// Exact reserved successor dispatch owner.
+        owner: tau_proto::AgentInferenceDispatchStarted,
+        /// Exact dormant steer node that must parent the failure.
+        parent: tau_proto::AgentHead,
+    },
+    /// Append the stamped owed finish beneath the dormant terminal.
+    Finish {
+        /// Exact open outer turn to settle.
+        outer_turn_id: tau_proto::AgentOuterTurnId,
+        /// Dormant terminal response node that must parent the finish.
+        parent: tau_proto::AgentHead,
+    },
+}
+
+/// Selected-lineage output-length terminal projected for cold watcher restore.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutputLengthTerminalIncomplete {
+    /// Reserved successor prompt that reached the output limit.
+    pub agent_prompt_id: tau_proto::AgentPromptId,
+    /// Finite provider transport attempt that produced the terminal response.
+    pub provider_attempt: tau_proto::ProviderAttempt,
 }
 
 /// Validated durable state for one standalone compaction transaction.
@@ -1548,6 +1653,21 @@ impl AgentTree {
         durable_event_seq: PersistedAgentEventSeq,
         fold_semantics: AgentJournalFoldSemantics,
     ) -> Option<NodeId> {
+        let selected_before = self.head;
+        let preserve_selected =
+            self.output_length_append_preserves_selection(parent, event, selected_before);
+        let resolved_parent = parent.resolve(self.head);
+        let output_length_steer_source = match event {
+            Event::AgentPromptSteered(steered)
+                if steered.internal_kind
+                    == Some(tau_proto::InternalPromptKind::OutputLengthContinuation) =>
+            {
+                self.active_output_length_plan()
+                    .filter(|(_, dispatch)| dispatch.output_length_plan_node == resolved_parent)
+                    .map(|(prompt_id, _)| prompt_id.clone())
+            }
+            _ => None,
+        };
         self.retained_provider_image_bytes = self
             .retained_provider_image_bytes
             .saturating_add(durable_event_provider_image_bytes(event));
@@ -1555,7 +1675,39 @@ impl AgentTree {
         if self.apply_side_state_event(event) {
             return None;
         }
-        let node = self.apply_transcript_event(parent.resolve(self.head), event, durable_event_seq);
+        let node = self.apply_transcript_event(resolved_parent, event, durable_event_seq);
+        if let Some(node_id) = node {
+            if let Event::ProviderResponseFinished(response) = event
+                && let Some(dispatch) = self.inference_dispatches.get_mut(&response.agent_prompt_id)
+            {
+                dispatch.response_node = Some(node_id);
+            }
+            match event {
+                Event::ProviderResponseFinished(response)
+                    if matches!(
+                        response.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                    ) =>
+                {
+                    if let Some(dispatch) =
+                        self.inference_dispatches.get_mut(&response.agent_prompt_id)
+                    {
+                        dispatch.output_length_plan_node = Some(node_id);
+                    }
+                }
+                Event::AgentPromptSteered(steered)
+                    if steered.internal_kind
+                        == Some(tau_proto::InternalPromptKind::OutputLengthContinuation) =>
+                {
+                    if let Some(source_prompt_id) = output_length_steer_source
+                        && let Some(dispatch) = self.inference_dispatches.get_mut(&source_prompt_id)
+                    {
+                        dispatch.output_length_steer_node = Some(node_id);
+                    }
+                }
+                _ => {}
+            }
+        }
         if let (Some(node_id), Event::AgentPromptSteered(steered)) = (node, event)
             && let Some(terminal) = &steered.self_compaction_terminal
         {
@@ -1567,7 +1719,88 @@ impl AgentTree {
                 },
             );
         }
+        if preserve_selected {
+            self.head = selected_before;
+        }
         node
+    }
+
+    /// Exact off-selected output-length repair and already-dispatched terminal
+    /// facts extend their dormant parent without changing branch selection.
+    fn output_length_append_preserves_selection(
+        &self,
+        parent: AgentEventParent,
+        event: &Event,
+        selected: Option<NodeId>,
+    ) -> bool {
+        if parent == AgentEventParent::InheritHead {
+            return false;
+        }
+        let parent_head = match parent {
+            AgentEventParent::InheritHead => unreachable!("returned above"),
+            AgentEventParent::Root => tau_proto::AgentHead::Root,
+            AgentEventParent::Under(node) => tau_proto::AgentHead::Node(node),
+        };
+        let selected_head = selected
+            .map(tau_proto::AgentHead::Node)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        if self.is_ancestor_head(parent_head, selected_head) {
+            return false;
+        }
+        let matches_repair = match (self.output_length_dormant_repair(), event) {
+            (
+                Some(OutputLengthDormantRepair::Steer {
+                    parent: expected, ..
+                }),
+                Event::AgentPromptSteered(steered),
+            ) => {
+                expected == parent_head
+                    && steered.internal_kind
+                        == Some(tau_proto::InternalPromptKind::OutputLengthContinuation)
+            }
+            (
+                Some(OutputLengthDormantRepair::Owner {
+                    through: expected, ..
+                }),
+                Event::AgentInferenceDispatchStarted(owner),
+            ) => expected == parent_head && owner.output_length_continuation.is_some(),
+            (
+                Some(OutputLengthDormantRepair::Terminal {
+                    parent: expected, ..
+                }),
+                Event::ProviderResponseFinished(response),
+            ) => {
+                expected == parent_head
+                    && matches!(
+                        response.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                            outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+                            ..
+                        }
+                    )
+            }
+            (
+                Some(OutputLengthDormantRepair::Finish {
+                    parent: expected, ..
+                }),
+                Event::AgentOuterTurnFinished(_),
+            ) => expected == parent_head,
+            _ => false,
+        };
+        matches_repair
+            || matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if (matches!(
+                            response.output_length_disposition,
+                            tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                        )
+                        || response.recovery_disposition
+                            == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned)
+                        && self
+                            .output_length_lineage_owner_for_prompt(&response.agent_prompt_id)
+                            .is_some()
+            )
     }
 
     fn apply_compaction_control_event(
@@ -1640,6 +1873,12 @@ impl AgentTree {
                         head_move_generation: self.head_move_generation,
                         finished: false,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+                        provider_attempt: None,
+                        provider_stop_reason: None,
+                        output_length_plan_node: None,
+                        output_length_steer_node: None,
+                        response_node: None,
                     },
                 );
                 if let Some(transaction_id) = &checkpoint.transaction_id
@@ -1661,6 +1900,9 @@ impl AgentTree {
                 {
                     dispatch.finished = true;
                     dispatch.recovery_disposition = response.recovery_disposition;
+                    dispatch.output_length_disposition = response.output_length_disposition.clone();
+                    dispatch.provider_attempt = Some(response.provider_attempt);
+                    dispatch.provider_stop_reason = Some(response.stop_reason);
                 }
                 for transaction in self.compaction_transactions.values_mut() {
                     if transaction.checkpoint.as_ref().is_some_and(|checkpoint| {
@@ -2495,7 +2737,8 @@ impl AgentTree {
             }
             Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => Some(
                 check_trusted_internal_spans(&steered.text, &steered.trusted_internal_spans)
-                    .and_then(|()| self.validate_self_compaction_delivery(steered)),
+                    .and_then(|()| self.validate_self_compaction_delivery(steered))
+                    .and_then(|()| self.validate_output_length_steer(head, steered)),
             ),
             Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
                 Some(Ok(()))
@@ -2765,6 +3008,350 @@ impl AgentTree {
                 .is_some_and(|turn| !turn.finished)
     }
 
+    /// Returns the selected-branch output-length repair authorized by durable
+    /// typed lineage.
+    #[must_use]
+    pub fn output_length_continuation_recovery(&self) -> Option<OutputLengthContinuationRecovery> {
+        let (source_prompt_id, source) = self.active_output_length_plan()?;
+        let tau_proto::OutputLengthDisposition::ContinuationPlanned {
+            outer_turn_id,
+            successor_agent_prompt_id,
+            ordinal: 1,
+            limit: 1,
+        } = &source.output_length_disposition
+        else {
+            return None;
+        };
+        let selected = self.head;
+        if source.output_length_steer_node.is_none() {
+            if selected != source.output_length_plan_node {
+                return Some(OutputLengthContinuationRecovery::BranchInvalid {
+                    source: source.checkpoint.clone(),
+                    successor_agent_prompt_id: successor_agent_prompt_id.clone(),
+                    outer_turn_id: outer_turn_id.clone(),
+                });
+            }
+            return Some(OutputLengthContinuationRecovery::SteerNeeded {
+                source: source.checkpoint.clone(),
+                successor_agent_prompt_id: successor_agent_prompt_id.clone(),
+                outer_turn_id: outer_turn_id.clone(),
+            });
+        }
+        let steer_node = source.output_length_steer_node?;
+        if self.inference_dispatches.values().any(|dispatch| {
+            dispatch
+                .checkpoint
+                .output_length_continuation
+                .as_ref()
+                .is_some_and(|owner| owner.source_agent_prompt_id == *source_prompt_id)
+        }) {
+            return None;
+        }
+        if selected != Some(steer_node) {
+            return Some(OutputLengthContinuationRecovery::BranchInvalid {
+                source: source.checkpoint.clone(),
+                successor_agent_prompt_id: successor_agent_prompt_id.clone(),
+                outer_turn_id: outer_turn_id.clone(),
+            });
+        }
+        Some(OutputLengthContinuationRecovery::OwnerNeeded {
+            source: source.checkpoint.clone(),
+            successor_agent_prompt_id: successor_agent_prompt_id.clone(),
+            outer_turn_id: outer_turn_id.clone(),
+            through: tau_proto::AgentHead::Node(steer_node),
+        })
+    }
+
+    /// Returns the next exact repair step for one active-turn output-length
+    /// plan that is no longer an ancestor of the selected transcript head.
+    #[must_use]
+    pub fn output_length_dormant_repair(&self) -> Option<OutputLengthDormantRepair> {
+        let active = self.active_outer_turn.as_ref()?;
+        let selected = self
+            .head
+            .map(tau_proto::AgentHead::Node)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        let (source_prompt_id, source) =
+            self.inference_dispatch_order
+                .iter()
+                .rev()
+                .find_map(|prompt_id| {
+                    let dispatch = self.inference_dispatches.get(prompt_id)?;
+                    matches!(
+                        &dispatch.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                            outer_turn_id,
+                            ordinal: 1,
+                            limit: 1,
+                            ..
+                        } if outer_turn_id == active
+                    )
+                    .then_some((prompt_id, dispatch))
+                })?;
+        let tau_proto::OutputLengthDisposition::ContinuationPlanned {
+            outer_turn_id,
+            successor_agent_prompt_id,
+            ..
+        } = &source.output_length_disposition
+        else {
+            return None;
+        };
+        let plan_node = source.output_length_plan_node?;
+        if self.is_ancestor_head(tau_proto::AgentHead::Node(plan_node), selected) {
+            return None;
+        }
+        let Some(steer_node) = source.output_length_steer_node else {
+            return Some(OutputLengthDormantRepair::Steer {
+                source: source.checkpoint.clone(),
+                successor_agent_prompt_id: successor_agent_prompt_id.clone(),
+                outer_turn_id: outer_turn_id.clone(),
+                parent: tau_proto::AgentHead::Node(plan_node),
+            });
+        };
+        let owner = self.inference_dispatches.values().find(|dispatch| {
+            dispatch
+                .checkpoint
+                .output_length_continuation
+                .as_ref()
+                .is_some_and(|owner| owner.source_agent_prompt_id == *source_prompt_id)
+        });
+        let Some(owner) = owner else {
+            return Some(OutputLengthDormantRepair::Owner {
+                source: source.checkpoint.clone(),
+                successor_agent_prompt_id: successor_agent_prompt_id.clone(),
+                outer_turn_id: outer_turn_id.clone(),
+                through: tau_proto::AgentHead::Node(steer_node),
+                plan_parent: tau_proto::AgentHead::Node(plan_node),
+            });
+        };
+        if !owner.finished {
+            if self
+                .prompt_starts
+                .contains_key(&owner.checkpoint.agent_prompt_id)
+            {
+                return None;
+            }
+            return Some(OutputLengthDormantRepair::Terminal {
+                owner: owner.checkpoint.clone(),
+                parent: tau_proto::AgentHead::Node(steer_node),
+            });
+        }
+        let tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id: terminal_turn,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+            outer_turn_finish_owed: true,
+            ..
+        } = &owner.output_length_disposition
+        else {
+            return None;
+        };
+        if terminal_turn != outer_turn_id || !self.outer_turn_is_open(outer_turn_id) {
+            return None;
+        }
+        Some(OutputLengthDormantRepair::Finish {
+            outer_turn_id: outer_turn_id.clone(),
+            parent: tau_proto::AgentHead::Node(owner.response_node?),
+        })
+    }
+
+    /// Returns the active selected-branch turn whose one output-length budget
+    /// has already been spent, including after its owner or terminal committed.
+    #[must_use]
+    pub fn output_length_budget_spent_outer_turn(&self) -> Option<tau_proto::AgentOuterTurnId> {
+        let active = self.active_outer_turn.as_ref()?;
+        self.inference_dispatch_order
+            .iter()
+            .rev()
+            .find_map(|prompt_id| {
+                let dispatch = self.inference_dispatches.get(prompt_id)?;
+                matches!(
+                    &dispatch.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                        outer_turn_id,
+                        ordinal: 1,
+                        limit: 1,
+                        ..
+                    } if outer_turn_id == active
+                )
+                .then(|| active.clone())
+            })
+    }
+
+    /// Resolves the exact output-length lineage owner for either its reserved
+    /// successor or the one post-compaction inference descendant durably owned
+    /// by that successor's reactive recovery transaction.
+    #[must_use]
+    pub fn output_length_lineage_owner_for_prompt(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Option<tau_proto::OutputLengthContinuationOwner> {
+        let dispatch = self.inference_dispatches.get(prompt_id)?;
+        if let Some(owner) = &dispatch.checkpoint.output_length_continuation {
+            return Some(owner.clone());
+        }
+        let transaction_id = dispatch.checkpoint.transaction_id.as_ref()?;
+        let transaction = self.compaction_transactions.get(transaction_id)?;
+        if transaction.checkpoint.as_ref() != Some(&dispatch.checkpoint)
+            || !matches!(
+                transaction.outcome,
+                Some(CompactionTransactionOutcome::Succeeded(_))
+            )
+        {
+            return None;
+        }
+        let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+            failed_agent_prompt_id,
+        } = &transaction.started.trigger
+        else {
+            return None;
+        };
+        let failed = self.inference_dispatches.get(failed_agent_prompt_id)?;
+        if failed.recovery_disposition
+            != tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+        {
+            return None;
+        }
+        failed.checkpoint.output_length_continuation.clone()
+    }
+
+    /// Resolves the original output-length owner for one successful reactive
+    /// transaction before its post-compaction inference checkpoint exists.
+    #[must_use]
+    pub fn output_length_lineage_owner_for_transaction(
+        &self,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) -> Option<tau_proto::OutputLengthContinuationOwner> {
+        let transaction = self.compaction_transactions.get(transaction_id)?;
+        if !matches!(
+            transaction.outcome,
+            Some(CompactionTransactionOutcome::Succeeded(_))
+        ) {
+            return None;
+        }
+        let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+            failed_agent_prompt_id,
+        } = &transaction.started.trigger
+        else {
+            return None;
+        };
+        let failed = self.inference_dispatches.get(failed_agent_prompt_id)?;
+        failed.checkpoint.output_length_continuation.clone()
+    }
+
+    /// Returns the durable harness-authored attempt for one finished inference.
+    #[must_use]
+    pub fn provider_attempt_for_prompt(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Option<tau_proto::ProviderAttempt> {
+        let dispatch = self.inference_dispatches.get(prompt_id)?;
+        dispatch
+            .finished
+            .then_some(dispatch.provider_attempt)
+            .flatten()
+    }
+
+    /// Finds exactly one active-turn plan not yet claimed by a successor owner.
+    fn active_output_length_plan(
+        &self,
+    ) -> Option<(&tau_proto::AgentPromptId, &InferenceDispatchFold)> {
+        let active = self.active_outer_turn.as_ref()?;
+        let mut plans = self
+            .inference_dispatches
+            .iter()
+            .filter(|(source_id, dispatch)| {
+                matches!(
+                    &dispatch.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                        outer_turn_id, ..
+                    } if outer_turn_id == active
+                ) && !self.inference_dispatches.values().any(|candidate| {
+                    candidate
+                        .checkpoint
+                        .output_length_continuation
+                        .as_ref()
+                        .is_some_and(|owner| &owner.source_agent_prompt_id == *source_id)
+                })
+            });
+        let plan = plans.next()?;
+        plans.next().is_none().then_some(plan)
+    }
+
+    /// Projects the latest selected-lineage terminal output-limit status for
+    /// sticky watcher restoration after a cold restart.
+    #[must_use]
+    pub fn output_length_terminal_incomplete(&self) -> Option<OutputLengthTerminalIncomplete> {
+        let selected_head = self
+            .head
+            .map(tau_proto::AgentHead::Node)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        let (prompt_id, dispatch) =
+            self.inference_dispatch_order
+                .iter()
+                .rev()
+                .find_map(|prompt_id| {
+                    let dispatch = self.inference_dispatches.get(prompt_id)?;
+                    let selected = if dispatch.finished {
+                        dispatch.response_node.is_some_and(|response_node| {
+                            self.is_ancestor_head(
+                                tau_proto::AgentHead::Node(response_node),
+                                selected_head,
+                            )
+                        })
+                    } else {
+                        dispatch.head_move_generation == self.head_move_generation
+                            && self.is_ancestor_head(dispatch.checkpoint.through, selected_head)
+                    };
+                    selected.then_some((prompt_id, dispatch))
+                })?;
+        if !dispatch.finished {
+            return None;
+        }
+        (matches!(
+            dispatch.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outcome: tau_proto::OutputLengthContinuationOutcome::Incomplete,
+                ..
+            }
+        ) || (dispatch.output_length_disposition == tau_proto::OutputLengthDisposition::None
+            && dispatch.provider_stop_reason == Some(tau_proto::ProviderStopReason::Length)))
+        .then(|| {
+            dispatch
+                .provider_attempt
+                .map(|provider_attempt| OutputLengthTerminalIncomplete {
+                    agent_prompt_id: prompt_id.clone(),
+                    provider_attempt,
+                })
+        })
+        .flatten()
+    }
+
+    /// Returns the sole explicit authority to repair a missing outer-turn
+    /// finish after an output-length successor terminal committed.
+    #[must_use]
+    pub fn output_length_outer_turn_finish_repair(&self) -> Option<tau_proto::AgentOuterTurnId> {
+        let active = self.active_outer_turn.as_ref()?;
+        let outer_turn_id = self
+            .inference_dispatch_order
+            .iter()
+            .rev()
+            .find_map(|prompt_id| {
+                let dispatch = self.inference_dispatches.get(prompt_id)?;
+                match &dispatch.output_length_disposition {
+                    tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                        outer_turn_id,
+                        outer_turn_finish_owed: true,
+                        ..
+                    } if outer_turn_id == active => Some(outer_turn_id),
+                    tau_proto::OutputLengthDisposition::None
+                    | tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                    | tau_proto::OutputLengthDisposition::ContinuationTerminal { .. } => None,
+                }
+            })?;
+        self.outer_turn_is_open(outer_turn_id)
+            .then(|| outer_turn_id.clone())
+    }
+
     /// Returns whether a compact materialization fact may acquire its sole live
     /// continuation before prompt construction mutates runtime bookkeeping.
     #[must_use]
@@ -2938,6 +3525,36 @@ impl AgentTree {
         Ok(())
     }
 
+    fn validate_output_length_steer(
+        &self,
+        head: Option<NodeId>,
+        steered: &tau_proto::AgentPromptSteered,
+    ) -> Result<(), AgentEventValidationError> {
+        if steered.internal_kind != Some(tau_proto::InternalPromptKind::OutputLengthContinuation) {
+            return Ok(());
+        }
+        let exact_span = u32::try_from(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.len())
+            .ok()
+            .map(|end| vec![tau_proto::TrustedInternalSpan { start: 0, end }]);
+        if self
+            .active_output_length_plan()
+            .filter(|(_, dispatch)| dispatch.output_length_plan_node == head)
+            .is_none_or(|(_, dispatch)| dispatch.output_length_steer_node.is_some())
+            || !steered.inference_activation
+            || steered.message_class != tau_proto::PromptMessageClass::Internal
+            || steered.submission_source != tau_proto::PromptSubmissionSource::HarnessInternal
+            || steered.text != tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+            || Some(&steered.trusted_internal_spans) != exact_span.as_ref()
+            || steered.self_compaction_terminal.is_some()
+            || steered.ctx_id.is_some()
+        {
+            return Err(AgentEventValidationError::new(
+                "output-length continuation steer mismatches its durable plan",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_manual_compaction_request_failed(
         &self,
         failed: &tau_proto::AgentManualCompactionRequestFailed,
@@ -3035,6 +3652,52 @@ impl AgentTree {
         &self,
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
     ) -> Result<(), AgentEventValidationError> {
+        if let Some(owner) = &checkpoint.output_length_continuation {
+            let source = self
+                .inference_dispatches
+                .get(&owner.source_agent_prompt_id)
+                .ok_or_else(|| {
+                    AgentEventValidationError::new(
+                        "output-length continuation references an unknown source inference",
+                    )
+                })?;
+            if owner.ordinal != 1
+                || checkpoint.transaction_id.is_some()
+                || source.output_length_steer_node.is_none()
+                || checkpoint.through
+                    != tau_proto::AgentHead::Node(
+                        source
+                            .output_length_steer_node
+                            .expect("checked output-length steer"),
+                    )
+                || checkpoint.model != source.checkpoint.model
+                || checkpoint.operation != source.checkpoint.operation
+                || checkpoint.activation_cut != source.checkpoint.activation_cut
+                || self.inference_dispatches.values().any(|dispatch| {
+                    dispatch
+                        .checkpoint
+                        .output_length_continuation
+                        .as_ref()
+                        .is_some_and(|claimed| {
+                            claimed.source_agent_prompt_id == owner.source_agent_prompt_id
+                        })
+                })
+                || !matches!(
+                    &source.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                        outer_turn_id,
+                        successor_agent_prompt_id,
+                        ordinal: 1,
+                        limit: 1,
+                    } if outer_turn_id == &owner.outer_turn_id
+                        && successor_agent_prompt_id == &checkpoint.agent_prompt_id
+                )
+            {
+                return Err(AgentEventValidationError::new(
+                    "output-length continuation mismatches its durable plan",
+                ));
+            }
+        }
         match (
             checkpoint.model.as_ref(),
             checkpoint.operation,
@@ -3204,6 +3867,195 @@ impl AgentTree {
         &self,
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
+        // Context recovery and output-length dispositions are mutually
+        // exclusive on one response: a context-rejected reserved successor
+        // carries recovery authority only, and an output-length terminal never
+        // also plans reactive recovery. A durable fact combining both is
+        // ambiguous and must fail closed.
+        if response.recovery_disposition != tau_proto::ContextRecoveryDisposition::None
+            && response.output_length_disposition != tau_proto::OutputLengthDisposition::None
+        {
+            return Err(AgentEventValidationError::new(
+                "provider response cannot combine context recovery and output-length dispositions",
+            ));
+        }
+        match &response.output_length_disposition {
+            tau_proto::OutputLengthDisposition::None => {}
+            tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                outer_turn_id,
+                successor_agent_prompt_id,
+                ordinal,
+                limit,
+            } => {
+                let eligible = *ordinal == 1
+                    && *limit == 1
+                    && response.stop_reason == tau_proto::ProviderStopReason::Length
+                    && response.originator.is_user()
+                    && response.backend.as_ref().is_some_and(|backend| {
+                        backend.kind == tau_proto::ProviderBackendKind::ChatCompletions
+                    })
+                    && response.error.is_none()
+                    && response.failure_kind.is_none()
+                    && response.output_items.iter().all(|item| {
+                        !matches!(item, ContextItem::Message(_) | ContextItem::ToolCall(_))
+                    })
+                    && response.output_items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                                kind: tau_proto::ReasoningTextKind::Full,
+                                text,
+                            }) if !text.is_empty()
+                        )
+                    })
+                    && self
+                        .inference_dispatches
+                        .get(&response.agent_prompt_id)
+                        .is_some_and(|dispatch| {
+                            !dispatch.finished
+                                && dispatch.fold_semantics
+                                    == AgentJournalFoldSemantics::InferenceDeferredInputV1
+                                && dispatch.checkpoint.transaction_id.is_none()
+                                && dispatch.checkpoint.operation
+                                    == Some(tau_proto::PromptOperation::Inference)
+                                && dispatch.checkpoint.model.is_some()
+                                && dispatch.checkpoint.activation_cut.is_some()
+                                && self
+                                    .prompt_starts
+                                    .get(&response.agent_prompt_id)
+                                    .is_some_and(|started| {
+                                        started.outer_turn_id.as_ref() == Some(outer_turn_id)
+                                            && started.originator == response.originator
+                                            && started.originator.is_user()
+                                            && Some(&started.model)
+                                                == dispatch.checkpoint.model.as_ref()
+                                            && Some(started.operation)
+                                                == dispatch.checkpoint.operation
+                                            && self.outer_turns.get(outer_turn_id).is_some_and(
+                                                |turn| turn.session_id == started.session_id,
+                                            )
+                                    })
+                        })
+                    && self
+                        .outer_turns
+                        .get(outer_turn_id)
+                        .is_some_and(|turn| !turn.finished)
+                    && self.active_outer_turn.as_ref() == Some(outer_turn_id)
+                    && !self.inference_dispatches.values().any(|dispatch| {
+                        matches!(
+                            &dispatch.output_length_disposition,
+                            tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                                outer_turn_id: planned_turn,
+                                ..
+                            } if planned_turn == outer_turn_id
+                        )
+                    })
+                    && !self
+                        .inference_dispatches
+                        .contains_key(successor_agent_prompt_id);
+                if !eligible {
+                    return Err(AgentEventValidationError::new(
+                        "output-length plan requires one replay-safe reasoning-only inference",
+                    ));
+                }
+            }
+            tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outer_turn_id,
+                source_agent_prompt_id,
+                ordinal,
+                outcome,
+                outer_turn_finish_owed,
+            } => {
+                let matches_owner = *ordinal == 1
+                    && self
+                        .output_length_lineage_owner_for_prompt(&response.agent_prompt_id)
+                        .is_some_and(|owner| {
+                            owner.source_agent_prompt_id == *source_agent_prompt_id
+                                && owner.outer_turn_id == *outer_turn_id
+                                && owner.ordinal == *ordinal
+                        })
+                    && self
+                        .inference_dispatches
+                        .get(&response.agent_prompt_id)
+                        .is_some_and(|dispatch| {
+                            let harness_pre_start_terminal = matches!(
+                                outcome,
+                                tau_proto::OutputLengthContinuationOutcome::Cancelled
+                            ) || (matches!(
+                                outcome,
+                                tau_proto::OutputLengthContinuationOutcome::Failed
+                            ) && response
+                                .output_items
+                                .is_empty()
+                                && response.error.is_some()
+                                && response.failure_kind
+                                    == Some(tau_proto::ProviderFailureKind::Unknown)
+                                && response.backend.is_none()
+                                && response.usage.is_none()
+                                && response.provider_attempt == tau_proto::ProviderAttempt::ONE);
+                            harness_pre_start_terminal
+                                || self
+                                    .prompt_starts
+                                    .get(&response.agent_prompt_id)
+                                    .is_some_and(|started| {
+                                        started.outer_turn_id.as_ref() == Some(outer_turn_id)
+                                            && Some(&started.model)
+                                                == dispatch.checkpoint.model.as_ref()
+                                            && Some(started.operation)
+                                                == dispatch.checkpoint.operation
+                                            && self.outer_turns.get(outer_turn_id).is_some_and(
+                                                |turn| turn.session_id == started.session_id,
+                                            )
+                                    })
+                        });
+                let matches_outcome = match outcome {
+                    tau_proto::OutputLengthContinuationOutcome::Completed => {
+                        matches!(
+                            response.stop_reason,
+                            tau_proto::ProviderStopReason::EndTurn
+                                | tau_proto::ProviderStopReason::ToolCalls
+                        ) && response.error.is_none()
+                            && response.failure_kind.is_none()
+                    }
+                    tau_proto::OutputLengthContinuationOutcome::Incomplete => {
+                        response.stop_reason == tau_proto::ProviderStopReason::Length
+                    }
+                    tau_proto::OutputLengthContinuationOutcome::Failed => {
+                        response.error.is_some()
+                            || response.failure_kind.is_some()
+                            || matches!(
+                                response.stop_reason,
+                                tau_proto::ProviderStopReason::Error
+                                    | tau_proto::ProviderStopReason::RepetitionDetected
+                            )
+                    }
+                    tau_proto::OutputLengthContinuationOutcome::Cancelled => {
+                        response.stop_reason == tau_proto::ProviderStopReason::Error
+                            && response.error.as_deref() == Some("cancelled")
+                            && response.failure_kind.is_none()
+                            && response.output_items.is_empty()
+                    }
+                };
+                let finish_bit_valid = !*outer_turn_finish_owed
+                    || (response.recovery_disposition
+                        == tau_proto::ContextRecoveryDisposition::None
+                        && (response.stop_reason != tau_proto::ProviderStopReason::ToolCalls
+                            || !response
+                                .output_items
+                                .iter()
+                                .any(|item| matches!(item, ContextItem::ToolCall(_))))
+                        && !(response.stop_reason == tau_proto::ProviderStopReason::EndTurn
+                            && response
+                                .output_items
+                                .iter()
+                                .any(|item| matches!(item, ContextItem::ToolCall(_)))));
+                if !matches_owner || !matches_outcome || !finish_bit_valid {
+                    return Err(AgentEventValidationError::new(
+                        "output-length terminal mismatches its durable continuation owner",
+                    ));
+                }
+            }
+        }
         if response.recovery_disposition
             == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
         {

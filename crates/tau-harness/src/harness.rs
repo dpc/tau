@@ -134,8 +134,9 @@ use crate::harness::extensions::{
 };
 use crate::harness::gated_final::{CommittedGatedFinal, GatedFinalDisposition};
 use crate::harness::interception::{
-    AgentPublishCompletion, ConversationHeadSync, DeferredPublish, InterceptorRegistry,
-    PendingIntercept, PostCommitContinuation, PromptDispatchContinuation, PromptDispatchPhase,
+    AgentPublishCompletion, ConversationHeadSync, DeferredPublish, DormantOutputLengthCompletion,
+    InterceptorRegistry, PendingIntercept, PostCommitContinuation, PromptDispatchContinuation,
+    PromptDispatchPhase,
 };
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
@@ -315,6 +316,43 @@ struct CommitEventTiming {
     post_commit: Duration,
     /// Terminal status of this commit attempt.
     result: CommitEventTimingResult,
+}
+
+/// Complete inference checkpoint inputs selected before either dispatch path
+/// claims runtime ownership.
+#[derive(Clone, Debug)]
+pub(super) struct InferenceDispatchSelection {
+    /// Exact provider-qualified model captured for the checkpoint.
+    pub(super) model: ModelId,
+    /// Provider operation captured for the checkpoint.
+    pub(super) operation: tau_proto::PromptOperation,
+    /// Immutable input activation cut captured for the checkpoint.
+    pub(super) activation_cut: tau_proto::AgentHead,
+}
+
+/// Categorical reason an inference dispatch cannot select checkpoint authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InferenceDispatchSelectionError {
+    /// No configured model can own the inference.
+    MissingModel,
+    /// Selected-branch inputs do not yield one comparable activation cut.
+    MissingActivationCut,
+    /// The selected branch no longer ends at the committed continuation steer.
+    OutputLengthBranchInvalid,
+}
+
+/// Exact durable checkpoint fields claimed from one dispatch selection.
+struct InferenceCheckpointInput {
+    /// Durable agent that owns the checkpoint.
+    durable_agent_id: tau_proto::AgentId,
+    /// Reserved provider prompt correlation.
+    agent_prompt_id: tau_proto::AgentPromptId,
+    /// Exact selected head the checkpoint extends.
+    through: tau_proto::AgentHead,
+    /// Captured model, operation, and activation authority.
+    selection: InferenceDispatchSelection,
+    /// Output-length owner when this is the reserved successor.
+    output_length_continuation: Option<tau_proto::OutputLengthContinuationOwner>,
 }
 
 /// Terminal classification for one measured commit attempt.
@@ -1078,7 +1116,8 @@ impl PendingTool {
     }
 }
 
-#[derive(Default)]
+/// Frozen normalized call aggregate retained until its response commits.
+#[derive(Clone, Default)]
 struct NormalizedFinishedToolCalls {
     /// Tool-call validation failures keyed by the normalized call id.
     invalid_errors: HashMap<ToolCallId, String>,
@@ -1086,6 +1125,8 @@ struct NormalizedFinishedToolCalls {
     calls: Vec<NormalizedFinishedToolCall>,
 }
 
+/// One frozen normalized provider call and its dispatch policy.
+#[derive(Clone)]
 struct NormalizedFinishedToolCall {
     /// Normalized provider tool call.
     call: AgentToolCall,
@@ -1093,6 +1134,15 @@ struct NormalizedFinishedToolCall {
     background_support: BackgroundSupport,
     /// Recognized activity categories frozen from the prompt-owned tool spec.
     turn_categories: ToolTurnCategories,
+}
+
+/// Tool effect authorized only after an output-length terminal commits.
+#[derive(Clone)]
+enum CommittedOutputLengthToolEffect {
+    /// The terminal owns no executable tool round.
+    None,
+    /// Dispatch this exact normalized tool aggregate after write-complete.
+    Dispatch(NormalizedFinishedToolCalls),
 }
 
 struct FinishedToolCallNormalization {
@@ -2181,6 +2231,8 @@ pub(crate) enum AgentWatchProviderDeliveryKind {
     DispatchUncertain(tau_proto::AgentWatchProviderCategory),
     /// Terminal with the enclosed sanitized failure kind.
     TerminalError(tau_proto::ProviderFailureKind),
+    /// Terminal incomplete output with the enclosed sanitized category.
+    TerminalIncomplete(tau_proto::AgentWatchProviderCategory),
 }
 
 impl From<&tau_proto::AgentWatchProviderState> for AgentWatchProviderDeliveryKind {
@@ -2196,6 +2248,9 @@ impl From<&tau_proto::AgentWatchProviderState> for AgentWatchProviderDeliveryKin
             }
             tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
                 Self::TerminalError(*failure_kind)
+            }
+            tau_proto::AgentWatchProviderState::TerminalIncomplete { category, .. } => {
+                Self::TerminalIncomplete(*category)
             }
         }
     }
@@ -3019,11 +3074,13 @@ where
                         failure_kind: None,
                         context_limit_telemetry: None,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                        output_length_disposition: tau_proto::OutputLengthDisposition::None,
                         originator: prompt.originator.clone(),
                         usage: None,
                         compaction_original_input_tokens: None,
                         compaction_compacted_input_tokens: None,
                         backend: None,
+                        provider_attempt: Default::default(),
                         provider_response_id: None,
                         ws_pool_delta: None,
                     }),
@@ -3095,11 +3152,13 @@ where
                         failure_kind: None,
                         context_limit_telemetry: None,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                        output_length_disposition: tau_proto::OutputLengthDisposition::None,
                         originator: prompt.originator.clone(),
                         usage: None,
                         compaction_original_input_tokens: None,
                         compaction_compacted_input_tokens: None,
                         backend: None,
+                        provider_attempt: Default::default(),
                         provider_response_id: None,
                         ws_pool_delta: None,
                     }),
@@ -5590,15 +5649,28 @@ impl Harness {
             Event::AgentPromptTerminated(terminated) => Some(&terminated.agent_prompt_id),
             _ => None,
         };
-        let fold_parent = prompt_id
-            .and_then(|prompt_id| {
-                self.agents
-                    .get(cid)
-                    .and_then(|agent| agent.agent_id.as_deref())
-                    .and_then(|agent_id| self.agent_store.agent(agent_id))
-                    .and_then(|tree| tree.marked_inference_through(prompt_id))
+        let fold_parent = completion
+            .as_ref()
+            .and_then(|completion| match completion {
+                AgentPublishCompletion::OutputLengthSteer { batch_parent, .. } => {
+                    Some(tau_core::AgentEventParent::from_head(*batch_parent))
+                }
+                AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
+                    Some(tau_core::AgentEventParent::from_head(checkpoint.through))
+                }
+                _ => None,
             })
-            .map(tau_core::AgentEventParent::from_head);
+            .or_else(|| {
+                prompt_id
+                    .and_then(|prompt_id| {
+                        self.agents
+                            .get(cid)
+                            .and_then(|agent| agent.agent_id.as_deref())
+                            .and_then(|agent_id| self.agent_store.agent(agent_id))
+                            .and_then(|tree| tree.marked_inference_through(prompt_id))
+                    })
+                    .map(tau_core::AgentEventParent::from_head)
+            });
         persist |= matches!(event, Event::AgentPromptTerminated(_)) && fold_parent.is_some();
         let sync = Some(ConversationHeadSync {
             cid: cid.clone(),
@@ -5857,6 +5929,24 @@ impl Harness {
         let Some(sync) = sync else {
             return false;
         };
+        if let Event::AgentPromptStarted(started) = event
+            && let Some(AgentPublishCompletion::OutputLengthPreDeliveryFailure { response, .. }) =
+                sync.completion()
+        {
+            return response.agent_prompt_id == started.agent_prompt_id
+                && response.agent_id == started.agent_id
+                && self.agents.get(&sync.cid).is_some_and(|agent| {
+                    matches!(
+                        &agent.output_length_continuation,
+                        path_crate_agent::OutputLengthContinuationState::Active(continuation)
+                            if continuation.plan.agent_prompt_id == started.agent_prompt_id
+                                && continuation.plan.dispatch.model == started.model
+                                && continuation.plan.dispatch.operation == started.operation
+                                && Some(&continuation.plan.owner.outer_turn_id)
+                                    == started.outer_turn_id.as_ref()
+                    )
+                });
+        }
         let Some(continuation) = sync.prompt_dispatch() else {
             return false;
         };
@@ -6192,8 +6282,10 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: Event,
         persist: bool,
-        sync_head_for: Option<ConversationHeadSync>,
+        mut sync_head_for: Option<ConversationHeadSync>,
     ) {
+        let mut event = event;
+        self.arbitrate_output_length_terminal_cancellation(&mut event, &mut sync_head_for);
         let watch_retirement = sync_head_for
             .as_ref()
             .and_then(ConversationHeadSync::watch_retirement)
@@ -6228,7 +6320,19 @@ impl Harness {
             self.emit_info("dropping stale synchronized inference checkpoint after teardown");
             return;
         }
-        if !self.activation_successor_matches_selected_head(&event) {
+        let reactive_recovery_claim = matches!(
+            sync_head_for
+                .as_ref()
+                .and_then(ConversationHeadSync::completion),
+            Some(AgentPublishCompletion::ReactiveContextRecoveryStart { .. })
+        ) && matches!(
+            event,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. },
+                ..
+            })
+        );
+        if !reactive_recovery_claim && !self.activation_successor_matches_selected_head(&event) {
             self.rollback_rejected_activation_successor(&event);
             self.emit_harness_failure(&format!(
                 "dropping stale off-branch activation successor {}",
@@ -6251,11 +6355,18 @@ impl Harness {
             return;
         }
         if let Some(sync) = sync_head_for.as_ref()
-            && let Some(AgentPublishCompletion::GatedFinal { batch_parent, .. }) = sync.completion()
-            && self.selected_head_for_agent(&sync.cid) != Some(*batch_parent)
+            && let Some(batch_parent) = sync.completion().and_then(|completion| match completion {
+                AgentPublishCompletion::GatedFinal { batch_parent, .. }
+                | AgentPublishCompletion::OutputLengthContinuation { batch_parent, .. }
+                | AgentPublishCompletion::OutputLengthSteer { batch_parent, .. } => {
+                    Some(*batch_parent)
+                }
+                _ => None,
+            })
+            && self.selected_head_for_agent(&sync.cid) != Some(batch_parent)
         {
             self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
-            self.emit_info("retaining gated final until its owning branch is selected");
+            self.emit_info("retaining branch-owned publication until its exact parent is selected");
             return;
         }
         let mut commit_timing = CommitEventTiming::new(event.name());
@@ -6362,6 +6473,14 @@ impl Harness {
                 self.rollback_rejected_activation_successor(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
                 self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
+                if !matches!(
+                    sync_head_for
+                        .as_ref()
+                        .and_then(ConversationHeadSync::completion),
+                    Some(AgentPublishCompletion::OutputLengthDormantRepair { .. })
+                ) {
+                    self.retain_rejected_outer_turn_finish(&event);
+                }
                 if semantic_event_router::session_membership_id_for_event(&event)
                     .is_some_and(|session_id| session_id == self.current_session_id)
                 {
@@ -6469,6 +6588,37 @@ impl Harness {
                 ..
             })
         );
+        if matches!(
+            &event,
+            Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                internal_kind: Some(tau_proto::InternalPromptKind::OutputLengthContinuation),
+                ..
+            })
+        ) && let Some(through) = append_outcome
+            .as_ref()
+            .and_then(|outcome| outcome.folded_node_id)
+            .map(tau_proto::AgentHead::Node)
+            && let Some(sync) = sync_head_for.as_ref()
+            && !matches!(
+                sync.completion(),
+                Some(AgentPublishCompletion::OutputLengthDormantRepair { .. })
+            )
+            && let Some(agent) = self.agents.get_mut(&sync.cid)
+            && matches!(
+                agent.output_length_continuation,
+                path_crate_agent::OutputLengthContinuationState::Planned(_)
+            )
+        {
+            let path_crate_agent::OutputLengthContinuationState::Planned(plan) =
+                std::mem::take(&mut agent.output_length_continuation)
+            else {
+                unreachable!("matched planned output-length continuation");
+            };
+            agent.output_length_continuation =
+                path_crate_agent::OutputLengthContinuationState::OwnerReady(
+                    path_crate_agent::OutputLengthContinuationDispatch { plan, through },
+                );
+        }
         if commits_inference_activation
             && let Some(sync) = sync_head_for
                 .as_ref()
@@ -6660,6 +6810,24 @@ impl Harness {
             }
         }
         if let Some((cid, completion, through)) = agent_publish_completion {
+            #[cfg(feature = "output-length-test-barrier")]
+            {
+                use crate::output_length_test_barrier::{OutputLengthCommitCut, reach};
+                match &completion {
+                    AgentPublishCompletion::OutputLengthContinuation { response, .. }
+                        if matches!(
+                            response.output_length_disposition,
+                            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                        ) =>
+                    {
+                        reach(OutputLengthCommitCut::AfterPlannedResponse);
+                    }
+                    AgentPublishCompletion::OutputLengthSteer { .. } => {
+                        reach(OutputLengthCommitCut::AfterContinuationSteer);
+                    }
+                    _ => {}
+                }
+            }
             self.complete_agent_publish(&cid, completion, through);
         }
         if let Some(completion) = watch_retirement.as_ref() {
@@ -6697,6 +6865,137 @@ impl Harness {
         commit_timing.result = CommitEventTimingResult::Ok;
     }
 
+    /// Lets a cancellation accepted before terminal write-complete own the one
+    /// canonical continuation terminal, regardless of the response queued
+    /// first.
+    fn arbitrate_output_length_terminal_cancellation(
+        &mut self,
+        event: &mut Event,
+        sync: &mut Option<ConversationHeadSync>,
+    ) {
+        if let Event::AgentStandaloneCompactionFailed(failed) = event {
+            let cancellation_owns_failure = self
+                .runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
+                .and_then(|cid| self.agents.get(&cid))
+                .is_some_and(|agent| {
+                    agent.pending_cancel.is_some()
+                        && matches!(
+                            &agent.activation_dispatch,
+                            path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                                transaction_id,
+                                ..
+                            } if transaction_id == &failed.transaction_id
+                        )
+                });
+            if cancellation_owns_failure {
+                failed.reason = tau_proto::StandaloneCompactionFailureReason::Cancelled;
+            }
+            return;
+        }
+        let Event::ProviderResponseFinished(response) = event else {
+            return;
+        };
+        let Some(cid) = self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
+        else {
+            return;
+        };
+        let cancellation_owns_prompt = self.agents.get(&cid).is_some_and(|agent| {
+            agent.pending_cancel.is_some()
+                && matches!(
+                    &agent.output_length_continuation,
+                    path_crate_agent::OutputLengthContinuationState::Active(continuation)
+                        if continuation.plan.agent_prompt_id == response.agent_prompt_id
+                )
+        });
+        if cancellation_owns_prompt
+            && response.recovery_disposition
+                == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+            && response.output_length_disposition == tau_proto::OutputLengthDisposition::None
+            && let Some(owner) =
+                self.agents
+                    .get(&cid)
+                    .and_then(|agent| match &agent.output_length_continuation {
+                        path_crate_agent::OutputLengthContinuationState::Active(continuation)
+                            if continuation.plan.agent_prompt_id == response.agent_prompt_id =>
+                        {
+                            Some(continuation.plan.owner.clone())
+                        }
+                        _ => None,
+                    })
+        {
+            response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
+            if let Some(telemetry) = response.context_limit_telemetry.as_mut() {
+                telemetry.recovery_eligible = false;
+                telemetry.action = tau_proto::ContextLimitAction::Terminal;
+            }
+            response.output_length_disposition =
+                tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                    outer_turn_id: owner.outer_turn_id,
+                    source_agent_prompt_id: owner.source_agent_prompt_id,
+                    ordinal: owner.ordinal,
+                    outcome: tau_proto::OutputLengthContinuationOutcome::Cancelled,
+                    outer_turn_finish_owed: true,
+                };
+        }
+        if !matches!(
+            response.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+        ) {
+            return;
+        }
+        if !cancellation_owns_prompt {
+            return;
+        }
+        let tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outcome,
+            outer_turn_finish_owed,
+            ..
+        } = &mut response.output_length_disposition
+        else {
+            unreachable!("terminal checked above");
+        };
+        *outcome = tau_proto::OutputLengthContinuationOutcome::Cancelled;
+        *outer_turn_finish_owed = true;
+        response.stop_reason = ProviderStopReason::Error;
+        response.error = Some("cancelled".to_owned());
+        response.failure_kind = None;
+        response.output_items.clear();
+        self.local_route_failure_prompts
+            .remove(&response.agent_prompt_id);
+        let batch_parent = sync.as_ref().and_then(|sync| {
+            let completion = sync.completion()?;
+            match completion {
+                AgentPublishCompletion::GatedFinal { batch_parent, .. }
+                | AgentPublishCompletion::OutputLengthContinuation { batch_parent, .. }
+                | AgentPublishCompletion::OutputLengthPreDeliveryFailure { batch_parent, .. } => {
+                    Some(*batch_parent)
+                }
+                AgentPublishCompletion::ReactiveContextRecovery { checkpoint, .. } => {
+                    Some(checkpoint.through)
+                }
+                AgentPublishCompletion::InitialPromptSubmission { .. }
+                | AgentPublishCompletion::OutputLengthSteer { .. }
+                | AgentPublishCompletion::OutputLengthDormantRepair { .. }
+                | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
+                | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                | AgentPublishCompletion::StandaloneContinuation { .. } => None,
+            }
+        });
+        if let (Some(sync), Some(batch_parent)) = (sync.as_mut(), batch_parent) {
+            sync.suppress_activation_dispatch = true;
+            self.pending_publish_idle_dispatches
+                .retain(|dispatch| dispatch.cid != sync.cid);
+            sync.continuation = Some(PostCommitContinuation::AgentPublish(Box::new(
+                AgentPublishCompletion::OutputLengthContinuation {
+                    batch_parent,
+                    response: Box::new(response.clone()),
+                    assistant_text: None,
+                    retry_event: None,
+                },
+            )));
+        }
+    }
+
     /// Restore a claimed wait when its canonical preemption terminal did not
     /// cross the semantic append boundary.
     fn rollback_failed_wait_compaction_terminal(&mut self, event: &Event) {
@@ -6732,6 +7031,12 @@ impl Harness {
         let Some(sync) = sync else {
             return true;
         };
+        if matches!(
+            sync.completion(),
+            Some(AgentPublishCompletion::OutputLengthDormantRepair { .. })
+        ) {
+            return true;
+        }
         if sync.session_generation != self.current_session_generation {
             return false;
         }
@@ -6842,6 +7147,149 @@ impl Harness {
             }
             return;
         }
+        if let AgentPublishCompletion::OutputLengthContinuation {
+            response,
+            assistant_text,
+            ..
+        } = completion
+        {
+            self.complete_finished_response_without_tool_calls(
+                cid,
+                &response,
+                assistant_text.as_deref(),
+            );
+            return;
+        }
+        if let AgentPublishCompletion::OutputLengthSteer { .. } = completion {
+            let dormant = self
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(tau_core::AgentTree::output_length_dormant_repair)
+                .is_some();
+            if dormant {
+                self.repair_dormant_output_length_lineage(cid);
+            } else {
+                self.dispatch_activation_after_publish_idle(cid);
+            }
+            return;
+        }
+        if let AgentPublishCompletion::OutputLengthPreDeliveryFailure { response, .. } = completion
+        {
+            if self
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.pending_cancel.is_some())
+            {
+                self.local_route_failure_prompts
+                    .remove(&response.agent_prompt_id);
+                self.finalize_canceled_in_flight_prompt(cid);
+                return;
+            }
+            let completion = Some(AgentPublishCompletion::OutputLengthContinuation {
+                batch_parent: self
+                    .selected_head_for_agent(cid)
+                    .unwrap_or(tau_proto::AgentHead::Root),
+                response: response.clone(),
+                assistant_text: None,
+                retry_event: None,
+            });
+            self.publish_finished_response_for_agent(cid, None, &response, completion, false);
+            return;
+        }
+        if let AgentPublishCompletion::OutputLengthDormantRepair { step, .. } = completion {
+            match step {
+                DormantOutputLengthCompletion::Owner {
+                    activation_cut,
+                    steer,
+                    ..
+                } => {
+                    self.retire_dormant_output_length_activation(cid, activation_cut, steer);
+                    self.repair_dormant_output_length_lineage(cid);
+                }
+                DormantOutputLengthCompletion::Steer { .. }
+                | DormantOutputLengthCompletion::Terminal { .. } => {
+                    self.repair_dormant_output_length_lineage(cid);
+                }
+                DormantOutputLengthCompletion::Finish { .. } => {
+                    if let Some(agent) = self.agents.get_mut(cid) {
+                        agent.pending_cancel = None;
+                    }
+                    self.set_agent_turn_state(cid, AgentTurnState::Idle);
+                    self.emit_info_important(
+                        "Output-length continuation failed on its dormant original branch after branch selection changed.",
+                    );
+                    self.drain_publish_idle_dispatches();
+                    self.try_advance_queue();
+                }
+            }
+            return;
+        }
+        if let AgentPublishCompletion::ReactiveContextRecovery {
+            checkpoint, source, ..
+        } = completion
+        {
+            let selected = self
+                .selected_head_for_agent(cid)
+                .unwrap_or(tau_proto::AgentHead::Root);
+            let branch_matches = self
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .is_some_and(|tree| tree.is_ancestor_head(checkpoint.through, selected));
+            let cancelled = self
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.pending_cancel.is_some());
+            if !branch_matches || cancelled {
+                self.terminalize_replay_blocked_context_recovery(
+                    cid,
+                    &checkpoint,
+                    if cancelled {
+                        tau_proto::StandaloneCompactionFailureReason::Cancelled
+                    } else {
+                        tau_proto::StandaloneCompactionFailureReason::StaleBranch
+                    },
+                );
+                if let Some(agent) = self.agents.get_mut(cid) {
+                    agent.pending_cancel = None;
+                }
+                return;
+            }
+            self.start_reactive_compaction_for_checkpoint(cid, &checkpoint, source.as_ref());
+            return;
+        }
+        if let AgentPublishCompletion::ReactiveContextRecoveryStart {
+            failure_after_commit,
+            ..
+        } = completion
+        {
+            if let Some(mut failure) = failure_after_commit {
+                if self
+                    .agents
+                    .get(cid)
+                    .is_some_and(|agent| agent.pending_cancel.is_some())
+                {
+                    failure.reason = tau_proto::StandaloneCompactionFailureReason::Cancelled;
+                }
+                self.publish_event_for_agent_with_completion(
+                    cid,
+                    None,
+                    Event::AgentStandaloneCompactionFailed(*failure),
+                    Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                        batch_parent: through,
+                        retry_event: None,
+                    }),
+                    false,
+                );
+            }
+            return;
+        }
+        if let AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } = completion {
+            return;
+        }
         let AgentPublishCompletion::StandaloneContinuation {
             transaction_id,
             model,
@@ -6900,6 +7348,7 @@ impl Harness {
                 model: Some(model),
                 operation: Some(tau_proto::PromptOperation::Inference),
                 activation_cut: Some(activation_cut),
+                output_length_continuation: None,
             }),
         );
     }
@@ -6940,6 +7389,27 @@ impl Harness {
             AgentPublishCompletion::GatedFinal { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
+            AgentPublishCompletion::OutputLengthContinuation { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::OutputLengthSteer { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::OutputLengthPreDeliveryFailure { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::ReactiveContextRecoveryStart { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::ReactiveContextRecoveryFailure { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
             AgentPublishCompletion::InitialPromptSubmission { .. } => {
                 unreachable!("initial submission returned above")
             }
@@ -6959,25 +7429,148 @@ impl Harness {
         let Some(completion) = self.pending_agent_publish_completions.remove(cid) else {
             return;
         };
-        if let AgentPublishCompletion::GatedFinal {
-            batch_parent,
-            retry_event,
-            ..
-        } = &completion
+        if let AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } = &completion
         {
-            if self.selected_head_for_agent(cid) != Some(*batch_parent) {
+            let selected = self
+                .selected_head_for_agent(cid)
+                .unwrap_or(tau_proto::AgentHead::Root);
+            let branch_matches = self
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .is_some_and(|tree| tree.is_ancestor_head(checkpoint.through, selected));
+            let cancelled = self
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.pending_cancel.is_some());
+            if !branch_matches || cancelled {
+                if let Some(agent) = self.agents.get_mut(cid) {
+                    agent.activation_dispatch =
+                        path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
+                            checkpoint: checkpoint.clone(),
+                        };
+                }
+                self.terminalize_replay_blocked_context_recovery(
+                    cid,
+                    checkpoint,
+                    if cancelled {
+                        tau_proto::StandaloneCompactionFailureReason::Cancelled
+                    } else {
+                        tau_proto::StandaloneCompactionFailureReason::StaleBranch
+                    },
+                );
+                if let Some(agent) = self.agents.get_mut(cid) {
+                    agent.pending_cancel = None;
+                }
+                return;
+            }
+        }
+        if matches!(
+            completion,
+            AgentPublishCompletion::GatedFinal { .. }
+                | AgentPublishCompletion::OutputLengthContinuation { .. }
+                | AgentPublishCompletion::OutputLengthSteer { .. }
+                | AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. }
+                | AgentPublishCompletion::OutputLengthDormantRepair { .. }
+                | AgentPublishCompletion::ReactiveContextRecovery { .. }
+                | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
+                | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+        ) {
+            if matches!(
+                completion,
+                AgentPublishCompletion::OutputLengthDormantRepair { .. }
+                    | AgentPublishCompletion::ReactiveContextRecovery { .. }
+                    | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
+                    | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+            ) {
+                let retry_event = match &completion {
+                    AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
+                    | AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. }
+                    | AgentPublishCompletion::ReactiveContextRecoveryStart {
+                        retry_event, ..
+                    }
+                    | AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                        retry_event, ..
+                    } => retry_event,
+                    _ => unreachable!("matched direct retry"),
+                };
+                let Some(event) = retry_event.clone() else {
+                    return;
+                };
+                let mut approved = completion;
+                match &mut approved {
+                    AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
+                    | AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. }
+                    | AgentPublishCompletion::ReactiveContextRecoveryStart {
+                        retry_event, ..
+                    }
+                    | AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                        retry_event, ..
+                    } => *retry_event = None,
+                    _ => unreachable!("matched direct retry"),
+                };
+                self.commit_approved_agent_retry(cid, *event, approved);
+                return;
+            }
+            let (batch_parent, retry_event) = match &completion {
+                AgentPublishCompletion::GatedFinal {
+                    batch_parent,
+                    retry_event,
+                    ..
+                }
+                | AgentPublishCompletion::OutputLengthContinuation {
+                    batch_parent,
+                    retry_event,
+                    ..
+                }
+                | AgentPublishCompletion::OutputLengthSteer {
+                    batch_parent,
+                    retry_event,
+                }
+                | AgentPublishCompletion::OutputLengthPreDeliveryFailure {
+                    batch_parent,
+                    retry_event,
+                    ..
+                } => (*batch_parent, retry_event.clone()),
+                AgentPublishCompletion::OutputLengthDormantRepair { .. } => {
+                    unreachable!("dormant repair returned above")
+                }
+                AgentPublishCompletion::ReactiveContextRecovery { .. } => {
+                    unreachable!("reactive recovery returned above")
+                }
+                AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
+                    unreachable!("reactive start returned above")
+                }
+                _ => unreachable!(),
+            };
+            if self.selected_head_for_agent(cid) != Some(batch_parent) {
                 self.pending_agent_publish_completions
                     .insert(cid.clone(), completion);
                 return;
             }
-            let Some(event) = retry_event.clone() else {
+            let Some(event) = retry_event else {
                 return;
             };
             let mut approved = completion;
-            let AgentPublishCompletion::GatedFinal { retry_event, .. } = &mut approved else {
-                unreachable!()
-            };
-            *retry_event = None;
+            match &mut approved {
+                AgentPublishCompletion::GatedFinal { retry_event, .. }
+                | AgentPublishCompletion::OutputLengthContinuation { retry_event, .. }
+                | AgentPublishCompletion::OutputLengthSteer { retry_event, .. }
+                | AgentPublishCompletion::OutputLengthPreDeliveryFailure { retry_event, .. } => {
+                    *retry_event = None;
+                }
+                AgentPublishCompletion::OutputLengthDormantRepair { .. } => {
+                    unreachable!("dormant repair returned above")
+                }
+                AgentPublishCompletion::ReactiveContextRecovery { .. } => {
+                    unreachable!("reactive recovery returned above")
+                }
+                AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
+                    unreachable!("reactive start returned above")
+                }
+                _ => unreachable!(),
+            }
             self.commit_approved_agent_retry(cid, *event, approved);
             return;
         }
@@ -6993,6 +7586,25 @@ impl Harness {
                 approved_retry_event.clone(),
             ),
             AgentPublishCompletion::GatedFinal { .. } => unreachable!("returned above"),
+            AgentPublishCompletion::OutputLengthContinuation { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::OutputLengthSteer { .. } => unreachable!("returned above"),
+            AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::OutputLengthDormantRepair { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::ReactiveContextRecovery { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => {
+                unreachable!("returned above")
+            }
             AgentPublishCompletion::InitialPromptSubmission { .. } => {
                 unreachable!("initial submissions are never retained for retry")
             }
@@ -7065,6 +7677,233 @@ impl Harness {
         for cid in pending {
             self.retry_pending_agent_publish_completion(&cid);
         }
+        let pending_finishes = self
+            .agents
+            .iter()
+            .filter(|(_, agent)| {
+                matches!(
+                    agent.outer_turn,
+                    path_crate_agent::OuterTurnRuntimeState::FinishRetry(_)
+                )
+            })
+            .map(|(cid, _)| cid.clone())
+            .collect::<Vec<_>>();
+        for cid in pending_finishes {
+            self.retry_outer_turn_finish(&cid);
+        }
+    }
+
+    /// Advance one core-projected dormant output-length repair step, restoring
+    /// the selected sibling before deriving the next step.
+    fn repair_dormant_output_length_lineage(&mut self, cid: &AgentId) {
+        if let Some(completion) = self.pending_agent_publish_completions.remove(cid) {
+            if matches!(
+                completion,
+                AgentPublishCompletion::OutputLengthSteer { .. }
+                    | AgentPublishCompletion::OutputLengthContinuation { .. }
+            ) {
+                // The exact dormant repair supersedes pre-branch live
+                // scheduling.
+            } else {
+                self.pending_agent_publish_completions
+                    .insert(cid.clone(), completion);
+                return;
+            }
+        }
+        let Some((agent_id, repair)) = self.agents.get(cid).and_then(|agent| {
+            let agent_id = crate::parse_agent_id(agent.agent_id.as_deref()?);
+            let repair = self
+                .agent_store
+                .agent(agent_id.as_str())?
+                .output_length_dormant_repair()?;
+            Some((agent_id, repair))
+        }) else {
+            return;
+        };
+        let (event, step) = match repair {
+            tau_core::OutputLengthDormantRepair::Steer { parent, .. } => {
+                let prompt = PendingPrompt::output_length_continuation();
+                let internal_kind = prompt.internal_kind();
+                (
+                    Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                        agent_id: agent_id.clone(),
+                        inference_activation: true,
+                        submission_source: prompt.submission_source,
+                        text: prompt.text,
+                        trusted_internal_spans: prompt.trusted_internal_spans,
+                        message_class: prompt.message_class,
+                        self_compaction_terminal: None,
+                        internal_kind,
+                        ctx_id: None,
+                    }),
+                    DormantOutputLengthCompletion::Steer {
+                        fold_parent: tau_core::AgentEventParent::from_head(parent),
+                    },
+                )
+            }
+            tau_core::OutputLengthDormantRepair::Owner {
+                source,
+                successor_agent_prompt_id,
+                outer_turn_id,
+                through,
+                plan_parent: _,
+            } => {
+                let activation_cut = source
+                    .activation_cut
+                    .expect("validated output-length source carries activation cut");
+                (
+                    Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            agent_id: agent_id.clone(),
+                            transaction_id: None,
+                            agent_prompt_id: successor_agent_prompt_id,
+                            through,
+                            model: source.model,
+                            operation: source.operation,
+                            activation_cut: Some(activation_cut),
+                            output_length_continuation: Some(
+                                tau_proto::OutputLengthContinuationOwner {
+                                    source_agent_prompt_id: source.agent_prompt_id,
+                                    outer_turn_id,
+                                    ordinal: 1,
+                                },
+                            ),
+                        },
+                    ),
+                    DormantOutputLengthCompletion::Owner {
+                        fold_parent: tau_core::AgentEventParent::from_head(through),
+                        activation_cut,
+                        steer: through,
+                    },
+                )
+            }
+            tau_core::OutputLengthDormantRepair::Terminal { owner, parent } => {
+                let continuation = owner
+                    .output_length_continuation
+                    .expect("dormant terminal owner carries continuation");
+                (
+                    Event::ProviderResponseFinished(ProviderResponseFinished {
+                        agent_prompt_id: owner.agent_prompt_id,
+                        agent_id: agent_id.clone(),
+                        output_items: Vec::new(),
+                        stop_reason: ProviderStopReason::Error,
+                        error: Some("output-length continuation branch was deselected".to_owned()),
+                        failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
+                        context_limit_telemetry: None,
+                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                        output_length_disposition:
+                            tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                                outer_turn_id: continuation.outer_turn_id,
+                                source_agent_prompt_id: continuation.source_agent_prompt_id,
+                                ordinal: continuation.ordinal,
+                                outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+                                outer_turn_finish_owed: true,
+                            },
+                        provider_attempt: Default::default(),
+                        originator: PromptOriginator::User,
+                        usage: None,
+                        estimated_api_cost_rates: None,
+                        estimated_api_cost_increment: None,
+                        compaction_original_input_tokens: None,
+                        compaction_compacted_input_tokens: None,
+                        backend: None,
+                        provider_response_id: None,
+                        ws_pool_delta: None,
+                    }),
+                    DormantOutputLengthCompletion::Terminal {
+                        fold_parent: tau_core::AgentEventParent::from_head(parent),
+                    },
+                )
+            }
+            tau_core::OutputLengthDormantRepair::Finish {
+                outer_turn_id,
+                parent,
+            } => {
+                if let Some(agent) = self.agents.get_mut(cid) {
+                    agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
+                        outer_turn_id.clone(),
+                    );
+                }
+                (
+                    Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                        agent_id: agent_id.clone(),
+                        session_id: self.current_session_id.clone(),
+                        outer_turn_id,
+                        disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                    }),
+                    DormantOutputLengthCompletion::Finish {
+                        fold_parent: tau_core::AgentEventParent::from_head(parent),
+                    },
+                )
+            }
+        };
+        let parent = step.fold_parent();
+        self.enqueue_publish(
+            None,
+            event,
+            true,
+            true,
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id: Some(agent_id),
+                session_generation: self.current_session_generation,
+                fold_parent: Some(parent),
+                suppress_activation_dispatch: true,
+                continuation: Some(PostCommitContinuation::AgentPublish(Box::new(
+                    AgentPublishCompletion::OutputLengthDormantRepair {
+                        step,
+                        retry_event: None,
+                    },
+                ))),
+                notify_watchers: false,
+            }),
+        );
+    }
+
+    /// Re-publishes one append-rejected finish while keeping one in-flight
+    /// owner.
+    fn retry_outer_turn_finish(&mut self, cid: &AgentId) {
+        let Some(finish) = self.agents.get_mut(cid).and_then(|agent| {
+            let path_crate_agent::OuterTurnRuntimeState::FinishRetry(outer_turn_id) =
+                &agent.outer_turn
+            else {
+                return None;
+            };
+            let outer_turn_id = outer_turn_id.clone();
+            agent.outer_turn =
+                path_crate_agent::OuterTurnRuntimeState::FinishInFlight(outer_turn_id.clone());
+            Some(tau_proto::AgentOuterTurnFinished {
+                agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
+                session_id: agent.session_id.clone(),
+                outer_turn_id,
+                disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+            })
+        }) else {
+            return;
+        };
+        self.publish_for_agent(cid, Event::AgentOuterTurnFinished(finish));
+    }
+
+    /// Retains one exact finish only after its durable append is rejected.
+    fn retain_rejected_outer_turn_finish(&mut self, event: &Event) {
+        let Event::AgentOuterTurnFinished(finished) = event else {
+            return;
+        };
+        let Some(cid) = self.runtime_agent_id_for_target_agent(Some(finished.agent_id.as_str()))
+        else {
+            return;
+        };
+        if let Some(agent) = self.agents.get_mut(&cid)
+            && matches!(
+                &agent.outer_turn,
+                path_crate_agent::OuterTurnRuntimeState::FinishInFlight(id)
+                    if id == &finished.outer_turn_id
+            )
+        {
+            agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishRetry(
+                finished.outer_turn_id.clone(),
+            );
+        }
     }
 
     /// Retry the exact standalone-owned inference checkpoint after branch
@@ -7109,6 +7948,7 @@ impl Harness {
                 model: Some(dispatch.model),
                 operation: Some(dispatch.operation),
                 activation_cut: Some(dispatch.activation_cut),
+                output_length_continuation: None,
             });
         if !self.activation_successor_matches_selected_head(&event) {
             return;
@@ -7153,8 +7993,31 @@ impl Harness {
             // no deferred branch obligation from which to reconstruct ownership.
             return;
         }
+        let mut retained_output_length = false;
         if let Some(agent) = self.agents.get_mut(&cid) {
             agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
+            if matches!(
+                &agent.output_length_continuation,
+                path_crate_agent::OutputLengthContinuationState::OwnerPending(continuation)
+                    if continuation.plan.agent_prompt_id == started.agent_prompt_id
+            ) {
+                let path_crate_agent::OutputLengthContinuationState::OwnerPending(continuation) =
+                    std::mem::take(&mut agent.output_length_continuation)
+                else {
+                    unreachable!("matched owner-pending continuation");
+                };
+                agent.output_length_continuation =
+                    path_crate_agent::OutputLengthContinuationState::OwnerReady(continuation);
+                agent.pending_replay_activation = true;
+                agent.turn_state = AgentTurnState::Idle;
+                retained_output_length = true;
+            }
+        }
+        if retained_output_length {
+            self.emit_harness_failure(
+                "output-length continuation owner did not commit; retaining the durable obligation",
+            );
+            return;
         }
         self.discard_finished_response_prompt_tracking(&started.agent_prompt_id);
         self.set_agent_turn_state(&cid, AgentTurnState::Idle);
@@ -7754,6 +8617,18 @@ impl Harness {
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
         self.react_to_committed_tool_terminal(source, event, append_outcome);
+        if let Event::AgentOuterTurnFinished(finished) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(finished.agent_id.as_str()))
+            && let Some(agent) = self.agents.get_mut(&cid)
+            && agent.outer_turn.owned_id() == Some(&finished.outer_turn_id)
+        {
+            agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::None;
+            if agent.output_length_continuation.outer_turn_id() == Some(&finished.outer_turn_id) {
+                agent.output_length_continuation =
+                    path_crate_agent::OutputLengthContinuationState::None;
+            }
+        }
         if let Event::AgentStandaloneCompactionStarted(started) = event {
             if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                 request_id,
@@ -7779,12 +8654,61 @@ impl Harness {
             let suppressed = self
                 .suppressed_compaction_dispatches
                 .remove(&suppression_key);
-            if suppressed {
-                self.cancelled_compaction_claims.remove(&suppression_key);
-            }
+            let cancelled = suppressed && self.cancelled_compaction_claims.remove(&suppression_key);
             let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
             if let Some(cid) = cid {
                 if suppressed {
+                    if cancelled {
+                        self.publish_event_for_agent_with_completion(
+                            &cid,
+                            None,
+                            Event::AgentStandaloneCompactionFailed(
+                                tau_proto::AgentStandaloneCompactionFailed {
+                                    agent_id: started.agent_id.clone(),
+                                    transaction_id: started.transaction_id.clone(),
+                                    cut: started.cut,
+                                    reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+                                    resume_through: started.resume_through,
+                                },
+                            ),
+                            Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                                batch_parent: append_outcome
+                                    .and_then(|outcome| outcome.folded_node_id)
+                                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                                retry_event: None,
+                            }),
+                            false,
+                        );
+                    }
+                    return;
+                }
+                let reactive_off_branch = matches!(
+                    started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
+                ) && started.resume_through.is_some_and(|through| {
+                    self.agent_store
+                        .agent(started.agent_id.as_str())
+                        .is_some_and(|tree| {
+                            !tree.is_ancestor_head(
+                                through,
+                                self.selected_head_for_agent(&cid)
+                                    .unwrap_or(tau_proto::AgentHead::Root),
+                            )
+                        })
+                });
+                if reactive_off_branch {
+                    self.publish_for_agent(
+                        &cid,
+                        Event::AgentStandaloneCompactionFailed(
+                            tau_proto::AgentStandaloneCompactionFailed {
+                                agent_id: started.agent_id.clone(),
+                                transaction_id: started.transaction_id.clone(),
+                                cut: started.cut,
+                                reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                                resume_through: started.resume_through,
+                            },
+                        ),
+                    );
                     return;
                 }
                 if let Some(resume_through) = started.resume_through {
@@ -7813,10 +8737,16 @@ impl Harness {
                     failed_agent_prompt_id,
                 } = &started.trigger
                 {
+                    let attempt = self
+                        .agent_store
+                        .agent(started.agent_id.as_str())
+                        .and_then(|tree| tree.provider_attempt_for_prompt(failed_agent_prompt_id))
+                        .map(tau_proto::ProviderAttempt::get)
+                        .unwrap_or(1);
                     self.project_agent_watch_provider_state(
                         &cid,
                         failed_agent_prompt_id.clone(),
-                        tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+                        tau_proto::AgentWatchProviderState::RecoveringContext { attempt },
                     );
                 }
                 if matches!(
@@ -7954,6 +8884,9 @@ impl Harness {
                     resume_through: failed.resume_through,
                 };
                 agent.in_flight_prompt = None;
+                if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled {
+                    agent.pending_cancel = None;
+                }
             }
             if !suppress_provider_watch && let Some(failed_prompt_id) = failed_prompt_id {
                 self.project_agent_watch_provider_state(
@@ -8175,9 +9108,81 @@ impl Harness {
                             operation: started.operation,
                             activation_cut: started.activation_cut,
                         };
+                    if matches!(
+                        &agent.output_length_continuation,
+                        path_crate_agent::OutputLengthContinuationState::OwnerPending(continuation)
+                            if continuation.plan.agent_prompt_id == started.agent_prompt_id
+                    ) {
+                        let path_crate_agent::OutputLengthContinuationState::OwnerPending(
+                            continuation,
+                        ) = std::mem::take(&mut agent.output_length_continuation)
+                        else {
+                            unreachable!("matched owner-pending continuation");
+                        };
+                        agent.output_length_continuation =
+                            path_crate_agent::OutputLengthContinuationState::Active(continuation);
+                    }
+                }
+                if self
+                    .agents
+                    .get(&cid)
+                    .is_some_and(|agent| agent.pending_cancel.is_some())
+                {
+                    self.finalize_canceled_in_flight_prompt(&cid);
+                    return;
                 }
                 let _ = self.send_prompt_to_agent_for(&cid);
             }
+        }
+        if let Event::ProviderResponseFinished(response) = event
+            && let tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outer_turn_id, ..
+            } = &response.output_length_disposition
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
+            && let Some(lineage_owner) = self
+                .agent_store
+                .agent(response.agent_id.as_str())
+                .and_then(|tree| {
+                    tree.output_length_lineage_owner_for_prompt(&response.agent_prompt_id)
+                })
+            && let Some(agent) = self.agents.get_mut(&cid)
+            && matches!(
+                &agent.output_length_continuation,
+                path_crate_agent::OutputLengthContinuationState::Active(continuation)
+                    if continuation.plan.owner == lineage_owner
+            )
+        {
+            agent.output_length_continuation =
+                path_crate_agent::OutputLengthContinuationState::Spent {
+                    outer_turn_id: outer_turn_id.clone(),
+                };
+            agent.pending_cancel = None;
+            if matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                    outcome: tau_proto::OutputLengthContinuationOutcome::Cancelled,
+                    ..
+                }
+            ) {
+                agent.pending_prompts.clear();
+                agent.pending_replay_activation = false;
+            }
+        }
+        if let Event::ProviderResponseFinished(response) = event
+            && matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                    outcome: tau_proto::OutputLengthContinuationOutcome::Failed
+                        | tau_proto::OutputLengthContinuationOutcome::Cancelled
+                        | tau_proto::OutputLengthContinuationOutcome::Incomplete,
+                    ..
+                }
+            )
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
+        {
+            self.invalidate_working_status_after_unsuccessful_terminal(&cid);
         }
         if let Event::ProviderResponseFinished(response) = event
             && let Some(cid) =
@@ -8370,6 +9375,24 @@ impl Harness {
         {
             self.reconcile_agent_context_usage_for_selected_branch(&cid);
             self.resolve_materialized_message_wakes(&cid);
+            let dormant_repair = self
+                .agent_store
+                .agent(moved.agent_id.as_str())
+                .is_some_and(|tree| tree.output_length_dormant_repair().is_some());
+            if dormant_repair {
+                if let Some(completion) = self.pending_agent_publish_completions.remove(&cid)
+                    && !matches!(
+                        completion,
+                        AgentPublishCompletion::OutputLengthSteer { .. }
+                            | AgentPublishCompletion::OutputLengthContinuation { .. }
+                    )
+                {
+                    self.pending_agent_publish_completions
+                        .insert(cid.clone(), completion);
+                }
+                self.repair_dormant_output_length_lineage(&cid);
+                return;
+            }
             self.retry_pending_agent_publish_completion(&cid);
             self.retry_standalone_inference_checkpoint(&cid);
             self.drain_publish_idle_dispatches();
@@ -8720,6 +9743,105 @@ impl Harness {
         } else {
             None
         }
+    }
+
+    /// Select one exact inference checkpoint for both ordinary and intercepted
+    /// dispatch paths without claiming its runtime state.
+    pub(super) fn select_inference_dispatch(
+        &self,
+        cid: &AgentId,
+        captured_activation_cut: Option<tau_proto::AgentHead>,
+    ) -> Result<InferenceDispatchSelection, InferenceDispatchSelectionError> {
+        let agent = self
+            .agents
+            .get(cid)
+            .ok_or(InferenceDispatchSelectionError::MissingModel)?;
+        let output_length = match &agent.output_length_continuation {
+            path_crate_agent::OutputLengthContinuationState::OwnerReady(dispatch) => {
+                let selected = agent
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                if dispatch.through != selected {
+                    return Err(InferenceDispatchSelectionError::OutputLengthBranchInvalid);
+                }
+                Some(dispatch.clone())
+            }
+            _ => None,
+        };
+        let model = output_length
+            .as_ref()
+            .map(|continuation| continuation.plan.dispatch.model.clone())
+            .or_else(|| self.model_for_agent_role(agent))
+            .ok_or(InferenceDispatchSelectionError::MissingModel)?;
+        let operation = output_length
+            .as_ref()
+            .map_or(tau_proto::PromptOperation::Inference, |continuation| {
+                continuation.plan.dispatch.operation
+            });
+        let activation_cut = output_length
+            .as_ref()
+            .map(|continuation| continuation.plan.dispatch.activation_cut)
+            .or_else(|| {
+                self.earliest_activation_cut(
+                    cid,
+                    captured_activation_cut
+                        .or_else(|| self.activation_cut_before_current_head(cid))
+                        .or(Some(tau_proto::AgentHead::Root)),
+                )
+            })
+            .ok_or(InferenceDispatchSelectionError::MissingActivationCut)?;
+        Ok(InferenceDispatchSelection {
+            model,
+            operation,
+            activation_cut,
+        })
+    }
+
+    /// Claims one selected inference and installs its write-pending checkpoint
+    /// state for either direct or interception-delayed dispatch.
+    fn claim_inference_checkpoint(
+        &mut self,
+        cid: &AgentId,
+        selection: InferenceDispatchSelection,
+    ) -> Option<InferenceCheckpointInput> {
+        let agent = self.agents.get_mut(cid)?;
+        let durable_agent_id = crate::parse_agent_id(agent.agent_id.as_deref()?);
+        let (agent_prompt_id, through, output_length_continuation) =
+            if let Some(continuation) = agent.output_length_continuation.claim_pending() {
+                (
+                    continuation.plan.agent_prompt_id,
+                    continuation.through,
+                    Some(continuation.plan.owner),
+                )
+            } else {
+                let agent_prompt_id = tau_proto::AgentPromptId::parse(format!(
+                    "ap-{durable_agent_id}-{}",
+                    agent.next_prompt_index
+                ))
+                .expect("known-safe AgentPromptId must be valid");
+                agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+                let through = agent
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                (agent_prompt_id, through, None)
+            };
+        agent.activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
+            agent_prompt_id: agent_prompt_id.clone(),
+            through,
+            dispatch: crate::agent::InferenceDispatchOwnership {
+                model: selection.model.clone(),
+                operation: selection.operation,
+                activation_cut: selection.activation_cut,
+            },
+        };
+        Some(InferenceCheckpointInput {
+            durable_agent_id,
+            agent_prompt_id,
+            through,
+            selection,
+            output_length_continuation,
+        })
     }
 
     /// Classifies selected-branch wake work for lifecycle fanout suppression.
@@ -11655,6 +12777,7 @@ impl Harness {
                     model: Some(checkpoint.dispatch.model),
                     operation: Some(checkpoint.dispatch.operation),
                     activation_cut: Some(checkpoint.dispatch.activation_cut),
+                    output_length_continuation: None,
                 });
             if !self.activation_successor_matches_selected_head(&event)
                 || !self.enqueued_standalone_inference_checkpoints.insert(key)
@@ -16780,7 +17903,14 @@ impl Harness {
         let Some(conv) = self.agents.get_mut(&cid) else {
             return;
         };
-        if matches!(conv.turn_state, AgentTurnState::Idle) {
+        let output_length_pending = matches!(
+            conv.output_length_continuation,
+            path_crate_agent::OutputLengthContinuationState::Planned(_)
+                | path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                | path_crate_agent::OutputLengthContinuationState::OwnerPending(_)
+                | path_crate_agent::OutputLengthContinuationState::Active(_)
+        );
+        if matches!(conv.turn_state, AgentTurnState::Idle) && !output_length_pending {
             self.emit_info("no active turn to cancel");
             return;
         }
@@ -16797,7 +17927,8 @@ impl Harness {
         let Some(conv) = self.agents.get_mut(&cid) else {
             return;
         };
-        conv.pending_prompts.clear();
+        conv.pending_prompts
+            .retain(PendingPrompt::is_output_length_continuation);
 
         if let Some(prompt_id) = prompt_id {
             self.publish_event(
@@ -16962,39 +18093,40 @@ impl Harness {
     /// Marks an intercepted reactive claim for durable cancellation when its
     /// start eventually commits, without allowing remote dispatch.
     fn cancel_pending_context_claim(&mut self, cid: &AgentId) {
+        let restored_pending =
+            self.agents
+                .get(cid)
+                .and_then(|agent| match &agent.activation_dispatch {
+                    path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
+                        checkpoint,
+                    } => Some(checkpoint.clone()),
+                    _ => None,
+                });
+        if let Some(checkpoint) = restored_pending {
+            self.terminalize_replay_blocked_context_recovery(
+                cid,
+                &checkpoint,
+                tau_proto::StandaloneCompactionFailureReason::Cancelled,
+            );
+            return;
+        }
         let pending = self
             .agents
             .get(cid)
             .and_then(|agent| match &agent.activation_dispatch {
                 path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
-                    checkpoint,
+                    checkpoint: _,
                     transaction_id,
-                } => Some((
-                    agent.agent_id.clone()?,
-                    checkpoint.clone(),
-                    transaction_id.clone(),
-                )),
+                } => Some((agent.agent_id.clone()?, transaction_id.clone())),
                 _ => None,
             });
-        if let Some((agent_id, checkpoint, transaction_id)) = pending
+        if let Some((agent_id, transaction_id)) = pending
             && self
                 .cancelled_compaction_claims
                 .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
         {
             self.suppressed_compaction_dispatches
                 .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
-            self.publish_for_agent(
-                cid,
-                Event::AgentStandaloneCompactionFailed(
-                    tau_proto::AgentStandaloneCompactionFailed {
-                        agent_id: crate::parse_agent_id(&agent_id),
-                        transaction_id,
-                        cut: checkpoint.activation_cut.unwrap_or(checkpoint.through),
-                        reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
-                        resume_through: Some(checkpoint.through),
-                    },
-                ),
-            );
         }
     }
 
@@ -17006,11 +18138,107 @@ impl Harness {
         {
             return;
         }
+        let dormant_repair_exists = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(tau_core::AgentTree::output_length_dormant_repair)
+            .is_some();
+        if dormant_repair_exists {
+            if matches!(
+                self.pending_agent_publish_completions.get(cid),
+                Some(AgentPublishCompletion::OutputLengthDormantRepair { .. })
+            ) {
+                self.retry_pending_agent_publish_completion(cid);
+            } else if self.publish_chain_is_idle() {
+                self.repair_dormant_output_length_lineage(cid);
+            }
+            return;
+        }
         let Some(turn_state) = self.agents.get(cid).map(|conv| conv.turn_state.clone()) else {
             return;
         };
         match turn_state {
             AgentTurnState::Idle => {
+                let continuation_state = self
+                    .agents
+                    .get(cid)
+                    .map(|agent| agent.output_length_continuation.clone());
+                match continuation_state {
+                    Some(path_crate_agent::OutputLengthContinuationState::OwnerReady(_)) => {
+                        if let Some(agent) = self.agents.get_mut(cid) {
+                            agent.pending_replay_activation = true;
+                        }
+                        self.dispatch_activation_after_publish_idle(cid);
+                        return;
+                    }
+                    Some(path_crate_agent::OutputLengthContinuationState::Planned(_)) => {
+                        if self.publish_chain_is_idle() {
+                            let has_marker = self.agents.get(cid).is_some_and(|agent| {
+                                agent
+                                    .pending_prompts
+                                    .iter()
+                                    .any(PendingPrompt::is_output_length_continuation)
+                            });
+                            if !has_marker && let Some(agent) = self.agents.get_mut(cid) {
+                                agent
+                                    .pending_prompts
+                                    .push_back(PendingPrompt::output_length_continuation());
+                            }
+                            self.fold_pending_prompts_as_steered(cid);
+                            self.dispatch_activation_after_publish_idle(cid);
+                        }
+                        return;
+                    }
+                    Some(path_crate_agent::OutputLengthContinuationState::Active(_))
+                        if self.agents.get(cid).is_some_and(|agent| {
+                            matches!(
+                                agent.activation_dispatch,
+                                path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                                    owner:
+                                        path_crate_agent::InferenceCheckpointOwner::Standalone {
+                                            ..
+                                        },
+                                    ..
+                                }
+                            )
+                        }) =>
+                    {
+                        // A cold restart between successful compaction and its
+                        // exact descendant checkpoint restores the reserved
+                        // output-length owner before any provider delivery.
+                        // Commit that owner first; its write-complete handler
+                        // observes the pending cancellation and authors the
+                        // sole canonical Cancelled terminal.
+                        self.retry_standalone_inference_checkpoint(cid);
+                        return;
+                    }
+                    Some(path_crate_agent::OutputLengthContinuationState::Active(_))
+                        if self.agents.get(cid).is_some_and(|agent| {
+                            matches!(
+                                agent.activation_dispatch,
+                                path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                                    ..
+                                }
+                            )
+                        }) =>
+                    {
+                        // The staged reactive Start owns the sole following
+                        // failure. Preserve cancellation until Start
+                        // write-complete can arbitrate StaleBranch to Cancelled.
+                        return;
+                    }
+                    _ => {}
+                }
+                if self.agents.get(cid).is_some_and(|agent| {
+                    matches!(
+                        agent.output_length_continuation,
+                        path_crate_agent::OutputLengthContinuationState::OwnerPending(_)
+                    )
+                }) {
+                    return;
+                }
                 self.fail_pending_initial_prompts(
                     cid,
                     tau_proto::AgentPromptFailureStage::Canceled,
@@ -17024,6 +18252,13 @@ impl Harness {
             AgentTurnState::AgentThinking { .. } => {
                 self.finalize_canceled_in_flight_prompt(cid);
                 self.emit_info("cancelling current prompt");
+                if self
+                    .agents
+                    .get(cid)
+                    .is_some_and(|agent| agent.pending_cancel.is_some())
+                {
+                    return;
+                }
                 self.try_advance_queue();
             }
             AgentTurnState::ToolsRunning { remaining_calls } => {
@@ -17084,13 +18319,21 @@ impl Harness {
     fn finalize_canceled_in_flight_prompt(&mut self, cid: &AgentId) {
         let Some((session_id, canceled_prompt_id, originator)) =
             self.agents.get(cid).and_then(|conv| {
-                conv.in_flight_prompt.clone().map(|agent_prompt_id| {
-                    (
-                        conv.session_id.clone(),
-                        agent_prompt_id,
-                        conv.originator.clone(),
-                    )
-                })
+                conv.in_flight_prompt
+                    .clone()
+                    .or_else(|| match &conv.output_length_continuation {
+                        path_crate_agent::OutputLengthContinuationState::Active(continuation) => {
+                            Some(continuation.plan.agent_prompt_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .map(|agent_prompt_id| {
+                        (
+                            conv.session_id.clone(),
+                            agent_prompt_id,
+                            conv.originator.clone(),
+                        )
+                    })
             })
         else {
             return;
@@ -17103,6 +18346,102 @@ impl Harness {
             .and_then(|tree| tree.marked_inference_through(&canceled_prompt_id))
             .is_some();
         self.cancel_running_compaction(cid, &canceled_prompt_id);
+        let output_length_owner =
+            self.agents
+                .get(cid)
+                .and_then(|agent| match &agent.output_length_continuation {
+                    path_crate_agent::OutputLengthContinuationState::Active(continuation)
+                        if continuation.plan.agent_prompt_id == canceled_prompt_id =>
+                    {
+                        Some(continuation.plan.owner.clone())
+                    }
+                    _ => None,
+                });
+        if let Some(owner) = output_length_owner {
+            let terminal_write_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
+                matches!(
+                        &pending.event,
+                    Event::ProviderResponseFinished(response)
+                        if response.agent_prompt_id == canceled_prompt_id
+                            && matches!(
+                                response.output_length_disposition,
+                                tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                            )
+                )
+            }) || self.deferred_publishes.iter().any(|pending| {
+                matches!(
+                    pending.event(),
+                    Event::ProviderResponseFinished(response)
+                        if response.agent_prompt_id == canceled_prompt_id
+                            && matches!(
+                                response.output_length_disposition,
+                                tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                            )
+                )
+            }) || self
+                .pending_agent_publish_completions
+                .get(cid)
+                .is_some_and(|completion| {
+                    completion.owns_output_length_terminal(&canceled_prompt_id)
+                });
+            if self
+                .local_route_failure_prompts
+                .contains(&canceled_prompt_id)
+                || terminal_write_pending
+            {
+                if let Some(agent) = self.agents.get_mut(cid) {
+                    agent.pending_prompts.clear();
+                }
+                return;
+            }
+            let response = ProviderResponseFinished {
+                agent_prompt_id: canceled_prompt_id.clone(),
+                agent_id: self
+                    .target_agent_id_for_agent(cid)
+                    .map(crate::parse_agent_id)
+                    .expect("loaded agent has durable identity"),
+                output_items: Vec::new(),
+                stop_reason: ProviderStopReason::Error,
+                error: Some("cancelled".to_owned()),
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                output_length_disposition:
+                    tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                        outer_turn_id: owner.outer_turn_id.clone(),
+                        source_agent_prompt_id: owner.source_agent_prompt_id,
+                        ordinal: owner.ordinal,
+                        outcome: tau_proto::OutputLengthContinuationOutcome::Cancelled,
+                        outer_turn_finish_owed: true,
+                    },
+                originator,
+                usage: None,
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_attempt: Default::default(),
+                provider_response_id: None,
+                ws_pool_delta: None,
+            };
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent
+                    .pending_prompts
+                    .retain(PendingPrompt::is_output_length_continuation);
+            }
+            self.canceled_prompts.insert(canceled_prompt_id.clone());
+            let completion = Some(AgentPublishCompletion::OutputLengthContinuation {
+                batch_parent: self
+                    .selected_head_for_agent(cid)
+                    .unwrap_or(tau_proto::AgentHead::Root),
+                response: Box::new(response.clone()),
+                assistant_text: None,
+                retry_event: None,
+            });
+            self.publish_finished_response_for_agent(cid, None, &response, completion, false);
+            return;
+        }
         self.publish_prompt_terminated(
             session_id,
             canceled_prompt_id.clone(),
@@ -17160,8 +18499,9 @@ impl Harness {
                 _ => None,
             });
         if let Some((agent_id, transaction_id, cut, resume_through)) = transaction {
-            self.publish_for_agent(
+            self.publish_event_for_agent_with_completion(
                 cid,
+                None,
                 Event::AgentStandaloneCompactionFailed(
                     tau_proto::AgentStandaloneCompactionFailed {
                         agent_id: crate::parse_agent_id(&agent_id),
@@ -17171,6 +18511,13 @@ impl Harness {
                         resume_through,
                     },
                 ),
+                Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                    batch_parent: self
+                        .selected_head_for_agent(cid)
+                        .unwrap_or(tau_proto::AgentHead::Root),
+                    retry_event: None,
+                }),
+                false,
             );
         }
     }
@@ -20890,7 +22237,17 @@ impl Harness {
         let Some(conv) = self.agents.get(cid) else {
             return false;
         };
-        let Some(model) = self.model_for_agent_role(conv) else {
+        let continuation_model = match &conv.output_length_continuation {
+            path_crate_agent::OutputLengthContinuationState::Planned(continuation) => {
+                Some(continuation.dispatch.model.clone())
+            }
+            path_crate_agent::OutputLengthContinuationState::OwnerReady(continuation)
+            | path_crate_agent::OutputLengthContinuationState::OwnerPending(continuation) => {
+                Some(continuation.plan.dispatch.model.clone())
+            }
+            _ => None,
+        };
+        let Some(model) = continuation_model.or_else(|| self.model_for_agent_role(conv)) else {
             return false;
         };
         self.provider_model_info
@@ -23579,7 +24936,14 @@ impl Harness {
             self.ensure_outer_turn_started(cid);
         } else {
             let finish = self.agents.get_mut(cid).and_then(|agent| {
-                let outer_turn_id = agent.active_outer_turn_id.take()?;
+                let path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id) =
+                    &agent.outer_turn
+                else {
+                    return None;
+                };
+                let outer_turn_id = outer_turn_id.clone();
+                agent.outer_turn =
+                    path_crate_agent::OuterTurnRuntimeState::FinishInFlight(outer_turn_id.clone());
                 Some(tau_proto::AgentOuterTurnFinished {
                     agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
                     session_id: agent.session_id.clone(),
@@ -23631,19 +24995,23 @@ impl Harness {
         });
         if let Some(turn_id) = restored_turn {
             if let Some(agent) = self.agents.get_mut(cid) {
-                agent.active_outer_turn_id = Some(turn_id);
+                agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn_id);
             }
             return;
         }
         let runtime_id = self.accounting_runtime_id.clone();
         let start = self.agents.get_mut(cid).and_then(|agent| {
             let (activation, prompt_id) = activation?;
-            if agent.active_outer_turn_id.is_some() {
+            if !matches!(
+                agent.outer_turn,
+                path_crate_agent::OuterTurnRuntimeState::None
+            ) {
                 return None;
             }
             let durable_agent_id = crate::parse_agent_id(agent.agent_id.as_deref()?);
             let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
-            agent.active_outer_turn_id = Some(outer_turn_id.clone());
+            agent.outer_turn =
+                path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
             Some(tau_proto::AgentOuterTurnStarted {
                 agent_id: durable_agent_id,
                 session_id: agent.session_id.clone(),
@@ -24115,6 +25483,8 @@ impl Harness {
         self.session_roster_ever_loaded_agents = ever_loaded;
         self.session_roster_loaded_agents = loaded_agents.iter().cloned().collect();
         let mut restored_parent_edges = Vec::new();
+        let mut restored_output_length_steers = Vec::new();
+        let mut restored_output_length_dormant = Vec::new();
         for agent_id in loaded_agents {
             let agent_id_string = agent_id.to_string();
             match self.agent_store.lock_and_recover_agent(agent_id.as_str()) {
@@ -24198,6 +25568,22 @@ impl Harness {
                 .agent_store
                 .agent(agent_id.as_str())
                 .and_then(tau_core::AgentTree::inference_dispatch_recovery);
+            let restored_output_length = self
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(tau_core::AgentTree::output_length_continuation_recovery);
+            let restored_output_length_spent = self
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(tau_core::AgentTree::output_length_budget_spent_outer_turn);
+            let restored_output_length_terminal = self
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(tau_core::AgentTree::output_length_terminal_incomplete);
+            let dormant_output_length_repair = self
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(tau_core::AgentTree::output_length_dormant_repair);
             let defer_manual_checkpoint = self
                 .agent_store
                 .agent(agent_id.as_str())
@@ -24251,6 +25637,73 @@ impl Harness {
             }
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.restored_tool_backed_start = tool_backed_start;
+                if dormant_output_length_repair.is_none()
+                    && let Some(outer_turn_id) = restored_output_length_spent
+                {
+                    conv.outer_turn =
+                        path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
+                    conv.output_length_continuation =
+                        path_crate_agent::OutputLengthContinuationState::Spent { outer_turn_id };
+                }
+                if let Some(restored) = restored_output_length {
+                    let repair = match restored {
+                        tau_core::OutputLengthContinuationRecovery::SteerNeeded {
+                            source,
+                            successor_agent_prompt_id,
+                            outer_turn_id,
+                        } => Some((source, successor_agent_prompt_id, outer_turn_id, None)),
+                        tau_core::OutputLengthContinuationRecovery::OwnerNeeded {
+                            source,
+                            successor_agent_prompt_id,
+                            outer_turn_id,
+                            through,
+                        } => Some((
+                            source,
+                            successor_agent_prompt_id,
+                            outer_turn_id,
+                            Some(through),
+                        )),
+                        tau_core::OutputLengthContinuationRecovery::BranchInvalid { .. } => None,
+                    };
+                    if let Some((source, successor_agent_prompt_id, outer_turn_id, through)) =
+                        repair
+                        && let (Some(model), Some(operation), Some(activation_cut)) =
+                            (source.model, source.operation, source.activation_cut)
+                    {
+                        conv.outer_turn =
+                            path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
+                        let plan = path_crate_agent::OutputLengthContinuationPlan {
+                            agent_prompt_id: successor_agent_prompt_id,
+                            owner: tau_proto::OutputLengthContinuationOwner {
+                                source_agent_prompt_id: source.agent_prompt_id,
+                                outer_turn_id,
+                                ordinal: 1,
+                            },
+                            dispatch: path_crate_agent::InferenceDispatchOwnership {
+                                model,
+                                operation,
+                                activation_cut,
+                            },
+                        };
+                        if let Some(through) = through {
+                            conv.output_length_continuation =
+                                path_crate_agent::OutputLengthContinuationState::OwnerReady(
+                                    path_crate_agent::OutputLengthContinuationDispatch {
+                                        plan,
+                                        through,
+                                    },
+                                );
+                            conv.pending_replay_activation = true;
+                        } else {
+                            conv.output_length_continuation =
+                                path_crate_agent::OutputLengthContinuationState::Planned(plan);
+                            restored_output_length_steers.push(cid.clone());
+                        }
+                    }
+                }
+            }
+            if dormant_output_length_repair.is_some() {
+                restored_output_length_dormant.push(cid.clone());
             }
             if let Some(query_id) = builtin_query_id {
                 self.pending_builtin_delegates
@@ -24278,6 +25731,16 @@ impl Harness {
             }
             self.agent_routes
                 .insert(agent_id_string.clone(), cid.clone());
+            if let Some(terminal) = restored_output_length_terminal {
+                self.project_agent_watch_provider_state(
+                    &cid,
+                    terminal.agent_prompt_id,
+                    tau_proto::AgentWatchProviderState::TerminalIncomplete {
+                        category: tau_proto::AgentWatchProviderCategory::OutputLength,
+                        attempt: terminal.provider_attempt.get(),
+                    },
+                );
+            }
             self.agent_navigation_modes
                 .entry(agent_id.clone())
                 .or_insert(navigation_mode);
@@ -24303,14 +25766,85 @@ impl Harness {
                     );
                 }
                 Some(
-                    recovery @ tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. },
+                    ref recovery @ tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
+                        ref transaction_id,
+                        ..
+                    },
                 ) if !defer_manual_checkpoint => {
-                    self.stage_restored_compaction_recovery(&cid, &recovery)
+                    let lineage_owner =
+                        self.agent_store.agent(agent_id.as_str()).and_then(|tree| {
+                            tree.output_length_lineage_owner_for_transaction(transaction_id)
+                        });
+                    self.stage_restored_compaction_recovery(&cid, recovery)
                         .expect("restored agent exists");
+                    if let Some(owner) = lineage_owner
+                        && let Some(conv) = self.agents.get_mut(&cid)
+                        && let path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                            agent_prompt_id,
+                            through,
+                            dispatch,
+                            ..
+                        } = &conv.activation_dispatch
+                    {
+                        conv.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                            owner.outer_turn_id.clone(),
+                        );
+                        conv.output_length_continuation =
+                            path_crate_agent::OutputLengthContinuationState::Active(
+                                path_crate_agent::OutputLengthContinuationDispatch {
+                                    plan: path_crate_agent::OutputLengthContinuationPlan {
+                                        agent_prompt_id: agent_prompt_id.clone(),
+                                        owner,
+                                        dispatch: dispatch.clone(),
+                                    },
+                                    through: *through,
+                                },
+                            );
+                    }
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
+                    self.prompt_agents
+                        .insert(status_prompt_id.clone(), cid.clone());
+                    if let Some(model) = checkpoint.model.clone() {
+                        self.prompt_models.insert(status_prompt_id.clone(), model);
+                    }
+                    if let Some(operation) = checkpoint.operation {
+                        self.prompt_operations
+                            .insert(status_prompt_id.clone(), (operation, true));
+                    }
+                    let restored_lineage_owner =
+                        self.agent_store.agent(agent_id.as_str()).and_then(|tree| {
+                            tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
+                        });
                     if let Some(conv) = self.agents.get_mut(&cid) {
+                        if let Some(owner) = restored_lineage_owner
+                            && let (Some(model), Some(operation), Some(activation_cut)) = (
+                                checkpoint.model.clone(),
+                                checkpoint.operation,
+                                checkpoint.activation_cut,
+                            )
+                        {
+                            conv.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                                owner.outer_turn_id.clone(),
+                            );
+                            conv.output_length_continuation =
+                                path_crate_agent::OutputLengthContinuationState::Active(
+                                    path_crate_agent::OutputLengthContinuationDispatch {
+                                        plan: path_crate_agent::OutputLengthContinuationPlan {
+                                            agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+                                            owner,
+                                            dispatch:
+                                                path_crate_agent::InferenceDispatchOwnership {
+                                                    model,
+                                                    operation,
+                                                    activation_cut,
+                                                },
+                                        },
+                                        through: checkpoint.through,
+                                    },
+                                );
+                        }
                         conv.activation_dispatch =
                             path_crate_agent::ActivationDispatchState::DispatchUncertain {
                                 owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
@@ -24345,6 +25879,32 @@ impl Harness {
                 )) = restored_inference.clone()
                 && let Some(conv) = self.agents.get_mut(&cid)
             {
+                if let Some(owner) = self.agent_store.agent(agent_id.as_str()).and_then(|tree| {
+                    tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
+                }) && let (Some(model), Some(operation), Some(activation_cut)) = (
+                    checkpoint.model.clone(),
+                    checkpoint.operation,
+                    checkpoint.activation_cut,
+                ) {
+                    conv.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                        owner.outer_turn_id.clone(),
+                    );
+                    conv.output_length_continuation =
+                        path_crate_agent::OutputLengthContinuationState::Active(
+                            path_crate_agent::OutputLengthContinuationDispatch {
+                                plan: path_crate_agent::OutputLengthContinuationPlan {
+                                    agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+                                    owner,
+                                    dispatch: path_crate_agent::InferenceDispatchOwnership {
+                                        model,
+                                        operation,
+                                        activation_cut,
+                                    },
+                                },
+                                through: checkpoint.through,
+                            },
+                        );
+                }
                 conv.activation_dispatch =
                     path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
                         checkpoint,
@@ -24438,6 +25998,28 @@ impl Harness {
                 );
             }
             self.session_loaded_agents.insert(agent_id.clone());
+            let finish_repair = self
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(tau_core::AgentTree::output_length_outer_turn_finish_repair);
+            if dormant_output_length_repair.is_none()
+                && let Some(outer_turn_id) = finish_repair
+            {
+                if let Some(agent) = self.agents.get_mut(&cid) {
+                    agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
+                        outer_turn_id.clone(),
+                    );
+                }
+                self.publish_for_agent(
+                    &cid,
+                    Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                        agent_id: agent_id.clone(),
+                        session_id: self.current_session_id.clone(),
+                        outer_turn_id,
+                        disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                    }),
+                );
+            }
             if let Some(tau_core::StandaloneCompactionRecovery::Interrupted(started)) =
                 restored_compaction
             {
@@ -24461,6 +26043,19 @@ impl Harness {
             {
                 child.parent_agent_id = Some(parent_cid);
             }
+        }
+        for cid in restored_output_length_steers {
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent
+                    .pending_prompts
+                    .push_back(PendingPrompt::output_length_continuation());
+                agent.turn_state = AgentTurnState::Idle;
+            }
+            self.fold_pending_prompts_as_steered(&cid);
+            self.dispatch_activation_after_publish_idle(&cid);
+        }
+        for cid in restored_output_length_dormant {
+            self.repair_dormant_output_length_lineage(&cid);
         }
         if !self.provider_model_info.is_empty() {
             self.reconcile_agent_context_usage_models();
@@ -25766,7 +27361,7 @@ impl Harness {
             && self
                 .agents
                 .get(cid)
-                .is_none_or(|agent| agent.active_outer_turn_id.is_none())
+                .is_none_or(|agent| agent.outer_turn.active_id().is_none())
         {
             self.terminalize_owned_dispatch_error(
                 cid,
@@ -25791,7 +27386,7 @@ impl Harness {
             started.outer_turn_id = self
                 .agents
                 .get(cid)
-                .and_then(|agent| agent.active_outer_turn_id.clone());
+                .and_then(|agent| agent.outer_turn.active_id().cloned());
         }
         let provider_connection_id = self
             .provider_model_routes
@@ -25823,15 +27418,146 @@ impl Harness {
         Some(agent_prompt_id)
     }
 
+    /// Commit prompt-start authority before one owned output-length successor
+    /// fails locally without provider delivery.
+    fn terminalize_output_length_before_prompt_start(
+        &mut self,
+        cid: &AgentId,
+        message: String,
+    ) -> bool {
+        let Some((agent_id, originator, continuation)) = self.agents.get(cid).and_then(|agent| {
+            let path_crate_agent::OutputLengthContinuationState::Active(continuation) =
+                &agent.output_length_continuation
+            else {
+                return None;
+            };
+            Some((
+                crate::parse_agent_id(agent.agent_id.as_deref()?),
+                agent.originator.clone(),
+                continuation.clone(),
+            ))
+        }) else {
+            return false;
+        };
+        let started = tau_proto::AgentPromptStarted {
+            agent_prompt_id: continuation.plan.agent_prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            session_id: self.current_session_id.clone(),
+            model: continuation.plan.dispatch.model.clone(),
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: Some(continuation.plan.owner.outer_turn_id.clone()),
+            operation: continuation.plan.dispatch.operation,
+            originator: originator.clone(),
+            ctx_id: None,
+        };
+        let response = ProviderResponseFinished {
+            agent_prompt_id: continuation.plan.agent_prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            output_items: Vec::new(),
+            stop_reason: ProviderStopReason::Error,
+            error: Some(message),
+            failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outer_turn_id: continuation.plan.owner.outer_turn_id.clone(),
+                source_agent_prompt_id: continuation.plan.owner.source_agent_prompt_id.clone(),
+                ordinal: continuation.plan.owner.ordinal,
+                outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+                outer_turn_finish_owed: true,
+            },
+            originator,
+            usage: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        };
+        let prompt_start_committed =
+            self.agent_store
+                .agent(agent_id.as_str())
+                .is_some_and(|tree| {
+                    tree.prompt_started(&continuation.plan.agent_prompt_id)
+                        .is_some()
+                });
+        self.local_route_failure_prompts
+            .insert(response.agent_prompt_id.clone());
+        if prompt_start_committed {
+            if self
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.pending_cancel.is_some())
+            {
+                self.local_route_failure_prompts
+                    .remove(&response.agent_prompt_id);
+                self.finalize_canceled_in_flight_prompt(cid);
+            } else {
+                let completion = Some(AgentPublishCompletion::OutputLengthContinuation {
+                    batch_parent: self
+                        .selected_head_for_agent(cid)
+                        .unwrap_or(tau_proto::AgentHead::Root),
+                    response: Box::new(response.clone()),
+                    assistant_text: None,
+                    retry_event: None,
+                });
+                self.publish_finished_response_for_agent(cid, None, &response, completion, false);
+            }
+            return true;
+        }
+        let batch_parent = self
+            .selected_head_for_agent(cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        self.enqueue_publish(
+            None,
+            Event::AgentPromptStarted(started),
+            false,
+            true,
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id: Some(agent_id),
+                session_generation: self.current_session_generation,
+                fold_parent: None,
+                suppress_activation_dispatch: true,
+                continuation: Some(PostCommitContinuation::AgentPublish(Box::new(
+                    AgentPublishCompletion::OutputLengthPreDeliveryFailure {
+                        batch_parent,
+                        response: Box::new(response),
+                        retry_event: None,
+                    },
+                ))),
+                notify_watchers: false,
+            }),
+        );
+        true
+    }
+
     /// Durably fails start- or checkpoint-owned work when its exact
     /// provider-qualified model no longer has a route, before any provider
     /// receives the request.
     fn terminalize_unroutable_owned_dispatch(&mut self, cid: &AgentId, model: Option<&ModelId>) {
+        let message = model.map_or_else(
+            || "checkpoint has no provider-qualified model".to_owned(),
+            |model| format!("checkpointed model `{model}` is unavailable"),
+        );
+        if self.terminalize_output_length_before_prompt_start(cid, message) {
+            return;
+        }
         let Some(agent) = self.agents.get(cid) else {
             return;
         };
         let agent_id = agent.agent_id.as_deref().map(crate::parse_agent_id);
         let originator = agent.originator.clone();
+        let output_length_owner = match &agent.output_length_continuation {
+            path_crate_agent::OutputLengthContinuationState::Active(continuation) => Some((
+                continuation.plan.agent_prompt_id.clone(),
+                continuation.plan.owner.clone(),
+            )),
+            _ => None,
+        };
         let failure = match &agent.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running {
                 id,
@@ -25851,6 +27577,18 @@ impl Harness {
                 agent_prompt_id,
                 ..
             } => agent_id.map(|agent_id| {
+                let output_length_disposition = output_length_owner
+                    .as_ref()
+                    .filter(|(prompt_id, _)| prompt_id == agent_prompt_id)
+                    .map_or(tau_proto::OutputLengthDisposition::None, |(_, owner)| {
+                        tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                            outer_turn_id: owner.outer_turn_id.clone(),
+                            source_agent_prompt_id: owner.source_agent_prompt_id.clone(),
+                            ordinal: owner.ordinal,
+                            outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+                            outer_turn_finish_owed: true,
+                        }
+                    });
                 Event::ProviderResponseFinished(ProviderResponseFinished {
                     estimated_api_cost_rates: None,
                     estimated_api_cost_increment: None,
@@ -25866,11 +27604,13 @@ impl Harness {
                     failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                     context_limit_telemetry: None,
                     recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                    output_length_disposition,
                     originator,
                     usage: None,
                     compaction_original_input_tokens: None,
                     compaction_compacted_input_tokens: None,
                     backend: None,
+                    provider_attempt: Default::default(),
                     provider_response_id: None,
                     ws_pool_delta: None,
                 })
@@ -25882,6 +27622,23 @@ impl Harness {
                 .insert(response.agent_prompt_id.clone());
             self.invalidate_working_status_after_unsuccessful_terminal(cid);
         }
+        if let Some(Event::ProviderResponseFinished(response)) = failure.as_ref()
+            && matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+            )
+        {
+            let completion = Some(AgentPublishCompletion::OutputLengthContinuation {
+                batch_parent: self
+                    .selected_head_for_agent(cid)
+                    .unwrap_or(tau_proto::AgentHead::Root),
+                response: Box::new(response.clone()),
+                assistant_text: None,
+                retry_event: None,
+            });
+            self.publish_finished_response_for_agent(cid, None, response, completion, false);
+            return;
+        }
         if let Some(failure) = failure {
             self.publish_for_agent(cid, failure);
         }
@@ -25890,6 +27647,9 @@ impl Harness {
     /// Durably close owned dispatch work that became invalid after its
     /// pre-check but before the intercepted dispatch checkpoint committed.
     fn terminalize_owned_dispatch_error(&mut self, cid: &AgentId, message: String) {
+        if self.terminalize_output_length_before_prompt_start(cid, message.clone()) {
+            return;
+        }
         let Some(agent) = self.agents.get(cid) else {
             return;
         };
@@ -25931,11 +27691,13 @@ impl Harness {
                     failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
                     context_limit_telemetry: None,
                     recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                    output_length_disposition: tau_proto::OutputLengthDisposition::None,
                     originator,
                     usage: None,
                     compaction_original_input_tokens: None,
                     compaction_compacted_input_tokens: None,
                     backend: None,
+                    provider_attempt: Default::default(),
                     provider_response_id: None,
                     ws_pool_delta: None,
                 })
@@ -26232,7 +27994,21 @@ impl Harness {
             return false;
         };
         let role_name = self.role_name_for_agent(conv);
-        let Some(model) = self.model_for_agent_role(conv) else {
+        let model = match &conv.output_length_continuation {
+            path_crate_agent::OutputLengthContinuationState::Planned(continuation) => {
+                Some(continuation.dispatch.model.clone())
+            }
+            path_crate_agent::OutputLengthContinuationState::OwnerReady(continuation)
+            | path_crate_agent::OutputLengthContinuationState::OwnerPending(continuation)
+            | path_crate_agent::OutputLengthContinuationState::Active(continuation) => {
+                Some(continuation.plan.dispatch.model.clone())
+            }
+            path_crate_agent::OutputLengthContinuationState::None
+            | path_crate_agent::OutputLengthContinuationState::Spent { .. } => {
+                self.model_for_agent_role(conv)
+            }
+        };
+        let Some(model) = model else {
             return true;
         };
         let is_non_tool_ext_query = matches!(
@@ -27126,6 +28902,8 @@ impl Harness {
         // extensions share this wire type for transport, so discard any value
         // supplied across that trust boundary before evaluating eligibility.
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
+        response.output_length_disposition = tau_proto::OutputLengthDisposition::None;
+        response.provider_attempt = tau_proto::ProviderAttempt::ONE;
         response.context_limit_telemetry = None;
         response.estimated_api_cost_rates = None;
         response.estimated_api_cost_increment = None;
@@ -27249,6 +29027,23 @@ impl Harness {
             .usage
             .as_ref()
             .map(|usage| usage.response_received_tokens);
+        let terminal_attempt = self
+            .target_agent_id_for_agent(&cid)
+            .and_then(|agent_id| self.agent_watch_provider_status.get(&agent_id))
+            .filter(|status| status.agent_prompt_id == response.agent_prompt_id)
+            .and_then(|status| match status.state {
+                tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
+                | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
+                | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. }
+                | tau_proto::AgentWatchProviderState::TerminalIncomplete { attempt, .. } => {
+                    Some(attempt)
+                }
+                tau_proto::AgentWatchProviderState::Blocked { .. }
+                | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
+            })
+            .map_or(1, |attempt| attempt.saturating_add(1));
+        response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
+            .expect("terminal attempt is one-based");
         self.attach_context_limit_telemetry(&mut response);
         let response_contains_compaction = response
             .output_items
@@ -27257,7 +29052,23 @@ impl Harness {
         let compaction_original_input_tokens = response_contains_compaction
             .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
             .flatten();
-        if !standalone_compaction || standalone_success {
+        let response_owner_is_selected = self
+            .agents
+            .get(&cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|tree| {
+                tree.marked_inference_through(&response.agent_prompt_id)
+                    .map(|through| {
+                        tree.is_ancestor_head(
+                            through,
+                            self.selected_head_for_agent(&cid)
+                                .unwrap_or(tau_proto::AgentHead::Root),
+                        )
+                    })
+            })
+            .unwrap_or(standalone_compaction);
+        if (!standalone_compaction || standalone_success) && response_owner_is_selected {
             self.update_finished_response_context_usage(
                 Some(&cid),
                 &response.agent_prompt_id,
@@ -27297,23 +29108,6 @@ impl Harness {
                 .agents
                 .get(&cid)
                 .map_or(0, |agent| agent.turn_generation);
-            let attempt = self
-                .agent_watch_provider_status
-                .get(&public_id)
-                .filter(|status| {
-                    status.turn_generation == turn_generation
-                        && status.agent_prompt_id == response.agent_prompt_id
-                })
-                .and_then(|status| match status.state {
-                    tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
-                    | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
-                    | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. } => {
-                        Some(attempt)
-                    }
-                    tau_proto::AgentWatchProviderState::Blocked { .. }
-                    | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
-                })
-                .map_or(1, |attempt| attempt.saturating_add(1));
             self.update_agent_watch_provider_status(
                 &public_id,
                 tau_proto::AgentWatchProviderStatusNotification {
@@ -27323,7 +29117,7 @@ impl Harness {
                     agent_prompt_id: response.agent_prompt_id.clone(),
                     state: tau_proto::AgentWatchProviderState::TerminalError {
                         failure_kind,
-                        attempt,
+                        attempt: response.provider_attempt.get(),
                     },
                     initial: false,
                 },
@@ -27360,8 +29154,23 @@ impl Harness {
             }
             return Ok(());
         }
-        let (requested_tool_calls, tool_calls_with_non_tool_stop) =
+        let (mut requested_tool_calls, tool_calls_with_non_tool_stop) =
             self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
+        // A length-stopped call is incomplete provider output. Preserve it for
+        // inspection, but never execute it or use synthetic closure to activate
+        // another inference. Suppress before deriving the output-length
+        // disposition so the continuation finish bit reflects the actual
+        // post-suppression tool continuation.
+        if response.stop_reason == ProviderStopReason::Length && requested_tool_calls {
+            requested_tool_calls = false;
+            tool_calls.clear();
+        }
+        self.derive_output_length_continuation(
+            &cid,
+            &mut response,
+            prompt_operation.0,
+            requested_tool_calls,
+        );
         if response_contains_compaction {
             self.attach_finished_response_compaction_usage(
                 &mut response,
@@ -27406,11 +29215,25 @@ impl Harness {
             && response.failure_kind.is_none()
             && !matches!(
                 response.stop_reason,
-                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+                ProviderStopReason::Length
+                    | ProviderStopReason::Error
+                    | ProviderStopReason::RepetitionDetected
             );
         let final_status_gate = (!requested_tool_calls)
             .then(|| self.apply_final_status_response_gate(&cid, &response))
             .flatten();
+        let final_status_challenged = matches!(
+            final_status_gate,
+            Some(path_crate_agent::FinalStatusDecision::Challenge(_))
+        );
+        if final_status_challenged
+            && let tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outer_turn_finish_owed,
+                ..
+            } = &mut response.output_length_disposition
+        {
+            *outer_turn_finish_owed = false;
+        }
         let final_status_gated = final_status_gate.is_some();
         let completion = match final_status_gate {
             Some(path_crate_agent::FinalStatusDecision::Challenge(challenge)) => {
@@ -27439,12 +29262,61 @@ impl Harness {
                             context_size_alerts: context_size_alerts.clone(),
                             is_non_tool_ext_query,
                             source: source.cloned(),
+                            tool_effect: CommittedOutputLengthToolEffect::None,
                         }),
                     },
                     retry_event: None,
                 })
             }
             None => None,
+        };
+        let completion = if matches!(
+            response.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+        ) {
+            Some(AgentPublishCompletion::OutputLengthContinuation {
+                batch_parent: self
+                    .agents
+                    .get(&cid)
+                    .and_then(|agent| agent.head)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                response: Box::new(response.clone()),
+                assistant_text: assistant_text.clone(),
+                retry_event: None,
+            })
+        } else {
+            completion
+        };
+        let output_length_terminal = matches!(
+            response.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+        );
+        let completion = if output_length_terminal && !final_status_challenged {
+            Some(AgentPublishCompletion::GatedFinal {
+                batch_parent: self
+                    .agents
+                    .get(&cid)
+                    .and_then(|agent| agent.head)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                disposition: GatedFinalDisposition::Accept {
+                    terminal: Box::new(CommittedGatedFinal {
+                        response: response.clone(),
+                        response_contains_compaction,
+                        input_tokens,
+                        context_size_alerts: context_size_alerts.clone(),
+                        is_non_tool_ext_query,
+                        source: source.cloned(),
+                        tool_effect: if requested_tool_calls {
+                            CommittedOutputLengthToolEffect::Dispatch(normalized_tool_calls.clone())
+                        } else {
+                            CommittedOutputLengthToolEffect::None
+                        },
+                    }),
+                },
+                retry_event: None,
+            })
+        } else {
+            completion
         };
         let notify_watchers_after_commit = completion.is_none()
             && !requested_tool_calls
@@ -27468,7 +29340,13 @@ impl Harness {
         if !requested_tool_calls {
             self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         }
-        if final_status_gated {
+        if final_status_gated
+            || matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+            )
+            || output_length_terminal
+        {
             return Ok(());
         }
         if response_contains_compaction {
@@ -27666,6 +29544,12 @@ impl Harness {
         let Some(model) = checkpoint.model.clone() else {
             return false;
         };
+        let selected_or_continuation_model_matches = self.agents.get(cid).is_some_and(|agent| {
+            self.model_for_agent_role(agent).as_ref() == Some(&model)
+                || agent
+                    .output_length_continuation
+                    .owns_prompt_model(&response.agent_prompt_id, &model)
+        });
         if checkpoint.activation_cut.is_none() {
             return false;
         }
@@ -27673,12 +29557,7 @@ impl Harness {
             || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
             || checkpoint.agent_prompt_id != response.agent_prompt_id
             || self.prompt_models.get(&response.agent_prompt_id) != Some(&model)
-            || self
-                .agents
-                .get(cid)
-                .and_then(|agent| self.model_for_agent_role(agent))
-                .as_ref()
-                != Some(&model)
+            || !selected_or_continuation_model_matches
             || !tree.is_ancestor_head(
                 checkpoint.through,
                 self.agents
@@ -27723,16 +29602,23 @@ impl Harness {
             .map(|usage| usage.response_received_tokens);
         self.attach_finished_response_usage(response, input_tokens, cached_tokens, output_tokens);
         self.add_finished_response_estimated_cost(cid, response, source);
-        self.publish_for_agent_from(
+        self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+        if let Some(agent) = self.agents.get_mut(cid)
+            && agent.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id)
+        {
+            agent.in_flight_prompt = None;
+        }
+        self.publish_event_for_agent_with_completion(
             cid,
             source,
             Event::ProviderResponseFinished(response.clone()),
+            Some(AgentPublishCompletion::ReactiveContextRecovery {
+                checkpoint,
+                source: source.cloned(),
+                retry_event: None,
+            }),
+            false,
         );
-        self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
-        if let Some(agent) = self.agents.get_mut(cid) {
-            agent.in_flight_prompt = None;
-        }
-        self.start_reactive_compaction_for_checkpoint(cid, &checkpoint, source);
         true
     }
 
@@ -27751,22 +29637,27 @@ impl Harness {
             .collect::<Vec<_>>();
         for (cid, checkpoint) in pending {
             let Some(model) = checkpoint.model.as_ref() else {
-                self.terminalize_replay_blocked_context_recovery(&cid, &checkpoint);
+                self.terminalize_replay_blocked_context_recovery(
+                    &cid,
+                    &checkpoint,
+                    tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                );
                 continue;
             };
             if !self.provider_model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
-            let model_matches = self
-                .agents
-                .get(&cid)
-                .and_then(|agent| self.model_for_agent_role(agent))
-                .as_ref()
-                == Some(model);
             let capability_matches = self
                 .provider_model_info
                 .get(model)
                 .is_some_and(|info| info.supports_standalone_compaction);
+            let selected_or_continuation_model_matches =
+                self.agents.get(&cid).is_some_and(|agent| {
+                    self.model_for_agent_role(agent).as_ref() == Some(model)
+                        || agent
+                            .output_length_continuation
+                            .owns_prompt_model(&checkpoint.agent_prompt_id, model)
+                });
             let policy_allows = self
                 .available_roles
                 .get(&self.role_name_for_agent_id(&cid))
@@ -27787,10 +29678,18 @@ impl Harness {
                                 .map_or(AgentHead::Root, AgentHead::Node),
                         )
                     });
-            if model_matches && capability_matches && policy_allows && branch_matches {
+            if selected_or_continuation_model_matches
+                && capability_matches
+                && policy_allows
+                && branch_matches
+            {
                 self.start_reactive_compaction_for_checkpoint(&cid, &checkpoint, None);
             } else {
-                self.terminalize_replay_blocked_context_recovery(&cid, &checkpoint);
+                self.terminalize_replay_blocked_context_recovery(
+                    &cid,
+                    &checkpoint,
+                    tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                );
             }
         }
     }
@@ -27801,6 +29700,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+        reason: tau_proto::StandaloneCompactionFailureReason,
     ) {
         let Some((agent_id, model, cut, originator, next)) =
             self.agents.get(cid).and_then(|agent| {
@@ -27831,8 +29731,16 @@ impl Harness {
         }
         self.suppressed_compaction_dispatches
             .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
-        self.publish_for_agent(
+        let failure = tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: crate::parse_agent_id(&agent_id),
+            transaction_id: transaction_id.clone(),
+            cut,
+            reason,
+            resume_through: Some(checkpoint.through),
+        };
+        self.publish_event_for_agent_with_completion(
             cid,
+            None,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
                 agent_id: crate::parse_agent_id(&agent_id),
                 transaction_id: transaction_id.clone(),
@@ -27847,16 +29755,12 @@ impl Harness {
                     failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
                 },
             }),
-        );
-        self.publish_for_agent(
-            cid,
-            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
-                agent_id: crate::parse_agent_id(&agent_id),
-                transaction_id,
-                cut,
-                reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
-                resume_through: Some(checkpoint.through),
+            Some(AgentPublishCompletion::ReactiveContextRecoveryStart {
+                checkpoint: checkpoint.clone(),
+                failure_after_commit: Some(Box::new(failure)),
+                retry_event: None,
             }),
+            false,
         );
         self.emit_info_important(&format!(
             "context recovery for restored agent `{cid}` is blocked by changed model, capability, policy, or branch; retry explicitly"
@@ -27903,7 +29807,7 @@ impl Harness {
                     transaction_id: transaction_id.clone(),
                 };
         }
-        self.publish_for_agent_from(
+        self.publish_event_for_agent_with_completion(
             cid,
             source,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
@@ -27920,6 +29824,12 @@ impl Harness {
                     failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
                 },
             }),
+            Some(AgentPublishCompletion::ReactiveContextRecoveryStart {
+                checkpoint: checkpoint.clone(),
+                failure_after_commit: None,
+                retry_event: None,
+            }),
+            false,
         );
     }
 
@@ -28850,19 +30760,19 @@ impl Harness {
         response: &ProviderResponseFinished,
         is_non_tool_ext_query: bool,
         requested_tool_calls: bool,
-        assistant_text: Option<&str>,
+        _assistant_text: Option<&str>,
         tool_call_count: usize,
     ) -> Option<String> {
         if is_non_tool_ext_query && requested_tool_calls {
             Some(format!(
                 "non-tool extension query attempted to call {tool_call_count} tool(s); refusing to execute"
             ))
-        } else if assistant_text.unwrap_or_default().is_empty()
-            && matches!(
-                response.stop_reason,
-                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
-            )
-        {
+        } else if matches!(
+            response.stop_reason,
+            ProviderStopReason::Length
+                | ProviderStopReason::Error
+                | ProviderStopReason::RepetitionDetected
+        ) {
             Some(format!(
                 "provider failure: {}",
                 response
@@ -29085,6 +30995,149 @@ impl Harness {
         }
     }
 
+    /// Derive the single replay-safe output-length continuation plan.
+    fn derive_output_length_continuation(
+        &mut self,
+        cid: &AgentId,
+        response: &mut ProviderResponseFinished,
+        operation: tau_proto::PromptOperation,
+        requested_tool_calls: bool,
+    ) {
+        response.output_length_disposition = tau_proto::OutputLengthDisposition::None;
+        let lineage_owner = self
+            .agents
+            .get(cid)
+            .and_then(|agent| {
+                self.agent_store
+                    .agent(agent.agent_id.as_deref()?)
+                    .and_then(|tree| {
+                        tree.output_length_lineage_owner_for_prompt(&response.agent_prompt_id)
+                    })
+            })
+            .filter(|owner| {
+                self.agents.get(cid).is_some_and(|agent| {
+                    matches!(
+                        &agent.output_length_continuation,
+                        path_crate_agent::OutputLengthContinuationState::Active(continuation)
+                            if continuation.plan.owner == *owner
+                    )
+                })
+            });
+        if let Some(owner) = lineage_owner {
+            let outcome = if response.stop_reason == ProviderStopReason::Length {
+                tau_proto::OutputLengthContinuationOutcome::Incomplete
+            } else if response.error.is_some()
+                || response.failure_kind.is_some()
+                || matches!(
+                    response.stop_reason,
+                    ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+                )
+            {
+                tau_proto::OutputLengthContinuationOutcome::Failed
+            } else {
+                tau_proto::OutputLengthContinuationOutcome::Completed
+            };
+            response.output_length_disposition =
+                tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                    outer_turn_id: owner.outer_turn_id,
+                    source_agent_prompt_id: owner.source_agent_prompt_id,
+                    ordinal: owner.ordinal,
+                    outcome,
+                    // The finish bit must reflect the actual post-suppression
+                    // tool continuation. A ToolCalls stop with zero calls is
+                    // reconciled to end_turn and owes its finish; an EndTurn
+                    // with calls dispatches them and owes none.
+                    outer_turn_finish_owed: !requested_tool_calls,
+                };
+            return;
+        }
+        let replay_safe_adapter = response
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.kind == tau_proto::ProviderBackendKind::ChatCompletions);
+        let ordinary_user_conversation = self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.originator.is_user());
+        if operation != tau_proto::PromptOperation::Inference
+            || !ordinary_user_conversation
+            || !replay_safe_adapter
+            || response.stop_reason != ProviderStopReason::Length
+            || response.error.is_some()
+            || response.failure_kind.is_some()
+            || requested_tool_calls
+            || response
+                .output_items
+                .iter()
+                .any(|item| matches!(item, ContextItem::Message(_) | ContextItem::ToolCall(_)))
+            || !response.output_items.iter().any(|item| {
+                matches!(
+                    item,
+                    ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                        kind: tau_proto::ReasoningTextKind::Full,
+                        text,
+                    }) if !text.is_empty()
+                )
+            })
+        {
+            return;
+        }
+        let Some(agent) = self.agents.get_mut(cid) else {
+            return;
+        };
+        let Some(outer_turn_id) = agent.outer_turn.active_id().cloned() else {
+            return;
+        };
+        if agent.output_length_continuation.outer_turn_id() == Some(&outer_turn_id) {
+            return;
+        }
+        let Some(agent_id) = agent.agent_id.as_deref() else {
+            return;
+        };
+        let successor_agent_prompt_id =
+            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", agent.next_prompt_index))
+                .expect("known-safe AgentPromptId must be valid");
+        agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+        let owner = tau_proto::OutputLengthContinuationOwner {
+            source_agent_prompt_id: response.agent_prompt_id.clone(),
+            outer_turn_id: outer_turn_id.clone(),
+            ordinal: 1,
+        };
+        let source_checkpoint = self
+            .agent_store
+            .agent(agent_id)
+            .and_then(|tree| tree.marked_inference_checkpoint(&response.agent_prompt_id))
+            .cloned();
+        let Some(source_checkpoint) = source_checkpoint else {
+            return;
+        };
+        let (Some(model), Some(operation), Some(activation_cut)) = (
+            source_checkpoint.model,
+            source_checkpoint.operation,
+            source_checkpoint.activation_cut,
+        ) else {
+            return;
+        };
+        agent.output_length_continuation = path_crate_agent::OutputLengthContinuationState::Planned(
+            path_crate_agent::OutputLengthContinuationPlan {
+                agent_prompt_id: successor_agent_prompt_id.clone(),
+                owner,
+                dispatch: path_crate_agent::InferenceDispatchOwnership {
+                    model,
+                    operation,
+                    activation_cut,
+                },
+            },
+        );
+        response.output_length_disposition =
+            tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                outer_turn_id,
+                successor_agent_prompt_id,
+                ordinal: 1,
+                limit: 1,
+            };
+    }
+
     fn complete_finished_response_without_tool_calls(
         &mut self,
         cid: &AgentId,
@@ -29092,6 +31145,30 @@ impl Harness {
         assistant_text: Option<&str>,
     ) {
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        self.project_committed_terminal_incomplete(cid, response);
+        if matches!(
+            response.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+        ) {
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent
+                    .pending_prompts
+                    .push_back(PendingPrompt::output_length_continuation());
+                // This is an inference round boundary, not an outer-turn
+                // running-to-idle transition. Keep lifecycle and the committed
+                // continuation reservation active while the steer is folded.
+                agent.turn_state = AgentTurnState::Idle;
+            }
+            let completion = AgentPublishCompletion::OutputLengthSteer {
+                batch_parent: self
+                    .selected_head_for_agent(cid)
+                    .unwrap_or(tau_proto::AgentHead::Root),
+                retry_event: None,
+            };
+            self.fold_pending_prompts_as_steered_with_completion(cid, Some(completion));
+            self.dispatch_activation_after_publish_idle(cid);
+            return;
+        }
         if response.stop_reason == ProviderStopReason::RepetitionDetected {
             self.handle_loop_guard_trigger(
                 cid,
@@ -29102,6 +31179,15 @@ impl Harness {
             self.record_assistant_loop_signature(cid, assistant_text);
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        if matches!(
+            response.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationTerminal {
+                outcome: tau_proto::OutputLengthContinuationOutcome::Cancelled,
+                ..
+            }
+        ) {
+            return;
+        }
         if self.agents.get(cid).is_some_and(|conv| {
             conv.pending_prompts
                 .iter()
@@ -29117,6 +31203,57 @@ impl Harness {
         self.try_advance_queue();
     }
 
+    /// Publish sticky incomplete state only from the canonical post-commit
+    /// response after interception and cancellation arbitration finish.
+    fn project_committed_terminal_incomplete(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+    ) {
+        if response.stop_reason != ProviderStopReason::Length
+            || matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+            )
+            || self
+                .agents
+                .get(cid)
+                .is_some_and(|agent| agent.lifecycle_notification_only_turn)
+        {
+            return;
+        }
+        let selected_terminal = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(tau_core::AgentTree::output_length_terminal_incomplete)
+            .is_some_and(|terminal| terminal.agent_prompt_id == response.agent_prompt_id);
+        if !selected_terminal {
+            return;
+        }
+        let Some(public_id) = self.ensure_agent_id_for_agent(cid) else {
+            return;
+        };
+        self.update_agent_watch_provider_status(
+            &public_id,
+            tau_proto::AgentWatchProviderStatusNotification {
+                session_id: self.current_session_id.clone(),
+                subscription_id: String::new(),
+                turn_generation: self
+                    .agents
+                    .get(cid)
+                    .map_or(0, |agent| agent.turn_generation),
+                agent_prompt_id: response.agent_prompt_id.clone(),
+                state: tau_proto::AgentWatchProviderState::TerminalIncomplete {
+                    category: tau_proto::AgentWatchProviderCategory::OutputLength,
+                    attempt: response.provider_attempt.get(),
+                },
+                initial: false,
+            },
+        );
+    }
+
     /// Apply the common successful-terminal gate before ordinary or delegated
     /// completion can project the candidate response.
     fn apply_final_status_response_gate(
@@ -29128,7 +31265,9 @@ impl Harness {
             && response.failure_kind.is_none()
             && !matches!(
                 response.stop_reason,
-                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+                ProviderStopReason::Length
+                    | ProviderStopReason::Error
+                    | ProviderStopReason::RepetitionDetected
             );
         let status_was_available = self
             .prompt_tool_specs
@@ -29157,12 +31296,21 @@ impl Harness {
             context_size_alerts,
             is_non_tool_ext_query,
             source,
+            tool_effect,
         } = terminal;
+        let (requested_tool_calls, mut normalized_tool_calls) = match tool_effect {
+            CommittedOutputLengthToolEffect::None => {
+                (false, NormalizedFinishedToolCalls::default())
+            }
+            CommittedOutputLengthToolEffect::Dispatch(calls) => (true, calls),
+        };
         let successful = response.error.is_none()
             && response.failure_kind.is_none()
             && !matches!(
                 response.stop_reason,
-                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+                ProviderStopReason::Length
+                    | ProviderStopReason::Error
+                    | ProviderStopReason::RepetitionDetected
             );
         if response_contains_compaction {
             self.clear_agent_context_usage(cid);
@@ -29177,15 +31325,14 @@ impl Harness {
             .agents
             .get(cid)
             .is_some_and(|agent| !agent.lifecycle_notification_only_turn);
-        let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
         if self.handle_finished_response_side_conversation(
             cid,
             FinishedSideConversation {
                 response: &response,
-                requested_tool_calls: false,
+                requested_tool_calls,
                 is_non_tool_ext_query,
                 assistant_text: assistant_text.as_deref(),
-                tool_call_count: 0,
+                tool_call_count: normalized_tool_calls.calls.len(),
             },
             &mut normalized_tool_calls,
             source.as_ref(),
@@ -29193,16 +31340,30 @@ impl Harness {
             return;
         }
         if notify_watchers
+            && !requested_tool_calls
             && successful
             && let Some(message) = assistant_text.clone()
         {
             self.notify_agent_watchers_about_response(cid, message);
         }
-        self.complete_finished_response_without_tool_calls(
-            cid,
-            &response,
-            assistant_text.as_deref(),
-        );
+        if requested_tool_calls {
+            if let Err(error) = self.dispatch_finished_response_tool_calls(
+                cid,
+                normalized_tool_calls,
+                source.as_ref(),
+            ) {
+                self.emit_harness_failure(&format!(
+                    "failed to dispatch committed output-length successor tools: {error}"
+                ));
+                self.terminalize_owned_dispatch_error(cid, error.to_string());
+            }
+        } else {
+            self.complete_finished_response_without_tool_calls(
+                cid,
+                &response,
+                assistant_text.as_deref(),
+            );
+        }
     }
 
     /// Dispatch a challenged candidate as an inner continuation without closing
@@ -30819,7 +32980,7 @@ impl Harness {
             .and_then(|agent| {
                 Some((
                     crate::parse_agent_id(agent.agent_id.as_deref()?),
-                    agent.active_outer_turn_id.clone(),
+                    agent.outer_turn.active_id().cloned(),
                 ))
             })
             .ok_or_else(|| {

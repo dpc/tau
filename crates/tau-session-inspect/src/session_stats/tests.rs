@@ -143,6 +143,8 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 recovery_disposition: Default::default(),
+                output_length_disposition: tau_proto::OutputLengthDisposition::None,
+                provider_attempt: Default::default(),
                 originator: Default::default(),
                 usage: Some(ProviderTokenUsage {
                     model: Some(model),
@@ -340,6 +342,7 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
             failure_kind: None,
             context_limit_telemetry: None,
             recovery_disposition: Default::default(),
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             originator: Default::default(),
             usage,
             estimated_api_cost_rates: rates,
@@ -347,6 +350,7 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         })

@@ -291,3 +291,37 @@ policy-authorized, provider-supported names advertised for that prompt; internal
 aliases and registered-but-hidden tools are not exposed. It contains no
 commands, secrets, failure text, or disabled extension catalog. Extension
 `active` means protocol Ready, not feature health or sandboxing.
+
+## Output-length successor
+
+An eligible reasoning-only `Length` response reserves exactly one new prompt id
+inside the active outer turn. Durable order is:
+
+`provider.response_finished(continuation_planned)` →
+`agent.prompt_steered(output_length_continuation)` →
+`agent.inference_dispatch_started(output_length_continuation owner)` →
+`agent.prompt_started` → transient `agent.prompt_created`.
+
+Only each fact's write-complete callback may create the next fact. The internal
+steer is a user-role internal instruction with harness-internal submission
+source, a trusted span covering the full UTF-8 text, and exactly:
+
+`The prior model response reached its output-token limit before producing an answer or tool request. Continue the same task from the retained reasoning. Do not repeat prior work.`
+
+It grants no model, route, branch, tool, or compaction authority. The successor
+uses the captured provider-qualified model and activation cut. Branch movement,
+cancellation, or a missing logical model route cannot redirect the reservation.
+
+A context-rejected reserved successor carries recovery disposition only. The
+exact successful reactive-compaction descendant keeps the same output-length
+owner and budget; another `Length` terminalizes it.
+
+If branch selection leaves the committed plan, the harness appends the exact
+steer, owner, empty pre-start `Failed` terminal, and owed finish beneath the
+dormant original branch. It restores the selected sibling after each write,
+never emits successor `agent.prompt_started` or provider work, and gives the
+sibling one UI notice without model-visible reasoning or failure state.
+This synthetic failure repair is authorized only before durable successor
+`agent.prompt_started`. If branch selection changes after prompt-start, Tau does
+not mint a competing pre-start failure; the already-dispatched owner remains the
+sole terminal authority.

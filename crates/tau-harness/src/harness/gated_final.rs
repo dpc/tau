@@ -35,4 +35,6 @@ pub(crate) struct CommittedGatedFinal {
     pub(super) is_non_tool_ext_query: bool,
     /// Connection that reported the response.
     pub(super) source: Option<ConnectionId>,
+    /// Exact tool effect withheld until terminal write-complete.
+    pub(super) tool_effect: super::CommittedOutputLengthToolEffect,
 }

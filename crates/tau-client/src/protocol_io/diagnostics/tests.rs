@@ -362,11 +362,13 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: Some(100),
         compaction_compacted_input_tokens: Some(25),
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: Some("response-1".to_owned()),
         ws_pool_delta: None,
     };

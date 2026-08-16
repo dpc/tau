@@ -2238,6 +2238,7 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     );
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator,
         ..finished_response("worker-sp", vec![assistant_message_item("worker answer")])
@@ -3262,13 +3263,99 @@ fn finished_response(
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
+    }
+}
+
+/// Output-limit warnings must distinguish the one authorized continuation from
+/// each terminal truncation shape without presenting an incomplete tool call as
+/// executable.
+#[test]
+fn renderer_output_length_diagnostics_match_disposition_and_visible_output() {
+    let cases = [
+        (
+            vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "retained private reasoning".to_owned(),
+            })],
+            tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&test_agent_prompt_id(
+                    "length-planned",
+                )),
+                successor_agent_prompt_id: test_agent_prompt_id("length-successor"),
+                ordinal: 1,
+                limit: 1,
+            },
+            "Output limit reached; continuing once from retained reasoning.",
+            None,
+        ),
+        (
+            vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "terminal private reasoning".to_owned(),
+            })],
+            tau_proto::OutputLengthDisposition::None,
+            "Model reached its output-token limit before completing the turn. No assistant answer or executable tool call was produced.",
+            None,
+        ),
+        (
+            vec![assistant_message_item("visible partial answer")],
+            tau_proto::OutputLengthDisposition::None,
+            "Model reached its output-token limit before completing the turn. The displayed response may be incomplete.",
+            Some("visible partial answer"),
+        ),
+        (
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "truncated-call".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: Some("{".to_owned()),
+                responses_envelope: None,
+            })],
+            tau_proto::OutputLengthDisposition::None,
+            "Model reached its output-token limit while producing a tool call. The incomplete call was not executed.",
+            None,
+        ),
+    ];
+
+    for (index, (output_items, disposition, warning, visible_output)) in
+        cases.into_iter().enumerate()
+    {
+        let (_term, handle, vt) = setup(160, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.apply_setting("show-thinking", "false");
+        let mut finished = finished_response(&format!("length-{index}"), output_items);
+        finished.stop_reason = ProviderStopReason::Length;
+        finished.output_length_disposition = disposition;
+        renderer.handle(&Event::ProviderResponseFinished(finished));
+        sync(&handle);
+
+        assert!(
+            eventually_screen_contains(&vt, 160, warning),
+            "missing output-limit warning in case {index}: {:?}",
+            vt.screen_text(160)
+        );
+        if let Some(output) = visible_output {
+            assert!(vt.screen_contains(160, output));
+        }
+        assert!(
+            !vt.screen_contains(160, "retained private reasoning")
+                && !vt.screen_contains(160, "terminal private reasoning")
+        );
+        assert_eq!(renderer.test_active_tool_count(), 0);
     }
 }
 
@@ -6091,6 +6178,7 @@ fn hidden_agent_activity_keeps_global_in_progress() {
         ..agent_prompt_created("worker-sp", "s1")
     }));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: tau_proto::ExtensionName::parse("core-subagents")
                 .expect("test identifier must satisfy its grammar"),
@@ -6124,6 +6212,7 @@ fn switched_agent_shows_its_tool_usage() {
         query_id: "q-worker".to_owned(),
     };
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator: originator.clone(),
         ..finished_response(
@@ -6497,6 +6586,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
         },
     ));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator,
         ..finished_response(
@@ -6541,6 +6631,7 @@ fn agent_switch_preserves_separate_transcripts() {
         ..agent_prompt_created("worker-sp", "s1")
     }));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator,
         ..finished_response("worker-sp", vec![assistant_message_item("worker answer")])
@@ -8699,6 +8790,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     // and should render immediately before the context chip. Quota remains
     // final, while side-conversation calls stay rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -8726,6 +8818,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }));
@@ -11507,6 +11600,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -11527,6 +11621,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }));
@@ -11702,6 +11797,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     assert!(eventually_screen_contains(&vt, 100, "❓✨ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -11722,6 +11818,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }));
@@ -11778,6 +11875,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     assert!(eventually_screen_contains(&vt, 100, "❓✨ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -11798,6 +11896,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }));
@@ -11832,6 +11931,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         },
     ));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -11852,6 +11952,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }));

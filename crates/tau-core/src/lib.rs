@@ -44,6 +44,7 @@ pub use session::{
     AgentMessageDirection, AgentMeta, AgentMetadataEntry, AgentNode, AgentTree,
     BackgroundToolCallState, BackgroundToolCompletion, BackgroundToolPlaceholder,
     InferenceDispatchRecovery, ManualCompactionOutcome, ManualCompactionRecovery, NodeId,
+    OutputLengthContinuationRecovery, OutputLengthDormantRepair, OutputLengthTerminalIncomplete,
     PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource, SessionMeta,
     StandaloneCompactionRecovery,
 };

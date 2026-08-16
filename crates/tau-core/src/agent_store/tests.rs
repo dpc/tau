@@ -38,6 +38,7 @@ fn overlapping_v1_owner_append_rejects_before_mutation() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(tau_proto::AgentHead::Root),
+            output_length_continuation: None,
         })
     };
     store

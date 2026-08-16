@@ -31,6 +31,33 @@ node navigation is reserved for an explicit node target. Durable
 `agent.head_moved` records the resolved root-or-node branch head, so replay can
 restore both ordinary node heads and the root cursor.
 
+## Output-length continuation
+
+`provider.response_finished.output_length_disposition` is a defaulted,
+harness-authored durable disposition. `continuation_planned` carries the outer
+turn, pre-minted successor prompt, and the fixed `ordinal=1, limit=1`.
+`continuation_terminal` carries the outer turn, source prompt, fixed ordinal,
+completed/incomplete/failed/cancelled outcome, and the explicit
+`outer_turn_finish_owed` crash-repair authority.
+
+`agent.inference_dispatch_started.output_length_continuation` binds the reserved
+successor to its source prompt, outer turn, and ordinal.
+`agent.prompt_steered.internal_kind=output_length_continuation` identifies the
+sole harness-authored continuation instruction. Watchers use provider category
+`output_length` and state `terminal_incomplete`; neither state is a successful
+final response.
+
+`provider.response_finished.provider_attempt` defaults to one and is omitted at
+that value. A non-default value is the harness-authored finite transport attempt
+that produced the terminal response, independent of the continuation ordinal.
+
+If selection moves to a sibling after a plan commits but before the reserved
+successor prompt starts, the original branch closes with its exact steer,
+reserved owner, pre-start harness `failed` terminal, and stamped owed finish.
+No successor prompt-start or provider request is created. Once the successor
+prompt has started, its real provider response remains the sole terminal owner
+on the original branch.
+
 ## Harness notices
 
 `harness.notice` carries a stable `kind`, a user-facing `message`, a `NoticeLevel`, and optional `always_show`. Treat `kind` values as protocol identifiers: UIs may special-case them, so do not derive them from unstable connection ids or free-form message text. `critical` notices and `always_show` warnings represent mandatory diagnostics; the harness must keep emitting them even if a UI filters routine notices locally.
@@ -102,7 +129,16 @@ it.
 `agent.outer_turn_started` and `agent.outer_turn_finished` are durable,
 harness-authored activation boundaries. Their stable ids, session attribution,
 initiating durable occurrence, and terminal disposition are accounting authority;
-replay never infers a missing finish.
+replay never infers a missing finish except for an output-length continuation
+terminal whose validated `outer_turn_finish_owed=true` fact explicitly authorizes
+one matching settled finish repair.
+
+An output-length plan whose branch becomes dormant may append its exact reserved
+steer, successor owner, pre-start failure, and owed finish under explicit parents
+without changing the selected sibling. This repair is valid only before the
+reserved successor's `agent.prompt_started`. After prompt-start, the dispatched
+owner remains the sole terminal authority and branch movement cannot synthesize
+a competing failure.
 
 `agent.prompt_created` is the full transient provider work request and may carry
 large system prompts, context, images, and tool definitions. It is emitted only

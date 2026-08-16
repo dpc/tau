@@ -800,6 +800,12 @@ pub(crate) fn watch_provider_status_text(
                 failure_kind.as_str()
             ))
         }
+        tau_proto::AgentWatchProviderState::TerminalIncomplete { category, .. } => {
+            crate::internal_envelope::frame(&format!(
+                "Watched agent {sender_label} provider status: terminal incomplete ({})",
+                category.as_str()
+            ))
+        }
     }
 }
 
@@ -829,6 +835,9 @@ pub(crate) fn watch_provider_status_summary(state: &tau_proto::AgentWatchProvide
         }
         tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
             format!("terminal error ({})", failure_kind.as_str())
+        }
+        tau_proto::AgentWatchProviderState::TerminalIncomplete { category, .. } => {
+            format!("terminal incomplete ({})", category.as_str())
         }
     }
 }

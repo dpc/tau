@@ -1802,6 +1802,168 @@ fn length_finish_reason_maps_to_length_stop_reason() {
     assert_eq!(state.stop_reason, ProviderStopReason::Length);
 }
 
+/// Full reasoning from a length-stopped response must replay as the immediately
+/// preceding assistant item before Tau's exact reserved user instruction.
+#[test]
+fn full_reasoning_length_replays_exactly_before_continuation_instruction() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning_content": "retained exact reasoning" },
+                "finish_reason": "length"
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("length stream event");
+    assert_eq!(state.stop_reason, ProviderStopReason::Length);
+    let items = state.output_items();
+    assert!(matches!(
+        items.as_slice(),
+        [ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text,
+        })] if text == "retained exact reasoning"
+    ));
+
+    for replay_mode in [
+        ReasoningReplay::ReasoningContent,
+        ReasoningReplay::Reasoning,
+        ReasoningReplay::Both,
+    ] {
+        let mut replay = prompt();
+        replay.context = tau_proto::PromptContext {
+            blocks: vec![
+                tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                    provider_response_id: None,
+                    backend: None,
+                    output_items: items.clone(),
+                    usage: None,
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(tau_proto::MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                }),
+            ],
+        };
+        let mut provider = provider();
+        provider.compat.reasoning_replay = replay_mode;
+        let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+        let json = serde_json::to_value(request).expect("request json");
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0]["content"].is_null());
+        assert!(messages[0]["tool_calls"].is_null());
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[1]["content"],
+            tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+        );
+        assert_eq!(
+            messages[0]["reasoning_content"].as_str(),
+            matches!(
+                replay_mode,
+                ReasoningReplay::ReasoningContent | ReasoningReplay::Both
+            )
+            .then_some("retained exact reasoning")
+        );
+        assert_eq!(
+            messages[0]["reasoning"].as_str(),
+            matches!(
+                replay_mode,
+                ReasoningReplay::Reasoning | ReasoningReplay::Both
+            )
+            .then_some("retained exact reasoning")
+        );
+    }
+}
+
+/// Summary-only reasoning from a length-stopped response must never become
+/// replay authority: the rebuilt request carries no assistant reasoning or
+/// content before Tau's exact reserved user instruction.
+#[test]
+fn summary_only_length_reasoning_has_no_replay_authority() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning_content": "summary reasoning" },
+                "finish_reason": "length"
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("length stream event");
+    assert_eq!(state.stop_reason, ProviderStopReason::Length);
+    let items = state.output_items();
+    // The adapter exposes streamed reasoning as Full by default in this
+    // fixture; replace it with the summary form the harness marks ineligible.
+    let items = items
+        .iter()
+        .map(|item| match item {
+            ContextItem::ReasoningText(reasoning) => {
+                ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                    kind: tau_proto::ReasoningTextKind::Summary,
+                    ..reasoning.clone()
+                })
+            }
+            other => other.clone(),
+        })
+        .collect::<Vec<_>>();
+    for replay_mode in [
+        ReasoningReplay::ReasoningContent,
+        ReasoningReplay::Reasoning,
+        ReasoningReplay::Both,
+    ] {
+        let mut replay = prompt();
+        replay.context = tau_proto::PromptContext {
+            blocks: vec![
+                tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                    provider_response_id: None,
+                    backend: None,
+                    output_items: items.clone(),
+                    usage: None,
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(tau_proto::MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                }),
+            ],
+        };
+        let mut provider = provider();
+        provider.compat.reasoning_replay = replay_mode;
+        let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+        let json = serde_json::to_value(request).expect("request json");
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            1,
+            "summary-only reasoning emits no assistant replay message in mode {replay_mode:?}"
+        );
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(
+            messages[0]["content"],
+            tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+        );
+    }
+}
+
 /// A non-null provider terminal outside Tau's supported stop contract must fail
 /// explicitly rather than inheriting the stream state's default successful
 /// end-turn classification.

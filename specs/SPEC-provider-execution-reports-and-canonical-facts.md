@@ -65,6 +65,10 @@ was available. Present all-zero counters remain present zero. Effective rates
 and response-local cost increment are present exactly when usage is present;
 otherwise all three accounting fields remain absent. The nested cumulative
 usage snapshot is never durable accounting input.
+The shared report shape also carries `provider_attempt`, but provider input is
+untrusted. The harness overwrites it with the finite transport attempt that
+produced the canonical terminal. The default is one; zero is invalid canonical
+state. This counter is independent of output-length continuation ordinals.
 
 Optional cache usage remains response-local, privacy-redacted metadata. The
 harness normalizes contradictory cache classes against authoritative total input
@@ -98,8 +102,31 @@ session token and cost accounting remains intentionally billable. Ordinary and
 reactive-recovery paths retain their canonical response behavior.
 Every report-derived alternative uses harness source.
 
+`ProviderStopReason::Length` is always an incomplete semantic terminal. The
+harness clears provider-authored output-length disposition and may derive one
+`ContinuationPlanned` disposition only for an ordinary inference that contains
+non-empty full, replay-safe reasoning and contains neither assistant messages nor
+tool calls. The plan reserves one successor prompt in the same outer turn.
+Assistant prose remains visible but is never stitched; a length-stopped tool call
+is retained but never executed and never activates a synthetic-error follow-up.
+
+The planned canonical response owns the continuation. Its commit completion
+appends the exact harness-internal output-length steer; that steer owns the
+matching inference checkpoint, and the checkpoint retains the captured model,
+route-independent model identity, branch cut, and original outer turn. A second
+plan in one outer turn is invalid. The successor terminal carries
+`ContinuationTerminal` and an explicit `outer_turn_finish_owed` repair bit.
+Each response retains separate provider usage, effective rates, and cost; totals
+sum every accepted response once.
+If reactive recovery claims the reserved successor, the rejected response carries
+only recovery authority. The transaction-owned post-compaction inference remains
+the exact successor lineage and closes it; its own `Length` is terminal because
+the same-turn budget is already spent.
+
 Report and successor publication are intentionally not transactional. The report commits
-first. Canonical interception may park, and required canonical persistence may fail,
+first. Output-length continuation is the narrow exception to eager successor effects:
+its steer cannot be appended or dispatched until the planned response commits.
+Otherwise, canonical interception may park, and required canonical persistence may fail,
 without rolling back terminal state, recovery, tool dispatch, side completion, or turn
 closure already performed by the terminal pipeline. A failed canonical append still
 prevents that canonical event's broadcast and downstream reaction. Fallible terminal

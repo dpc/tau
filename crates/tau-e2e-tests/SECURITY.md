@@ -183,6 +183,19 @@ that retains the overflowing prompt while excluding that pre-cut round. The
 production Chat Completions adapter, not this generic provider seam, owns
 static no-tools wire lowering and transcript-v1 request materialization.
 
+The output-length acceptance is one separate closed two-action, sole-lane
+scenario. It emits one full-reasoning `Length` response with fixed synthetic
+Chat Completions metadata, then accepts only the exact retained user input,
+reasoning, and shared harness-internal continuation instruction before one
+normal answer. It adds no generic backend, retry, continuation, or prompt
+matching control.
+The daemon-only restart oracle enables a feature-gated, process-local one-shot
+barrier at either the planned-response or continuation-steer write-complete
+boundary. It may create only one absent marker directly below the fixture's
+private harness-state root, blocks before scheduling the next continuation, and
+is released only by killing the private test process group. Production builds
+have no hook module, daemon option, or ordering branch.
+
 S5 observes the existing bounded hold's prompt-correlated `hold_ready` trace
 only after its wait worker starts. The test correlates that live record with the
 same durable harness dispatch prompt and a separately decoded fake lane cursor,

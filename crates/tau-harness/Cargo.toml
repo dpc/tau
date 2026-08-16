@@ -24,6 +24,9 @@ workspace = true
 echo-agent = ["dep:tau-ext-shell"]
 # Exposes one provider-runner injection helper to the dedicated test-support crate.
 provider-test-support = ["echo-agent"]
+# Exposes the closed write-complete output-length crash barrier used only by the
+# deterministic E2E daemon. Normal builds contain no hook or configuration.
+output-length-test-barrier = []
 
 [dependencies]
 blake3.workspace = true

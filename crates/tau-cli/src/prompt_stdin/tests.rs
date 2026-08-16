@@ -341,6 +341,7 @@ fn assistant_finished(
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -366,6 +367,7 @@ fn assistant_finished(
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }
@@ -382,6 +384,7 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
 
     assert!(
         !output.capture_finished(&ProviderResponseFinished {
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -400,6 +403,7 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         })
@@ -420,6 +424,133 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
     assert_eq!(output.final_response.as_deref(), Some("final answer"));
 }
 
+/// A planned output-length source is an intermediate boundary, while the
+/// successor's incomplete terminal ends the one-shot wait without inventing a
+/// successful assistant answer.
+#[test]
+fn one_shot_output_waits_for_length_successor_and_preserves_incomplete_reasoning() {
+    let mut output = OneShotOutput::default();
+    let mut source = assistant_finished("sp-length-source", "", ProviderStopReason::Length);
+    source.output_items = vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+        kind: tau_proto::ReasoningTextKind::Full,
+        text: "source reasoning".to_owned(),
+    })];
+    source.output_length_disposition = tau_proto::OutputLengthDisposition::ContinuationPlanned {
+        outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id),
+        successor_agent_prompt_id: "sp-length-successor".parse().expect("successor prompt id"),
+        ordinal: 1,
+        limit: 1,
+    };
+    assert!(!output.capture_finished(&source));
+    assert_eq!(output.thinking_blocks, vec!["source reasoning"]);
+    assert_eq!(output.final_response, None);
+
+    let mut successor = assistant_finished("sp-length-successor", "", ProviderStopReason::Length);
+    successor.output_items = vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+        kind: tau_proto::ReasoningTextKind::Full,
+        text: "incomplete successor reasoning".to_owned(),
+    })];
+    successor.output_length_disposition =
+        tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id),
+            source_agent_prompt_id: source.agent_prompt_id,
+            ordinal: 1,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Incomplete,
+            outer_turn_finish_owed: true,
+        };
+    assert!(output.capture_finished(&successor));
+    assert_eq!(
+        output.thinking_blocks,
+        vec!["source reasoning", "incomplete successor reasoning"]
+    );
+    assert_eq!(output.final_response, None);
+}
+
+/// The real one-shot event path must ignore the planned source terminal and
+/// complete only from the reserved successor.
+#[test]
+fn prompt_stdin_planned_length_waits_then_successor_succeeds() {
+    let mut output = OneShotOutput::default();
+    let mut source = assistant_finished("ap-main-1", "", ProviderStopReason::Length);
+    source.output_items = vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+        kind: tau_proto::ReasoningTextKind::Full,
+        text: "source reasoning".to_owned(),
+    })];
+    source.output_length_disposition = tau_proto::OutputLengthDisposition::ContinuationPlanned {
+        outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id),
+        successor_agent_prompt_id: "ap-main-2".parse().expect("successor prompt id"),
+        ordinal: 1,
+        limit: 1,
+    };
+    assert!(
+        !handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::ProviderResponseFinished(source)),
+            &mut output,
+        )
+        .expect("planned source remains pending")
+    );
+    assert!(
+        handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::ProviderResponseFinished(assistant_finished(
+                "ap-main-2",
+                "finished answer",
+                ProviderStopReason::EndTurn,
+            ))),
+            &mut output,
+        )
+        .expect("successor completes")
+    );
+    assert_eq!(output.final_response.as_deref(), Some("finished answer"));
+}
+
+/// Every unplanned Length shape must terminate one-shot mode unsuccessfully
+/// with its shape-specific safe diagnostic.
+#[test]
+fn prompt_stdin_terminal_length_variants_fail_with_exact_diagnostic() {
+    let mut cases = Vec::new();
+    let mut reasoning = assistant_finished("ap-main-1", "", ProviderStopReason::Length);
+    reasoning.output_items = vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+        kind: tau_proto::ReasoningTextKind::Full,
+        text: "hidden partial reasoning".to_owned(),
+    })];
+    cases.push((
+        reasoning,
+        "Model reached its output-token limit before completing the turn. No assistant answer or executable tool call was produced.",
+    ));
+    cases.push((
+        assistant_finished("ap-main-2", "partial prose", ProviderStopReason::Length),
+        "Model reached its output-token limit before completing the turn. The displayed response may be incomplete.",
+    ));
+    let mut tool_call = assistant_finished("ap-main-3", "", ProviderStopReason::Length);
+    tool_call.output_items = vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
+        call_id: "truncated-call".into(),
+        name: tau_proto::ToolName::new("shell"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: tau_proto::CborValue::Map(Vec::new()),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    cases.push((
+        tool_call,
+        "Model reached its output-token limit while producing a tool call. The incomplete call was not executed.",
+    ));
+
+    for (finished, diagnostic) in cases {
+        let mut output = OneShotOutput::default();
+        let error = handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::ProviderResponseFinished(finished)),
+            &mut output,
+        )
+        .expect_err("terminal length must fail");
+        assert_eq!(
+            error.to_string(),
+            format!("initial prompt failed (execution): {diagnostic}")
+        );
+        assert!(output.final_response.is_none());
+        assert!(output.thinking_blocks.is_empty());
+    }
+}
+
 /// Some provider paths may have accumulated streaming text but no final
 /// assistant message item; fall back to accumulated deltas rather than
 /// printing nothing.
@@ -431,6 +562,7 @@ fn one_shot_output_falls_back_to_latest_streaming_text() {
 
     assert!(
         output.capture_finished(&ProviderResponseFinished {
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -449,6 +581,7 @@ fn one_shot_output_falls_back_to_latest_streaming_text() {
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         })
@@ -468,6 +601,7 @@ fn one_shot_output_status_clear_resets_streaming_fallback() {
 
     assert!(
         output.capture_finished(&ProviderResponseFinished {
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -486,6 +620,7 @@ fn one_shot_output_status_clear_resets_streaming_fallback() {
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         })

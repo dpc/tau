@@ -1365,6 +1365,7 @@ fn representative_events() -> Vec<Event> {
             model: None,
             operation: None,
             activation_cut: None,
+            output_length_continuation: None,
         }),
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_prompt_id: test_agent_prompt_id("sp-1"),
@@ -1511,12 +1512,14 @@ fn representative_events() -> Vec<Event> {
             failure_kind: None,
             context_limit_telemetry: None,
             recovery_disposition: ContextRecoveryDisposition::None,
+            output_length_disposition: OutputLengthDisposition::None,
             usage: None,
             originator: PromptOriginator::User,
 
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         }),
@@ -4115,12 +4118,14 @@ fn execution_events_use_provider_wire_family() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 recovery_disposition: ContextRecoveryDisposition::None,
+                output_length_disposition: OutputLengthDisposition::None,
                 originator: PromptOriginator::User,
                 output_items: Vec::new(),
                 usage: None,
                 compaction_original_input_tokens: None,
                 compaction_compacted_input_tokens: None,
                 backend: None,
+                provider_attempt: Default::default(),
                 provider_response_id: None,
                 ws_pool_delta: None,
             }),
@@ -4173,12 +4178,14 @@ fn provider_execution_reports_use_distinct_transient_wires() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 recovery_disposition: ContextRecoveryDisposition::None,
+                output_length_disposition: OutputLengthDisposition::None,
                 originator: PromptOriginator::User,
                 output_items: Vec::new(),
                 usage: None,
                 compaction_original_input_tokens: None,
                 compaction_compacted_input_tokens: None,
                 backend: None,
+                provider_attempt: Default::default(),
                 provider_response_id: None,
                 ws_pool_delta: None,
             }),
@@ -5789,11 +5796,13 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         recovery_disposition: ContextRecoveryDisposition::None,
+        output_length_disposition: OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     })
@@ -5940,9 +5949,9 @@ fn agent_watch_provider_state_wire_contract_enforces_phase_invariants() {
     );
 }
 
-/// Standalone-compaction triggers and recovery fields must preserve literal
-/// wire tags, legacy omission defaults, and correlation across JSON and CBOR
-/// replay.
+/// Standalone-compaction triggers, recovery fields, and provider attempt must
+/// preserve literal wire tags, attempt-one omission/default, non-default JSON
+/// and CBOR round trips, and durable correlation.
 #[test]
 fn standalone_compaction_and_context_recovery_wire_contract() {
     fn cbor_event(event: &Event) -> ciborium::value::Value {
@@ -6075,6 +6084,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         model: Some("provider/model".into()),
         operation: Some(PromptOperation::Inference),
         activation_cut: Some(AgentHead::Root),
+        output_length_continuation: None,
     };
     let checkpoint_json = serde_json::to_value(&checkpoint).expect("encode checkpoint");
     assert_eq!(
@@ -6111,6 +6121,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
             model: None,
             operation: None,
             activation_cut: None,
+            output_length_continuation: None,
             ..checkpoint.clone()
         });
     let mut legacy_checkpoint_cbor = cbor_event(&checkpoint_event);
@@ -6134,21 +6145,70 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         recovery_disposition: ContextRecoveryDisposition::None,
+        output_length_disposition: OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     };
     let none_json = serde_json::to_value(&response).expect("encode no-disposition response");
     assert!(none_json.get("recovery_disposition").is_none());
+    assert!(none_json.get("output_length_disposition").is_none());
+    assert!(none_json.get("provider_attempt").is_none());
     assert_eq!(
         serde_json::from_value::<ProviderResponseFinished>(none_json)
             .expect("omitted disposition defaults"),
         response
     );
+    response.provider_attempt = ProviderAttempt::new(7).expect("nonzero attempt");
+    let attempted_json = serde_json::to_value(&response).expect("encode provider attempt");
+    assert_eq!(attempted_json["provider_attempt"], 7);
+    assert_eq!(
+        serde_json::from_value::<ProviderResponseFinished>(attempted_json)
+            .expect("non-default provider attempt round trip")
+            .provider_attempt
+            .get(),
+        7
+    );
+    let mut attempted_cbor = Vec::new();
+    ciborium::into_writer(&response, &mut attempted_cbor).expect("encode provider attempt CBOR");
+    assert_eq!(
+        ciborium::from_reader::<ProviderResponseFinished, _>(attempted_cbor.as_slice())
+            .expect("decode provider attempt CBOR")
+            .provider_attempt
+            .get(),
+        7
+    );
+    let mut zero_attempt = serde_json::to_value(&response).expect("encode zero mutation");
+    zero_attempt["provider_attempt"] = serde_json::json!(0);
+    assert!(
+        serde_json::from_value::<ProviderResponseFinished>(zero_attempt).is_err(),
+        "zero is not a finite provider attempt"
+    );
+    response.provider_attempt = ProviderAttempt::ONE;
+    response.output_length_disposition = OutputLengthDisposition::ContinuationPlanned {
+        outer_turn_id: AgentOuterTurnId::parse("ot-ap-a-1").expect("outer turn id"),
+        successor_agent_prompt_id: test_agent_prompt_id("ap-a-2"),
+        ordinal: 1,
+        limit: 1,
+    };
+    let output_length_json =
+        serde_json::to_value(&response).expect("encode output-length disposition");
+    assert_eq!(
+        output_length_json["output_length_disposition"],
+        serde_json::json!({
+            "state": "continuation_planned",
+            "outer_turn_id": "ot-ap-a-1",
+            "successor_agent_prompt_id": "ap-a-2",
+            "ordinal": 1,
+            "limit": 1,
+        })
+    );
+    response.output_length_disposition = OutputLengthDisposition::None;
     response.recovery_disposition = ContextRecoveryDisposition::ReactiveCompactionPlanned;
     let planned_json = serde_json::to_value(&response).expect("encode planned response");
     assert_eq!(
@@ -6174,6 +6234,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     );
     let none_event = Event::ProviderResponseFinished(ProviderResponseFinished {
         recovery_disposition: ContextRecoveryDisposition::None,
+        output_length_disposition: OutputLengthDisposition::None,
         ..response
     });
     let none_cbor = cbor_event(&none_event);
@@ -6376,5 +6437,86 @@ fn agent_runtime_indicator_declaration_round_trips_transiently() {
     assert_eq!(
         serde_json::from_slice::<crate::Event>(&encoded).expect("deserialize"),
         event
+    );
+}
+
+/// Output-length owner and every terminal outcome must retain their exact
+/// non-default wire shape so cold recovery never loses continuation authority.
+#[test]
+fn output_length_continuation_wire_shapes_round_trip() {
+    let source_agent_prompt_id = crate::AgentPromptId::parse("source").expect("prompt id");
+    let owner = crate::OutputLengthContinuationOwner {
+        outer_turn_id: crate::AgentOuterTurnId::for_prompt(&source_agent_prompt_id),
+        source_agent_prompt_id,
+        ordinal: 1,
+    };
+    let encoded_owner = serde_json::to_value(&owner).expect("serialize owner");
+    assert_eq!(encoded_owner["ordinal"], 1);
+    assert_eq!(
+        serde_json::from_value::<crate::OutputLengthContinuationOwner>(encoded_owner)
+            .expect("deserialize owner"),
+        owner
+    );
+    let mut owner_cbor = Vec::new();
+    ciborium::into_writer(&owner, &mut owner_cbor).expect("serialize owner CBOR");
+    assert_eq!(
+        ciborium::from_reader::<crate::OutputLengthContinuationOwner, _>(owner_cbor.as_slice())
+            .expect("deserialize owner CBOR"),
+        owner
+    );
+
+    for (outcome, spelling) in [
+        (
+            crate::OutputLengthContinuationOutcome::Completed,
+            "completed",
+        ),
+        (
+            crate::OutputLengthContinuationOutcome::Incomplete,
+            "incomplete",
+        ),
+        (crate::OutputLengthContinuationOutcome::Failed, "failed"),
+        (
+            crate::OutputLengthContinuationOutcome::Cancelled,
+            "cancelled",
+        ),
+    ] {
+        let disposition = crate::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id: owner.outer_turn_id.clone(),
+            source_agent_prompt_id: owner.source_agent_prompt_id.clone(),
+            ordinal: 1,
+            outcome,
+            outer_turn_finish_owed: true,
+        };
+        let encoded = serde_json::to_value(&disposition).expect("serialize disposition");
+        assert_eq!(encoded["state"], "continuation_terminal");
+        assert_eq!(encoded["outcome"], spelling);
+        assert_eq!(
+            serde_json::from_value::<crate::OutputLengthDisposition>(encoded)
+                .expect("deserialize disposition"),
+            disposition
+        );
+        let mut encoded_cbor = Vec::new();
+        ciborium::into_writer(&disposition, &mut encoded_cbor).expect("serialize disposition CBOR");
+        assert_eq!(
+            ciborium::from_reader::<crate::OutputLengthDisposition, _>(encoded_cbor.as_slice())
+                .expect("deserialize disposition CBOR"),
+            disposition
+        );
+    }
+
+    let watch = crate::AgentWatchProviderState::TerminalIncomplete {
+        category: crate::AgentWatchProviderCategory::OutputLength,
+        attempt: 7,
+    };
+    let encoded_watch = serde_json::to_value(&watch).expect("serialize watch state");
+    assert_eq!(encoded_watch["phase"], "terminal_incomplete");
+    assert_eq!(encoded_watch["category"], "output_length");
+    assert_eq!(encoded_watch["attempt"], 7);
+    let mut watch_cbor = Vec::new();
+    ciborium::into_writer(&watch, &mut watch_cbor).expect("serialize watch state CBOR");
+    assert_eq!(
+        ciborium::from_reader::<crate::AgentWatchProviderState, _>(watch_cbor.as_slice())
+            .expect("deserialize watch state CBOR"),
+        watch
     );
 }

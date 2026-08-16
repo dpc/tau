@@ -106,7 +106,8 @@ fn provider_status_attempt(state: &tau_proto::AgentWatchProviderState) -> Option
     match state {
         tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
         | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
-        | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. } => Some(*attempt),
+        | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. }
+        | tau_proto::AgentWatchProviderState::TerminalIncomplete { attempt, .. } => Some(*attempt),
         tau_proto::AgentWatchProviderState::Blocked { .. }
         | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
     }
@@ -123,6 +124,12 @@ fn provider_status_update_is_stale(
         || next.agent_prompt_id != current.agent_prompt_id
     {
         return false;
+    }
+    if matches!(
+        current.state,
+        tau_proto::AgentWatchProviderState::TerminalIncomplete { .. }
+    ) {
+        return true;
     }
     if matches!(
         (&current.state, &next.state),

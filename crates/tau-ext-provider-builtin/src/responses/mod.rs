@@ -371,6 +371,7 @@ fn finished(
         failure_kind,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: prompt.originator.clone(),
         usage,
         compaction_original_input_tokens: None,
@@ -383,6 +384,7 @@ fn finished(
         }),
         provider_response_id,
         ws_pool_delta: None,
+        provider_attempt: Default::default(),
     }
 }
 

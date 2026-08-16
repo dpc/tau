@@ -995,6 +995,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         crate::test_connection_id("provider"),
     );
     let response = tau_proto::ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -1020,6 +1021,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     };
@@ -1226,6 +1228,7 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         )
         .expect("subscribe observer");
     let response = tau_proto::ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -1263,6 +1266,7 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     };

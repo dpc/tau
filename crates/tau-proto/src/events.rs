@@ -2327,6 +2327,8 @@ pub enum AgentWatchProviderCategory {
     ContextWindow,
     /// Standalone or inline compaction work.
     Compaction,
+    /// Provider output ended at its configured token limit.
+    OutputLength,
 }
 
 impl AgentWatchProviderCategory {
@@ -2342,6 +2344,7 @@ impl AgentWatchProviderCategory {
             Self::Unknown => "unknown",
             Self::ContextWindow => "context_window",
             Self::Compaction => "compaction",
+            Self::OutputLength => "output_length",
         }
     }
 }
@@ -2396,6 +2399,13 @@ pub enum AgentWatchProviderState {
         /// Saturating provider attempt correlated with this prompt.
         attempt: u32,
     },
+    /// Provider work ended with an incomplete output-length terminal.
+    TerminalIncomplete {
+        /// Sanitized terminal category.
+        category: AgentWatchProviderCategory,
+        /// Saturating provider attempt correlated with this prompt.
+        attempt: u32,
+    },
 }
 
 impl AgentWatchProviderState {
@@ -2407,6 +2417,7 @@ impl AgentWatchProviderState {
             Self::Blocked { .. } => "blocked",
             Self::DispatchUncertain { .. } => "dispatch_uncertain",
             Self::TerminalError { .. } => "terminal_error",
+            Self::TerminalIncomplete { .. } => "terminal_incomplete",
         }
     }
 }
@@ -4437,8 +4448,21 @@ pub struct AgentInferenceDispatchStarted {
     /// Absent on legacy records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cut: Option<AgentHead>,
+    /// Harness-owned output-length continuation correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_length_continuation: Option<OutputLengthContinuationOwner>,
 }
 
+/// Durable correlation from an output-length plan to its successor inference.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OutputLengthContinuationOwner {
+    /// Length response that authorized the continuation.
+    pub source_agent_prompt_id: AgentPromptId,
+    /// Outer turn retained by the successor inference.
+    pub outer_turn_id: AgentOuterTurnId,
+    /// One-based continuation ordinal. The only valid value is one.
+    pub ordinal: u8,
+}
 /// The harness accepted one standalone provider compaction result.
 ///
 /// This is the sole transcript boundary for replacement-window compaction.
@@ -5495,6 +5519,59 @@ pub enum ContextRecoveryDisposition {
     ReactiveCompactionPlanned,
 }
 
+/// Harness-authored disposition for an output-length terminal.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OutputLengthDisposition {
+    /// The response does not own output-length continuation work.
+    #[default]
+    None,
+    /// One replay-safe reasoning continuation must be claimed.
+    ContinuationPlanned {
+        /// Outer turn retained by the successor inference.
+        outer_turn_id: AgentOuterTurnId,
+        /// Pre-minted correlation for the successor inference.
+        successor_agent_prompt_id: AgentPromptId,
+        /// One-based continuation ordinal. The only valid value is one.
+        ordinal: u8,
+        /// Per-outer-turn continuation limit. The only valid value is one.
+        limit: u8,
+    },
+    /// The reserved continuation reached a durable terminal.
+    ContinuationTerminal {
+        /// Outer turn retained from the source inference.
+        outer_turn_id: AgentOuterTurnId,
+        /// Length response that authorized this continuation.
+        source_agent_prompt_id: AgentPromptId,
+        /// One-based continuation ordinal. The only valid value is one.
+        ordinal: u8,
+        /// Semantic terminal outcome.
+        outcome: OutputLengthContinuationOutcome,
+        /// Whether replay may repair a missing settled outer-turn finish.
+        outer_turn_finish_owed: bool,
+    },
+}
+
+impl OutputLengthDisposition {
+    fn is_none(value: &Self) -> bool {
+        matches!(value, Self::None)
+    }
+}
+
+/// Semantic outcome of a harness-owned output-length continuation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputLengthContinuationOutcome {
+    /// A normal semantic response completed the continuation.
+    Completed,
+    /// The continuation also reached its output cap.
+    Incomplete,
+    /// The continuation failed before semantic completion.
+    Failed,
+    /// Cancellation terminated the continuation.
+    Cancelled,
+}
+
 impl ContextRecoveryDisposition {
     fn is_none(value: &Self) -> bool {
         matches!(value, Self::None)
@@ -5509,6 +5586,42 @@ impl ProviderFailureKind {
             Self::RequestRejected => "request_rejected",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+/// Finite one-based transport attempt that produced a terminal provider
+/// response.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderAttempt(std::num::NonZeroU32);
+
+impl ProviderAttempt {
+    /// First finite transport attempt.
+    pub const ONE: Self = Self(NonZeroU32::MIN);
+
+    /// Creates a finite one-based transport attempt.
+    #[must_use]
+    pub const fn new(value: u32) -> Option<Self> {
+        match NonZeroU32::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the one-based wire value.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    fn is_one(&self) -> bool {
+        *self == Self::ONE
+    }
+}
+
+impl Default for ProviderAttempt {
+    fn default() -> Self {
+        Self::ONE
     }
 }
 
@@ -5546,6 +5659,18 @@ pub struct ProviderResponseFinished {
     /// discards and rederives before canonical publication.
     #[serde(default, skip_serializing_if = "ContextRecoveryDisposition::is_none")]
     pub recovery_disposition: ContextRecoveryDisposition,
+    /// Harness-owned output-length continuation decision. Provider reports may
+    /// carry an untrusted value, which the terminal pipeline clears and
+    /// rederives before canonical publication.
+    #[serde(default, skip_serializing_if = "OutputLengthDisposition::is_none")]
+    pub output_length_disposition: OutputLengthDisposition,
+    /// Harness-authored finite transport attempt that produced this terminal
+    /// response. Provider reports may carry an untrusted value, which the
+    /// terminal pipeline clears and rederives before canonical publication.
+    ///
+    /// This is independent of an output-length continuation ordinal.
+    #[serde(default, skip_serializing_if = "ProviderAttempt::is_one")]
+    pub provider_attempt: ProviderAttempt,
     /// Echo of [`AgentPromptCreated::originator`]. The provider must
     /// copy this from the prompt; the harness routes the response
     /// based on it.

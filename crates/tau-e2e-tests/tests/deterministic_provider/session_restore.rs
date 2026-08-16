@@ -15,7 +15,9 @@ use tau_proto::{
     SessionAgentPersistence, SessionId,
 };
 
-use super::daemon_support::{disconnect_ui, spawn_daemon};
+use super::daemon_support::{
+    OutputLengthCrashCut, disconnect_ui, spawn_daemon, spawn_daemon_at_output_length_cut,
+};
 use super::{DUMMY_TOOL, FAKE_PROVIDER};
 
 #[path = "session_restore/dispatch_uncertain.rs"]
@@ -35,6 +37,285 @@ mod observer;
 use observer::{Observed, SessionRestoreObserver};
 
 const SESSION: &str = "deterministic-e2e-session";
+
+/// Planned-response and steer crash cuts recover only the missing durable step,
+/// then issue exactly one reserved successor after restart. The absent-usage
+/// variant proves no fabricated counters or cost after cold reload, while the
+/// reported-usage variant proves the same nonzero totals recompute after
+/// restart.
+#[test]
+fn deterministic_output_length_recovers_planned_and_steer_cuts()
+-> Result<(), Box<dyn std::error::Error>> {
+    for cut in [
+        OutputLengthCrashCut::PlannedResponse,
+        OutputLengthCrashCut::ContinuationSteer,
+    ] {
+        run_output_length_restart_cut(cut, false)?;
+    }
+    // One reported-usage restart subcase proves cold reload recomputes the
+    // same nonzero accounting totals as the live run.
+    run_output_length_restart_cut(OutputLengthCrashCut::PlannedResponse, true)?;
+    Ok(())
+}
+
+fn run_output_length_restart_cut(
+    cut: OutputLengthCrashCut,
+    report_usage: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const USER: &str = "finish the restart-bounded answer";
+    const REASONING: &str = "retained restart plan";
+    const ANSWER: &str = "completed after restart continuation";
+    let scenario = ScenarioV2::new(
+        format!("output-length-{cut:?}-usage-{report_usage}"),
+        vec![ScenarioLaneV2 {
+            ctx_id: "output-length-restart".to_owned(),
+            actions: vec![
+                ScenarioActionV2::OutputLengthReasoning {
+                    user_text: USER.to_owned(),
+                    reasoning: REASONING.to_owned(),
+                    report_usage,
+                },
+                ScenarioActionV2::OutputLengthContinuation {
+                    user_text: USER.to_owned(),
+                    reasoning: REASONING.to_owned(),
+                    response: ANSWER.to_owned(),
+                    report_usage,
+                },
+            ],
+        }],
+    );
+    let fixture = DeterministicFixture::new_session_restore(
+        &format!("deterministic_output_length_{cut:?}_usage_{report_usage}"),
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let session_id: SessionId = SESSION.parse()?;
+    let reached = fixture
+        .harness_state_dir()
+        .join(format!("output-length-{cut:?}-{report_usage}.reached"));
+    let socket_a = fixture.socket_path(&format!("output-length-{cut:?}-{report_usage}-a"));
+    let daemon_a = spawn_daemon_at_output_length_cut(
+        &fixture,
+        &socket_a,
+        tau_harness::SessionLaunchStatus::New,
+        cut,
+        &reached,
+    );
+    let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
+    let main = observer_a.create_idle_main()?;
+    observer_a.submit(&main, "output-length-restart", USER)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !reached.exists() {
+        if deadline < Instant::now() {
+            return Err(format!("output-length {cut:?} barrier was not reached").into());
+        }
+        std::thread::yield_now();
+    }
+    let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    let before = &snapshot_a.agent_events[&main];
+    assert_eq!(matched_action_count(&fixture)?, 1);
+    assert_eq!(
+        before
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                    output_length_disposition:
+                        tau_proto::OutputLengthDisposition::ContinuationPlanned { .. },
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+    let steer_count = before
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                    internal_kind: Some(tau_proto::InternalPromptKind::OutputLengthContinuation),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(
+        steer_count,
+        match cut {
+            OutputLengthCrashCut::PlannedResponse => 0,
+            OutputLengthCrashCut::ContinuationSteer => 1,
+        }
+    );
+    assert!(before.iter().all(|record| !matches!(
+        record.event,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            output_length_continuation: Some(_),
+            ..
+        })
+    )));
+
+    let terminated = daemon_a.kill_ungracefully()?;
+    drop(observer_a);
+    terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
+
+    let socket_b = fixture.socket_path(&format!("output-length-{cut:?}-{report_usage}-b"));
+    let daemon_b = spawn_daemon(
+        &fixture,
+        &socket_b,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
+    observer_b.wait_for_session_boundary(&session_id)?;
+    observer_b.wait_for_agent_marker(&main, ANSWER, 0)?;
+    let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    let after = &snapshot_b.agent_events[&main];
+    assert_eq!(
+        after
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                    internal_kind: Some(tau_proto::InternalPromptKind::OutputLengthContinuation),
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                    output_length_continuation: Some(_),
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|record| matches!(record.event, Event::ProviderResponseFinished(_)))
+            .count(),
+        2
+    );
+    if !report_usage {
+        assert!(after.iter().all(|record| match &record.event {
+            Event::ProviderResponseFinished(response) => {
+                response.usage.is_none()
+                    && response.estimated_api_cost_rates.is_none()
+                    && response.estimated_api_cost_increment.is_none()
+            }
+            _ => true,
+        }));
+    }
+    let final_stats = observer_b
+        .events
+        .iter()
+        .filter_map(|observed| match &observed.event {
+            Event::AgentStatsUpdated(stats) if stats.agent_id == main => Some(stats),
+            _ => None,
+        })
+        .next_back()
+        .expect("final restored agent stats");
+    if report_usage {
+        // The reported-usage restart must recompute the same nonzero totals as
+        // the live run: distinct per-response usage survives, each response
+        // keeps its own provider response id, and the aggregate equals the
+        // arithmetic sum exactly once.
+        let usages = after
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ProviderResponseFinished(response) => response.usage.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usages
+                .iter()
+                .map(|usage| (
+                    usage.prompt_sent_tokens,
+                    usage.prompt_cached_tokens,
+                    usage.response_received_tokens
+                ))
+                .collect::<Vec<_>>(),
+            vec![(10, 2, 3), (20, 5, 7)]
+        );
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|record| match &record.event {
+                    Event::ProviderResponseFinished(response) => {
+                        response.provider_response_id.clone()
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "resp-output-length-source".to_owned(),
+                "resp-output-length-successor".to_owned(),
+            ]
+        );
+        // Runtime-lifetime agent stats restart from zero, so the nonzero
+        // cold-reload aggregate comes from the durable per-response cost
+        // increments: each response's own increment survives exactly once and
+        // sums to the same total as the live run.
+        let cost_increments = after
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ProviderResponseFinished(response) => response.estimated_api_cost_increment,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cost_increments
+                .iter()
+                .map(|increment| increment.as_picodollars())
+                .collect::<Vec<_>>(),
+            vec![30_000_000, 63_000_000]
+        );
+        assert_eq!(
+            cost_increments
+                .iter()
+                .map(|increment| increment.as_picodollars())
+                .sum::<u64>(),
+            93_000_000,
+            "cold reload recomputes the same nonzero total cost"
+        );
+        assert_eq!(
+            usages
+                .iter()
+                .map(|usage| usage.response_received_tokens)
+                .sum::<u64>(),
+            10,
+            "cold reload recomputes the same nonzero token total"
+        );
+    } else {
+        assert_eq!(final_stats.estimated_api_cost.as_picodollars(), 0);
+    }
+    // After restart the journal proves no source resend and no third
+    // inference: exactly the source dispatch and one reserved successor
+    // dispatch, closed by two responses. The transient successor prompt was
+    // already proven by the delivered answer marker.
+    assert_eq!(
+        after
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        2,
+        "restart never resends the source or creates a third inference"
+    );
+    assert_eq!(matched_action_count(&fixture)?, 2);
+    disconnect_ui(&mut observer_b.peer)?;
+    daemon_b.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 const WORKER_PROMPT: &str = "Complete the deterministic worker instruction.";
 const WORKER_PROVIDER_INITIAL: &str = concat!(
     "<tau_internal>You were started by an agent `main`. Your responses will be delivered to it. ",

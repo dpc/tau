@@ -955,6 +955,28 @@ the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 ### Reactive context recovery fields
 
 `agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `automatic_threshold` identifies proactive role/model threshold work, while `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.
+
+`provider.response_finished.output_length_disposition` is also harness-authored
+and defaults to `none`. An eligible reasoning-only `length` terminal may carry
+one `continuation_planned` reservation; its successor checkpoint carries the
+matching `output_length_continuation` owner and remains in the same outer turn.
+The successor response carries `continuation_terminal`. Every `length` terminal
+is semantically incomplete. Watch projection uses category `output_length` and
+sticky state `terminal_incomplete`; late subscribers see that state, while final
+assistant and successful worker notifications remain suppressed.
+Clients must display or report incomplete retained reasoning or partial prose
+rather than treating it as a successful final answer.
+`provider_attempt` is also harness-authored. It defaults to one and records the
+finite transport attempt that produced this terminal, independently of the
+continuation ordinal. Cold watch restore reads this durable value.
+
+A reserved successor rejected for context carries recovery disposition only.
+Its exact post-compaction descendant remains in the lineage. If selection moves
+away instead, Tau closes the dormant original branch with steer, owner, failure,
+and finish facts without dispatching the successor; the selected sibling receives
+only a visible notice. This synthetic failure applies only before the reserved
+successor prompt-start commits. After prompt-start, the dispatched owner supplies
+the sole terminal even if selection moves elsewhere.
 - **`agent.manual_compaction_requested`** — harness-owned durable acceptance of
   a model-callable `compact` or `agent_compact` request, including bounded
   request/caller/target/prompt/tool-call/model correlation.

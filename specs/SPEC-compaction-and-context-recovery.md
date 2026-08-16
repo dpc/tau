@@ -357,3 +357,18 @@ a `□ <exact configured text>` notice in the dedicated internal-notice style
 during live delivery and replay.
 Crossing, queued-delivery, and one-shot suppression state remains runtime-only;
 cleared alerts do not gain synthetic history.
+
+Output-length continuation and context recovery have separate authority.
+Compaction output never creates output-length eligibility, and a `Length`
+terminal never masquerades as context overflow. If the reserved successor
+receives the existing eligible no-output context-window rejection, reactive
+compaction may run under its existing one-shot rules, but the outer turn's
+output-length budget remains spent. A later `Length` is terminal incomplete.
+When the reserved successor is context-rejected, its canonical response carries
+only `recovery_disposition`; it does not also claim an output-length terminal.
+The exact inference checkpoint owned by the successful reactive-compaction
+transaction remains in the original output-length lineage and may publish its
+terminal. Unrelated descendants cannot claim that lineage.
+Compaction and cold context reconstruction replay retained full reasoning plus
+the exact internal continuation steer; summary-only reasoning never becomes
+continuation authority.

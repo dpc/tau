@@ -682,6 +682,52 @@ pre-start failure, and explicit successor recovery independently; retain
 cross-agent `agent_compact` as the asynchronous waitable control case.
 
 
+## Output-length continuation coverage
+
+Treat the source response, reserved steer, successor owner, prompt start,
+successor terminal, and outer-turn finish as separate durable boundaries. Core
+cold-replay tests must cover plan-without-steer, steer-without-owner,
+owner-without-prompt-start, prompt-start-without-terminal, both values of the
+terminal finish-repair bit, malformed or duplicate lineage, off-branch plans,
+spent budgets, and an earlier completed plan followed by the active outstanding
+plan. The owner and prompt-start cuts must prove that restart does not resend.
+
+Harness tests must cover adapter and originator eligibility, exact captured
+model and route use, one continuation per open outer turn, cancellation before
+and after owner publication, branch loss, intercepted and append-rejected steer
+or owner publication, terminal outcomes, tool-call suppression, and reactive
+compaction. Client and worker tests must prove that incomplete output never
+becomes a successful final, one-shot callers keep waiting across the planned
+source, and provider watchers keep a sticky `output_length` terminal. Protocol
+tests own JSON and CBOR round trips for the plan, owner, terminal, and watch
+shapes.
+
+Branch-movement coverage must exercise cold crash cuts after the dormant steer,
+reserved owner, and synthetic terminal. Each cut keeps the sibling selected,
+derives only the next exact repair, emits one visible notice after the owed
+finish, and never creates or sends a provider prompt. Reselecting the repaired
+branch must not revive a retired activation. Cancellation and append rejection
+must still converge on that one dormant failure and leave later queued work
+runnable.
+
+Reactive-compaction coverage must reject and retry the planned rejection before
+starting its transaction, then prove that only the exact transaction-owned
+post-compaction descendant may close the output-length lineage. Cold replay must
+preserve this ownership; an unrelated descendant must not inherit the spent
+budget or terminal authority.
+
+Provider-watch coverage must use a non-default durable provider attempt and
+assert identical live and cold late-subscriber `terminal_incomplete` snapshots
+in JSON and CBOR. It must also prove that a later selected success or unfinished
+dispatch suppresses an older incomplete status rather than reviving it.
+
+The deterministic fake-provider lane must issue exactly two provider requests
+for an eligible source plus successor and must repeat the scenario after a cold
+crash restart. Assert each response's usage and cost increment independently, then
+assert their aggregate once. Keep these focused oracles when changing response
+folding, recovery, accounting, adapters, or terminal presentation.
+
+
 ## Wall-clock timer coverage
 
 `tau-ext-utils` keeps calendar parsing, DST gap/fold selection, and exact

@@ -224,6 +224,52 @@ fn typed_image_scenario_requires_one_correlated_closed_lane() {
     );
 }
 
+fn output_length_scenario(user_text: &str, reasoning: &str, response: &str) -> ScenarioV2 {
+    ScenarioV2::new(
+        "output-length",
+        vec![ScenarioLaneV2 {
+            ctx_id: "output-length".to_owned(),
+            actions: vec![
+                ScenarioActionV2::OutputLengthReasoning {
+                    user_text: user_text.to_owned(),
+                    reasoning: reasoning.to_owned(),
+                    report_usage: false,
+                },
+                ScenarioActionV2::OutputLengthContinuation {
+                    user_text: user_text.to_owned(),
+                    reasoning: reasoning.to_owned(),
+                    response: response.to_owned(),
+                    report_usage: false,
+                },
+            ],
+        }],
+    )
+}
+
+/// The output-limit fixture admits only one bounded correlated source/successor
+/// pair, so it cannot become a general continuation grammar.
+#[test]
+fn output_length_scenario_requires_one_correlated_closed_pair() {
+    let valid = output_length_scenario("user", "reasoning", "answer");
+    assert!(validation::validate_v2(&valid).is_ok());
+
+    let mut mismatch = valid.clone();
+    let ScenarioActionV2::OutputLengthContinuation { reasoning, .. } =
+        &mut mismatch.lanes[0].actions[1]
+    else {
+        unreachable!("constructed output-length continuation");
+    };
+    *reasoning = "other".to_owned();
+    assert!(validation::validate_v2(&mismatch).is_err());
+
+    let mut extra = valid;
+    extra.lanes[0].actions.push(ScenarioActionV2::Text {
+        user_text: "extra".to_owned(),
+        response: "extra".to_owned(),
+    });
+    assert!(validation::validate_v2(&extra).is_err());
+}
+
 /// HumanUi fixture matching projects expected typed text and never invents a
 /// decoded semantic value from the intentionally non-injective provider form.
 #[test]

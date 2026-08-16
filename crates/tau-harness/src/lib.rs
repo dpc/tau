@@ -40,6 +40,8 @@ mod harness;
 mod internal_envelope;
 pub mod internal_tools;
 mod model;
+#[cfg(feature = "output-length-test-barrier")]
+pub mod output_length_test_barrier;
 mod pending_agent_discovery;
 mod prompt;
 mod provider_cache_residency;

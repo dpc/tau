@@ -62,6 +62,28 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response.
         response: String,
     },
+    /// Reach the output limit with one replay-safe full reasoning item and no
+    /// assistant message or tool call.
+    OutputLengthReasoning {
+        /// Exact initial user text.
+        user_text: String,
+        /// Exact nonempty full reasoning text retained for one continuation.
+        reasoning: String,
+        /// Whether this response reports deterministic nonzero token usage.
+        report_usage: bool,
+    },
+    /// Complete the sole output-length continuation after validating exact
+    /// replay.
+    OutputLengthContinuation {
+        /// Exact initial user text retained from the source request.
+        user_text: String,
+        /// Exact full reasoning text retained from the source response.
+        reasoning: String,
+        /// Complete normal assistant response.
+        response: String,
+        /// Whether this response reports deterministic nonzero token usage.
+        report_usage: bool,
+    },
     /// Return a validated standalone-compaction replacement window.
     StandaloneCompaction {
         /// Exact complete six-section summary returned by the provider.

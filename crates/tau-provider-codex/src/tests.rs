@@ -17,6 +17,7 @@ fn debug_response_producer_submits_typed_compressed_capture_job() {
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         output_items: Vec::new(),
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -28,6 +29,7 @@ fn debug_response_producer_submits_typed_compressed_capture_job() {
             transport: tau_proto::ProviderBackendTransport::Websocket,
             stale_chain_fallback: false,
         }),
+        provider_attempt: Default::default(),
         provider_response_id: Some("response-test".to_owned()),
         ws_pool_delta: None,
     };

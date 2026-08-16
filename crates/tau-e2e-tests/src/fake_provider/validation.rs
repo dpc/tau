@@ -158,6 +158,51 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
         }
         for (action_index, action) in lane.actions.iter().enumerate() {
             match action {
+                ScenarioActionV2::OutputLengthReasoning {
+                    user_text,
+                    reasoning,
+                    ..
+                } if user_text.is_empty()
+                    || 4 * 1024 < user_text.len()
+                    || reasoning.is_empty()
+                    || 4 * 1024 < reasoning.len()
+                    || !matches!(
+                        lane.actions.get(action_index + 1),
+                        Some(ScenarioActionV2::OutputLengthContinuation {
+                            user_text: next_user,
+                            reasoning: next_reasoning,
+                            ..
+                        }) if next_user == user_text && next_reasoning == reasoning
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "output-length reasoning must have bounded text and one adjacent matching continuation",
+                    ));
+                }
+                ScenarioActionV2::OutputLengthContinuation {
+                    user_text,
+                    reasoning,
+                    response,
+                    ..
+                } if user_text.is_empty()
+                    || 4 * 1024 < user_text.len()
+                    || reasoning.is_empty()
+                    || 4 * 1024 < reasoning.len()
+                    || response.is_empty()
+                    || 4 * 1024 < response.len()
+                    || !matches!(
+                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                        Some(ScenarioActionV2::OutputLengthReasoning {
+                            user_text: source_user,
+                            reasoning: source_reasoning,
+                            ..
+                        }) if source_user == user_text && source_reasoning == reasoning
+                    ) =>
+                {
+                    return Err(ClientError::handler(
+                        "output-length continuation must be bounded and follow its matching reasoning terminal",
+                    ));
+                }
                 ScenarioActionV2::DummyToolCall { call_id, .. }
                     if !dummy_call_ids.insert(call_id.as_str())
                         || 2 < dummy_call_ids.len()
@@ -737,6 +782,46 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     {
         return Err(ClientError::handler(
             "typed-image scenario requires one bounded call/result/replay lane",
+        ));
+    }
+    let output_length_lanes = scenario
+        .lanes
+        .iter()
+        .filter(|lane| {
+            lane.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    ScenarioActionV2::OutputLengthReasoning { .. }
+                        | ScenarioActionV2::OutputLengthContinuation { .. }
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if !output_length_lanes.is_empty()
+        && (scenario.lanes.len() != 1
+            || output_length_lanes.len() != 1
+            || !matches!(
+                output_length_lanes[0].actions.as_slice(),
+                [
+                    ScenarioActionV2::OutputLengthReasoning {
+                        user_text,
+                        reasoning,
+                        report_usage,
+                    },
+                    ScenarioActionV2::OutputLengthContinuation {
+                        user_text: next_user,
+                        reasoning: next_reasoning,
+                        response,
+                        report_usage: next_report_usage,
+                    },
+                ] if user_text == next_user
+                    && reasoning == next_reasoning
+                    && report_usage == next_report_usage
+                    && !response.is_empty()
+            ))
+    {
+        return Err(ClientError::handler(
+            "output-length scenario requires one closed matching reasoning/continuation lane",
         ));
     }
     if 1 < dummy_call_ids.len()

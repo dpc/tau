@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::{fs as path_std_fs, thread};
 
@@ -178,6 +178,49 @@ pub(super) fn spawn_daemon(
     socket: &Path,
     status: tau_harness::SessionLaunchStatus,
 ) -> DaemonGuard {
+    spawn_daemon_inner(fixture, socket, status, None)
+}
+
+/// Closed durable cut supported by the deterministic output-length daemon.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum OutputLengthCrashCut {
+    /// Stop after the planned response and before scheduling its steer.
+    PlannedResponse,
+    /// Stop after the continuation steer and before scheduling its owner.
+    ContinuationSteer,
+}
+
+impl OutputLengthCrashCut {
+    fn arg(self) -> &'static str {
+        match self {
+            Self::PlannedResponse => "planned-response",
+            Self::ContinuationSteer => "continuation-steer",
+        }
+    }
+}
+
+/// Spawn one daemon generation with a one-shot post-commit crash barrier.
+pub(super) fn spawn_daemon_at_output_length_cut(
+    fixture: &DeterministicFixture,
+    socket: &Path,
+    status: tau_harness::SessionLaunchStatus,
+    cut: OutputLengthCrashCut,
+    reached_path: &Path,
+) -> DaemonGuard {
+    spawn_daemon_inner(
+        fixture,
+        socket,
+        status,
+        Some((cut, reached_path.to_path_buf())),
+    )
+}
+
+fn spawn_daemon_inner(
+    fixture: &DeterministicFixture,
+    socket: &Path,
+    status: tau_harness::SessionLaunchStatus,
+    output_length_cut: Option<(OutputLengthCrashCut, PathBuf)>,
+) -> DaemonGuard {
     // Mark orchestration incomplete until exact scenario consumption succeeds.
     fixture.mark_daemon_started();
     let stderr_path = fixture
@@ -204,6 +247,12 @@ pub(super) fn spawn_daemon(
     }
     if fixture.dummy_enabled() {
         command.arg("--test-dummy");
+    }
+    if let Some((cut, reached_path)) = output_length_cut {
+        command
+            .arg("--output-length-cut")
+            .arg(cut.arg())
+            .arg(reached_path);
     }
     let child = command
         .stdin(Stdio::null())

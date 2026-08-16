@@ -3374,6 +3374,7 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
             model: Some("test/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(tau_proto::AgentHead::Root),
+            output_length_continuation: None,
         });
     h.publish_for_agent(&cid_a, old_checkpoint.clone());
     assert!(h.pending_intercept.is_some());
@@ -3473,6 +3474,7 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
             model: Some("test/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(tau_proto::AgentHead::Root),
+            output_length_continuation: None,
         }),
     );
     assert!(h.pending_intercept.is_some());
@@ -4640,11 +4642,13 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             failure_kind: None,
             context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         }),
@@ -5874,7 +5878,11 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     assert_eq!(prompt_created_count(&h), prompts_before);
     assert!(h.pending_intercept.is_some());
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    assert!(!h.pending_publish_idle_dispatches[0].committed_activation);
+    assert!(
+        !h.pending_publish_idle_dispatches[0]
+            .obligation
+            .is_committed()
+    );
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -5897,7 +5905,11 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         })
     )));
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    assert!(!h.pending_publish_idle_dispatches[0].committed_activation);
+    assert!(
+        !h.pending_publish_idle_dispatches[0]
+            .obligation
+            .is_committed()
+    );
 
     h.handle_extension_event(
         "interceptor-passive-batch",

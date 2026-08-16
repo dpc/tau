@@ -194,3 +194,14 @@ model-visible provider and work-status transitions use
 isolated activation. Initial and
 redundant structured snapshots have no wake and no provider block. Replay
 retains canonical facts without waking or refanout.
+Output-token-limit terminals use provider category `output_length`. An eligible
+first reasoning-only terminal remains nonterminal while its one continuation is
+owed. Every exhausted or ineligible limit publishes
+`terminal_incomplete { category: output_length, attempt }`; this state is sticky
+for that provider prompt and remains the late-subscriber snapshot. It never
+publishes assistant-final content, completes a delegated worker, or causes a
+successful detach. Cold restore reconstructs the same terminal snapshot from the
+durable canonical response rather than promoting it to a final.
+The attempt is the canonical response's durable `provider_attempt`, not a
+continuation ordinal or a replay-time count. Cold restore reconstructs the
+snapshot without refanning a historical live occurrence.

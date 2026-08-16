@@ -329,11 +329,13 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     })
@@ -410,6 +412,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(tau_proto::AgentHead::Root),
+            output_length_continuation: None,
         })
     };
     let prompt = |id: &str, operation| {

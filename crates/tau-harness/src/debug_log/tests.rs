@@ -304,6 +304,7 @@ fn published_line_preserves_enriched_token_usage() {
             observation: tau_proto::ContextLimitObservation::RejectedBelowAdvertisedLimit,
         }),
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: Some(ProviderTokenUsage {
             model: Some(model),
@@ -317,6 +318,7 @@ fn published_line_preserves_enriched_token_usage() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     });
@@ -875,11 +877,13 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     });

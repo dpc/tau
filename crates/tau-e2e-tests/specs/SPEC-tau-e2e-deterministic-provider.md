@@ -170,6 +170,27 @@ correlated successful result whose exact sanitized text names the child and
 contains no subscription identity. No other harness-owned tool enters the
 grammar.
 
+One separate sole-lane two-action shape exercises the output-length contract.
+Its first action emits exactly one nonempty full-reasoning `Length` response,
+with closed Chat Completions backend metadata and no assistant message or tool
+call. Its adjacent successor accepts only the exact initial HumanUi projection,
+retained full reasoning, and shared harness-internal continuation instruction in
+that order, then emits one normal answer. The pair cannot mix with any other
+action or lane. The acceptance oracle requires exactly two provider requests,
+one continuation steer and owner, two independently accounted terminal facts,
+and no third request.
+The pair's matching `report_usage` flags select either fixed nonzero, distinct
+per-response usage or no usage at all. The live oracle checks each captured rate
+and cost increment plus their aggregate exactly once; the cold-cut oracle retains
+the absent-usage case.
+The restart oracle alone enables a feature-gated one-shot barrier after the
+planned response or continuation steer has completed durable publication and
+before its next post-commit action. The test daemon accepts only those two cuts
+and an absent marker directly below its private harness-state root. It writes
+and syncs that marker, blocks the event loop, and relies on the existing
+process-group `SIGKILL` owner; no production configuration or durable fact
+represents the barrier.
+
 V1's closed current-status sequence emits Working plus one dummy call in either
 provider order, optionally substitutes one rejected status state, validates the
 resulting reminder behavior, performs another Working-state tool round, attempts

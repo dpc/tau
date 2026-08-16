@@ -245,6 +245,7 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
             model: Some("test/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(tau_proto::AgentHead::Root),
+            output_length_continuation: None,
         })
     };
     apply_persisted_test_record(
@@ -438,11 +439,13 @@ fn provider_response_rejects_input_side_tool_result_items() {
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         usage: None,
         originator: PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     };
@@ -629,11 +632,13 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             failure_kind: None,
             context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             usage: None,
             originator: PromptOriginator::User,
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         };
@@ -716,11 +721,13 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             failure_kind: None,
             context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             usage: None,
             originator: PromptOriginator::User,
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         },
@@ -918,6 +925,7 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
         model: Some(successor.model),
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(successor.cut),
+        output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
         .expect("successor-owned checkpoint");
@@ -948,11 +956,13 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
             failure_kind: None,
             context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             originator: PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         },
@@ -975,6 +985,7 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(AgentHead::Root),
+        output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
         .expect("ordinary checkpoint is valid");
@@ -991,11 +1002,13 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     };
@@ -1047,6 +1060,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(AgentHead::Root),
+        output_length_continuation: None,
     };
     let planned_response = tau_proto::ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -1060,11 +1074,13 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     };
@@ -1173,6 +1189,12 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
                 finished: true,
                 recovery_disposition:
                     tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+                output_length_disposition: tau_proto::OutputLengthDisposition::None,
+                provider_attempt: None,
+                provider_stop_reason: Some(tau_proto::ProviderStopReason::Error),
+                output_length_plan_node: None,
+                output_length_steer_node: None,
+                response_node: None,
             },
         );
         assert!(
@@ -1247,6 +1269,7 @@ fn compaction_fold_rejects_premature_and_unknown_checkpoints() {
         model: None,
         operation: None,
         activation_cut: None,
+        output_length_continuation: None,
     };
     assert!(
         validation_error(
@@ -1305,6 +1328,7 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
         model: Some(started.model),
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(started.cut),
+        output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
         .expect("exact checkpoint");
@@ -1542,6 +1566,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             model: Some(started.model.clone()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(started.cut),
+            output_length_continuation: None,
         };
         let records = vec![
             record(0, Event::AgentStandaloneCompactionStarted(started.clone())),
@@ -1922,6 +1947,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(AgentHead::Root),
+            output_length_continuation: None,
         }),
         parent: AgentEventParent::Under(NodeId::new(0)),
         fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
@@ -1981,11 +2007,13 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 failure_kind: None,
                 context_limit_telemetry: None,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 usage: None,
                 originator: PromptOriginator::User,
                 compaction_original_input_tokens: None,
                 compaction_compacted_input_tokens: None,
                 backend: None,
+                provider_attempt: Default::default(),
                 provider_response_id: Some("response-id".to_owned()),
                 ws_pool_delta: None,
             }),
@@ -2362,6 +2390,7 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(AgentHead::Root),
+            output_length_continuation: None,
         });
     let input = Event::AgentMessageReceived(AgentMessageReceived {
         message_id: tau_proto::AgentMessageId::parse("v1-input").expect("test message id"),
@@ -2559,6 +2588,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
                 model: Some("provider/model".into()),
                 operation: Some(tau_proto::PromptOperation::Inference),
                 activation_cut: Some(AgentHead::Root),
+                output_length_continuation: None,
             }),
             AgentJournalFoldSemantics::InferenceDeferredInputV1,
         );
@@ -2758,6 +2788,7 @@ fn inference_deferred_input_v1_head_move_resets_branch_eligibility() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(AgentHead::Root),
+            output_length_continuation: None,
         });
     let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
     response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
@@ -2848,6 +2879,7 @@ fn inference_deferred_input_v1_defers_only_exact_owner_branch() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(AgentHead::Node(NodeId::new(0))),
+            output_length_continuation: None,
         });
     let mut response = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
     response.stop_reason = tau_proto::ProviderStopReason::EndTurn;
@@ -2957,6 +2989,7 @@ fn inference_deferred_input_v1_terminal_fallback_rejects_late_response() {
                 model: Some("provider/model".into()),
                 operation: Some(tau_proto::PromptOperation::Inference),
                 activation_cut: Some(AgentHead::Root),
+                output_length_continuation: None,
             });
         let records = vec![
             record(
@@ -3051,6 +3084,7 @@ fn mixed_legacy_v1_replay_preserves_old_node_targets() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(AgentHead::Root),
+            output_length_continuation: None,
         })
     };
     let records = vec![
@@ -3172,6 +3206,7 @@ fn v1_terminal_fallback_restores_selected_queue_not_global_last_node() {
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
             activation_cut: Some(AgentHead::Root),
+            output_length_continuation: None,
         }),
         parent: AgentEventParent::Under(NodeId::new(0)),
         fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
@@ -3236,11 +3271,13 @@ fn tool_calling_response(
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         usage: None,
         originator: PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }
@@ -3520,6 +3557,7 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(AgentHead::Root),
+        output_length_continuation: None,
     };
     tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
         .expect("inference owner");
@@ -3546,6 +3584,7 @@ fn prompt_started_requires_unique_matching_owner() {
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(AgentHead::Root),
+        output_length_continuation: None,
     };
     let started = tau_proto::AgentPromptStarted {
         model_params: Some(tau_proto::ModelParams::default()),
@@ -3600,6 +3639,1341 @@ fn prompt_started_requires_unique_matching_owner() {
     assert_eq!(tree.ordinary_inference_generation(), 1);
     assert!(validation_error(&tree, Event::AgentPromptStarted(started)).contains("duplicate"));
     assert_eq!(tree.ordinary_inference_generation(), 1);
+}
+
+/// Complete, valid source → plan → steer → owner → prompt-start → terminal
+/// journal records shared by focused output-length recovery regressions.
+struct OutputLengthRecoveryFixture {
+    /// Durable agent whose journal owns every fixture record.
+    agent_id: tau_proto::AgentId,
+    /// Reserved successor dispatch used by ownership assertions.
+    owner: tau_proto::AgentInferenceDispatchStarted,
+    /// Complete valid journal, ordered through the successor terminal.
+    records: Vec<PersistedAgentEvent>,
+    /// Transcript head created by the reserved continuation steer.
+    steer_node: NodeId,
+    /// Transcript head created by the completed successor response.
+    terminal_node: NodeId,
+}
+
+#[derive(Clone, Copy)]
+/// Inclusive durable journal cut exposed by the shared recovery fixture.
+enum OutputLengthFixturePhase {
+    /// Source response durably reserves the successor.
+    Plan,
+    /// Exact internal steer has committed.
+    Steer,
+    /// Reserved successor owner has committed.
+    Owner,
+    /// Reserved successor prompt-start has committed.
+    PromptStart,
+    /// Reserved successor terminal has committed.
+    Terminal,
+}
+
+impl OutputLengthRecoveryFixture {
+    fn through(&self, phase: OutputLengthFixturePhase) -> &[PersistedAgentEvent] {
+        let phase_index = self
+            .records
+            .iter()
+            .position(|record| match (&record.event, phase) {
+                (Event::ProviderResponseFinished(response), OutputLengthFixturePhase::Plan) => {
+                    matches!(
+                        response.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                    )
+                }
+                (Event::AgentPromptSteered(_), OutputLengthFixturePhase::Steer) => true,
+                (Event::AgentInferenceDispatchStarted(owner), OutputLengthFixturePhase::Owner) => {
+                    owner.output_length_continuation.is_some()
+                }
+                (Event::AgentPromptStarted(started), OutputLengthFixturePhase::PromptStart) => {
+                    started.agent_prompt_id == self.owner.agent_prompt_id
+                }
+                (Event::ProviderResponseFinished(response), OutputLengthFixturePhase::Terminal) => {
+                    matches!(
+                        response.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                    )
+                }
+                _ => false,
+            })
+            .expect("fixture contains requested output-length phase");
+        &self.records[..=phase_index]
+    }
+
+    fn steer(&self) -> tau_proto::AgentPromptSteered {
+        self.records
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::AgentPromptSteered(steer) => Some(steer.clone()),
+                _ => None,
+            })
+            .expect("fixture steer phase")
+    }
+
+    fn source_response(&self) -> tau_proto::ProviderResponseFinished {
+        self.records
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::ProviderResponseFinished(response)
+                    if matches!(
+                        response.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                    ) =>
+                {
+                    Some(response.clone())
+                }
+                _ => None,
+            })
+            .expect("fixture plan phase")
+    }
+
+    fn source_dispatch_record(&self) -> PersistedAgentEvent {
+        self.records
+            .iter()
+            .find(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentInferenceDispatchStarted(owner)
+                        if owner.output_length_continuation.is_none()
+                )
+            })
+            .cloned()
+            .expect("fixture source dispatch")
+    }
+
+    fn outer_turn_started(&self) -> tau_proto::AgentOuterTurnStarted {
+        self.records
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::AgentOuterTurnStarted(started) => Some(started.clone()),
+                _ => None,
+            })
+            .expect("fixture outer-turn start")
+    }
+
+    fn source_prompt_started(&self) -> tau_proto::AgentPromptStarted {
+        let source_prompt_id = self
+            .owner
+            .output_length_continuation
+            .as_ref()
+            .expect("fixture continuation owner")
+            .source_agent_prompt_id
+            .clone();
+        self.records
+            .iter()
+            .find_map(|record| match &record.event {
+                Event::AgentPromptStarted(started)
+                    if started.agent_prompt_id == source_prompt_id =>
+                {
+                    Some(started.clone())
+                }
+                _ => None,
+            })
+            .expect("fixture source prompt-start")
+    }
+
+    fn owner(&self) -> &tau_proto::AgentInferenceDispatchStarted {
+        &self.owner
+    }
+
+    fn agent_id(&self) -> &tau_proto::AgentId {
+        &self.agent_id
+    }
+
+    const fn steer_head(&self) -> AgentHead {
+        AgentHead::Node(self.steer_node)
+    }
+
+    const fn terminal_node(&self) -> NodeId {
+        self.terminal_node
+    }
+
+    fn source_dispatch_in<'a>(
+        &self,
+        records: &'a mut [PersistedAgentEvent],
+    ) -> &'a mut PersistedAgentEvent {
+        let source_prompt_id = &self
+            .owner
+            .output_length_continuation
+            .as_ref()
+            .expect("fixture continuation owner")
+            .source_agent_prompt_id;
+        records
+            .iter_mut()
+            .find(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentInferenceDispatchStarted(owner)
+                        if owner.agent_prompt_id == *source_prompt_id
+                            && owner.output_length_continuation.is_none()
+                )
+            })
+            .expect("source dispatch record")
+    }
+
+    fn source_prompt_start_in<'a>(
+        &self,
+        records: &'a mut [PersistedAgentEvent],
+    ) -> &'a mut tau_proto::AgentPromptStarted {
+        let source_prompt_id = &self
+            .owner
+            .output_length_continuation
+            .as_ref()
+            .expect("fixture continuation owner")
+            .source_agent_prompt_id;
+        records
+            .iter_mut()
+            .find_map(|record| match &mut record.event {
+                Event::AgentPromptStarted(started)
+                    if started.agent_prompt_id == *source_prompt_id =>
+                {
+                    Some(started)
+                }
+                _ => None,
+            })
+            .expect("source prompt-start record")
+    }
+
+    fn steer_in<'a>(
+        &self,
+        records: &'a mut [PersistedAgentEvent],
+    ) -> &'a mut tau_proto::AgentPromptSteered {
+        records
+            .iter_mut()
+            .find_map(|record| match &mut record.event {
+                Event::AgentPromptSteered(steer)
+                    if steer.agent_id == self.agent_id
+                        && steer.internal_kind
+                            == Some(tau_proto::InternalPromptKind::OutputLengthContinuation) =>
+                {
+                    Some(steer)
+                }
+                _ => None,
+            })
+            .expect("continuation steer record")
+    }
+
+    fn owner_in<'a>(
+        &self,
+        records: &'a mut [PersistedAgentEvent],
+    ) -> &'a mut tau_proto::AgentInferenceDispatchStarted {
+        records
+            .iter_mut()
+            .find_map(|record| match &mut record.event {
+                Event::AgentInferenceDispatchStarted(owner)
+                    if owner.agent_prompt_id == self.owner.agent_prompt_id
+                        && owner.output_length_continuation.is_some() =>
+                {
+                    Some(owner)
+                }
+                _ => None,
+            })
+            .expect("continuation owner record")
+    }
+
+    fn terminal_in<'a>(
+        &self,
+        records: &'a mut [PersistedAgentEvent],
+    ) -> &'a mut tau_proto::ProviderResponseFinished {
+        records
+            .iter_mut()
+            .find_map(|record| match &mut record.event {
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == self.owner.agent_prompt_id
+                        && matches!(
+                            response.output_length_disposition,
+                            tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                        ) =>
+                {
+                    Some(response)
+                }
+                _ => None,
+            })
+            .expect("continuation terminal record")
+    }
+}
+
+fn output_length_record(
+    seq: u64,
+    parent: AgentEventParent,
+    event: Event,
+    fold_semantics: AgentJournalFoldSemantics,
+) -> PersistedAgentEvent {
+    PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([seq as u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent,
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(seq),
+    }
+}
+
+fn output_length_steer(agent_id: tau_proto::AgentId) -> tau_proto::AgentPromptSteered {
+    tau_proto::AgentPromptSteered {
+        agent_id,
+        inference_activation: true,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        text: tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.to_owned(),
+        trusted_internal_spans: vec![tau_proto::TrustedInternalSpan {
+            start: 0,
+            end: u32::try_from(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.len())
+                .expect("bounded instruction"),
+        }],
+        message_class: tau_proto::PromptMessageClass::Internal,
+        self_compaction_terminal: None,
+        internal_kind: Some(tau_proto::InternalPromptKind::OutputLengthContinuation),
+        ctx_id: None,
+    }
+}
+
+fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
+    let agent_id = agent_id();
+    let source_prompt_id = tau_proto::AgentPromptId::parse("ap-source").expect("source prompt id");
+    let successor_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-successor").expect("successor prompt id");
+    let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&source_prompt_id);
+    let model: tau_proto::ModelId = "provider/model".into();
+    let source = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: None,
+        agent_prompt_id: source_prompt_id.clone(),
+        through: AgentHead::Root,
+        model: Some(model.clone()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+        output_length_continuation: None,
+    };
+    let turn = tau_proto::AgentOuterTurnStarted {
+        agent_id: agent_id.clone(),
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        outer_turn_id: outer_turn_id.clone(),
+        agent_prompt_id: source_prompt_id.clone(),
+        runtime_id: tau_proto::AccountingRuntimeId::parse("runtime").expect("runtime id"),
+        activation: tau_proto::AgentOuterTurnActivation::External {
+            correlation_id: tau_proto::AgentActivationCorrelationId::parse("activation")
+                .expect("activation id"),
+        },
+    };
+    let source_started = tau_proto::AgentPromptStarted {
+        agent_prompt_id: source_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        model: model.clone(),
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: Some(outer_turn_id.clone()),
+        operation: tau_proto::PromptOperation::Inference,
+        originator: PromptOriginator::User,
+        ctx_id: None,
+    };
+    let response = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: source_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        output_items: vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "reasoning".to_owned(),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::Length,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationPlanned {
+            outer_turn_id: outer_turn_id.clone(),
+            successor_agent_prompt_id: successor_prompt_id.clone(),
+            ordinal: 1,
+            limit: 1,
+        },
+        originator: PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::ChatCompletions,
+            base_url: "https://example.invalid/v1".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::HttpSse,
+            stale_chain_fallback: false,
+        }),
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    let steer = output_length_steer(agent_id.clone());
+    let owner = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: None,
+        agent_prompt_id: successor_prompt_id,
+        through: AgentHead::Node(NodeId::new(1)),
+        model: Some(model.clone()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+        output_length_continuation: Some(tau_proto::OutputLengthContinuationOwner {
+            source_agent_prompt_id: source_prompt_id,
+            outer_turn_id: outer_turn_id.clone(),
+            ordinal: 1,
+        }),
+    };
+    let successor_started = tau_proto::AgentPromptStarted {
+        agent_prompt_id: owner.agent_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        model,
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: Some(outer_turn_id.clone()),
+        operation: tau_proto::PromptOperation::Inference,
+        originator: PromptOriginator::User,
+        ctx_id: None,
+    };
+    let terminal = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: owner.agent_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "finished".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id,
+            source_agent_prompt_id: owner
+                .output_length_continuation
+                .as_ref()
+                .expect("continuation owner")
+                .source_agent_prompt_id
+                .clone(),
+            ordinal: 1,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Completed,
+            outer_turn_finish_owed: true,
+        },
+        originator: PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::ChatCompletions,
+            base_url: "https://example.invalid/v1".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::HttpSse,
+            stale_chain_fallback: false,
+        }),
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    let records = vec![
+        output_length_record(
+            0,
+            AgentEventParent::Root,
+            Event::AgentInferenceDispatchStarted(source),
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        output_length_record(
+            1,
+            AgentEventParent::Root,
+            Event::AgentOuterTurnStarted(turn),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        output_length_record(
+            2,
+            AgentEventParent::Root,
+            Event::AgentPromptStarted(source_started),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        output_length_record(
+            3,
+            AgentEventParent::Root,
+            Event::ProviderResponseFinished(response),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        output_length_record(
+            4,
+            AgentEventParent::Under(NodeId::new(0)),
+            Event::AgentPromptSteered(steer),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        output_length_record(
+            5,
+            AgentEventParent::Under(NodeId::new(1)),
+            Event::AgentInferenceDispatchStarted(owner.clone()),
+            AgentJournalFoldSemantics::InferenceDeferredInputV1,
+        ),
+        output_length_record(
+            6,
+            AgentEventParent::Under(NodeId::new(1)),
+            Event::AgentPromptStarted(successor_started),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+        output_length_record(
+            7,
+            AgentEventParent::Under(NodeId::new(1)),
+            Event::ProviderResponseFinished(terminal),
+            AgentJournalFoldSemantics::Legacy,
+        ),
+    ];
+    OutputLengthRecoveryFixture {
+        agent_id,
+        owner,
+        records,
+        steer_node: NodeId::new(1),
+        terminal_node: NodeId::new(2),
+    }
+}
+
+/// Live source dispatch, turn, prompt-start, and response folding must project
+/// the exact reserved successor rather than deriving authority from cold data.
+#[test]
+fn output_length_recovery_projects_exact_live_plan() {
+    let fixture = output_length_recovery_fixture();
+    let mut tree = AgentTree::from_events(fixture.agent_id().clone(), &[]);
+    tree.apply_persisted_record(&fixture.source_dispatch_record())
+        .expect("marked source dispatch");
+    let turn = fixture.outer_turn_started();
+    tree.validate_event(&Event::AgentOuterTurnStarted(turn.clone()))
+        .expect("outer-turn start");
+    tree.apply_event(&Event::AgentOuterTurnStarted(turn));
+    let started = fixture.source_prompt_started();
+    tree.validate_event(&Event::AgentPromptStarted(started.clone()))
+        .expect("source prompt-start");
+    tree.apply_event(&Event::AgentPromptStarted(started));
+    let response = fixture.source_response();
+    tree.validate_event(&Event::ProviderResponseFinished(response.clone()))
+        .expect("planned response");
+    tree.apply_event(&Event::ProviderResponseFinished(response));
+    assert!(matches!(
+        tree.output_length_continuation_recovery(),
+        Some(super::OutputLengthContinuationRecovery::SteerNeeded {
+            successor_agent_prompt_id,
+            ..
+        }) if successor_agent_prompt_id == fixture.owner().agent_prompt_id
+    ));
+}
+
+/// Cold plan and steer cuts project only their exact missing fact, while owner
+/// and prompt-start cuts conservatively suppress resend.
+#[test]
+fn output_length_recovery_projects_exact_cold_cuts() {
+    let fixture = output_length_recovery_fixture();
+    let plan_cut = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::Plan),
+    )
+    .expect("cold plan cut");
+    assert!(matches!(
+        plan_cut.output_length_continuation_recovery(),
+        Some(super::OutputLengthContinuationRecovery::SteerNeeded {
+            successor_agent_prompt_id,
+            ..
+        }) if successor_agent_prompt_id == fixture.owner().agent_prompt_id
+    ));
+
+    let mut plan_cut = plan_cut;
+    let steer = fixture.steer();
+    plan_cut
+        .validate_event(&Event::AgentPromptSteered(steer.clone()))
+        .expect("exact steer");
+    plan_cut.apply_event(&Event::AgentPromptSteered(steer.clone()));
+    assert!(
+        plan_cut
+            .validate_event(&Event::AgentPromptSteered(steer))
+            .is_err()
+    );
+    let through = match plan_cut.output_length_continuation_recovery() {
+        Some(super::OutputLengthContinuationRecovery::OwnerNeeded { through, .. }) => through,
+        recovery => panic!("expected owner repair, got {recovery:?}"),
+    };
+    assert_eq!(through, fixture.steer_head());
+
+    let steer_cut = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::Steer),
+    )
+    .expect("cold steer cut");
+    assert!(matches!(
+        steer_cut.output_length_continuation_recovery(),
+        Some(super::OutputLengthContinuationRecovery::OwnerNeeded {
+            through,
+            ..
+        }) if through == fixture.steer_head()
+    ));
+    for (name, records) in [
+        ("owner", fixture.through(OutputLengthFixturePhase::Owner)),
+        (
+            "prompt-start",
+            fixture.through(OutputLengthFixturePhase::PromptStart),
+        ),
+    ] {
+        let cut = AgentTree::try_from_events(fixture.agent_id().clone(), records)
+            .unwrap_or_else(|error| panic!("cold {name} cut: {error}"));
+        assert_eq!(cut.output_length_continuation_recovery(), None);
+        assert!(matches!(
+            cut.inference_dispatch_recovery(),
+            Some(super::InferenceDispatchRecovery::DispatchUncertain(_))
+        ));
+    }
+}
+
+/// Reactive recovery from the reserved successor keeps only recovery authority
+/// on that response, then binds the exact transaction-owned descendant back to
+/// the original output-length lineage.
+#[test]
+fn output_length_reactive_descendant_resolves_exact_owner() {
+    let fixture = output_length_recovery_fixture();
+    let mut tree = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::PromptStart),
+    )
+    .expect("reserved successor cut");
+    let owner = fixture.owner().clone();
+    let continuation = owner
+        .output_length_continuation
+        .as_ref()
+        .expect("continuation owner")
+        .clone();
+    let rejection = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: owner.agent_prompt_id.clone(),
+        agent_id: fixture.agent_id().clone(),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("context overflow".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        provider_attempt: tau_proto::ProviderAttempt::new(3).expect("nonzero attempt"),
+        originator: PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    tree.validate_event(&Event::ProviderResponseFinished(rejection.clone()))
+        .expect("reserved context rejection");
+    tree.apply_event(&Event::ProviderResponseFinished(rejection));
+
+    let mut started = compaction_start("ct-output-length-reactive");
+    started.agent_id = fixture.agent_id().clone();
+    started.compact_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-output-length-compact").expect("compact prompt id");
+    started.resume_through = Some(owner.through);
+    started.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+        failed_agent_prompt_id: owner.agent_prompt_id.clone(),
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("reactive compaction start");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    let compact_parent = AgentHead::Node(tree.head().expect("rejected response node"));
+    let compacted = tau_proto::AgentCompacted {
+        agent_id: fixture.agent_id().clone(),
+        transaction_id: Some(started.transaction_id.clone()),
+        cut: Some(started.cut),
+        suffix_end: Some(compact_parent),
+        compact_prompt_id: Some(started.compact_prompt_id.clone()),
+        model: Some(started.model.clone()),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    };
+    tree.validate_event(&Event::AgentCompacted(compacted.clone()))
+        .expect("reactive compaction success");
+    tree.apply_event(&Event::AgentCompacted(compacted));
+    let descendant_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-output-length-descendant").expect("descendant id");
+    let descendant = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: fixture.agent_id().clone(),
+        transaction_id: Some(started.transaction_id),
+        agent_prompt_id: descendant_prompt_id.clone(),
+        through: AgentHead::Node(tree.head().expect("compaction node")),
+        model: Some(started.model),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(started.cut),
+        output_length_continuation: None,
+    };
+    let mut unrelated = descendant.clone();
+    unrelated.agent_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-unrelated-descendant").expect("unrelated id");
+    unrelated.transaction_id = None;
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(unrelated.clone()));
+    assert_eq!(
+        tree.output_length_lineage_owner_for_prompt(&unrelated.agent_prompt_id),
+        None
+    );
+    tree.validate_event(&Event::AgentInferenceDispatchStarted(descendant.clone()))
+        .expect("exact post-compaction descendant");
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(descendant.clone()));
+    assert_eq!(
+        tree.output_length_lineage_owner_for_prompt(&descendant_prompt_id),
+        Some(continuation.clone())
+    );
+    let descendant_started = tau_proto::AgentPromptStarted {
+        agent_prompt_id: descendant_prompt_id.clone(),
+        agent_id: fixture.agent_id().clone(),
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        model: descendant.model.clone().expect("descendant model"),
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: Some(continuation.outer_turn_id.clone()),
+        operation: tau_proto::PromptOperation::Inference,
+        originator: PromptOriginator::User,
+        ctx_id: None,
+    };
+    tree.validate_event(&Event::AgentPromptStarted(descendant_started.clone()))
+        .expect("descendant prompt-start");
+    tree.apply_event(&Event::AgentPromptStarted(descendant_started));
+    let terminal = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: descendant_prompt_id,
+        agent_id: fixture.agent_id().clone(),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Length,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id: continuation.outer_turn_id.clone(),
+            source_agent_prompt_id: continuation.source_agent_prompt_id,
+            ordinal: continuation.ordinal,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Incomplete,
+            outer_turn_finish_owed: true,
+        },
+        provider_attempt: Default::default(),
+        originator: PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    tree.validate_event(&Event::ProviderResponseFinished(terminal.clone()))
+        .expect("descendant terminal");
+    tree.apply_event(&Event::ProviderResponseFinished(terminal));
+    assert_eq!(
+        tree.output_length_budget_spent_outer_turn(),
+        Some(continuation.outer_turn_id)
+    );
+}
+
+/// Output-length plans require a marked user-owned source dispatch and prompt
+/// start; legacy or side-conversation sources cannot mint continuation work.
+#[test]
+fn output_length_recovery_rejects_unmarked_and_side_owned_sources() {
+    let fixture = output_length_recovery_fixture();
+    let mut legacy_source = fixture.through(OutputLengthFixturePhase::Plan).to_vec();
+    fixture
+        .source_dispatch_in(&mut legacy_source)
+        .fold_semantics = AgentJournalFoldSemantics::Legacy;
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &legacy_source).is_err());
+
+    let mut side_started = fixture.through(OutputLengthFixturePhase::Plan).to_vec();
+    let started = fixture.source_prompt_start_in(&mut side_started);
+    started.originator = PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::parse("side-owner").expect("extension name"),
+        query_id: "side-query".to_owned(),
+    };
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &side_started).is_err());
+}
+
+/// Cold finish repair is authorized only by the stamped terminal bit and names
+/// the exact still-open outer turn.
+#[test]
+fn output_length_finish_repair_requires_stamped_authority() {
+    let fixture = output_length_recovery_fixture();
+    let terminal_cut = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::Terminal),
+    )
+    .expect("cold terminal cut");
+    assert_eq!(
+        terminal_cut.output_length_outer_turn_finish_repair(),
+        fixture
+            .owner()
+            .output_length_continuation
+            .as_ref()
+            .map(|continuation| continuation.outer_turn_id.clone())
+    );
+
+    let mut no_finish_records = fixture.through(OutputLengthFixturePhase::Terminal).to_vec();
+    let response = fixture.terminal_in(&mut no_finish_records);
+    let tau_proto::OutputLengthDisposition::ContinuationTerminal {
+        outer_turn_finish_owed,
+        ..
+    } = &mut response.output_length_disposition
+    else {
+        unreachable!("constructed continuation terminal")
+    };
+    *outer_turn_finish_owed = false;
+    let no_finish_cut = AgentTree::try_from_events(fixture.agent_id().clone(), &no_finish_records)
+        .expect("cold terminal without finish repair");
+    assert_eq!(no_finish_cut.output_length_outer_turn_finish_repair(), None);
+}
+
+/// Malformed or duplicate continuation facts fail cold fold instead of
+/// authorizing repair from a nearby but different plan.
+#[test]
+fn output_length_recovery_rejects_mismatched_and_duplicate_facts() {
+    let fixture = output_length_recovery_fixture();
+
+    let mut wrong_steer = fixture.through(OutputLengthFixturePhase::Steer).to_vec();
+    let steer = fixture.steer_in(&mut wrong_steer);
+    steer.text.push_str(" changed");
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &wrong_steer).is_err());
+
+    let mut wrong_owner = fixture.through(OutputLengthFixturePhase::Owner).to_vec();
+    let owner = fixture.owner_in(&mut wrong_owner);
+    owner.through = AgentHead::Root;
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &wrong_owner).is_err());
+
+    let mut wrong_terminal = fixture.through(OutputLengthFixturePhase::Terminal).to_vec();
+    let terminal = fixture.terminal_in(&mut wrong_terminal);
+    let tau_proto::OutputLengthDisposition::ContinuationTerminal { ordinal, .. } =
+        &mut terminal.output_length_disposition
+    else {
+        unreachable!("constructed continuation terminal")
+    };
+    *ordinal = 2;
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &wrong_terminal).is_err());
+
+    let mut duplicate_plan = fixture.through(OutputLengthFixturePhase::Plan).to_vec();
+    duplicate_plan.push(output_length_record(
+        4,
+        AgentEventParent::Root,
+        Event::ProviderResponseFinished(fixture.source_response()),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &duplicate_plan).is_err());
+
+    let continuation = fixture
+        .owner()
+        .output_length_continuation
+        .as_ref()
+        .expect("continuation owner");
+    let finish = tau_proto::AgentOuterTurnFinished {
+        agent_id: fixture.agent_id().clone(),
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        outer_turn_id: continuation.outer_turn_id.clone(),
+        disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+    };
+    let mut finished = fixture.through(OutputLengthFixturePhase::Terminal).to_vec();
+    finished.push(output_length_record(
+        8,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::AgentOuterTurnFinished(finish.clone()),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let finished_tree = AgentTree::try_from_events(fixture.agent_id().clone(), &finished)
+        .expect("matching finish closes repair");
+    assert_eq!(finished_tree.output_length_outer_turn_finish_repair(), None);
+    finished.push(output_length_record(
+        9,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::AgentOuterTurnFinished(finish),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    assert!(AgentTree::try_from_events(fixture.agent_id().clone(), &finished).is_err());
+}
+
+/// A reserved successor terminal must never also plan reactive recovery on the
+/// same response, and a finish-owed bit must stay consistent with the durable
+/// output shape: a ToolCalls terminal without call items may owe its finish,
+/// while one with call items contradicts the bit and must fail closed.
+#[test]
+fn output_length_terminal_rejects_reactive_recovery_and_pins_finish_bit() {
+    let fixture = output_length_recovery_fixture();
+    let tree = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::PromptStart),
+    )
+    .expect("owner and prompt-start fold");
+    let terminal = fixture
+        .records
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if matches!(
+                    response.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                ) =>
+            {
+                Some(response.clone())
+            }
+            _ => None,
+        })
+        .expect("fixture successor terminal");
+
+    let mut combined = terminal.clone();
+    combined.recovery_disposition =
+        tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+    assert!(
+        validation_error(&tree, Event::ProviderResponseFinished(combined))
+            .contains("cannot combine context recovery and output-length dispositions"),
+        "a successor terminal and reactive recovery are mutually exclusive on one response"
+    );
+
+    let tau_proto::OutputLengthDisposition::ContinuationTerminal {
+        outer_turn_id,
+        source_agent_prompt_id,
+        ..
+    } = &terminal.output_length_disposition
+    else {
+        unreachable!("constructed continuation terminal")
+    };
+    let mut tool_calls_terminal = terminal.clone();
+    tool_calls_terminal.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+    tool_calls_terminal.output_items = Vec::new();
+    tool_calls_terminal.output_length_disposition =
+        tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id: outer_turn_id.clone(),
+            source_agent_prompt_id: source_agent_prompt_id.clone(),
+            ordinal: 1,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Completed,
+            outer_turn_finish_owed: true,
+        };
+    tree.validate_event(&Event::ProviderResponseFinished(
+        tool_calls_terminal.clone(),
+    ))
+    .expect("ToolCalls terminal without call items may owe its finish");
+
+    tool_calls_terminal.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: "finish-bit-call".into(),
+        name: ToolName::new("finish_bit_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: tau_proto::CborValue::Null,
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    assert!(
+        validation_error(&tree, Event::ProviderResponseFinished(tool_calls_terminal))
+            .contains("output-length terminal mismatches"),
+        "a finish-owed ToolCalls terminal must not also carry call items"
+    );
+
+    // An EndTurn terminal with call items always dispatches those calls, so a
+    // finish-owed bit on that shape is equally contradictory and must fail
+    // closed instead of trusting the stamped bit.
+    let mut end_turn_with_calls = terminal.clone();
+    end_turn_with_calls.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: "finish-bit-end-turn-call".into(),
+        name: ToolName::new("finish_bit_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: tau_proto::CborValue::Null,
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    assert!(
+        validation_error(&tree, Event::ProviderResponseFinished(end_turn_with_calls))
+            .contains("output-length terminal mismatches"),
+        "a finish-owed EndTurn terminal must not also carry call items"
+    );
+}
+
+/// A completed historical continuation cannot hide or consume a later
+/// unresolved plan at either the plan or steer crash cut.
+#[test]
+fn output_length_recovery_selects_later_unresolved_plan() {
+    let fixture = output_length_recovery_fixture();
+    let owner_continuation = fixture
+        .owner()
+        .output_length_continuation
+        .as_ref()
+        .expect("continuation owner");
+    let mut records = fixture.through(OutputLengthFixturePhase::Terminal).to_vec();
+    records.push(output_length_record(
+        8,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+            agent_id: fixture.agent_id().clone(),
+            session_id: tau_proto::SessionId::parse("session").expect("session id"),
+            outer_turn_id: owner_continuation.outer_turn_id.clone(),
+            disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+        }),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let later_source_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-later-source").expect("later source prompt id");
+    let later_successor_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-later-successor").expect("later successor prompt id");
+    let later_outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&later_source_prompt_id);
+    records.push(output_length_record(
+        9,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: fixture.agent_id().clone(),
+            transaction_id: None,
+            agent_prompt_id: later_source_prompt_id.clone(),
+            through: AgentHead::Node(fixture.terminal_node()),
+            model: fixture.owner().model.clone(),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(AgentHead::Node(fixture.terminal_node())),
+            output_length_continuation: None,
+        }),
+        AgentJournalFoldSemantics::InferenceDeferredInputV1,
+    ));
+    records.push(output_length_record(
+        10,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::AgentOuterTurnStarted(tau_proto::AgentOuterTurnStarted {
+            agent_id: fixture.agent_id().clone(),
+            session_id: tau_proto::SessionId::parse("session").expect("session id"),
+            outer_turn_id: later_outer_turn_id.clone(),
+            agent_prompt_id: later_source_prompt_id.clone(),
+            runtime_id: tau_proto::AccountingRuntimeId::parse("later-runtime").expect("runtime id"),
+            activation: tau_proto::AgentOuterTurnActivation::External {
+                correlation_id: tau_proto::AgentActivationCorrelationId::parse("later-activation")
+                    .expect("activation id"),
+            },
+        }),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    records.push(output_length_record(
+        11,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id: later_source_prompt_id.clone(),
+            agent_id: fixture.agent_id().clone(),
+            session_id: tau_proto::SessionId::parse("session").expect("session id"),
+            model: fixture.owner().model.clone().expect("owner model"),
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: Some(later_outer_turn_id.clone()),
+            operation: tau_proto::PromptOperation::Inference,
+            originator: PromptOriginator::User,
+            ctx_id: None,
+        }),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let mut later_response = fixture.source_response();
+    later_response.agent_prompt_id = later_source_prompt_id;
+    later_response.output_length_disposition =
+        tau_proto::OutputLengthDisposition::ContinuationPlanned {
+            outer_turn_id: later_outer_turn_id,
+            successor_agent_prompt_id: later_successor_prompt_id.clone(),
+            ordinal: 1,
+            limit: 1,
+        };
+    records.push(output_length_record(
+        12,
+        AgentEventParent::Under(fixture.terminal_node()),
+        Event::ProviderResponseFinished(later_response),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let plan_cut = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
+        .expect("completed history and later plan cut");
+    assert!(matches!(
+        plan_cut.output_length_continuation_recovery(),
+        Some(super::OutputLengthContinuationRecovery::SteerNeeded {
+            successor_agent_prompt_id,
+            ..
+        }) if successor_agent_prompt_id == later_successor_prompt_id
+    ));
+    let later_plan_node = plan_cut.head().expect("later plan transcript node");
+
+    records.push(output_length_record(
+        13,
+        AgentEventParent::Under(later_plan_node),
+        Event::AgentPromptSteered(output_length_steer(fixture.agent_id().clone())),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let steer_cut = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
+        .expect("completed history and later steer cut");
+    let later_steer_head =
+        AgentHead::Node(steer_cut.head().expect("later continuation steer node"));
+    assert!(matches!(
+        steer_cut.output_length_continuation_recovery(),
+        Some(super::OutputLengthContinuationRecovery::OwnerNeeded {
+            successor_agent_prompt_id,
+            through,
+            ..
+        }) if successor_agent_prompt_id == later_successor_prompt_id && through == later_steer_head
+    ));
+}
+
+/// Cold reconstruction after each dormant repair cut exposes only the next
+/// exact fact while preserving the selected sibling.
+#[test]
+fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
+    let fixture = output_length_recovery_fixture();
+    let mut records = fixture.through(OutputLengthFixturePhase::Plan).to_vec();
+    records.push(output_length_record(
+        4,
+        AgentEventParent::Root,
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: fixture.agent_id().clone(),
+            text: "branch elsewhere".to_owned(),
+            inference_activation: false,
+            message_class: Default::default(),
+        }),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let mut tree =
+        AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("off-lineage cut");
+    assert!(matches!(
+        tree.output_length_continuation_recovery(),
+        Some(super::OutputLengthContinuationRecovery::BranchInvalid { .. })
+    ));
+    let sibling = AgentHead::Node(tree.head().expect("selected sibling"));
+    let repair = tree
+        .output_length_dormant_repair()
+        .expect("dormant steer repair");
+    let super::OutputLengthDormantRepair::Steer { parent, .. } = repair else {
+        panic!("expected dormant steer repair");
+    };
+    let steer = Event::AgentPromptSteered(output_length_steer(fixture.agent_id().clone()));
+    let steer_parent = AgentEventParent::from_head(parent);
+    tree.validate_event_at(steer_parent, &steer)
+        .expect("dormant steer validates");
+    records.push(output_length_record(
+        records.len() as u64,
+        steer_parent,
+        steer,
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    tree =
+        AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("cold steer cut");
+    assert_eq!(tree.head(), sibling.as_option());
+
+    let super::OutputLengthDormantRepair::Owner {
+        source,
+        successor_agent_prompt_id,
+        outer_turn_id,
+        through,
+        plan_parent,
+    } = tree
+        .output_length_dormant_repair()
+        .expect("dormant owner repair")
+    else {
+        panic!("expected dormant owner repair");
+    };
+    assert_eq!(plan_parent, parent);
+    let owner = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: fixture.agent_id().clone(),
+        transaction_id: None,
+        agent_prompt_id: successor_agent_prompt_id,
+        through,
+        model: source.model,
+        operation: source.operation,
+        activation_cut: source.activation_cut,
+        output_length_continuation: Some(tau_proto::OutputLengthContinuationOwner {
+            source_agent_prompt_id: source.agent_prompt_id,
+            outer_turn_id,
+            ordinal: 1,
+        }),
+    };
+    let owner_event = Event::AgentInferenceDispatchStarted(owner.clone());
+    let owner_parent = AgentEventParent::from_head(through);
+    tree.validate_event_at(owner_parent, &owner_event)
+        .expect("dormant owner validates");
+    records.push(output_length_record(
+        records.len() as u64,
+        owner_parent,
+        owner_event,
+        AgentJournalFoldSemantics::InferenceDeferredInputV1,
+    ));
+    tree =
+        AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("cold owner cut");
+    assert_eq!(tree.head(), sibling.as_option());
+
+    let super::OutputLengthDormantRepair::Terminal { parent, .. } = tree
+        .output_length_dormant_repair()
+        .expect("dormant terminal repair")
+    else {
+        panic!("expected dormant terminal repair");
+    };
+    let continuation = owner
+        .output_length_continuation
+        .as_ref()
+        .expect("continuation owner");
+    let terminal = Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        agent_prompt_id: owner.agent_prompt_id.clone(),
+        agent_id: fixture.agent_id().clone(),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("output-length continuation branch was deselected".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::ContinuationTerminal {
+            outer_turn_id: continuation.outer_turn_id.clone(),
+            source_agent_prompt_id: continuation.source_agent_prompt_id.clone(),
+            ordinal: 1,
+            outcome: tau_proto::OutputLengthContinuationOutcome::Failed,
+            outer_turn_finish_owed: true,
+        },
+        provider_attempt: Default::default(),
+        originator: PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    });
+    let terminal_parent = AgentEventParent::from_head(parent);
+    tree.validate_event_at(terminal_parent, &terminal)
+        .expect("pre-start dormant failure validates");
+    records.push(output_length_record(
+        records.len() as u64,
+        terminal_parent,
+        terminal,
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    tree = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
+        .expect("cold terminal cut");
+    assert_eq!(tree.head(), sibling.as_option());
+
+    let Some(super::OutputLengthDormantRepair::Finish {
+        outer_turn_id: finish_turn,
+        parent: finish_parent_head,
+    }) = tree.output_length_dormant_repair()
+    else {
+        panic!("expected dormant finish repair");
+    };
+    assert_eq!(finish_turn, continuation.outer_turn_id);
+    let finish = Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+        agent_id: fixture.agent_id().clone(),
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        outer_turn_id: continuation.outer_turn_id.clone(),
+        disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+    });
+    let finish_parent = AgentEventParent::from_head(finish_parent_head);
+    tree.validate_event_at(finish_parent, &finish)
+        .expect("dormant owed finish validates");
+    records.push(output_length_record(
+        records.len() as u64,
+        finish_parent,
+        finish,
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    tree =
+        AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("cold finish cut");
+    assert_eq!(tree.output_length_dormant_repair(), None);
+    assert_eq!(tree.head(), sibling.as_option());
+}
+
+/// Once the reserved successor prompt-start commits, branch movement cannot
+/// authorize a competing synthetic pre-start failure.
+#[test]
+fn output_length_post_start_branch_move_has_no_synthetic_repair() {
+    let fixture = output_length_recovery_fixture();
+    let mut records = fixture
+        .through(OutputLengthFixturePhase::PromptStart)
+        .to_vec();
+    records.push(output_length_record(
+        u64::try_from(records.len()).expect("bounded fixture"),
+        AgentEventParent::Root,
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: fixture.agent_id().clone(),
+            text: "post-start sibling".to_owned(),
+            inference_activation: false,
+            message_class: Default::default(),
+        }),
+        AgentJournalFoldSemantics::Legacy,
+    ));
+    let tree = AgentTree::try_from_events(fixture.agent_id().clone(), &records)
+        .expect("post-start sibling");
+    assert_eq!(tree.output_length_dormant_repair(), None);
+    assert_eq!(tree.output_length_continuation_recovery(), None);
+}
+
+/// Cold sticky output-length status stops at newer selected work, whether that
+/// work is unfinished or later succeeds.
+#[test]
+fn output_length_terminal_incomplete_does_not_cross_newer_selected_dispatch() {
+    let fixture = output_length_recovery_fixture();
+    let mut records = fixture.through(OutputLengthFixturePhase::Terminal).to_vec();
+    let terminal = fixture.terminal_in(&mut records);
+    terminal.stop_reason = tau_proto::ProviderStopReason::Length;
+    terminal.output_items.clear();
+    terminal.provider_attempt =
+        tau_proto::ProviderAttempt::new(4).expect("nonzero provider attempt");
+    let tau_proto::OutputLengthDisposition::ContinuationTerminal { outcome, .. } =
+        &mut terminal.output_length_disposition
+    else {
+        panic!("fixture successor terminal");
+    };
+    *outcome = tau_proto::OutputLengthContinuationOutcome::Incomplete;
+    let mut tree =
+        AgentTree::try_from_events(fixture.agent_id().clone(), &records).expect("incomplete cut");
+    assert_eq!(
+        tree.output_length_terminal_incomplete()
+            .expect("latest incomplete")
+            .provider_attempt
+            .get(),
+        4
+    );
+
+    let later_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-later").expect("known-safe prompt id");
+    let selected = tree.head().map_or(AgentHead::Root, AgentHead::Node);
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(
+        tau_proto::AgentInferenceDispatchStarted {
+            agent_id: fixture.agent_id().clone(),
+            transaction_id: None,
+            agent_prompt_id: later_prompt_id.clone(),
+            through: selected,
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(selected),
+            output_length_continuation: None,
+        },
+    ));
+    assert_eq!(tree.output_length_terminal_incomplete(), None);
+
+    tree.apply_event(&Event::ProviderResponseFinished(
+        tau_proto::ProviderResponseFinished {
+            agent_prompt_id: later_prompt_id,
+            agent_id: fixture.agent_id().clone(),
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "later success".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            provider_attempt: Default::default(),
+            originator: PromptOriginator::User,
+            usage: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        },
+    ));
+    assert_eq!(tree.output_length_terminal_incomplete(), None);
 }
 
 /// Old full prompt records fail strict fold instead of receiving compatibility,

@@ -483,10 +483,16 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             supports_standalone_compaction: capabilities.standalone_compaction,
             standalone_compaction_threshold: None,
             cache_policy: None,
-            est_uncached_input_cost_1m_usd: Default::default(),
-            est_cached_input_cost_1m_usd: Default::default(),
+            est_uncached_input_cost_1m_usd: Some(
+                tau_proto::EstimatedUsdPerMillion::from_micro_usd(2_000_000),
+            ),
+            est_cached_input_cost_1m_usd: Some(tau_proto::EstimatedUsdPerMillion::from_micro_usd(
+                1_000_000,
+            )),
             est_cache_write_input_cost_1m_usd: Default::default(),
-            est_output_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Some(tau_proto::EstimatedUsdPerMillion::from_micro_usd(
+                4_000_000,
+            )),
             est_cache_storage_cost_1m_token_hour_usd: None,
         }],
     }
@@ -1517,6 +1523,33 @@ impl FakeState {
         action: ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
+            ScenarioActionV2::OutputLengthReasoning {
+                reasoning,
+                report_usage,
+                ..
+            } => emit_output_length_reasoning(prompt, handle, reasoning, report_usage),
+            ScenarioActionV2::OutputLengthContinuation {
+                response,
+                report_usage,
+                ..
+            } => {
+                let mut finished = finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                );
+                finished.backend = Some(tau_proto::ProviderBackend {
+                    kind: tau_proto::ProviderBackendKind::ChatCompletions,
+                    base_url: "https://deterministic.invalid/v1".to_owned(),
+                    transport: tau_proto::ProviderBackendTransport::HttpSse,
+                    stale_chain_fallback: false,
+                });
+                finished.provider_response_id = Some("resp-output-length-successor".to_owned());
+                if report_usage {
+                    finished.usage = Some(output_length_usage(OutputLengthUsagePhase::Successor));
+                }
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
+            }
             ScenarioActionV2::Text { response, .. }
             | ScenarioActionV2::CompactedText { response, .. }
             | ScenarioActionV2::CompactedOpaqueText { response, .. }
@@ -1992,6 +2025,14 @@ impl FakeState {
         action: &ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
+            ScenarioActionV2::OutputLengthContinuation {
+                user_text,
+                reasoning,
+                ..
+            } => {
+                validate_output_length_continuation_context(prompt, user_text, reasoning)
+                    .map_err(|message| self.mismatch(cursor, message))?;
+            }
             ScenarioActionV2::DummyToolCall { .. }
             | ScenarioActionV2::TypedImageToolCall { .. } => {
                 let tool_name = if matches!(action, ScenarioActionV2::TypedImageToolCall { .. }) {
@@ -2698,6 +2739,57 @@ fn emit_text_response(
     )))
 }
 
+/// Publishes one replay-safe reasoning-only output-limit terminal.
+fn emit_output_length_reasoning(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    reasoning: String,
+    report_usage: bool,
+) -> ClientResult<()> {
+    let mut response = finished(
+        prompt,
+        vec![ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: reasoning,
+        })],
+        ProviderStopReason::Length,
+    );
+    response.backend = Some(tau_proto::ProviderBackend {
+        kind: tau_proto::ProviderBackendKind::ChatCompletions,
+        base_url: "https://deterministic.invalid/v1".to_owned(),
+        transport: tau_proto::ProviderBackendTransport::HttpSse,
+        stale_chain_fallback: false,
+    });
+    response.provider_response_id = Some("resp-output-length-source".to_owned());
+    if report_usage {
+        response.usage = Some(output_length_usage(OutputLengthUsagePhase::Source));
+    }
+    handle.emit_transient(Event::ProviderResponseFinishedReported(response))
+}
+
+/// Semantic response phase selecting one fixed accounting record.
+enum OutputLengthUsagePhase {
+    /// Initial response that plans the continuation.
+    Source,
+    /// Reserved continuation response that closes the sequence.
+    Successor,
+}
+
+/// Returns fixed, distinct source/successor usage for exact aggregation
+/// oracles.
+fn output_length_usage(phase: OutputLengthUsagePhase) -> tau_proto::ProviderTokenUsage {
+    let (prompt_sent_tokens, prompt_cached_tokens, response_received_tokens) = match phase {
+        OutputLengthUsagePhase::Source => (10, 2, 3),
+        OutputLengthUsagePhase::Successor => (20, 5, 7),
+    };
+    tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens,
+        prompt_cached_tokens,
+        response_received_tokens,
+        ..Default::default()
+    }
+}
+
 /// Publishes the fixed raw provider item used to exercise opaque compaction
 /// persistence and replay without interpreting its provider-owned fields.
 fn emit_opaque_compaction_response(
@@ -2944,11 +3036,13 @@ fn finished(
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }
@@ -2973,6 +3067,7 @@ impl ScenarioActionV2 {
     fn binding_user_text(&self) -> Option<&str> {
         match self {
             Self::Text { user_text, .. }
+            | Self::OutputLengthReasoning { user_text, .. }
             | Self::ContextOverflow { user_text, .. }
             | Self::CompactedText {
                 user_text,
@@ -3006,7 +3101,8 @@ impl ScenarioActionV2 {
             | Self::BarrierText { user_text, .. }
             | Self::BarrierParallelDummyTools { user_text, .. }
             | Self::ProviderContextRawMessageCall { user_text, .. } => Some(user_text),
-            Self::StandaloneCompaction { summary: _ }
+            Self::OutputLengthContinuation { .. }
+            | Self::StandaloneCompaction { summary: _ }
             | Self::StandaloneOpaqueCompaction
             | Self::ReactiveOpaqueCompaction { .. }
             | Self::ReactiveCompactedOpaqueText { .. }
@@ -3155,6 +3251,86 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Validate the exact retained transcript consumed by the one authorized
+/// output-limit successor.
+fn validate_output_length_continuation_context(
+    prompt: &tau_proto::AgentPromptCreated,
+    user_text: &str,
+    reasoning: &str,
+) -> Result<(), &'static str> {
+    let items = prompt.context.flatten();
+    let source_user = items.iter().position(|item| {
+        matches!(
+            item,
+            ContextItem::Message(message)
+                if message.role == ContextRole::User
+                    && message.content.iter().map(|part| match part {
+                        ContentPart::Text { text }
+                        | ContentPart::HarnessInternalText { text } => text.as_str(),
+                    }).collect::<String>()
+                        == project_fixture_human_ui_user_prompt(user_text)
+        )
+    });
+    let retained_reasoning = items.iter().position(|item| {
+        matches!(
+            item,
+            ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text,
+            }) if text == reasoning
+        )
+    });
+    let instruction_text = tau_internal_envelope(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION);
+    let instruction = items.iter().position(|item| {
+        matches!(
+            item,
+            ContextItem::Message(message)
+                if message.role == ContextRole::User
+                    && message.content.iter().map(|part| match part {
+                        ContentPart::Text { text }
+                        | ContentPart::HarnessInternalText { text } => text.as_str(),
+                    }).collect::<String>() == instruction_text
+        )
+    });
+    let exact_order = matches!(
+        (source_user, retained_reasoning, instruction),
+        (Some(user), Some(reasoning), Some(instruction))
+            if user < reasoning && reasoning < instruction
+    );
+    let user_texts = provider_user_texts(prompt);
+    let exact_reasoning_count = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                    kind: tau_proto::ReasoningTextKind::Full,
+                    text,
+                }) if text == reasoning
+            )
+        })
+        .count()
+        == 1;
+    let no_assistant_or_call = items.iter().all(|item| {
+        !matches!(
+            item,
+            ContextItem::Message(message) if message.role == ContextRole::Assistant
+        ) && !matches!(item, ContextItem::ToolCall(_))
+    });
+    if !exact_order
+        || user_texts
+            != [
+                project_fixture_human_ui_user_prompt(user_text),
+                instruction_text,
+            ]
+        || !exact_reasoning_count
+        || !no_assistant_or_call
+    {
+        return Err("output-length continuation context is not exact ordered replay");
+    }
+    Ok(())
 }
 
 /// Returns whether provider context contains one exact role-specific text item.

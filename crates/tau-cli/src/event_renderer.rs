@@ -5891,7 +5891,10 @@ impl EventRenderer {
             return false;
         }
         match internal_kind {
-            Some(tau_proto::InternalPromptKind::BackgroundToolCompletion) => return true,
+            Some(
+                tau_proto::InternalPromptKind::BackgroundToolCompletion
+                | tau_proto::InternalPromptKind::OutputLengthContinuation,
+            ) => return true,
             Some(tau_proto::InternalPromptKind::ContextSizeAlert) => {}
             None => return false,
         }
@@ -6773,12 +6776,44 @@ impl EventRenderer {
             );
             return;
         }
-        let tool_calls = tool_calls_from_output_items(&finished.output_items);
+        let tool_calls = if finished.stop_reason == tau_proto::ProviderStopReason::Length {
+            Vec::new()
+        } else {
+            tool_calls_from_output_items(&finished.output_items)
+        };
         self.main_tools_total += tool_calls.len() as u64;
         self.set_main_tools_visible(!tool_calls.is_empty());
         let summary_block_id = self.prepare_tool_summary_for_finished_calls(&tool_calls);
         for item in &finished.output_items {
+            if finished.stop_reason == tau_proto::ProviderStopReason::Length
+                && matches!(item, ContextItem::ToolCall(_))
+            {
+                continue;
+            }
             self.render_finished_context_item(item, summary_block_id, finished);
+        }
+        if finished.stop_reason == tau_proto::ProviderStopReason::Length {
+            let text = if matches!(
+                finished.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+            ) {
+                "Output limit reached; continuing once from retained reasoning."
+            } else if finished
+                .output_items
+                .iter()
+                .any(|item| matches!(item, ContextItem::ToolCall(_)))
+            {
+                "Model reached its output-token limit while producing a tool call. The incomplete call was not executed."
+            } else if finished
+                .output_items
+                .iter()
+                .any(|item| matches!(item, ContextItem::Message(_)))
+            {
+                "Model reached its output-token limit before completing the turn. The displayed response may be incomplete."
+            } else {
+                "Model reached its output-token limit before completing the turn. No assistant answer or executable tool call was produced."
+            };
+            self.render_provider_response_placeholder(text);
         }
         self.handle.redraw();
     }

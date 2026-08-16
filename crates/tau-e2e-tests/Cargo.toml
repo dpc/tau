@@ -32,7 +32,7 @@ tau-client.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
 tau-ext-test-dummy.workspace = true
-tau-harness.workspace = true
+tau-harness = { workspace = true, features = ["output-length-test-barrier"] }
 tau-harness-tools.workspace = true
 tau-proto.workspace = true
 tau-socket.workspace = true

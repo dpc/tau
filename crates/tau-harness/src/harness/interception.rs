@@ -24,6 +24,7 @@ use tau_proto::{
     InterceptReply, InterceptRequest, InterceptionPriority,
 };
 
+use crate::harness::InferenceDispatchSelectionError;
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
 
 /// One harness-owned full prompt carried from compact-fact admission through
@@ -77,6 +78,24 @@ pub(crate) struct WatchRetirementCompletion {
 use crate::harness::Harness;
 use crate::harness::extensions::ExtensionFrameAdmission;
 
+/// Semantic source and durability phase of deferred activation work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeferredActivationObligation {
+    /// Ordinary work waiting for the publish chain to become idle.
+    OrdinaryPublishIdle,
+    /// Reserved output-length work waiting for its steer to commit.
+    OutputLengthPublishIdle,
+    /// One exact durable activation watermark.
+    Committed,
+}
+
+impl DeferredActivationObligation {
+    /// Whether this obligation has a durable activating occurrence.
+    pub(crate) const fn is_committed(self) -> bool {
+        matches!(self, Self::Committed)
+    }
+}
+
 /// One publish-idle dispatch or one distinct committed activation obligation.
 #[derive(Clone)]
 pub(crate) struct DeferredPromptDispatch {
@@ -92,8 +111,8 @@ pub(crate) struct DeferredPromptDispatch {
     pub(crate) activation_through: Option<tau_proto::AgentHead>,
     /// Durable activating occurrence whose node may not exist yet.
     pub(crate) activation_source_seq: Option<tau_core::PersistedAgentEventSeq>,
-    /// Whether this entry owns a committed inference activation.
-    pub(crate) committed_activation: bool,
+    /// Semantic source and durability phase of this obligation.
+    pub(crate) obligation: DeferredActivationObligation,
 }
 
 /// Snapshot of a publish that's currently waiting on an interceptor's
@@ -296,6 +315,47 @@ impl ConversationHeadSync {
 
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
+pub(crate) enum DormantOutputLengthCompletion {
+    /// Derive the synthetic owner after the dormant steer commits.
+    Steer {
+        /// Exact planned-response parent retained across append rejection.
+        fold_parent: tau_core::AgentEventParent,
+    },
+    /// Retire the exact dormant activation after its synthetic owner commits.
+    Owner {
+        /// Exact dormant steer parent retained across append rejection.
+        fold_parent: tau_core::AgentEventParent,
+        /// Exact closed provider cut captured for the dormant activation.
+        activation_cut: tau_proto::AgentHead,
+        /// Exact committed steer watermark consumed by the synthetic owner.
+        steer: tau_proto::AgentHead,
+    },
+    /// Derive the owed finish after the synthetic terminal commits.
+    Terminal {
+        /// Exact synthetic-owner parent retained across append rejection.
+        fold_parent: tau_core::AgentEventParent,
+    },
+    /// Settle runtime and publish the branch-failure notice after owed finish.
+    Finish {
+        /// Exact dormant terminal parent retained across append rejection.
+        fold_parent: tau_core::AgentEventParent,
+    },
+}
+
+impl DormantOutputLengthCompletion {
+    /// Exact explicit parent for this repair fact.
+    pub(crate) const fn fold_parent(&self) -> tau_core::AgentEventParent {
+        match self {
+            Self::Steer { fold_parent }
+            | Self::Owner { fold_parent, .. }
+            | Self::Terminal { fold_parent }
+            | Self::Finish { fold_parent } => *fold_parent,
+        }
+    }
+}
+
+/// Harness-owned continuation bound to one exact agent publication envelope.
+#[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
     /// Report a correlated initial-prompt failure if its canonical submission
     /// cannot commit.
@@ -311,6 +371,72 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact post-commit terminal or continuation behavior.
         disposition: super::gated_final::GatedFinalDisposition,
         /// Exact interceptor-approved event retained after append rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Start the single output-length successor only after the planned source
+    /// response has committed on its owning branch.
+    OutputLengthContinuation {
+        /// Selected transcript head that owns the source response.
+        batch_parent: tau_proto::AgentHead,
+        /// Exact planned response retained for post-commit runtime completion.
+        response: Box<tau_proto::ProviderResponseFinished>,
+        /// Display-only assistant text retained for common terminal handling.
+        assistant_text: Option<String>,
+        /// Exact interceptor-approved event retained after append rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Retain the exact planned continuation steer until its plan branch
+    /// accepts the durable append.
+    OutputLengthSteer {
+        /// Exact planned-response node that this steer must extend.
+        batch_parent: tau_proto::AgentHead,
+        /// Exact interceptor-approved steer retained after append rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Publish one reserved successor failure only after its synthetic
+    /// prompt-start authority commits.
+    OutputLengthPreDeliveryFailure {
+        /// Exact owner branch on which prompt-start must commit.
+        batch_parent: tau_proto::AgentHead,
+        /// Harness-synthesized terminal retained across append rejection.
+        response: Box<tau_proto::ProviderResponseFinished>,
+        /// Exact interceptor-approved prompt-start retained after rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Advance one explicit-parent dormant output-length repair only after its
+    /// exact durable append commits.
+    OutputLengthDormantRepair {
+        /// Semantically valid next action after commit.
+        step: DormantOutputLengthCompletion,
+        /// Exact interceptor-approved repair fact retained after rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Start reactive compaction only after its exact rejection response
+    /// commits.
+    ReactiveContextRecovery {
+        /// Durable failed inference owner that the transaction must claim.
+        checkpoint: tau_proto::AgentInferenceDispatchStarted,
+        /// Provider connection retained only for live attribution.
+        source: Option<tau_proto::ConnectionId>,
+        /// Exact interceptor-approved rejection retained after append
+        /// rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Retain the exact reactive transaction claim until its start commits.
+    ReactiveContextRecoveryStart {
+        /// Failed inference owner whose selected branch authorizes this claim.
+        checkpoint: tau_proto::AgentInferenceDispatchStarted,
+        /// Exact failure that must follow this committed synthetic claim.
+        failure_after_commit: Option<Box<tau_proto::AgentStandaloneCompactionFailed>>,
+        /// Exact interceptor-approved transaction start retained after
+        /// rejection.
+        retry_event: Option<Box<Event>>,
+    },
+    /// Retain one reactive recovery failure until its semantic append commits.
+    ReactiveContextRecoveryFailure {
+        /// Exact committed transaction-start parent of this failure.
+        batch_parent: tau_proto::AgentHead,
+        /// Exact interceptor-approved failure retained after rejection.
         retry_event: Option<Box<Event>>,
     },
     /// Resume the successful standalone compaction after the final steer in its
@@ -337,12 +463,53 @@ pub(crate) enum AgentPublishCompletion {
 }
 
 impl AgentPublishCompletion {
+    /// Whether this retained completion owns one terminal for the prompt.
+    pub(super) fn owns_output_length_terminal(
+        &self,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        let response = match self {
+            Self::OutputLengthContinuation { response, .. }
+            | Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
+            Self::GatedFinal {
+                retry_event: Some(event),
+                ..
+            } => match event.as_ref() {
+                Event::ProviderResponseFinished(response) => Some(response),
+                _ => None,
+            },
+            Self::InitialPromptSubmission { .. }
+            | Self::GatedFinal { .. }
+            | Self::OutputLengthSteer { .. }
+            | Self::OutputLengthDormantRepair { .. }
+            | Self::ReactiveContextRecovery { .. }
+            | Self::ReactiveContextRecoveryStart { .. }
+            | Self::ReactiveContextRecoveryFailure { .. }
+            | Self::StandaloneContinuation { .. } => None,
+        };
+        response.is_some_and(|response| {
+            &response.agent_prompt_id == agent_prompt_id
+                && matches!(
+                    response.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                )
+        })
+    }
+
     /// Return the durable transaction shared by every member of this batch.
     fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
         match self {
             Self::StandaloneContinuation { transaction_id, .. } => transaction_id,
-            Self::GatedFinal { .. } | Self::InitialPromptSubmission { .. } => {
-                unreachable!("gated finals do not own compaction transactions")
+            Self::GatedFinal { .. }
+            | Self::OutputLengthContinuation { .. }
+            | Self::OutputLengthSteer { .. }
+            | Self::OutputLengthPreDeliveryFailure { .. }
+            | Self::OutputLengthDormantRepair { .. }
+            | Self::ReactiveContextRecovery { .. }
+            | Self::ReactiveContextRecoveryStart { .. }
+            | Self::ReactiveContextRecoveryFailure { .. }
+            | Self::InitialPromptSubmission { .. } => {
+                unreachable!("non-standalone completions do not own compaction transactions")
             }
         }
     }
@@ -1028,7 +1195,30 @@ impl Harness {
                 .first()
                 .is_some_and(path_crate_agent::PendingPrompt::should_notify_watchers),
             AgentPublishCompletion::GatedFinal { .. } => false,
+            AgentPublishCompletion::OutputLengthContinuation { .. } => false,
+            AgentPublishCompletion::OutputLengthSteer { .. } => false,
+            AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. } => false,
+            AgentPublishCompletion::OutputLengthDormantRepair { .. } => false,
+            AgentPublishCompletion::ReactiveContextRecovery { .. } => false,
+            AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => false,
+            AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
+        };
+        let fold_parent = match &completion {
+            AgentPublishCompletion::OutputLengthDormantRepair { step, .. } => {
+                Some(step.fold_parent())
+            }
+            AgentPublishCompletion::OutputLengthSteer { batch_parent, .. } => {
+                Some(tau_core::AgentEventParent::from_head(*batch_parent))
+            }
+            AgentPublishCompletion::ReactiveContextRecovery { checkpoint, .. }
+            | AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
+                Some(tau_core::AgentEventParent::from_head(checkpoint.through))
+            }
+            AgentPublishCompletion::ReactiveContextRecoveryFailure { batch_parent, .. } => {
+                Some(tau_core::AgentEventParent::from_head(*batch_parent))
+            }
+            _ => None,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agents
@@ -1045,12 +1235,13 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id,
                 session_generation: self.current_session_generation,
-                fold_parent: None,
+                fold_parent,
                 suppress_activation_dispatch: true,
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,
             }),
         );
+        self.drain_deferred_publishes();
     }
 
     /// Rewrite queued canonical model state to an empty snapshot after its
@@ -1152,7 +1343,7 @@ impl Harness {
 
     /// True when no event is parked in interception and no publish is
     /// queued behind one.
-    fn publish_chain_is_idle(&self) -> bool {
+    pub(super) fn publish_chain_is_idle(&self) -> bool {
         self.pending_intercept.is_none() && self.deferred_publishes.is_empty()
     }
 
@@ -1161,7 +1352,7 @@ impl Harness {
     pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &AgentId) -> bool {
         self.pending_publish_idle_dispatches.iter().any(|queued| {
             &queued.cid == cid
-                && (!queued.committed_activation
+                && (!queued.obligation.is_committed()
                     || queued.activation_through.is_none()
                     || self.deferred_activation_is_selected(queued))
         })
@@ -1183,7 +1374,7 @@ impl Harness {
         if !self
             .pending_publish_idle_dispatches
             .iter()
-            .any(|deferred| deferred.cid == *cid && deferred.committed_activation)
+            .any(|deferred| deferred.cid == *cid && deferred.obligation.is_committed())
         {
             self.enqueue_committed_activation_dispatch(
                 cid.clone(),
@@ -1235,68 +1426,45 @@ impl Harness {
         if !self.agent_can_start_deferred_inference_dispatch(cid) {
             return;
         }
-        if !self.validate_prompt_render_for_dispatch(cid) {
+        let output_length_owner_ready = self.agents.get(cid).is_some_and(|agent| {
+            matches!(
+                agent.output_length_continuation,
+                path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+            )
+        });
+        if !output_length_owner_ready && !self.validate_prompt_render_for_dispatch(cid) {
             return;
         }
-        let model = self
-            .agents
-            .get(cid)
-            .and_then(|agent| self.model_for_agent_role(agent));
-        let Some(model) = model else {
-            let role_name = self.role_name_for_agent_id(cid);
-            self.emit_info(&format!(
-                "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
-            ));
-            self.set_agent_turn_state(cid, path_crate_agent::AgentTurnState::Idle);
-            return;
+        let selection = match self.select_inference_dispatch(cid, captured_activation_cut) {
+            Ok(selection) => selection,
+            Err(InferenceDispatchSelectionError::MissingModel) => {
+                let role_name = self.role_name_for_agent_id(cid);
+                self.emit_info(&format!(
+                    "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
+                ));
+                self.set_agent_turn_state(cid, path_crate_agent::AgentTurnState::Idle);
+                return;
+            }
+            Err(InferenceDispatchSelectionError::OutputLengthBranchInvalid) => {
+                self.repair_dormant_output_length_lineage(cid);
+                return;
+            }
+            Err(InferenceDispatchSelectionError::MissingActivationCut) => return,
         };
-        let activation_cut = self.earliest_activation_cut(
-            cid,
-            captured_activation_cut
-                .or_else(|| self.activation_cut_before_current_head(cid))
-                .or(Some(tau_proto::AgentHead::Root)),
-        );
-        let Some(activation_cut) = activation_cut else {
-            return;
-        };
-        let Some((durable_agent_id, prompt_id, through)) =
-            self.agents.get_mut(cid).and_then(|agent| {
-                let durable_agent_id = agent.agent_id.clone()?;
-                let prompt_id = tau_proto::AgentPromptId::parse(format!(
-                    "ap-{durable_agent_id}-{}",
-                    agent.next_prompt_index
-                ))
-                .expect("known-safe AgentPromptId must be valid");
-                agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-                let through = agent
-                    .head
-                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-                agent.activation_dispatch =
-                    path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
-                        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
-                        agent_prompt_id: prompt_id.clone(),
-                        through,
-                        dispatch: crate::agent::InferenceDispatchOwnership {
-                            model: model.clone(),
-                            operation: tau_proto::PromptOperation::Inference,
-                            activation_cut,
-                        },
-                    };
-                Some((durable_agent_id, prompt_id, through))
-            })
-        else {
+        let Some(checkpoint) = self.claim_inference_checkpoint(cid, selection) else {
             return;
         };
         self.publish_for_agent(
             cid,
             Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
-                agent_id: crate::parse_agent_id(&durable_agent_id),
+                agent_id: checkpoint.durable_agent_id,
                 transaction_id: None,
-                agent_prompt_id: prompt_id,
-                through,
-                model: Some(model),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(activation_cut),
+                agent_prompt_id: checkpoint.agent_prompt_id,
+                through: checkpoint.through,
+                model: Some(checkpoint.selection.model),
+                operation: Some(checkpoint.selection.operation),
+                activation_cut: Some(checkpoint.selection.activation_cut),
+                output_length_continuation: checkpoint.output_length_continuation,
             }),
         );
     }
@@ -1310,13 +1478,24 @@ impl Harness {
             );
             return;
         }
+        let output_length_continuation = self.agents.get(&cid).is_some_and(|agent| {
+            matches!(
+                agent.output_length_continuation,
+                crate::agent::OutputLengthContinuationState::Planned(_)
+                    | crate::agent::OutputLengthContinuationState::OwnerReady(_)
+            )
+        });
         self.pending_publish_idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
                 activation_cut: None,
                 activation_through: None,
                 activation_source_seq: None,
-                committed_activation: false,
+                obligation: if output_length_continuation {
+                    DeferredActivationObligation::OutputLengthPublishIdle
+                } else {
+                    DeferredActivationObligation::OrdinaryPublishIdle
+                },
             });
     }
 
@@ -1335,6 +1514,11 @@ impl Harness {
         self.agent_context_ready_for(cid)
             && self.agents.get(cid).is_some_and(|agent| {
                 !agent.terminating
+                    && matches!(
+                        agent.outer_turn,
+                        path_crate_agent::OuterTurnRuntimeState::None
+                            | path_crate_agent::OuterTurnRuntimeState::Active(_)
+                    )
                     && matches!(
                         agent.activation_dispatch,
                         crate::agent::ActivationDispatchState::None
@@ -1355,12 +1539,12 @@ impl Harness {
             && left.activation_cut == right.activation_cut
             && left.activation_through == right.activation_through
             && left.activation_source_seq == right.activation_source_seq
-            && left.committed_activation == right.committed_activation
+            && left.obligation == right.obligation
     }
 
     fn deferred_prompt_dispatch_is_actionable(&self, deferred: &DeferredPromptDispatch) -> bool {
         let selected =
-            !deferred.committed_activation || self.deferred_activation_is_selected(deferred);
+            !deferred.obligation.is_committed() || self.deferred_activation_is_selected(deferred);
         if !selected {
             return false;
         }
@@ -1422,14 +1606,14 @@ impl Harness {
         activation_through: Option<tau_proto::AgentHead>,
     ) {
         self.pending_publish_idle_dispatches
-            .retain(|deferred| deferred.cid != cid || deferred.committed_activation);
+            .retain(|deferred| deferred.cid != cid || deferred.obligation.is_committed());
         self.pending_publish_idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
                 activation_cut,
                 activation_through,
                 activation_source_seq: None,
-                committed_activation: true,
+                obligation: DeferredActivationObligation::Committed,
             });
     }
 
@@ -1456,14 +1640,14 @@ impl Harness {
                 })
         });
         self.pending_publish_idle_dispatches
-            .retain(|deferred| deferred.cid != cid || deferred.committed_activation);
+            .retain(|deferred| deferred.cid != cid || deferred.obligation.is_committed());
         self.pending_publish_idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
                 activation_cut,
                 activation_through,
                 activation_source_seq: Some(source_seq),
-                committed_activation: true,
+                obligation: DeferredActivationObligation::Committed,
             });
     }
 
@@ -1478,7 +1662,7 @@ impl Harness {
     ) {
         self.pending_publish_idle_dispatches.retain(|deferred| {
             deferred.cid != *cid
-                || !deferred.committed_activation
+                || !deferred.obligation.is_committed()
                 || deferred.activation_through != activation_through
         });
     }
@@ -1500,10 +1684,32 @@ impl Harness {
         };
         self.pending_publish_idle_dispatches.retain(|deferred| {
             deferred.cid != *cid
-                || !deferred.committed_activation
+                || !deferred.obligation.is_committed()
                 || deferred
                     .activation_through
                     .is_none_or(|owner| !tree.is_ancestor_head(owner, through))
+        });
+    }
+
+    /// Retire both possible runtime forms of one exact dormant output-length
+    /// activation after its synthetic owner commits.
+    pub(crate) fn retire_dormant_output_length_activation(
+        &mut self,
+        cid: &AgentId,
+        activation_cut: tau_proto::AgentHead,
+        steer: tau_proto::AgentHead,
+    ) {
+        self.pending_publish_idle_dispatches.retain(|deferred| {
+            if deferred.cid != *cid {
+                return true;
+            }
+            if deferred.obligation.is_committed() {
+                return deferred.activation_through != Some(steer);
+            }
+            deferred.obligation != DeferredActivationObligation::OutputLengthPublishIdle
+                || deferred
+                    .activation_cut
+                    .is_some_and(|cut| cut != activation_cut)
         });
     }
 
@@ -1983,7 +2189,8 @@ impl Harness {
         while self.publish_chain_is_idle() {
             for index in 0..self.pending_publish_idle_dispatches.len() {
                 let needs_binding = self.pending_publish_idle_dispatches[index]
-                    .committed_activation
+                    .obligation
+                    .is_committed()
                     && self.pending_publish_idle_dispatches[index]
                         .activation_through
                         .is_none();
@@ -2043,10 +2250,10 @@ impl Harness {
                 self.pending_publish_idle_dispatches.remove(index);
                 continue;
             }
-            if !deferred.committed_activation {
+            if !deferred.obligation.is_committed() {
                 self.pending_publish_idle_dispatches.remove(index);
             }
-            if deferred.committed_activation
+            if deferred.obligation.is_committed()
                 && self.schedule_standalone_auto_compaction_for_activation(
                     &cid,
                     true,
@@ -2057,7 +2264,7 @@ impl Harness {
             {
                 if self.pending_publish_idle_dispatches.iter().any(|queued| {
                     queued.cid == cid
-                        && queued.committed_activation
+                        && queued.obligation.is_committed()
                         && queued.activation_through == deferred.activation_through
                 }) {
                     // A synchronous persistence rejection left the branch
@@ -2068,7 +2275,7 @@ impl Harness {
                 continue;
             }
             self.checkpoint_or_send_prompt(&cid, deferred.activation_cut);
-            if deferred.committed_activation
+            if deferred.obligation.is_committed()
                 && self
                     .pending_publish_idle_dispatches
                     .iter()

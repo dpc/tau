@@ -2,6 +2,40 @@ use std::collections as path_std_collections;
 
 use super::*;
 
+/// A terminal-incomplete provider snapshot is final for its exact prompt and
+/// cannot be replaced by a later retry, error, or blocked observation.
+#[test]
+fn terminal_incomplete_watch_state_is_sticky() {
+    let status = |state| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: tau_proto::SessionId::parse("session").expect("session id"),
+        subscription_id: String::new(),
+        turn_generation: 7,
+        agent_prompt_id: tau_proto::AgentPromptId::parse("ap-length").expect("prompt id"),
+        state,
+        initial: false,
+    };
+    let terminal = status(tau_proto::AgentWatchProviderState::TerminalIncomplete {
+        category: tau_proto::AgentWatchProviderCategory::OutputLength,
+        attempt: 3,
+    });
+    for later in [
+        tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt: 4,
+            next_retry_delay_secs: 1,
+        },
+        tau_proto::AgentWatchProviderState::TerminalError {
+            failure_kind: tau_proto::ProviderFailureKind::Unknown,
+            attempt: 4,
+        },
+        tau_proto::AgentWatchProviderState::Blocked {
+            category: tau_proto::AgentWatchProviderCategory::Compaction,
+        },
+    ] {
+        assert!(provider_status_update_is_stale(&terminal, &status(later)));
+    }
+}
+
 /// Peer I/O admission rejects excess work before spawning another worker and
 /// releases every process-wide slot when the admitted jobs finish.
 #[test]

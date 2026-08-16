@@ -391,6 +391,7 @@ fn finished(
         failure_kind,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: prompt.originator.clone(),
         usage,
         compaction_original_input_tokens: None,
@@ -401,6 +402,7 @@ fn finished(
             transport: tau_proto::ProviderBackendTransport::HttpSse,
             stale_chain_fallback: false,
         }),
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }

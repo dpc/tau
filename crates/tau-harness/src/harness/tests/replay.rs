@@ -1576,6 +1576,7 @@ fn provider_response_contains_text(finished: &ProviderResponseFinished, needle: 
 
 fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -1606,6 +1607,7 @@ fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     }
@@ -1696,6 +1698,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
                 model: Some("echo/model".into()),
                 operation: Some(tau_proto::PromptOperation::Inference),
                 activation_cut: Some(tau_proto::AgentHead::Root),
+                output_length_continuation: None,
             }),
         )
         .expect("seed V1 inference owner");
@@ -1878,6 +1881,7 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 agent_prompt_id: format!("sp-{agent_id}")
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),
@@ -2920,6 +2924,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     h.publish_event(
         None,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -2936,6 +2941,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         }),
@@ -3065,6 +3071,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         h.publish_for_agent(
             &cid,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
@@ -3090,6 +3097,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
                 compaction_original_input_tokens: None,
                 compaction_compacted_input_tokens: None,
                 backend: None,
+                provider_attempt: Default::default(),
                 provider_response_id: None,
                 ws_pool_delta: None,
             }),
@@ -3301,6 +3309,7 @@ fn resumed_harness_replays_persisted_session_history() {
             .expect("first prompt agent id")
             .clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -3317,6 +3326,7 @@ fn resumed_harness_replays_persisted_session_history() {
             compaction_original_input_tokens: None,
             compaction_compacted_input_tokens: None,
             backend: None,
+            provider_attempt: Default::default(),
             provider_response_id: None,
             ws_pool_delta: None,
         })
@@ -3546,6 +3556,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
 
     let spid1 = h.send_prompt_to_agent("s1");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -3562,6 +3573,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
+        provider_attempt: Default::default(),
         provider_response_id: None,
         ws_pool_delta: None,
     })

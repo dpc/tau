@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::ffi as path_std_ffi;
 use std::path::PathBuf;
 
+use tau_harness::output_length_test_barrier::OutputLengthCommitCut;
+
 /// Selects the closed provider and session topology for one daemon invocation.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ProviderMode {
@@ -40,6 +42,19 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let output_length_cut = args
+        .iter()
+        .position(|arg| arg == path_std_ffi::OsStr::new("--output-length-cut"))
+        .map(|index| {
+            if args.len() < index + 3 {
+                return Err("--output-length-cut requires CUT REACHED_PATH");
+            }
+            let cut = args.remove(index + 1);
+            let reached = args.remove(index + 1);
+            args.remove(index);
+            Ok((cut, reached))
+        })
+        .transpose()?;
     let test_dummy = args
         .last()
         .is_some_and(|arg| arg == path_std_ffi::OsStr::new("--test-dummy"));
@@ -71,13 +86,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 return Err(
                     "expected SOCKET HARNESS_STATE CONFIG_DIR STATE_DIR {new|resumed} \
-                     [CORE_SHELL_CWD] [--provider-builtin] [--test-dummy]"
+                     [CORE_SHELL_CWD] [--provider-builtin] [--test-dummy] \
+                     [--output-length-cut {planned-response|continuation-steer} REACHED_PATH]"
                         .into(),
                 );
             }
         };
     if provider_mode == ProviderMode::Builtin && core_shell_cwd.is_some() {
         return Err("provider-builtin daemon cannot enable core-shell".into());
+    }
+    if let Some((cut, reached)) = output_length_cut {
+        if provider_mode != ProviderMode::Fake {
+            return Err("output-length cut requires the fake provider".into());
+        }
+        let cut = match cut.to_str() {
+            Some("planned-response") => OutputLengthCommitCut::AfterPlannedResponse,
+            Some("continuation-steer") => OutputLengthCommitCut::AfterContinuationSteer,
+            _ => {
+                return Err(
+                    "output-length cut must be planned-response or continuation-steer".into(),
+                );
+            }
+        };
+        let harness_state = PathBuf::from(harness_state).canonicalize()?;
+        let reached = PathBuf::from(reached);
+        let reached_parent = reached
+            .parent()
+            .ok_or("output-length reached path must have a parent")?
+            .canonicalize()?;
+        if reached.exists() || reached_parent != harness_state {
+            return Err(
+                "output-length reached path must be an absent direct child of harness state".into(),
+            );
+        }
+        tau_harness::output_length_test_barrier::install(cut, reached)?;
     }
     let status = match status.to_str() {
         Some("new") => tau_harness::SessionLaunchStatus::New,

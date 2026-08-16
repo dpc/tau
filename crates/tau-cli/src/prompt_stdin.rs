@@ -455,14 +455,34 @@ impl OneShotOutput {
         if !self.owns_finished(finished) {
             return None;
         }
+        if matches!(
+            finished.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+        ) {
+            return None;
+        }
         let failed = matches!(
             finished.stop_reason,
-            tau_proto::ProviderStopReason::Error
+            tau_proto::ProviderStopReason::Length
+                | tau_proto::ProviderStopReason::Error
                 | tau_proto::ProviderStopReason::RepetitionDetected
         ) || finished.failure_kind.is_some()
             || finished.error.is_some();
         failed.then(|| {
             finished.error.clone().unwrap_or_else(|| {
+                if finished.stop_reason == tau_proto::ProviderStopReason::Length {
+                    if finished
+                        .output_items
+                        .iter()
+                        .any(|item| matches!(item, ContextItem::ToolCall(_)))
+                    {
+                        return "Model reached its output-token limit while producing a tool call. The incomplete call was not executed.".to_owned();
+                    }
+                    if assistant_text_from_output_items(&finished.output_items).is_some() {
+                        return "Model reached its output-token limit before completing the turn. The displayed response may be incomplete.".to_owned();
+                    }
+                    return "Model reached its output-token limit before completing the turn. No assistant answer or executable tool call was produced.".to_owned();
+                }
                 finished.failure_kind.map_or_else(
                     || format!("provider stopped with {:?}", finished.stop_reason),
                     |kind| format!("provider failure: {}", kind.as_str()),
@@ -491,6 +511,12 @@ impl OneShotOutput {
             })
         {
             self.thinking_blocks.push(thinking);
+        }
+        if matches!(
+            finished.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+        ) {
+            return false;
         }
         if finished.stop_reason.requests_tool_calls() {
             return false;
