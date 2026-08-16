@@ -74,8 +74,8 @@ impl GatewayRegistrySnapshot {
             .iter()
             .filter(|registration| registration.key.session_id == session_id)
             .map(|registration| GatewayAgentView {
-                session_id: registration.key.session_id.clone(),
-                agent_id: registration.key.agent_id.clone(),
+                session_id: registration.key.session_id.to_string(),
+                agent_id: registration.key.agent_id.as_str().to_owned(),
                 display_name: registration.display_name.clone(),
                 alias: registration.alias,
             })
@@ -85,7 +85,8 @@ impl GatewayRegistrySnapshot {
     /// Return true when a target registration is currently live.
     pub(super) fn has_registration(&self, session_id: &str, agent_id: &str) -> bool {
         self.registrations.iter().any(|registration| {
-            registration.key.session_id == session_id && registration.key.agent_id == agent_id
+            registration.key.session_id == session_id
+                && registration.key.agent_id.as_str() == agent_id
         })
     }
 

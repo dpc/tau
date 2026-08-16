@@ -350,6 +350,21 @@ impl GatewaySupervisorWorker {
                 }
             }
             if !connection_failed {
+                match gateway.complete_reannouncement() {
+                    Ok(response) if !gateway_response_requires_reconnect(&gateway, &response) => {
+                        deliveries.extend(response.deliveries);
+                    }
+                    Ok(_) => connection_failed = true,
+                    Err(message) => {
+                        if !outage_reported {
+                            output.request_notice(message.to_string(), NoticeLevel::Warning);
+                            outage_reported = true;
+                        }
+                        connection_failed = true;
+                    }
+                }
+            }
+            if !connection_failed {
                 let state_guard = state.lock();
                 if !gateway_supervisor_is_current(&state_guard, config_generation) {
                     gateway.disconnect();

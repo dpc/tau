@@ -17,9 +17,11 @@ workspace = true
 [dependencies]
 blake3.workspace = true
 fs2.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 socket2.workspace = true
+subtle.workspace = true
 tau-client.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true

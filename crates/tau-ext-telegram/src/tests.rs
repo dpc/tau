@@ -12,8 +12,16 @@ use super::gateway_supervisor::{
     GATEWAY_RECONNECT_INITIAL_DELAY, GATEWAY_RECONNECT_MAX_DELAY, next_gateway_retry_delay,
 };
 use super::*;
+use crate::gateway_client::test_support::authenticate_test_gateway;
 
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+const TEST_GEN_ONE: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+const TEST_GEN_TWO: &str = "0202020202020202020202020202020202020202020202020202020202020202";
+const TEST_GEN_THREE: &str = "0303030303030303030303030303030303030303030303030303030303030303";
+const TEST_GEN_LATE: &str = "0404040404040404040404040404040404040404040404040404040404040404";
+const TEST_GEN_OLD: &str = "0505050505050505050505050505050505050505050505050505050505050505";
+const TEST_GEN_CURRENT: &str = "0606060606060606060606060606060606060606060606060606060606060606";
 
 /// Clears the correlated production saturation hook even after a test panic.
 struct SaturationHookGuard;
@@ -621,7 +629,7 @@ fn message_args(value: &str) -> CborValue {
 }
 
 fn gateway_mode(socket_path: std::path::PathBuf) -> BridgeMode {
-    BridgeMode::GatewayClient(GatewayClientConfig { socket_path })
+    BridgeMode::GatewayClient(GatewayClientConfig::for_test(socket_path))
 }
 
 /// Write one flushed fake gateway response line.
@@ -872,11 +880,10 @@ fn config_rejects_missing_token_or_empty_allowlist() {
     assert!(err.contains("allowed_user_ids"));
 }
 
-/// Gateway-client mode deliberately does not read a bot token or require a
-/// Telegram allowlist in the sidecar; those belong to the standalone gateway
-/// process that owns polling.
+/// Gateway-client mode requires a declared gateway key, but no bot token or
+/// Telegram allowlist; those belong to the standalone gateway.
 #[test]
-fn gateway_client_config_requires_only_socket_path() {
+fn gateway_client_config_requires_socket_and_declared_secret() {
     let err = ExtConfig {
         mode: ExtMode::GatewayClient,
         ..ExtConfig::default()
@@ -885,14 +892,45 @@ fn gateway_client_config_requires_only_socket_path() {
     .expect_err("missing socket should fail");
     assert!(err.contains("gateway_socket_path"));
 
-    let mode = ExtConfig {
+    let err = ExtConfig {
         mode: ExtMode::GatewayClient,
         gateway_socket_path: Some(PathBuf::from("/tmp/tau-telegram-test.sock")),
         ..ExtConfig::default()
     }
     .validate(&BTreeMap::new())
-    .expect("gateway client config");
-    assert!(matches!(mode, BridgeMode::GatewayClient(_)));
+    .expect_err("missing key declaration should fail");
+    assert!(err.contains("gateway_client_secret"));
+
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "gateway-key".to_owned(),
+        tau_proto::SecretValue::new("11".repeat(32)),
+    );
+    let config = || ExtConfig {
+        mode: ExtMode::GatewayClient,
+        gateway_socket_path: Some(PathBuf::from("/tmp/tau-telegram-test.sock")),
+        gateway_client_secret: Some("gateway-key".to_owned()),
+        ..ExtConfig::default()
+    };
+    let first = config().validate(&secrets).expect("gateway client config");
+    let second = config()
+        .validate(&secrets)
+        .expect("fresh gateway client config");
+    let (BridgeMode::GatewayClient(first), BridgeMode::GatewayClient(second)) = (first, second)
+    else {
+        panic!("gateway mode");
+    };
+    assert_ne!(first.client_generation, second.client_generation);
+
+    secrets.insert(
+        "gateway-key".to_owned(),
+        tau_proto::SecretValue::new("AA".repeat(32)),
+    );
+    let error = config()
+        .validate(&secrets)
+        .expect_err("uppercase gateway key must fail");
+    assert_eq!(error, "invalid Telegram gateway client secret");
+    assert!(!error.contains("AA"));
 }
 
 /// In gateway-client mode the sidecar must not touch Telegram polling APIs.
@@ -908,6 +946,8 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
     let seen_requests_thread = Arc::clone(&seen_requests);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let hello = authenticate_test_gateway(&mut stream, &"44".repeat(32));
+        seen_requests_thread.lock().expect("requests").push(hello);
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = path_std_io::BufReader::new(reader);
         for index in 0..3 {
@@ -917,17 +957,10 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                 serde_json::from_str(&line).expect("gateway request JSON");
             seen_requests_thread.lock().expect("requests").push(request);
             let response = match index {
-                0 => serde_json::json!({
-                    "protocol_version": 0,
-                    "ok": true,
-                    "gateway_generation": "test",
-                    "reannounce_required": true,
-                    "deliveries": [],
-                }),
                 1 => serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [{
                         "request_id": GATEWAY_REPORT_1,
                         "session_id": "s1",
@@ -940,9 +973,9 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                     }],
                 }),
                 _ => serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [],
                 }),
             };
@@ -988,13 +1021,14 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
     assert!(client.poll_timeouts.lock().expect("polls").is_empty());
     let requests = seen_requests.lock().expect("requests");
     assert_eq!(requests[0]["kind"], "hello");
-    assert_eq!(requests[1]["kind"], "register_agent");
-    assert_eq!(requests[1]["session_id"], "s1");
-    assert_eq!(requests[1]["agent_id"], "agent-1");
-    assert_eq!(requests[2]["kind"], "send_message");
+    assert_eq!(requests[1]["kind"], "complete_reannouncement");
+    assert_eq!(requests[2]["kind"], "register_agent");
     assert_eq!(requests[2]["session_id"], "s1");
     assert_eq!(requests[2]["agent_id"], "agent-1");
-    assert_eq!(requests[2]["message"], "reply");
+    assert_eq!(requests[3]["kind"], "send_message");
+    assert_eq!(requests[3]["session_id"], "s1");
+    assert_eq!(requests[3]["agent_id"], "agent-1");
+    assert_eq!(requests[3]["message"], "reply");
     assert!(client.sent.lock().expect("sent").is_empty());
 }
 
@@ -1010,6 +1044,8 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
     let seen_requests_thread = Arc::clone(&seen_requests);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let hello = authenticate_test_gateway(&mut stream, &"44".repeat(32));
+        seen_requests_thread.lock().expect("requests").push(hello);
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..2 {
@@ -1022,9 +1058,9 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [],
                 })
             )
@@ -1054,11 +1090,12 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
 
     let requests = seen_requests.lock().expect("requests");
     assert_eq!(requests[0]["kind"], "hello");
-    assert_eq!(requests[1]["kind"], "send_message");
-    assert_eq!(requests[1]["session_id"], "s1");
-    assert_eq!(requests[1]["agent_id"], "agent-1");
-    assert_eq!(requests[1]["message"], "reply");
-    assert!(requests[1].get("chat_id").is_none());
+    assert_eq!(requests[1]["kind"], "complete_reannouncement");
+    assert_eq!(requests[2]["kind"], "send_message");
+    assert_eq!(requests[2]["session_id"], "s1");
+    assert_eq!(requests[2]["agent_id"], "agent-1");
+    assert_eq!(requests[2]["message"], "reply");
+    assert!(requests[2].get("chat_id").is_none());
     assert!(client.sent.lock().expect("sent").is_empty());
     assert_eq!(sent.agent_id.as_str(), "agent-1");
     assert_eq!(sent.text, "reply");
@@ -1073,6 +1110,7 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
     let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        authenticate_test_gateway(&mut stream, &"44".repeat(32));
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = path_std_io::BufReader::new(reader);
         for index in 0..2 {
@@ -1080,14 +1118,14 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
             reader.read_line(&mut line).expect("read gateway request");
             let response = if index == 0 {
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [],
                 })
             } else {
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": false,
                     "error": "gateway send failed",
                     "keep_connection": true,
@@ -1136,6 +1174,8 @@ fn gateway_client_register_before_session_started_does_not_announce() {
     let seen_requests_thread = Arc::clone(&seen_requests);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let hello = authenticate_test_gateway(&mut stream, &"44".repeat(32));
+        seen_requests_thread.lock().expect("requests").push(hello);
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..2 {
@@ -1152,9 +1192,9 @@ fn gateway_client_register_before_session_started_does_not_announce() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [],
                 })
             )
@@ -1191,9 +1231,9 @@ fn gateway_client_register_before_session_started_does_not_announce() {
 fn gateway_delivery_requires_live_local_registration() {
     let (tx, rx) = mpsc::channel();
     let state = SharedState::new();
-    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
-        socket_path: PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
-    }));
+    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig::for_test(
+        PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
+    )));
     let gateway_cell = Mutex::new(Some(Arc::clone(&gateway)));
     {
         let mut state = state.lock();
@@ -1252,9 +1292,9 @@ fn gateway_report_failure_stops_delivery_suffix() {
     let (tx, rx) = mpsc::channel();
     drop(rx);
     let state = SharedState::new();
-    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
-        socket_path: PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
-    }));
+    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig::for_test(
+        PathBuf::from("/tmp/nonexistent-telegram-gateway.sock"),
+    )));
     let gateway_cell = Mutex::new(Some(Arc::clone(&gateway)));
     {
         let mut state = state.lock();
@@ -1298,21 +1338,8 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
     let seen_ack_server = Arc::clone(&seen_ack);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        authenticate_test_gateway(&mut stream, &"44".repeat(32));
         let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone stream"));
-        let mut hello = String::new();
-        reader.read_line(&mut hello).expect("read hello");
-        writeln!(
-            stream,
-            "{}",
-            serde_json::json!({
-                "protocol_version": 0,
-                "ok": true,
-                "gateway_generation": "test",
-                "deliveries": [],
-            })
-        )
-        .expect("write hello response");
-        stream.flush().expect("flush hello");
         let mut unregister = String::new();
         reader
             .read_line(&mut unregister)
@@ -1324,9 +1351,9 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 0,
+                "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                 "ok": true,
-                "gateway_generation": "test",
+                "gateway_generation": "44".repeat(32),
                 "deliveries": [],
             })
         )
@@ -1335,23 +1362,8 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
         drop(reader);
         drop(stream);
         let (mut stream, _) = listener.accept().expect("accept replacement client");
+        authenticate_test_gateway(&mut stream, &"55".repeat(32));
         let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone stream"));
-        let mut hello = String::new();
-        reader
-            .read_line(&mut hello)
-            .expect("read replacement hello");
-        writeln!(
-            stream,
-            "{}",
-            serde_json::json!({
-                "protocol_version": 0,
-                "ok": true,
-                "gateway_generation": "replacement",
-                "deliveries": [],
-            })
-        )
-        .expect("write replacement hello response");
-        stream.flush().expect("flush replacement hello");
         let mut ack = String::new();
         reader.read_line(&mut ack).expect("read ack");
         *seen_ack_server.lock().expect("seen ack") =
@@ -1360,9 +1372,9 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 0,
+                "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                 "ok": true,
-                "gateway_generation": "replacement",
+                "gateway_generation": "55".repeat(32),
                 "deliveries": [],
             })
         )
@@ -1371,7 +1383,9 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
     });
 
     let replacement_socket_path = socket_path.clone();
-    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig { socket_path }));
+    let gateway = Arc::new(GatewayClient::new(GatewayClientConfig::for_test(
+        socket_path,
+    )));
     gateway
         .connect_cancellable(|| false)
         .expect("connect gateway client");
@@ -1434,9 +1448,9 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
             .any(|pending| pending.canonical_echo_observed),
         "validated late echo remains a retryable ACK obligation"
     );
-    let replacement = Arc::new(GatewayClient::new(GatewayClientConfig {
-        socket_path: replacement_socket_path,
-    }));
+    let replacement = Arc::new(GatewayClient::new(GatewayClientConfig::for_test(
+        replacement_socket_path,
+    )));
     replacement
         .connect_cancellable(|| false)
         .expect("connect replacement client");
@@ -1479,6 +1493,7 @@ fn assert_stale_ack_response_reconnects(
         });
         {
             let (mut stream, _) = listener.accept().expect("accept original client");
+            authenticate_test_gateway(&mut stream, TEST_GEN_ONE);
             let mut reader =
                 path_std_io::BufReader::new(stream.try_clone().expect("clone original"));
             for index in 0..3 {
@@ -1493,21 +1508,17 @@ fn assert_stale_ack_response_reconnects(
                 write_gateway_response(
                     &mut stream,
                     serde_json::json!({
-                        "protocol_version": 0,
+                        "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                         "ok": true,
-                        "gateway_generation": "one",
-                        "reannounce_required": index == 0,
-                        "deliveries": if index == 1 {
-                            vec![delivery.clone()]
-                        } else {
-                            Vec::<serde_json::Value>::new()
-                        },
+                        "gateway_generation": TEST_GEN_ONE,
+                        "deliveries": vec![delivery.clone()],
                     }),
                 );
             }
         }
         {
             let (mut stream, _) = listener.accept().expect("accept stale ACK client");
+            authenticate_test_gateway(&mut stream, TEST_GEN_TWO);
             let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone stale"));
             for index in 0..3 {
                 let mut line = String::new();
@@ -1516,20 +1527,19 @@ fn assert_stale_ack_response_reconnects(
                     serde_json::from_str(&line).expect("stale request JSON");
                 assert_eq!(
                     request["kind"],
-                    ["hello", "register_agent", "ack_delivery"][index]
+                    ["register_agent", "complete_reannouncement", "ack_delivery"][index]
                 );
                 write_gateway_response(
                     &mut stream,
                     serde_json::json!({
-                        "protocol_version": 0,
+                        "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                         "ok": true,
                         "gateway_generation": if index == 2 {
                             stale_generation
                         } else {
-                            "two"
+                            TEST_GEN_TWO
                         },
-                        "reannounce_required": index == 0
-                            || (index == 2 && stale_reannounce_required),
+                        "reannounce_required": index == 2 && stale_reannounce_required,
                         "deliveries": if index == 2 {
                             vec![serde_json::json!({
                                 "request_id": GATEWAY_REPORT_2,
@@ -1548,12 +1558,13 @@ fn assert_stale_ack_response_reconnects(
                 );
             }
         }
-        let final_generation = if stale_generation == "three" {
-            "three"
+        let final_generation = if stale_generation == TEST_GEN_THREE {
+            TEST_GEN_THREE
         } else {
-            "two"
+            TEST_GEN_TWO
         };
         let (mut stream, _) = listener.accept().expect("accept final ACK client");
+        authenticate_test_gateway(&mut stream, final_generation);
         let mut reader = path_std_io::BufReader::new(stream.try_clone().expect("clone final"));
         for index in 0..3 {
             let mut line = String::new();
@@ -1562,15 +1573,14 @@ fn assert_stale_ack_response_reconnects(
                 serde_json::from_str(&line).expect("final request JSON");
             assert_eq!(
                 request["kind"],
-                ["hello", "register_agent", "ack_delivery"][index]
+                ["register_agent", "complete_reannouncement", "ack_delivery"][index]
             );
             write_gateway_response(
                 &mut stream,
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
                     "gateway_generation": final_generation,
-                    "reannounce_required": index == 0,
                     "deliveries": if index == 2 {
                         vec![serde_json::json!({
                             "request_id": GATEWAY_REPORT_2,
@@ -1634,14 +1644,14 @@ fn assert_stale_ack_response_reconnects(
 /// the canonical obligation without publishing stale deliveries.
 #[test]
 fn gateway_ack_generation_change_reconnects_and_retries() {
-    assert_stale_ack_response_reconnects("three", false);
+    assert_stale_ack_response_reconnects(TEST_GEN_THREE, false);
 }
 
 /// A hint-only ACK response must preserve and automatically retry the canonical
 /// obligation without publishing stale deliveries.
 #[test]
 fn gateway_ack_reannouncement_hint_reconnects_and_retries() {
-    assert_stale_ack_response_reconnects("two", true);
+    assert_stale_ack_response_reconnects(TEST_GEN_TWO, true);
 }
 
 /// A heartbeat failure from a stale gateway connection must not clear
@@ -1650,12 +1660,12 @@ fn gateway_ack_reannouncement_hint_reconnects_and_retries() {
 fn stale_gateway_heartbeat_failure_does_not_clear_new_registration_state() {
     let gateway_cell = Mutex::new(None);
     let state = SharedState::new();
-    let old_gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
-        socket_path: PathBuf::from("/tmp/old-gateway.sock"),
-    }));
-    let new_gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
-        socket_path: PathBuf::from("/tmp/new-gateway.sock"),
-    }));
+    let old_gateway = Arc::new(GatewayClient::new(GatewayClientConfig::for_test(
+        PathBuf::from("/tmp/old-gateway.sock"),
+    )));
+    let new_gateway = Arc::new(GatewayClient::new(GatewayClientConfig::for_test(
+        PathBuf::from("/tmp/new-gateway.sock"),
+    )));
     *gateway_cell.lock().expect("gateway lock") = Some(Arc::clone(&new_gateway));
     {
         let mut state = state.lock();
@@ -1704,6 +1714,8 @@ fn gateway_client_config_error_sends_goodbye() {
     let (goodbye_seen_tx, goodbye_seen_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let hello = authenticate_test_gateway(&mut stream, &"44".repeat(32));
+        seen_requests_thread.lock().expect("requests").push(hello);
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..2 {
@@ -1722,9 +1734,9 @@ fn gateway_client_config_error_sends_goodbye() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [],
                 })
             )
@@ -1751,21 +1763,23 @@ fn gateway_client_config_error_sends_goodbye() {
     std::thread::scope(|scope| {
         let clear = scope.spawn(|| ext.clear_config_after_error());
         post_join_rx.recv().expect("stop joined worker");
-        let goodbye_before_release = goodbye_seen_rx.try_recv();
+        let goodbye_after_join = goodbye_seen_rx.try_recv();
         goodbye_release_tx
             .send(())
             .expect("release goodbye after worker join");
         clear.join().expect("clear configuration");
-        assert!(
-            matches!(goodbye_before_release, Err(mpsc::TryRecvError::Empty)),
-            "goodbye must wait until the worker retires"
-        );
+        if matches!(goodbye_after_join, Err(mpsc::TryRecvError::Empty)) {
+            goodbye_seen_rx
+                .recv()
+                .expect("goodbye after supervisor worker retirement");
+        }
     });
     server.join().expect("fake gateway thread");
 
     let requests = seen_requests.lock().expect("requests");
     assert_eq!(requests[0]["kind"], "hello");
-    assert_eq!(requests[1]["kind"], "goodbye");
+    assert_eq!(requests[1]["kind"], "complete_reannouncement");
+    assert_eq!(requests[2]["kind"], "goodbye");
 }
 
 /// Agent unload must explicitly unregister the route from the gateway before
@@ -1779,9 +1793,11 @@ fn gateway_client_agent_unload_sends_unregister() {
     let seen_requests_thread = Arc::clone(&seen_requests);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let hello = authenticate_test_gateway(&mut stream, &"44".repeat(32));
+        seen_requests_thread.lock().expect("requests").push(hello);
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = path_std_io::BufReader::new(reader);
-        for _ in 0..4 {
+        for _ in 0..3 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
             if line.trim().is_empty() {
@@ -1795,9 +1811,9 @@ fn gateway_client_agent_unload_sends_unregister() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "test",
+                    "gateway_generation": "44".repeat(32),
                     "deliveries": [],
                 })
             )
@@ -1835,13 +1851,14 @@ fn gateway_client_agent_unload_sends_unregister() {
 
     let requests = seen_requests.lock().expect("requests");
     assert_eq!(requests[0]["kind"], "hello");
-    assert_eq!(requests[1]["kind"], "register_agent");
-    assert_eq!(requests[2]["kind"], "unregister_agent");
-    assert_eq!(requests[2]["session_id"], "s1");
-    assert_eq!(requests[2]["agent_id"], "agent-1");
+    assert_eq!(requests[1]["kind"], "complete_reannouncement");
+    assert_eq!(requests[2]["kind"], "register_agent");
+    assert_eq!(requests[3]["kind"], "unregister_agent");
+    assert_eq!(requests[3]["session_id"], "s1");
+    assert_eq!(requests[3]["agent_id"], "agent-1");
     assert!(
         requests
-            .get(3)
+            .get(4)
             .is_none_or(|request| request["kind"] == "goodbye")
     );
 }
@@ -1862,9 +1879,10 @@ fn gateway_supervisor_recovers_when_gateway_starts_late() {
     let listener = UnixListener::bind(&socket_path).expect("start fake gateway later");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept reconnecting sidecar");
+        authenticate_test_gateway(&mut stream, TEST_GEN_LATE);
         let mut reader =
             path_std_io::BufReader::new(stream.try_clone().expect("clone gateway stream"));
-        for expected_kind in ["hello", "goodbye"] {
+        for expected_kind in ["complete_reannouncement", "goodbye"] {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
             if line.trim().is_empty() {
@@ -1878,10 +1896,9 @@ fn gateway_supervisor_recovers_when_gateway_starts_late() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "late",
-                    "reannounce_required": expected_kind == "hello",
+                    "gateway_generation": TEST_GEN_LATE,
                     "deliveries": [],
                 })
             )
@@ -1910,6 +1927,11 @@ fn assert_gateway_response_forces_exact_reannouncement(
     let server = std::thread::spawn(move || {
         {
             let (mut stream, _) = listener.accept().expect("accept first connection");
+            let hello = authenticate_test_gateway(&mut stream, TEST_GEN_ONE);
+            seen_thread
+                .lock()
+                .expect("seen")
+                .push((1, hello["kind"].as_str().expect("hello kind").to_owned()));
             let mut reader =
                 path_std_io::BufReader::new(stream.try_clone().expect("clone first stream"));
             for index in 0..3 {
@@ -1925,15 +1947,14 @@ fn assert_gateway_response_forces_exact_reannouncement(
                     stream,
                     "{}",
                     serde_json::json!({
-                        "protocol_version": 0,
+                        "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                         "ok": true,
                         "gateway_generation": if index == 2 {
                             restart_generation
                         } else {
-                            "one"
+                            TEST_GEN_ONE
                         },
-                        "reannounce_required": index == 0
-                            || (index == 2 && reannounce_required),
+                        "reannounce_required": index == 2 && reannounce_required,
                         "deliveries": [],
                     })
                 )
@@ -1944,6 +1965,11 @@ fn assert_gateway_response_forces_exact_reannouncement(
         std::fs::remove_file(&server_path).expect("remove first listener path");
         let replacement = UnixListener::bind(&server_path).expect("bind replacement gateway");
         let (mut stream, _) = replacement.accept().expect("accept replacement connection");
+        let hello = authenticate_test_gateway(&mut stream, restart_generation);
+        seen_thread
+            .lock()
+            .expect("seen")
+            .push((2, hello["kind"].as_str().expect("hello kind").to_owned()));
         let mut reader =
             path_std_io::BufReader::new(stream.try_clone().expect("clone replacement stream"));
         for index in 0..3 {
@@ -1957,7 +1983,7 @@ fn assert_gateway_response_forces_exact_reannouncement(
                 2,
                 request["kind"].as_str().expect("request kind").to_owned(),
             ));
-            if index == 1 {
+            if index == 0 {
                 assert_eq!(request["session_id"], "s1");
                 assert_eq!(request["agent_id"], "agent-1");
             }
@@ -1965,10 +1991,9 @@ fn assert_gateway_response_forces_exact_reannouncement(
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
                     "gateway_generation": restart_generation,
-                    "reannounce_required": index == 0,
                     "deliveries": [],
                 })
             )
@@ -2001,10 +2026,12 @@ fn assert_gateway_response_forces_exact_reannouncement(
         *seen.lock().expect("seen"),
         vec![
             (1, "hello".to_owned()),
+            (1, "complete_reannouncement".to_owned()),
             (1, "register_agent".to_owned()),
             (1, "send_message".to_owned()),
             (2, "hello".to_owned()),
             (2, "register_agent".to_owned()),
+            (2, "complete_reannouncement".to_owned()),
             (2, "send_message".to_owned()),
         ]
     );
@@ -2014,14 +2041,14 @@ fn assert_gateway_response_forces_exact_reannouncement(
 /// exact route replay, and recovered operation without relying on a hint bit.
 #[test]
 fn gateway_generation_change_forces_exact_reannouncement() {
-    assert_gateway_response_forces_exact_reannouncement("two", false);
+    assert_gateway_response_forces_exact_reannouncement(TEST_GEN_TWO, false);
 }
 
 /// A live response requesting reannouncement must force fresh hello, exact
 /// route replay, and recovered operation even when generation is unchanged.
 #[test]
 fn gateway_reannouncement_hint_forces_exact_reannouncement() {
-    assert_gateway_response_forces_exact_reannouncement("one", true);
+    assert_gateway_response_forces_exact_reannouncement(TEST_GEN_ONE, true);
 }
 
 /// Replacing gateway configuration must wait for an old worker blocked in its
@@ -2040,27 +2067,31 @@ fn gateway_reconfiguration_joins_fixture_blocked_worker() {
         path_std_io::BufReader::new(stream.try_clone().expect("clone old stream"))
             .read_line(&mut line)
             .expect("read old hello");
+        let hello: serde_json::Value = serde_json::from_str(&line).expect("old gateway hello JSON");
+        assert_eq!(hello["kind"], "hello");
         hello_seen_tx.send(()).expect("signal blocked hello");
         release_rx.recv().expect("release old hello");
-        writeln!(
+        let _ = writeln!(
             stream,
             "{}",
             serde_json::json!({
-                "protocol_version": 0,
+                "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                 "ok": true,
-                "gateway_generation": "old",
-                "deliveries": [],
+                "kind": "challenge",
+                "gateway_generation": TEST_GEN_OLD,
+                "server_nonce": "33".repeat(32),
+                "server_mac": "00".repeat(32),
             })
-        )
-        .expect("write old hello response");
-        stream.flush().expect("flush old hello response");
+        );
+        let _ = stream.flush();
     });
     let new_listener = UnixListener::bind(&new_path).expect("bind current gateway");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = new_listener.accept().expect("accept current connection");
+        authenticate_test_gateway(&mut stream, TEST_GEN_CURRENT);
         let mut reader =
             path_std_io::BufReader::new(stream.try_clone().expect("clone current stream"));
-        for _ in 0..2 {
+        for _ in 0..1 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read current request");
             if line.trim().is_empty() {
@@ -2070,9 +2101,9 @@ fn gateway_reconfiguration_joins_fixture_blocked_worker() {
                 stream,
                 "{}",
                 serde_json::json!({
-                    "protocol_version": 0,
+                    "protocol_version": crate::gateway_auth::PROTOCOL_VERSION,
                     "ok": true,
-                    "gateway_generation": "current",
+                    "gateway_generation": TEST_GEN_CURRENT,
                     "deliveries": [],
                 })
             )

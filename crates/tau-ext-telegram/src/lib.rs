@@ -15,6 +15,7 @@
 use ureq::tls as path_ureq_tls;
 
 mod gateway;
+mod gateway_auth;
 mod gateway_client;
 mod gateway_exit;
 mod gateway_supervisor;
@@ -285,6 +286,8 @@ struct ExtConfig {
     poll_timeout_seconds: Option<u64>,
     /// Unix socket used in `gateway_client` mode.
     gateway_socket_path: Option<PathBuf>,
+    /// Declared secret name carrying the gateway authentication key.
+    gateway_client_secret: Option<String>,
 }
 
 impl ExtConfig {
@@ -299,8 +302,18 @@ impl ExtConfig {
                 .ok_or_else(|| {
                     "telegram gateway_client mode requires `gateway_socket_path`".to_owned()
                 })?;
+            let secret_name = self.gateway_client_secret.ok_or_else(|| {
+                "telegram gateway_client mode requires `gateway_client_secret`".to_owned()
+            })?;
+            let secret = secrets
+                .get(&secret_name)
+                .map(tau_proto::SecretValue::expose_secret)
+                .ok_or_else(|| "telegram gateway client secret is missing".to_owned())?;
+            let auth_key = gateway_auth::GatewayAuthKey::parse(secret)?;
             return Ok(BridgeMode::GatewayClient(GatewayClientConfig {
                 socket_path,
+                auth_key,
+                client_generation: gateway_auth::ClientGeneration::random(),
             }));
         }
         let secret_name = self

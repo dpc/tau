@@ -6030,9 +6030,11 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fs2",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "socket2",
+ "subtle",
  "tau-client",
  "tau-core",
  "tau-proto",

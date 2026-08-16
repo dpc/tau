@@ -24,7 +24,14 @@ reconnect/backlog-drain, and non-routed duplicate-reply interleavings without
 wall-clock races. Cover both direct polling and gateway client paths. Gateway
 response conformance uses the real gateway client to cover
 the 32-record maximum response prefix, both send and heartbeat producers, and
-repeated exact replay before ACK. Gateway tests force mixed-prefix ordering,
+repeated exact replay before ACK. Operational socket fixtures complete the
+authenticated protocol-v0 handshake;
+legacy unauthenticated protocol shapes appear only in explicit rejection
+coverage. Authentication tests cover current and previous keys,
+malformed or incorrect proofs, minimal unauthenticated status, replay,
+replacement fencing, and fresh process generations. Gateway tests force
+mandatory, repeated, out-of-order, omitted-route, and
+disconnect-before-completion reannouncement cases, mixed-prefix ordering,
 restart/re-registration replay, ACK progress independent of long polling,
 late ACK after route retirement, mismatched-route rejection, dropped ACK
 responses, bounded retry state,

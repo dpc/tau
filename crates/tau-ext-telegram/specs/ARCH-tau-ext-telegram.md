@@ -155,6 +155,10 @@ Long polling is single-owner per API base and bot token, protected by the non-se
 Gateway mode delegates polling, allowlist, destination, and durable mixed
 checkpoint authority to
 [ARCH-tau-telegram-gateway](ARCH-tau-telegram-gateway.md). The sidecar has no
-bot token, filters deliveries against current local registrations, correlates
+bot token and mutually authenticates with the gateway over the authenticated
+protocol using one declared
+`gateway_client_secret` before gaining route or message authority. It filters
+deliveries against current local registrations, correlates
 the configured publisher's exact live canonical echo, and sends the durable
-ACK. Its same-UID socket is a trusted local boundary rather than a sandbox.
+ACK. Its authenticated same-UID stream is a cooperative local boundary rather
+than a hostile-process sandbox.

@@ -1180,6 +1180,10 @@ from malicious same-UID code or misuse of credentials returned to an authorized
 extension. Secret payloads remain absent from logs, events, journals, generic
 debug output, and errors. See
 [`SPEC-extension-secret-storage`](specs/SPEC-extension-secret-storage.md).
+The Telegram gateway uses one such configured-instance secret for mutual local
+protocol authentication. This removes ambient authority from socket-only peers,
+but does not prevent malicious same-UID code from extracting an authorized
+extension's in-memory key through `/proc`, ptrace, or direct memory access.
 Named-secret environment discovery matches the exact `TAU_SECRET_` prefix in
 the OS-native key representation and ignores unrelated raw entries. A matching
 suffix or value that cannot enter the UTF-8 schema returns a typed,

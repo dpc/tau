@@ -8,9 +8,9 @@ One local gateway exclusively owns a shared token, `getUpdates` cursor,
 webhook/conflict handling, stream lock, durable update checkpoints,
 allowlist/destination policy, and sends. Per-session sidecars own live local
 registration and canonical report confirmation; they never poll or select raw
-chat IDs. The private bounded sanitized same-user socket is local coordination,
-not a sandbox or authentication boundary, and token-bearing data stays
-gateway-only.
+chat IDs. The private bounded sanitized same-user socket uses mandatory mutual
+authentication for local coordination but is not a hostile same-UID sandbox.
+Token-bearing data stays gateway-only.
 
 The gateway exposes stable service-manager exit classes: clean/help exits zero;
 malformed CLI input and a missing or empty token environment value use
@@ -36,8 +36,8 @@ The gateway persists a routed checkpoint before exposing it on the socket.
 Socket responses select a bounded, non-destructive prefix for registrations
 owned by that connection. Disconnect, unregister, lease expiry, and process
 restart suppress delivery without deleting or retargeting the checkpoint;
-re-registration replays its exact retained fields. An idempotent `ack_delivery`
-request carries the report ID and frozen session/agent route. It accepts only an
+re-registration replays its exact retained fields. An authenticated idempotent
+`ack_delivery` request carries the report ID and frozen session/agent route. It accepts only an
 exact matching pending record or recent acknowledgement, without requiring a
 currently live lease, then commits canonical acknowledgement and contiguous cursor
 advancement through the existing per-stream state-file transaction before returning
@@ -54,6 +54,33 @@ commit-unknown: the gateway poisons the shared state owner, refuses further
 state operations, and requires restart rather than resuming from a divergent
 claimed rollback.
 
+The authenticated protocol authenticates a three-frame
+`hello`/`challenge`/`authenticate` exchange with a 32-byte shared key. The key is
+encoded as exactly 64 lowercase hexadecimal characters. Each role-separated
+keyed-BLAKE3 MAC covers length-prefixed protocol, key selector, random gateway
+generation, fixed `std-telegram` instance, process-local client generation, and
+fresh client/server nonces. The gateway keeps current and optional previous key
+slots for rotation; a Tau sidecar receives exactly one declared key. Unknown
+keys, malformed fields, wrong proofs, pre-authentication operations, repeated
+authentication, and handshake timeout return only `authentication failed` and
+close. Unauthenticated `status` is one-shot and exposes only protocol version,
+readiness, and gateway generation.
+
+A reconnect with the same process-local client generation atomically fences its
+older connection and transfers that generation's routes. The replacement
+registers its current desired snapshot, then sends mandatory authenticated
+`complete_reannouncement`; completion atomically removes every transferred route
+omitted from that snapshot. The sidecar cannot publish the replacement before
+completion succeeds. Before completion, registration responses expose no durable
+deliveries and heartbeat, unregister, send, and ACK operations fail without
+authority-bearing side effects.
+Every old-connection operation is fatal. A different live client generation
+cannot replace an owned route and receives `route_conflict`; after disconnect or
+expiry it may claim the route. ACK authority remains bound to the durable frozen
+report/route rather than a live lease or client generation, but the connection
+issuing it must still be current and authenticated. Session and agent route
+fields use the canonical Tau typed grammars.
+
 Live leases disappear on unregister, goodbye, disconnect, heartbeat expiry, or
 restart. A sidecar rechecks current registration before report submission.
 Sends require a live registration owned by that exact requesting sidecar and a
@@ -61,8 +88,9 @@ gateway-selected configured or linked chat, never model coordinates.
 Gateway-client sidecars keep the desired live route set separately from
 connection-owned lease authority. One cancellable supervisor reconnects with
 bounded low-rate backoff, sends a fresh `hello`, validates the gateway
-generation, and exactly reannounces the current desired set before publishing
-the new connection for delivery, ACK, or send. Disconnects and generation or
+generation, exactly reannounces the current desired set, and commits it with
+`complete_reannouncement` before publishing the new connection for delivery,
+ACK, or send. Disconnects and generation or
 reannouncement hints retire only connection-owned authority; stale workers and
 responses cannot publish deliveries, acknowledge reports, mutate newer
 configuration, or restore removed routes.

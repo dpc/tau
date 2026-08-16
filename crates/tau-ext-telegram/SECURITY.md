@@ -8,8 +8,12 @@ publication/shutdown gate ensures forced output teardown joins the poller,
 while ordinary disconnect does not wait for a provider long poll.
 
 `std-telegram` is a disabled-by-default personal text bridge. The configured
-extension process and optional same-UID gateway socket are cooperative local
-components, not hostile-code sandboxes. Telegram, Bot API endpoints, sender
+extension process and optional same-UID gateway are cooperative local
+components, not hostile-code sandboxes. The gateway socket uses mandatory
+mutual authentication, so merely opening it grants only minimal readiness and
+challenge access, not route, delivery, ACK, or send authority. This does not
+protect keys held in process memory from malicious same-UID `/proc`, ptrace, or
+memory access. Telegram, Bot API endpoints, sender
 metadata, commands, and message text remain untrusted external input. The
 allowlist authenticates one Telegram numeric sender for admission; it does not
 make message text trustworthy or grant Tau tool authority.
@@ -18,6 +22,22 @@ make message text trustworthy or grant Tau tool authority.
   only the API base and domain-separated stream fingerprint, never the token or
   token-bearing URL. Production Bot API endpoints require HTTPS; plaintext is
   loopback-test-only.
+- Gateway credentials use exactly 32 bytes encoded as 64 lowercase hexadecimal
+  characters; surrounding whitespace is rejected. The transcript binds the
+  numeric protocol version, key selector, gateway and client generations,
+  extension identity, both fresh nonces, and a distinct client/server proof role.
+  Key selectors are domain-separated keyed-BLAKE3 digests truncated to 16 bytes.
+  Client and server proofs are keyed-BLAKE3 over u32be-length-prefixed transcript
+  fields and are compared in constant time. Every malformed or unauthorized
+  pre-authentication frame receives the same bounded `authentication failed`
+  response followed by connection close.
+  Current and previous key slots must differ, configuration diagnostics redact
+  their contents, and the sidecar accepts only canonical generation, nonce, and
+  proof encodings.
+- One monotonic deadline covers each complete authentication exchange, so
+  byte-by-byte progress cannot retain a handler indefinitely. Authority is
+  installed only after the authenticated response is written. Reconnect fencing
+  and exact reannouncement follow the governing gateway specification.
 - Every successful Bot API response body has a Tau-owned inclusive 10 MiB cap
   after HTTP framing. Exactly 10 MiB reaches JSON decoding; 10 MiB plus one
   fails as a `Protocol` error before decoding. The cap applies equally to
@@ -67,7 +87,8 @@ make message text trustworthy or grant Tau tool authority.
   replay the retained route rather than deleting or recomputing it. The ACK
   includes the persisted report ID and frozen route, so the gateway accepts only
   that exact durable pair even after the live lease disappears; this same-UID
-  local protocol does not treat lease state as an authentication boundary.
+  authenticated local protocol does not treat lease state as durable ACK
+  authorization.
 - One cancellable sidecar supervisor owns gateway connect/reconnect. While the
   socket is absent or failed, socket delivery, ACK transmission, and outbound
   send fail closed; no
@@ -75,10 +96,14 @@ make message text trustworthy or grant Tau tool authority.
   An exact canonical echo validated while disconnected remains a local pending
   ACK obligation and is transmitted only through a subsequently validated live
   connection.
-  Every replacement connection validates a fresh `hello` generation and
-  reannounces an exact current route snapshot before becoming live. Bounded
+  Every replacement connection validates a fresh `hello` generation, reannounces
+  an exact current route snapshot, and commits it with
+  `complete_reannouncement` before becoming live. Bounded
   backoff limits retry load, while configuration generations plus joined
   cancellation prevent stale workers and responses from restoring authority.
+  Pending registration responses expose no durable deliveries, and pending
+  heartbeat, unregister, send, and ACK operations fail before authority-bearing
+  side effects.
   Non-routed updates commit only after required replies and mutations succeed.
   The same state-file transaction commits an ACK, advances its contiguous
   prefix, and retains one of 128 content-free report-ID/route retry
@@ -90,6 +115,13 @@ make message text trustworthy or grant Tau tool authority.
   gateway restart rather than claiming rollback. Review
   [SPEC-tau-telegram-gateway](specs/SPEC-tau-telegram-gateway.md) separately when
   changing it.
+- Authentication primitive tests protect strict key and field parsing, key-slot
+  rotation, transcript role separation, proof comparison, uniform malformed-field
+  rejection, absolute deadlines, final-response-loss cleanup, fencing, and exact
+  replacement reannouncement. Re-run and revisit those tests and this threat
+  boundary whenever changing key parsing or slots, transcript framing, proof
+  derivation or comparison, pre-authentication errors, deadlines, fencing, or
+  reannouncement.
 - Hermetic tests force early canonical echoes, missing and unrelated echoes,
   mixed/out-of-order checkpoints, retry bounds, listener reconnect drain,
   process restart drain, stream changes, and maximum update-ID arithmetic.

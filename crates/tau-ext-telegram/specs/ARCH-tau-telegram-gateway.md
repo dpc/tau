@@ -40,8 +40,10 @@ when a selected target or exactly one live registration makes the target unambig
 The allowlist is checked before any side effects. Without a fixed `chat_id`, only one
 allowlisted private chat can link with `/start`; unconfigured group/supergroup chats are
 ignored rather than linked or replied to. The local socket accepts a one-shot versioned
-JSON-line `status` request and persistent sidecar `hello`, `heartbeat`,
-`register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, and
+JSON-line `status` request and authenticated protocol sidecar `hello`,
+`challenge`, and `authenticate` frames before persistent `heartbeat`,
+`register_agent`, `complete_reannouncement`, `unregister_agent`, `send_message`,
+`ack_delivery`, and
 `goodbye` requests up to a small fixed byte limit. It returns bounded status snapshots,
 sidecar lease parameters,
 and pending durable inbound delivery records on sidecar responses;
@@ -52,9 +54,12 @@ registrations are live-only leases: they are removed on explicit unregister,
 goodbye, socket disconnect, heartbeat expiry, or gateway restart/reannouncement.
 Lease loss suppresses delivery but does not delete or retarget durable routed
 checkpoints; an exact ACK still retires its frozen checkpoint after lease loss.
-The socket is private same-UID local IPC, not an authentication boundary;
-this MVP bounds request size and closes protocol-error connections but does not attempt
-to defend against all same-user local denial-of-service patterns.
+A high-entropy shared key delivered separately to the gateway and configured
+`std-telegram` instance authenticates both endpoints before either gains route,
+delivery, ACK, or send authority. This removes ambient authority from a process that
+can only open the socket. It does not contain malicious same-UID code that can use
+`/proc`, ptrace, or direct process-memory access, and it does not defend against all
+same-user local denial-of-service patterns.
 Successful sidecar operations expose only the oldest delivery prefix whose exact
 serialized JSON line fits the shared 65,536-byte response limit. A record that cannot
 fit alone is rejected before persistence with no private content in the diagnostic. The tested
@@ -63,7 +68,8 @@ paths, exact boundaries, JSON escaping, and multibyte UTF-8.
 
 The regular `std-telegram`/`tau-ext-telegram` sidecar supports `mode: gateway_client`
 for this architecture. In that mode its startup configuration names
-`gateway_socket_path` instead of a bot token secret. The sidecar still declares the
+`gateway_socket_path` plus a declared `gateway_client_secret` instead of a bot
+token secret. The sidecar still declares the
 existing register/send tools, subscribes to session/agent lifecycle facts, sends `hello`
 and persistent `register_agent`/`unregister_agent`/`heartbeat` requests to the gateway,
 and emits gateway-delivered inbound text as `message.delivered_reported` to its own
@@ -84,7 +90,8 @@ reannouncement hint retires the current connection and fails socket delivery,
 ACK transmission, and send closed. A validated late canonical echo remains
 pending locally for ACK over the next validated connection. The supervisor
 retries with capped exponential backoff, sends a
-fresh `hello`, and reannounces an exact snapshot of current session/agent routes
-before making the replacement connection live. Reconfiguration and shutdown
+fresh `hello`, reannounces an exact snapshot of current session/agent routes,
+and commits it with `complete_reannouncement` before making the replacement
+connection live. Reconfiguration and shutdown
 cancel and join the old supervisor; configuration generations prevent stale
 workers or responses from mutating replacement state.

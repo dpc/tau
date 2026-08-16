@@ -34,11 +34,15 @@ fn serial() -> MutexGuard<'static, ()> {
 
 /// Build a gateway command with isolated filesystem roots and one valid user.
 fn command(temp: &TempDir) -> Command {
+    let client_secret = temp.path().join("gateway-client-secret");
+    std::fs::write(&client_secret, "11".repeat(32)).expect("write gateway client secret");
     let mut command = Command::new(env!("CARGO_BIN_EXE_tau-telegram-gateway"));
     command
         .env("TELEGRAM_BOT_TOKEN", "secret-token")
         .arg("--allowed-user-id")
         .arg("1")
+        .arg("--client-secret-file")
+        .arg(client_secret)
         .arg("--state-dir")
         .arg(temp.path().join("state"))
         .arg("--runtime-dir")
@@ -91,6 +95,10 @@ fn assert_exit(mut command: Command, expected: i32) -> Output {
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("secret-token"),
         "stderr leaked the token: {output:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(&"11".repeat(32)),
+        "stderr leaked the gateway client secret: {output:?}"
     );
     output
 }
@@ -259,6 +267,68 @@ fn semantic_configuration_uses_ex_config() {
         assert_exit(rejected, 78);
         worker.join().expect("join malformed-body server");
     }
+}
+
+/// Current and previous credential slots load from exact files, reject invalid
+/// rotation state as EX_CONFIG, and never echo credential contents.
+#[test]
+fn gateway_authentication_credential_configuration_is_strict_and_redacted() {
+    let _serial = serial();
+
+    for contents in ["short-secret".to_owned(), format!("{}\n", "22".repeat(32))] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let previous = temp.path().join("previous-client-secret");
+        std::fs::write(&previous, &contents).expect("write malformed previous credential");
+        let mut malformed = command(&temp);
+        malformed
+            .arg("--previous-client-secret-file")
+            .arg(&previous);
+        let output = assert_exit(malformed, 78);
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains(&contents),
+            "stderr leaked malformed credential contents: {output:?}"
+        );
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let malformed_current = temp.path().join("malformed-current-secret");
+    std::fs::write(&malformed_current, "not-a-key").expect("write malformed current credential");
+    let mut invalid_current = command(&temp);
+    invalid_current
+        .arg("--client-secret-file")
+        .arg(&malformed_current);
+    let output = assert_exit(invalid_current, 78);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("not-a-key"));
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut unreadable = command(&temp);
+    unreadable
+        .arg("--previous-client-secret-file")
+        .arg(temp.path().join("does-not-exist"));
+    assert_exit(unreadable, 78);
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let duplicate = temp.path().join("duplicate-client-secret");
+    std::fs::write(&duplicate, "11".repeat(32)).expect("write duplicate credential");
+    let mut duplicate_slots = command(&temp);
+    duplicate_slots
+        .arg("--previous-client-secret-file")
+        .arg(&duplicate);
+    assert_exit(duplicate_slots, 78);
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let previous = temp.path().join("previous-client-secret");
+    std::fs::write(&previous, "77".repeat(32)).expect("write previous credential");
+    let (base, worker) = server(vec![(401, "rejected")]);
+    let mut distinct_slots = command(&temp);
+    distinct_slots
+        .arg("--previous-client-secret-file")
+        .arg(&previous)
+        .arg("--api-base")
+        .arg(base);
+    let output = assert_exit(distinct_slots, 78);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&"77".repeat(32)));
+    worker.join().expect("join credential preflight server");
 }
 
 /// Webhook preflight maps transient HTTP statuses and refused transport to

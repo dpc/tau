@@ -150,23 +150,29 @@ line:
 
 ```sh
 TELEGRAM_BOT_TOKEN=... tau-telegram-gateway \
-  --allowed-user-id 123456789
+  --allowed-user-id 123456789 \
+  --client-secret-file /run/credentials/tau-telegram-gateway/client-secret
 ```
 
 Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
-`--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The private
+`--poll-timeout-seconds`, `--state-dir`, `--runtime-dir`, and
+`--previous-client-secret-file` for key rotation. Client-secret files contain
+exactly 64 lowercase hexadecimal characters encoding 32 random bytes. The private
 same-UID local socket accepts a one-shot JSON-line
-`{"protocol_version":0,"kind":"status"}` request and returns a status snapshot.
+`{"protocol_version":0,"kind":"status"}` request and returns only readiness and
+a random gateway generation.
 Gateway and sidecar must run the same current socket protocol, which uses
 transport-neutral message-fact identity
 fields and original message bodies.
-It also accepts persistent sidecar requests: `hello`, `heartbeat`,
-`register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, and
+The authenticated protocol mutually authenticates `hello`, `challenge`, and `authenticate`
+with the shared key before it accepts persistent sidecar requests: `heartbeat`,
+`register_agent`, `complete_reannouncement`, `unregister_agent`, `send_message`,
+`ack_delivery`, and
 `goodbye`. The gateway
 treats registrations as live leases, refreshes them on heartbeat, removes them on
 explicit unregister/goodbye or socket disconnect, and prunes them on lease expiry.
-`hello`/status responses include a gateway generation and reannouncement hint so
-sidecars reconnecting after a gateway restart know to re-send their current
+The authenticated response includes a gateway generation and reannouncement hint
+so sidecars reconnecting after a gateway restart know to re-send their current
 registrations. Heartbeat/register responses can include queued inbound delivery
 records for the sidecar to submit locally as transient
 `message.delivered_reported`. `send_message`
@@ -178,7 +184,12 @@ The normal sidecar can run in no-poll gateway-client mode:
 ```yaml
 mode: gateway_client
 gateway_socket_path: /run/user/1000/tau/telegram-gateway/<stream>.sock
+gateway_client_secret: telegram_gateway_client
 ```
+
+Declare `telegram_gateway_client` in this extension instance's `secrets` list.
+Tau delivers that key only through `Configure.secrets`; the sidecar creates a
+fresh process-local generation and reuses it across reconnects.
 
 In this mode the sidecar does not need `bot_token_secret`, does not use
 `allowed_user_ids`, and never calls Telegram `getUpdates`; the gateway owns the
@@ -195,10 +206,15 @@ matching agent has already unloaded.
 The sidecar supervises this socket independently of extension configuration
 delivery. If the gateway is initially absent or restarts, the sidecar fails
 delivery and outbound send closed, reconnects with capped exponential backoff,
-sends a fresh `hello`, and reannounces the current live route set before
-resuming. Gateway generation changes and explicit reannouncement hints force
+sends a fresh `hello`, reannounces the current live route set, and commits it
+with `complete_reannouncement` before resuming. Gateway generation changes and
+explicit reannouncement hints force
 the same replacement path. Reconfiguration and shutdown cancel and join the
 previous supervisor, so stale workers cannot restore retired routes.
+A same-generation replacement fences every operation on the old connection.
+A different live client generation cannot take over an existing route. Socket
+authentication removes authority from processes that only inherit socket access,
+but it does not contain malicious same-UID `/proc`, ptrace, or memory access.
 Outbound
 `telegram_send` goes back through the gateway, which checks that the calling
 agent is still registered and sends to the configured or linked active Telegram

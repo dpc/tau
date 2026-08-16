@@ -1,9 +1,40 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io as path_std_io;
 use std::io::BufRead as _;
+use std::net::Shutdown;
 use std::sync::Barrier;
 
 use super::*;
+
+fn test_auth_keys() -> Vec<GatewayAuthKey> {
+    vec![GatewayAuthKey::parse(&"11".repeat(32)).expect("test key")]
+}
+
+fn authenticate_registry(
+    registry: &mut GatewayRegistry,
+    connection_id: u64,
+    generation: String,
+    now: Instant,
+) {
+    begin_authenticate_registry(registry, connection_id, generation, now);
+    registry
+        .complete_reannouncement(connection_id)
+        .expect("complete test reannouncement");
+}
+
+fn begin_authenticate_registry(
+    registry: &mut GatewayRegistry,
+    connection_id: u64,
+    generation: String,
+    now: Instant,
+) {
+    registry.authenticate(
+        connection_id,
+        ClientGeneration::parse(generation).expect("test generation"),
+        now,
+    );
+}
 use crate::gateway_client::{GatewayClient, GatewayClientConfig, GatewaySocketResponse};
 
 /// Ensures the daemon refuses to start without an explicit user allowlist.
@@ -24,7 +55,10 @@ fn gateway_args_require_allowed_user() {
 /// paths without ever taking the token from argv.
 #[test]
 fn gateway_args_resolve_token_from_environment() {
-    let args = [
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let credential = tempdir.path().join("client-secret");
+    fs::write(&credential, "11".repeat(32)).expect("write credential");
+    let args = vec![
         "tau-telegram-gateway",
         "--bot-token-env",
         "BOT",
@@ -36,8 +70,10 @@ fn gateway_args_resolve_token_from_environment() {
         "/tmp/tau-state",
         "--runtime-dir",
         "/tmp/tau-run",
+        "--client-secret-file",
+        credential.to_str().expect("credential path"),
     ];
-    let config = GatewayConfig::from_env_args(args.map(OsString::from), |name| {
+    let config = GatewayConfig::from_env_args(args.into_iter().map(OsString::from), |name| {
         (name == "BOT").then(|| "secret-token".to_owned())
     })
     .expect("gateway config should parse");
@@ -88,8 +124,8 @@ fn recent_acknowledgements_are_bounded_and_content_free() {
         ..GatewayDurableState::default()
     };
     let route = GatewayRegistrationKey {
-        session_id: "session-alpha".to_owned(),
-        agent_id: "agent-alpha".to_owned(),
+        session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+        agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
     };
     for update_id in 0..=RECENT_ACKNOWLEDGEMENT_LIMIT {
         state.remember_acknowledgement(
@@ -455,15 +491,24 @@ fn local_socket_status_response_contains_core_fields() {
     let value: serde_json::Value =
         serde_json::from_str(&response).expect("response should be JSON");
     assert_eq!(value["protocol_version"], SOCKET_PROTOCOL_VERSION);
-    assert_eq!(value["stream_hash"], "test-stream");
-    assert_eq!(value["next_update_offset"], 42);
-    assert_eq!(value["routing"], "commands-enabled");
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["ready"], true);
+    assert!(
+        GatewayGeneration::parse(
+            value["gateway_generation"]
+                .as_str()
+                .expect("generation")
+                .to_owned()
+        )
+        .is_ok()
+    );
+    assert_eq!(value.as_object().expect("status object").len(), 4);
 }
 
 /// Ensures sidecar hello advertises that clients must reannounce their live
 /// registrations after connecting to this gateway process.
 #[test]
-fn sidecar_hello_requires_registration_reannouncement() {
+fn authenticated_status_contains_lease_details() {
     let cfg = runtime_config(Some(10), [7]);
     let durable = GatewayDurableState {
         stream_hash: "test-stream".to_owned(),
@@ -477,16 +522,21 @@ fn sidecar_hello_requires_registration_reannouncement() {
         Arc::new(FakeGatewayClient::default()),
     );
 
+    state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .hello(1, Instant::now());
     let response = handle_gateway_socket_request(
         &state,
         1,
         GatewaySocketRequest {
-            kind: "hello".to_owned(),
+            kind: "status".to_owned(),
             ..GatewaySocketRequest::default()
         },
     );
 
-    assert_eq!(response["reannounce_required"], true);
+    assert_eq!(response["ok"], true);
     assert_eq!(
         response["heartbeat_interval_seconds"],
         SIDECAR_HEARTBEAT_INTERVAL.as_secs()
@@ -572,14 +622,11 @@ fn malformed_socket_request_disconnects_and_prunes_stale_routes() {
 fn sidecar_register_unregister_and_status_update_counts() {
     let state = test_socket_state();
     let connection_id = 1;
-    handle_gateway_socket_request(
-        &state,
-        connection_id,
-        GatewaySocketRequest {
-            kind: "hello".to_owned(),
-            ..GatewaySocketRequest::default()
-        },
-    );
+    state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .hello(connection_id, Instant::now());
     handle_gateway_socket_request(
         &state,
         connection_id,
@@ -622,15 +669,17 @@ fn sidecar_register_unregister_and_status_update_counts() {
 fn sidecar_goodbye_disconnect_prunes_registered_routes() {
     let state = Arc::new(test_socket_state());
     let (mut client, server) = UnixStream::pair().expect("socket pair");
-    writeln!(client, r#"{{"protocol_version":0,"kind":"hello"}}"#).expect("write hello");
+    let server_state = Arc::clone(&state);
+    let server_thread =
+        std::thread::spawn(move || handle_gateway_socket_client(server, server_state));
+    authenticate_socket(&mut client);
     writeln!(
         client,
         r#"{{"protocol_version":0,"kind":"register_agent","session_id":"session-a","agent_id":"agent-a"}}"#
     )
     .expect("write register");
+    assert_socket_ok(&mut client);
     writeln!(client, r#"{{"protocol_version":0,"kind":"goodbye"}}"#).expect("write goodbye");
-
-    handle_gateway_socket_client(server, Arc::clone(&state));
 
     let mut response = String::new();
     client
@@ -639,6 +688,7 @@ fn sidecar_goodbye_disconnect_prunes_registered_routes() {
     assert!(response.lines().any(|line| {
         serde_json::from_str::<serde_json::Value>(line).expect("response JSON")["goodbye"] == true
     }));
+    server_thread.join().expect("socket server");
     assert_eq!(state.registry_counts().registrations, 0);
 }
 
@@ -928,8 +978,8 @@ fn canonical_ack_advances_durable_mixed_prefix() {
         .acknowledge_delivery(
             delivery.request_id.as_str().to_owned(),
             GatewayRegistrationKey {
-                session_id: "session-alpha".to_owned(),
-                agent_id: "agent-alpha".to_owned(),
+                session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+                agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
             },
         )
         .expect("persist acknowledgement");
@@ -1028,8 +1078,9 @@ fn canonical_ack_save_cuts_have_deterministic_recovery() {
             .acknowledge_delivery(
                 delivery.request_id.as_str().to_owned(),
                 GatewayRegistrationKey {
-                    session_id: "session-alpha".to_owned(),
-                    agent_id: "agent-alpha".to_owned(),
+                    session_id: tau_proto::SessionId::parse("session-alpha")
+                        .expect("valid test value"),
+                    agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
                 },
             )
             .expect_err("injected canonical ACK save failure");
@@ -1076,8 +1127,8 @@ fn commit_unknown_poison_stops_waiter_after_initial_health_check() {
         .expect("pending delivery")
         .request_id;
     let route = GatewayRegistrationKey {
-        session_id: "session-alpha".to_owned(),
-        agent_id: "agent-alpha".to_owned(),
+        session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+        agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
     };
     let later_update = TelegramUpdateId::new(207).expect("valid later update");
     let mut candidate = fixture
@@ -1181,8 +1232,8 @@ fn committed_ack_retry_survives_response_loss_and_restart() {
         .acknowledge_delivery(
             report_id.as_str().to_owned(),
             GatewayRegistrationKey {
-                session_id: "session-alpha".to_owned(),
-                agent_id: "agent-alpha".to_owned(),
+                session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+                agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
             },
         )
         .expect("retry committed ACK after route retirement");
@@ -1201,13 +1252,14 @@ fn committed_ack_retry_survives_response_loss_and_restart() {
         PathBuf::from("/tmp/restarted-test.sock"),
         Arc::clone(&fixture.gateway.client),
         restarted_store,
+        test_auth_keys(),
     );
     restarted_socket
         .acknowledge_delivery(
             report_id.as_str().to_owned(),
             GatewayRegistrationKey {
-                session_id: "session-alpha".to_owned(),
-                agent_id: "agent-alpha".to_owned(),
+                session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+                agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
             },
         )
         .expect("retry committed ACK after restart");
@@ -1238,8 +1290,8 @@ fn processed_update_commit_preserves_concurrent_ack() {
     candidate.processed_update_count = candidate.processed_update_count.saturating_add(1);
     candidate.checkpoints.insert_non_routed(later_update);
     let route = GatewayRegistrationKey {
-        session_id: "session-alpha".to_owned(),
-        agent_id: "agent-alpha".to_owned(),
+        session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+        agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
     };
     fixture
         .gateway
@@ -1336,8 +1388,8 @@ fn enqueue_rejects_delivery_that_cannot_fit_one_response() {
         .socket_state
         .enqueue_delivery(
             &GatewayRegistrationKey {
-                session_id: "session-alpha".to_owned(),
-                agent_id: "agent-alpha".to_owned(),
+                session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+                agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
             },
             &message(7, 10, &text),
             TelegramUpdateId::new(101).expect("test update id"),
@@ -1363,8 +1415,9 @@ fn enqueue_checks_missing_route_before_singleton_size() {
         .socket_state
         .enqueue_delivery(
             &GatewayRegistrationKey {
-                session_id: "missing-session".to_owned(),
-                agent_id: "missing-agent".to_owned(),
+                session_id: tau_proto::SessionId::parse("missing-session")
+                    .expect("valid test value"),
+                agent_id: tau_proto::AgentId::parse("missing-agent").expect("valid test value"),
             },
             &message(7, 10, &text),
             TelegramUpdateId::new(102).expect("test update id"),
@@ -1393,8 +1446,8 @@ fn enqueue_checks_full_queue_before_singleton_size() {
         .socket_state
         .enqueue_delivery(
             &GatewayRegistrationKey {
-                session_id: "session-alpha".to_owned(),
-                agent_id: "agent-alpha".to_owned(),
+                session_id: tau_proto::SessionId::parse("session-alpha").expect("valid test value"),
+                agent_id: tau_proto::AgentId::parse("agent-alpha").expect("valid test value"),
             },
             &message(7, 10, &text),
             TelegramUpdateId::new(103).expect("test update id"),
@@ -1419,9 +1472,10 @@ fn gateway_client_replays_bounded_durable_prefix_in_order() {
         let (stream, _) = listener.accept().expect("accept gateway client");
         handle_gateway_socket_client(stream, state);
     });
-    let client = GatewayClient::new(GatewayClientConfig { socket_path });
+    let client = GatewayClient::new(GatewayClientConfig::for_test(socket_path));
 
     let _connected = bounded_gateway_response(client.connect_cancellable(|| false));
+    let _reconciled = bounded_gateway_response(client.complete_reannouncement());
     let _registered = bounded_gateway_response(client.register_agent(
         "session-alpha",
         "agent-alpha",
@@ -1470,7 +1524,6 @@ fn gateway_client_replays_bounded_durable_prefix_in_order() {
 fn outbound_send_uses_configured_chat_for_registered_agent() {
     let fixture = GatewayFixture::new(Some(10), [7]);
     fixture.register_route(1, "session-alpha", "agent-alpha");
-
     let response = handle_gateway_socket_request(
         &fixture.gateway.socket_state,
         1,
@@ -1496,6 +1549,13 @@ fn outbound_send_uses_configured_chat_for_registered_agent() {
 #[test]
 fn outbound_send_rejects_unregistered_agent() {
     let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture
+        .gateway
+        .socket_state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .hello(1, Instant::now());
 
     let response = handle_gateway_socket_request(
         &fixture.gateway.socket_state,
@@ -1552,6 +1612,17 @@ fn outbound_send_failure_is_sanitized_for_sidecar() {
 fn outbound_send_rejects_route_owned_by_another_sidecar() {
     let fixture = GatewayFixture::new(Some(10), [7]);
     fixture.register_route(1, "session-alpha", "agent-alpha");
+    authenticate_registry(
+        &mut fixture
+            .gateway
+            .socket_state
+            .registry
+            .lock()
+            .expect("registry lock"),
+        2,
+        "55".repeat(32),
+        Instant::now(),
+    );
 
     let response = handle_gateway_socket_request(
         &fixture.gateway.socket_state,
@@ -1726,8 +1797,7 @@ fn outbound_send_failure_keeps_sidecar_connection_live() {
     let (mut client, server) = UnixStream::pair().expect("socket pair");
     let server_thread = std::thread::spawn(move || handle_gateway_socket_client(server, state));
 
-    writeln!(client, r#"{{"protocol_version":0,"kind":"hello"}}"#).expect("write hello");
-    assert_socket_ok(&mut client);
+    authenticate_socket(&mut client);
     writeln!(
         client,
         r#"{{"protocol_version":0,"kind":"register_agent","session_id":"session-alpha","agent_id":"agent-alpha"}}"#
@@ -2045,6 +2115,7 @@ impl GatewayFixture {
             PathBuf::from("/tmp/test.sock"),
             Arc::clone(&gateway_client),
             Arc::clone(&durable_store),
+            test_auth_keys(),
         ));
         Self {
             gateway: Gateway {
@@ -2069,7 +2140,14 @@ impl GatewayFixture {
             .lock()
             .expect("registry lock");
         let now = Instant::now();
-        registry.hello(connection_id, now);
+        if !registry.sidecars.contains_key(&connection_id) {
+            authenticate_registry(
+                &mut registry,
+                connection_id,
+                format!("{connection_id:064x}"),
+                now,
+            );
+        }
         registry
             .register_agent(connection_id, register_request(session_id, agent_id), now)
             .expect("register test route");
@@ -2211,10 +2289,512 @@ fn read_socket_json(stream: &mut UnixStream) -> serde_json::Value {
     serde_json::from_str(&line).expect("socket response JSON")
 }
 
+/// Complete a authenticated protocol handshake against the real gateway socket
+/// handler.
+fn authenticate_socket(stream: &mut UnixStream) {
+    let key = GatewayAuthKey::parse(&"11".repeat(32)).expect("test auth key");
+    authenticate_socket_with(stream, &key, &"22".repeat(32), &"44".repeat(32));
+}
+
+/// Complete an authenticated handshake with explicit deterministic credentials.
+fn authenticate_socket_with(
+    stream: &mut UnixStream,
+    key: &GatewayAuthKey,
+    client_generation: &str,
+    client_nonce: &str,
+) {
+    let key_id = key.key_id();
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "kind": "hello",
+            "key_id": key_id,
+            "extension_instance": EXTENSION_INSTANCE,
+            "client_generation": client_generation,
+            "client_nonce": client_nonce,
+        })
+    )
+    .expect("write authenticated hello");
+    let challenge = read_socket_json(stream);
+    assert_eq!(challenge["kind"], "challenge", "{challenge}");
+    let gateway_generation = GatewayGeneration::parse(
+        challenge["gateway_generation"]
+            .as_str()
+            .expect("challenge gateway generation")
+            .to_owned(),
+    )
+    .expect("valid gateway generation");
+    let server_nonce = ServerNonce::parse(
+        challenge["server_nonce"]
+            .as_str()
+            .expect("challenge server nonce")
+            .to_owned(),
+    )
+    .expect("valid server nonce");
+    let client_generation =
+        ClientGeneration::parse(client_generation.to_owned()).expect("valid client generation");
+    let client_nonce = ClientNonce::parse(client_nonce.to_owned()).expect("valid client nonce");
+    let fields = AuthFields {
+        key_id: &key_id,
+        gateway_generation: &gateway_generation,
+        client_generation: &client_generation,
+        client_nonce: &client_nonce,
+        server_nonce: &server_nonce,
+    };
+    let proof = AuthProof::parse(challenge["server_mac"].as_str().unwrap_or_default())
+        .expect("valid server proof");
+    assert!(key.verify_proof(&key.server_proof(&fields), &proof));
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "kind": "authenticate",
+            "client_mac": key.client_proof(&fields).encode(),
+        })
+    )
+    .expect("write client authentication");
+    let authenticated = read_socket_json(stream);
+    assert_eq!(authenticated["kind"], "authenticated", "{authenticated}");
+    writeln!(
+        stream,
+        r#"{{"protocol_version":0,"kind":"complete_reannouncement"}}"#
+    )
+    .expect("write reannouncement completion");
+    assert_socket_ok(stream);
+}
+
 /// Assert that one gateway socket response is an accepted operation.
 fn assert_socket_ok(stream: &mut UnixStream) {
     let response = read_socket_json(stream);
     assert_eq!(response["ok"], true, "{response}");
+}
+
+/// The optional previous credential must authenticate during rotation exactly
+/// like the current slot.
+#[test]
+fn previous_authentication_key_completes_authenticated_protocol() {
+    let previous = GatewayAuthKey::parse(&"77".repeat(32)).expect("previous key");
+    let mut state = test_socket_state();
+    state.auth_keys.push(previous.clone());
+    let state = Arc::new(state);
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    let server_thread = std::thread::spawn(move || handle_gateway_socket_client(server, state));
+
+    authenticate_socket_with(&mut client, &previous, &"66".repeat(32), &"55".repeat(32));
+    writeln!(client, r#"{{"protocol_version":0,"kind":"heartbeat"}}"#).expect("write heartbeat");
+    assert_socket_ok(&mut client);
+    drop(client);
+    server_thread.join().expect("socket server");
+}
+
+/// Every invalid pre-authentication shape, including legacy unauthenticated
+/// traffic, must produce the same bounded rejection without installing
+/// connection authority.
+#[test]
+fn invalid_and_legacy_hellos_share_one_generic_rejection() {
+    let requests = [
+        serde_json::json!({"protocol_version": 0, "kind": "hello"}),
+        serde_json::json!({"protocol_version": 0, "kind": "heartbeat"}),
+        serde_json::json!({
+            "protocol_version": 0,
+            "kind": "hello",
+            "key_id": "00".repeat(16),
+            "extension_instance": EXTENSION_INSTANCE,
+            "client_generation": "22".repeat(32),
+            "client_nonce": "33".repeat(32),
+        }),
+        serde_json::json!({
+            "protocol_version": 0,
+            "kind": "hello",
+            "key_id": GatewayAuthKey::parse(&"11".repeat(32)).expect("key").key_id(),
+            "extension_instance": "other-extension",
+            "client_generation": "22".repeat(32),
+            "client_nonce": "33".repeat(32),
+        }),
+        serde_json::json!({
+            "protocol_version": 0,
+            "kind": "hello",
+            "key_id": GatewayAuthKey::parse(&"11".repeat(32)).expect("key").key_id(),
+            "extension_instance": EXTENSION_INSTANCE,
+            "client_generation": "not-hex",
+            "client_nonce": "33".repeat(32),
+        }),
+    ];
+    for request in requests {
+        let state = Arc::new(test_socket_state());
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        writeln!(client, "{request}").expect("write invalid hello");
+        handle_gateway_socket_client(server, Arc::clone(&state));
+        let response = read_socket_json(&mut client);
+        assert_eq!(response["error"], "authentication failed", "{request}");
+        assert_eq!(response.as_object().expect("response object").len(), 3);
+        assert_eq!(state.registry_counts().sidecars, 0);
+    }
+}
+
+/// A wrong client proof and repeated authentication both fail generically and
+/// close rather than retaining an authenticated stream.
+#[test]
+fn wrong_or_repeated_authentication_is_fatal() {
+    let state = Arc::new(test_socket_state());
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    let server_thread = std::thread::spawn(move || handle_gateway_socket_client(server, state));
+    let key = GatewayAuthKey::parse(&"11".repeat(32)).expect("key");
+    writeln!(
+        client,
+        "{}",
+        serde_json::json!({
+            "protocol_version": 0,
+            "kind": "hello",
+            "key_id": key.key_id(),
+            "extension_instance": EXTENSION_INSTANCE,
+            "client_generation": "22".repeat(32),
+            "client_nonce": "33".repeat(32),
+        })
+    )
+    .expect("write hello");
+    assert_eq!(read_socket_json(&mut client)["kind"], "challenge");
+    writeln!(
+        client,
+        r#"{{"protocol_version":0,"kind":"authenticate","client_mac":"00"}}"#
+    )
+    .expect("write wrong proof");
+    assert_eq!(
+        read_socket_json(&mut client)["error"],
+        "authentication failed"
+    );
+    server_thread.join().expect("socket server");
+
+    let state = Arc::new(test_socket_state());
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    let server_thread = std::thread::spawn(move || handle_gateway_socket_client(server, state));
+    authenticate_socket(&mut client);
+    writeln!(
+        client,
+        r#"{{"protocol_version":0,"kind":"authenticate","client_mac":"00"}}"#
+    )
+    .expect("write repeated authentication");
+    let response = read_socket_json(&mut client);
+    assert_eq!(response["error"], "authentication failed");
+    assert!(response.get("keep_connection").is_none());
+    server_thread.join().expect("socket server");
+}
+
+/// Losing the final authenticated response cannot fence the live connection or
+/// transfer authority to a socket that never observed handshake completion.
+#[test]
+fn authenticated_response_write_failure_preserves_existing_authority() {
+    let state = Arc::new(test_socket_state());
+    {
+        let mut registry = state.registry.lock().expect("registry lock");
+        authenticate_registry(&mut registry, 1, "22".repeat(32), Instant::now());
+        registry
+            .register_agent(1, register_request("session-a", "agent-a"), Instant::now())
+            .expect("register old route");
+    }
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    let server_state = Arc::clone(&state);
+    let server_thread =
+        std::thread::spawn(move || handle_gateway_socket_client(server, server_state));
+    let key = GatewayAuthKey::parse(&"11".repeat(32)).expect("test key");
+    let key_id = key.key_id();
+    let client_generation = ClientGeneration::parse("22".repeat(32)).expect("valid test value");
+    let client_nonce = ClientNonce::parse("33".repeat(32)).expect("valid test value");
+    writeln!(
+        client,
+        "{}",
+        serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "kind": "hello",
+            "key_id": key_id,
+            "extension_instance": EXTENSION_INSTANCE,
+            "client_generation": client_generation.as_str(),
+            "client_nonce": client_nonce.as_str(),
+        })
+    )
+    .expect("write hello");
+    let challenge = read_socket_json(&mut client);
+    let gateway_generation = GatewayGeneration::parse(
+        challenge["gateway_generation"]
+            .as_str()
+            .expect("valid test value")
+            .to_owned(),
+    )
+    .expect("valid test value");
+    let server_nonce = ServerNonce::parse(
+        challenge["server_nonce"]
+            .as_str()
+            .expect("valid test value")
+            .to_owned(),
+    )
+    .expect("valid test value");
+    let fields = AuthFields {
+        key_id: &key_id,
+        gateway_generation: &gateway_generation,
+        client_generation: &client_generation,
+        client_nonce: &client_nonce,
+        server_nonce: &server_nonce,
+    };
+    writeln!(
+        client,
+        "{}",
+        serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "kind": "authenticate",
+            "client_mac": key.client_proof(&fields).encode(),
+        })
+    )
+    .expect("write authenticate");
+    client
+        .shutdown(Shutdown::Read)
+        .expect("reject final response");
+    server_thread.join().expect("socket server");
+
+    let registry = state.registry.lock().expect("registry lock");
+    registry
+        .ensure_active(1)
+        .expect("old authority remains active");
+    assert!(!registry.sidecars.contains_key(&2));
+    let route = GatewayRegistrationKey {
+        session_id: tau_proto::SessionId::parse("session-a").expect("valid test value"),
+        agent_id: tau_proto::AgentId::parse("agent-a").expect("valid test value"),
+    };
+    registry
+        .ensure_owned_registration(1, &route)
+        .expect("old route remains owned");
+}
+
+/// Same-generation replacement transfers routes and fences all old operations,
+/// while old disconnect cleanup cannot delete the transferred route.
+#[test]
+fn same_generation_replacement_fences_old_connection_atomically() {
+    let mut registry = GatewayRegistry::default();
+    let now = Instant::now();
+    authenticate_registry(&mut registry, 1, "22".repeat(32), now);
+    registry
+        .register_agent(1, register_request("session-a", "agent-a"), now)
+        .expect("register route");
+    begin_authenticate_registry(&mut registry, 2, "22".repeat(32), now);
+
+    assert!(registry.ensure_active(1).is_err());
+    registry.disconnect(1);
+    let key = GatewayRegistrationKey {
+        session_id: tau_proto::SessionId::parse("session-a").expect("valid test value"),
+        agent_id: tau_proto::AgentId::parse("agent-a").expect("valid test value"),
+    };
+    assert_eq!(
+        registry
+            .ensure_owned_registration(2, &key)
+            .expect_err("replacement cannot publish before reconciliation"),
+        "gateway route reannouncement is incomplete"
+    );
+    assert_eq!(
+        registry
+            .registrations
+            .get(&key)
+            .map(|route| route.connection_id),
+        Some(2),
+        "route transfers before exact reconciliation"
+    );
+    registry
+        .register_agent(2, register_request("session-a", "agent-a"), now)
+        .expect("reannounce transferred route");
+    registry
+        .complete_reannouncement(2)
+        .expect("complete exact reannouncement");
+    registry
+        .ensure_owned_registration(2, &key)
+        .expect("reannounced transfer remains owned");
+    assert!(registry.complete_reannouncement(2).is_err());
+}
+
+/// Reconciliation atomically removes transferred omissions, while disconnecting
+/// before completion cannot leave transferred authority on a dead socket.
+#[test]
+fn replacement_reconciliation_removes_omissions_and_cleans_up_disconnect() {
+    let mut registry = GatewayRegistry::default();
+    let now = Instant::now();
+    authenticate_registry(&mut registry, 1, "22".repeat(32), now);
+    for agent in ["agent-a", "agent-b"] {
+        registry
+            .register_agent(1, register_request("session-a", agent), now)
+            .expect("register old route");
+    }
+    begin_authenticate_registry(&mut registry, 2, "22".repeat(32), now);
+    assert_eq!(
+        registry
+            .heartbeat(2, now)
+            .expect_err("heartbeat before completion"),
+        "gateway route reannouncement is incomplete"
+    );
+    registry
+        .register_agent(2, register_request("session-a", "agent-a"), now)
+        .expect("reannounce retained route");
+    registry
+        .complete_reannouncement(2)
+        .expect("commit exact snapshot");
+    assert_eq!(registry.registrations.len(), 1);
+    assert!(
+        registry
+            .registrations
+            .keys()
+            .all(|key| key.agent_id.as_str() == "agent-a")
+    );
+
+    begin_authenticate_registry(&mut registry, 3, "22".repeat(32), now);
+    registry.disconnect(3);
+    assert!(registry.registrations.is_empty());
+    assert!(registry.ensure_active(2).is_err());
+}
+
+/// Pending reconciliation exposes no transferred delivery and rejects durable
+/// ACK authority before consulting the checkpoint store.
+#[test]
+fn pending_reannouncement_gates_socket_delivery_and_ack() {
+    let state = test_socket_state();
+    *state.durable_deliveries.lock().expect("deliveries lock") = vec![test_delivery(1, "pending")];
+    {
+        let mut registry = state.registry.lock().expect("registry lock");
+        let now = Instant::now();
+        authenticate_registry(&mut registry, 1, "22".repeat(32), now);
+        registry
+            .register_agent(1, register_request("session-alpha", "agent-alpha"), now)
+            .expect("register old route");
+        begin_authenticate_registry(&mut registry, 2, "22".repeat(32), now);
+    }
+
+    let register =
+        handle_gateway_socket_request(&state, 2, register_request("session-alpha", "agent-alpha"));
+    assert_eq!(register["ok"], true);
+    assert_eq!(register["deliveries"], serde_json::json!([]));
+
+    let ack = handle_gateway_socket_request(
+        &state,
+        2,
+        GatewaySocketRequest {
+            kind: "ack_delivery".to_owned(),
+            report_id: Some(test_delivery(1, "pending").request_id.into()),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert_eq!(ack["ok"], false);
+    assert!(
+        ack["error"]
+            .as_str()
+            .expect("bounded error")
+            .contains("reannouncement is incomplete")
+    );
+}
+
+/// A distinct live process generation cannot steal a route; once the old owner
+/// disconnects, the new authenticated connection may claim it.
+#[test]
+fn different_generation_route_conflicts_until_disconnect() {
+    let mut registry = GatewayRegistry::default();
+    let now = Instant::now();
+    authenticate_registry(&mut registry, 1, "11".repeat(32), now);
+    registry
+        .register_agent(1, register_request("session-a", "agent-a"), now)
+        .expect("register route");
+    authenticate_registry(&mut registry, 2, "22".repeat(32), now);
+    assert_eq!(
+        registry
+            .register_agent(2, register_request("session-a", "agent-a"), now)
+            .expect_err("live route conflict"),
+        "route_conflict"
+    );
+    registry.disconnect(1);
+    registry
+        .register_agent(2, register_request("session-a", "agent-a"), now)
+        .expect("claim after disconnect");
+}
+
+/// Route identifiers use Tau's canonical grammars, and a fenced connection is
+/// rejected before an ACK can consult or mutate durable state.
+#[test]
+fn typed_routes_and_fenced_ack_fail_before_side_effects() {
+    let state = test_socket_state();
+    state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .hello(1, Instant::now());
+    let invalid = handle_gateway_socket_request(
+        &state,
+        1,
+        GatewaySocketRequest {
+            kind: "register_agent".to_owned(),
+            session_id: Some("invalid session".to_owned()),
+            agent_id: Some("agent-a".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert!(
+        invalid["error"]
+            .as_str()
+            .expect("error")
+            .contains("session_id")
+    );
+    authenticate_registry(
+        &mut state.registry.lock().expect("registry lock"),
+        2,
+        "22".repeat(32),
+        Instant::now(),
+    );
+    let ack = handle_gateway_socket_request(
+        &state,
+        1,
+        GatewaySocketRequest {
+            kind: "ack_delivery".to_owned(),
+            report_id: Some("not-a-report".to_owned()),
+            session_id: Some("session-a".to_owned()),
+            agent_id: Some("agent-a".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert!(ack["error"].as_str().expect("error").contains("fenced"));
+    assert!(ack.get("keep_connection").is_none());
+}
+
+/// Gateway generations are full CSPRNG values rather than timestamp labels.
+#[test]
+fn gateway_generations_are_random_32_byte_values() {
+    let first = gateway_generation();
+    let second = gateway_generation();
+    assert_eq!(first.as_str().len(), 64);
+    assert_eq!(second.as_str().len(), 64);
+    assert_ne!(first, second);
+}
+
+/// Authentication uses one deadline for the complete frame, not an idle timeout
+/// that a trickling peer can renew byte by byte.
+#[test]
+fn authentication_reader_enforces_one_absolute_deadline_across_bytes() {
+    let (server, mut client) = UnixStream::pair().expect("socket pair");
+    client.write_all(b"{").expect("write first request byte");
+    let started = Instant::now();
+    let calls = Cell::new(0);
+    let error = read_gateway_socket_request_with_deadline_and_clock(
+        &server,
+        Some(started + Duration::from_secs(1)),
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == 0 {
+                started
+            } else {
+                started + Duration::from_secs(2)
+            }
+        },
+    )
+    .expect_err("trickle must exceed the absolute deadline");
+    assert!(!error.is_empty());
+    assert_eq!(calls.get(), 2);
 }
 
 /// Build a gateway socket state for protocol tests.

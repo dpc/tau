@@ -135,7 +135,7 @@ impl GatewayDurableStore {
         let Some(delivery) = state.checkpoints.pending_delivery(report_id) else {
             return Err("Telegram gateway report is not pending.".to_owned());
         };
-        if delivery.session_id != route.session_id || delivery.agent_id != route.agent_id {
+        if route.session_id != delivery.session_id || route.agent_id.as_str() != delivery.agent_id {
             return Err("Telegram gateway report does not belong to this sidecar.".to_owned());
         }
 

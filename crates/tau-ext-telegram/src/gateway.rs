@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use checkpoint::GatewayCheckpoints;
@@ -35,6 +35,10 @@ use routing::{
     telegram_source_label,
 };
 
+use crate::gateway_auth::{
+    AuthFields, AuthProof, ClientGeneration, ClientNonce, EXTENSION_INSTANCE, GatewayAuthKey,
+    GatewayGeneration, GatewayKeyId, PROTOCOL_VERSION, ServerNonce,
+};
 use crate::gateway_exit::GatewayExitError;
 use crate::live_checkpoint::{TelegramReportId, TelegramUpdateId};
 use crate::stream_owner::{UpdateStreamLock, UpdateStreamLockError, webhook_active_message};
@@ -71,9 +75,9 @@ const RECENT_UPDATE_LIMIT: usize = 128;
 const RECENT_ACKNOWLEDGEMENT_LIMIT: usize = 128;
 
 /// Version of the local gateway status socket protocol.
-///
-/// This stays at zero under `GATE-no-backward-compatibility`.
-const SOCKET_PROTOCOL_VERSION: u32 = 0;
+const SOCKET_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
+/// Maximum time allowed to complete authentication.
+const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum bytes read from one local socket request.
 const MAX_SOCKET_REQUEST_BYTES: usize = 8192;
@@ -156,6 +160,8 @@ struct GatewayConfig {
     state_dir: PathBuf,
     /// Private runtime directory containing the gateway local socket.
     runtime_dir: PathBuf,
+    /// Current and optional previous gateway client authentication keys.
+    auth_keys: Vec<GatewayAuthKey>,
 }
 
 impl GatewayConfig {
@@ -199,6 +205,19 @@ impl GatewayConfig {
         let runtime_dir = raw
             .runtime_dir
             .unwrap_or_else(|| default_runtime_dir(&get_env, &state_dir));
+        let current_path = raw.client_secret_file.ok_or_else(|| {
+            GatewayExitError::Config("telegram gateway requires --client-secret-file".to_owned())
+        })?;
+        let mut auth_keys = vec![read_gateway_auth_key(&current_path)?];
+        if let Some(previous_path) = raw.previous_client_secret_file {
+            let previous = read_gateway_auth_key(&previous_path)?;
+            if previous.key_id() == auth_keys[0].key_id() {
+                return Err(GatewayExitError::Config(
+                    "telegram gateway authentication key slots must differ".to_owned(),
+                ));
+            }
+            auth_keys.push(previous);
+        }
         Ok(Self {
             bot_token,
             allowed_user_ids: raw.allowed_user_ids.into_iter().collect(),
@@ -209,6 +228,7 @@ impl GatewayConfig {
                 .unwrap_or(DEFAULT_POLL_TIMEOUT_SECONDS),
             state_dir,
             runtime_dir,
+            auth_keys,
         })
     }
 
@@ -222,6 +242,14 @@ impl GatewayConfig {
             poll_timeout_seconds: self.poll_timeout_seconds,
         }
     }
+}
+
+/// Read one private credential without retaining its path or plaintext.
+fn read_gateway_auth_key(path: &Path) -> Result<GatewayAuthKey, GatewayExitError> {
+    let value = fs::read_to_string(path).map_err(|_| {
+        GatewayExitError::Config("unable to read Telegram gateway client credential".to_owned())
+    })?;
+    GatewayAuthKey::parse(&value).map_err(GatewayExitError::Config)
 }
 
 /// Raw command-line configuration before environment/default resolution.
@@ -241,6 +269,10 @@ struct RawGatewayArgs {
     state_dir: Option<PathBuf>,
     /// Optional private runtime socket directory override.
     runtime_dir: Option<PathBuf>,
+    /// Private systemd credential containing the current gateway client key.
+    client_secret_file: Option<PathBuf>,
+    /// Optional private credential containing the previous key during rotation.
+    previous_client_secret_file: Option<PathBuf>,
 }
 
 /// Minimal flag parser that avoids adding a CLI dependency for the MVP daemon.
@@ -285,6 +317,12 @@ where
                 }
                 "--state-dir" => raw.state_dir = Some(PathBuf::from(self.next_value(&arg)?)),
                 "--runtime-dir" => raw.runtime_dir = Some(PathBuf::from(self.next_value(&arg)?)),
+                "--client-secret-file" => {
+                    raw.client_secret_file = Some(PathBuf::from(self.next_value(&arg)?));
+                }
+                "--previous-client-secret-file" => {
+                    raw.previous_client_secret_file = Some(PathBuf::from(self.next_value(&arg)?));
+                }
                 "--help" | "-h" => return Err(gateway_usage()),
                 other => return Err(format!("unknown telegram gateway argument `{other}`")),
             }
@@ -380,6 +418,7 @@ impl Gateway {
             socket_path.clone(),
             Arc::clone(&client),
             Arc::clone(&durable_store),
+            config.auth_keys,
         ));
         let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&socket_state))
             .map_err(GatewayExitError::Io)?;
@@ -849,8 +888,10 @@ impl Gateway {
             Err(error) => return self.reply(message.chat_id, &error),
         };
         let target = GatewayRegistrationKey {
-            session_id,
-            agent_id,
+            session_id: tau_proto::SessionId::parse(session_id)
+                .expect("registry snapshot session id is valid"),
+            agent_id: tau_proto::AgentId::parse(agent_id)
+                .expect("registry snapshot agent id is valid"),
         };
         self.queue_route_or_reply(message, update_id, target, text)
     }
@@ -872,8 +913,10 @@ impl Gateway {
                     message,
                     update_id,
                     GatewayRegistrationKey {
-                        session_id,
-                        agent_id,
+                        session_id: tau_proto::SessionId::parse(session_id)
+                            .expect("stored selection session id is valid"),
+                        agent_id: tau_proto::AgentId::parse(agent_id)
+                            .expect("stored selection agent id is valid"),
                     },
                     text,
                 );
@@ -1317,7 +1360,9 @@ struct GatewaySocketState {
     /// Monotonic connection id allocator.
     next_connection_id: AtomicU64,
     /// Per-process generation that tells reconnecting sidecars to reannounce.
-    generation: String,
+    generation: GatewayGeneration,
+    /// Current and optional previous authentication keys.
+    auth_keys: Vec<GatewayAuthKey>,
     /// Exact unacknowledged deliveries mirrored from durable checkpoints.
     durable_deliveries: Mutex<Vec<GatewayDelivery>>,
     /// Shared transaction owner for canonical ACK persistence.
@@ -1341,6 +1386,7 @@ impl GatewaySocketState {
             socket_path,
             client,
             Arc::new(GatewayDurableStore::in_memory(durable.clone())),
+            vec![GatewayAuthKey::parse(&"11".repeat(32)).expect("test key")],
         )
     }
 
@@ -1352,6 +1398,7 @@ impl GatewaySocketState {
         socket_path: PathBuf,
         client: Arc<dyn TelegramClient>,
         durable_store: Arc<GatewayDurableStore>,
+        auth_keys: Vec<GatewayAuthKey>,
     ) -> Self {
         Self {
             socket_path,
@@ -1362,6 +1409,7 @@ impl GatewaySocketState {
             outbound_send_times: Mutex::new(VecDeque::new()),
             next_connection_id: AtomicU64::new(1),
             generation: gateway_generation(),
+            auth_keys,
             durable_deliveries: Mutex::new(durable.checkpoints.pending_deliveries()),
             durable_store,
         }
@@ -1455,15 +1503,15 @@ impl GatewaySocketState {
         let report_id = TelegramReportId::for_gateway(stream_hash, update_id);
         let delivery = GatewayDelivery {
             request_id: report_id,
-            session_id: target.session_id.clone(),
-            agent_id: target.agent_id.clone(),
+            session_id: target.session_id.to_string(),
+            agent_id: target.agent_id.as_str().to_owned(),
             message_id: format!("telegram:{}:{update_id}", message.chat_id),
             sender_id: message.user_id.to_string(),
             source: telegram_source_label(message),
             conversation_id: message.chat_id.to_string(),
             text: text.to_owned(),
         };
-        if !delivery_response_fits(&self.generation, std::slice::from_ref(&delivery)) {
+        if !delivery_response_fits(self.generation.as_str(), std::slice::from_ref(&delivery)) {
             return Err(DELIVERY_TOO_LARGE_MESSAGE.to_owned());
         }
         Ok(delivery)
@@ -1521,13 +1569,15 @@ impl GatewaySocketState {
             .iter()
             .filter(|delivery| {
                 owned.contains(&GatewayRegistrationKey {
-                    session_id: delivery.session_id.clone(),
-                    agent_id: delivery.agent_id.clone(),
+                    session_id: tau_proto::SessionId::parse(&delivery.session_id)
+                        .expect("durable delivery session id is valid"),
+                    agent_id: tau_proto::AgentId::parse(&delivery.agent_id)
+                        .expect("durable delivery agent id is valid"),
                 })
             })
             .cloned()
             .collect::<Vec<_>>();
-        select_delivery_prefix(&self.generation, &eligible)
+        select_delivery_prefix(self.generation.as_str(), &eligible)
     }
 
     /// Persist one exact canonical ACK without depending on a live route lease.
@@ -1556,8 +1606,8 @@ impl GatewaySocketState {
         connection_id: u64,
         request: GatewaySocketRequest,
     ) -> Result<(), String> {
-        let session_id = required_request_field(request.session_id, "session_id")?;
-        let agent_id = required_request_field(request.agent_id, "agent_id")?;
+        let session_id = required_session_id(request.session_id)?;
+        let agent_id = required_agent_id(request.agent_id)?;
         let message = required_message_field(request.message)?;
         if message.len() > MAX_OUTBOUND_MESSAGE_BYTES {
             return Err("telegram gateway send message is too large".to_owned());
@@ -1663,20 +1713,79 @@ impl Default for GatewayRegistry {
 }
 
 impl GatewayRegistry {
-    /// Add or refresh a connected sidecar.
+    /// Install the deterministic test identity used by direct registry tests.
+    #[cfg(test)]
     fn hello(&mut self, connection_id: u64, now: Instant) {
-        self.sidecars
-            .entry(connection_id)
-            .and_modify(|sidecar| sidecar.last_seen = now)
-            .or_insert(GatewaySidecar { last_seen: now });
+        self.authenticate(
+            connection_id,
+            ClientGeneration::parse("22".repeat(32)).expect("test generation"),
+            now,
+        );
+        self.complete_reannouncement(connection_id)
+            .expect("test connection reannouncement");
+    }
+    /// Install authenticated authority and fence an older reconnect generation.
+    fn authenticate(
+        &mut self,
+        connection_id: u64,
+        client_generation: ClientGeneration,
+        now: Instant,
+    ) {
+        let replaced = self
+            .sidecars
+            .iter_mut()
+            .filter_map(|(old_id, sidecar)| {
+                (sidecar.client_generation == client_generation && !sidecar.fenced).then(|| {
+                    sidecar.fenced = true;
+                    *old_id
+                })
+            })
+            .collect::<Vec<_>>();
+        self.sidecars.insert(
+            connection_id,
+            GatewaySidecar {
+                last_seen: now,
+                client_generation,
+                fenced: false,
+                reannouncement: Some(HashSet::new()),
+            },
+        );
+        for registration in self.registrations.values_mut() {
+            if replaced.contains(&registration.connection_id) {
+                registration.connection_id = connection_id;
+                registration.expires_at = now + REGISTRATION_LEASE_DURATION;
+            }
+        }
+    }
+
+    /// Reject operations from unknown or superseded connections.
+    fn ensure_active(&self, connection_id: u64) -> Result<(), String> {
+        match self.sidecars.get(&connection_id) {
+            Some(sidecar) if !sidecar.fenced => Ok(()),
+            _ => Err("gateway connection fenced; reconnect".to_owned()),
+        }
+    }
+
+    /// Require exact route reconciliation before authority-bearing operations.
+    fn ensure_reconciled(&self, connection_id: u64) -> Result<(), String> {
+        self.ensure_active(connection_id)?;
+        if self
+            .sidecars
+            .get(&connection_id)
+            .is_some_and(|sidecar| sidecar.reannouncement.is_some())
+        {
+            return Err("gateway route reannouncement is incomplete".to_owned());
+        }
+        Ok(())
     }
 
     /// Refresh a sidecar heartbeat and extend its registration leases.
     fn heartbeat(&mut self, connection_id: u64, now: Instant) -> Result<(), String> {
+        self.ensure_reconciled(connection_id)?;
         let sidecar = self
             .sidecars
             .get_mut(&connection_id)
-            .ok_or_else(|| "sidecar must send hello before heartbeat".to_owned())?;
+            .expect("active sidecar must exist");
         sidecar.last_seen = now;
         for registration in self.registrations.values_mut() {
             if registration.connection_id == connection_id {
@@ -1693,18 +1802,21 @@ impl GatewayRegistry {
         request: GatewaySocketRequest,
         now: Instant,
     ) -> Result<(), String> {
-        if !self.sidecars.contains_key(&connection_id) {
-            return Err("sidecar must send hello before register_agent".to_owned());
-        }
-        let session_id = required_request_field(request.session_id, "session_id")?;
-        let agent_id = required_request_field(request.agent_id, "agent_id")?;
+        self.ensure_active(connection_id)?;
+        let session_id = required_session_id(request.session_id)?;
+        let agent_id = required_agent_id(request.agent_id)?;
         let key = GatewayRegistrationKey {
             session_id,
             agent_id,
         };
-        if !self.session_aliases.contains_key(&key.session_id) {
+        if let Some(owner) = self.registrations.get(&key)
+            && owner.connection_id != connection_id
+        {
+            return Err("route_conflict".to_owned());
+        }
+        if !self.session_aliases.contains_key(key.session_id.as_str()) {
             self.session_aliases
-                .insert(key.session_id.clone(), self.next_session_alias);
+                .insert(key.session_id.to_string(), self.next_session_alias);
             self.next_session_alias += 1;
         }
         if !self.agent_aliases.contains_key(&key) {
@@ -1713,7 +1825,7 @@ impl GatewayRegistry {
             self.next_agent_alias += 1;
         }
         self.registrations.insert(
-            key,
+            key.clone(),
             GatewayRegistration {
                 connection_id,
                 display_name: request.display_name,
@@ -1721,6 +1833,31 @@ impl GatewayRegistry {
                 expires_at: now + REGISTRATION_LEASE_DURATION,
             },
         );
+        let sidecar = self
+            .sidecars
+            .get_mut(&connection_id)
+            .expect("active sidecar must exist");
+        if let Some(reannounced_routes) = sidecar.reannouncement.as_mut() {
+            reannounced_routes.insert(key);
+        }
+        Ok(())
+    }
+
+    /// Atomically replace transferred routes with the exact reannounced
+    /// snapshot.
+    fn complete_reannouncement(&mut self, connection_id: u64) -> Result<(), String> {
+        self.ensure_active(connection_id)?;
+        let sidecar = self
+            .sidecars
+            .get_mut(&connection_id)
+            .expect("active sidecar must exist");
+        let reannounced_routes = sidecar
+            .reannouncement
+            .take()
+            .ok_or_else(|| "gateway route reannouncement is already complete".to_owned())?;
+        self.registrations.retain(|key, registration| {
+            registration.connection_id != connection_id || reannounced_routes.contains(key)
+        });
         Ok(())
     }
 
@@ -1730,8 +1867,9 @@ impl GatewayRegistry {
         connection_id: u64,
         request: GatewaySocketRequest,
     ) -> Result<(), String> {
-        let session_id = required_request_field(request.session_id, "session_id")?;
-        let agent_id = required_request_field(request.agent_id, "agent_id")?;
+        self.ensure_reconciled(connection_id)?;
+        let session_id = required_session_id(request.session_id)?;
+        let agent_id = required_agent_id(request.agent_id)?;
         let key = GatewayRegistrationKey {
             session_id,
             agent_id,
@@ -1752,6 +1890,7 @@ impl GatewayRegistry {
         connection_id: u64,
         key: &GatewayRegistrationKey,
     ) -> Result<(), String> {
+        self.ensure_reconciled(connection_id)?;
         match self.registrations.get(key) {
             Some(registration) if registration.connection_id == connection_id => Ok(()),
             Some(_) => Err("telegram gateway route is owned by another sidecar".to_owned()),
@@ -1790,14 +1929,14 @@ impl GatewayRegistry {
         for registration in &registrations {
             match sessions
                 .iter_mut()
-                .find(|session| session.session_id == registration.key.session_id)
+                .find(|session| registration.key.session_id == session.session_id)
             {
                 Some(session) => session.agent_count += 1,
                 None => sessions.push(GatewaySessionSnapshot {
-                    session_id: registration.key.session_id.clone(),
+                    session_id: registration.key.session_id.to_string(),
                     alias: *self
                         .session_aliases
-                        .get(&registration.key.session_id)
+                        .get(registration.key.session_id.as_str())
                         .expect("registered session should have alias"),
                     agent_count: 1,
                 }),
@@ -1854,15 +1993,21 @@ impl GatewayRegistry {
 struct GatewaySidecar {
     /// Last time the sidecar sent hello or heartbeat.
     last_seen: Instant,
+    /// Process-local identity used to recognize reconnects.
+    client_generation: ClientGeneration,
+    /// Whether a newer connection superseded this one.
+    fenced: bool,
+    /// Whether transferred routes still await exact snapshot reconciliation.
+    reannouncement: Option<HashSet<GatewayRegistrationKey>>,
 }
 
 /// Key identifying one registered Tau agent route.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 struct GatewayRegistrationKey {
     /// Tau session id announced by the sidecar.
-    session_id: String,
+    session_id: tau_proto::SessionId,
     /// Tau agent id announced by the sidecar.
-    agent_id: String,
+    agent_id: tau_proto::AgentId,
 }
 
 /// Live route metadata for one registered Tau agent.
@@ -1885,8 +2030,18 @@ struct GatewaySocketRequest {
     protocol_version: u32,
     /// Request kind such as `status`, `hello`, `heartbeat`,
     /// `register_agent`, `unregister_agent`, `send_message`, `ack_delivery`, or
-    /// `goodbye`.
+    /// `complete_reannouncement`, or `goodbye`.
     kind: String,
+    /// Authentication key selector.
+    key_id: Option<String>,
+    /// Allowed extension instance.
+    extension_instance: Option<String>,
+    /// Process-local client generation.
+    client_generation: Option<String>,
+    /// Fresh client nonce.
+    client_nonce: Option<String>,
+    /// Client proof for the challenge transcript.
+    client_mac: Option<String>,
     /// Tau session id for registration or acknowledgement requests.
     session_id: Option<String>,
     /// Tau agent id for registration or acknowledgement requests.
@@ -1905,6 +2060,11 @@ impl Default for GatewaySocketRequest {
         Self {
             protocol_version: SOCKET_PROTOCOL_VERSION,
             kind: "status".to_owned(),
+            key_id: None,
+            extension_instance: None,
+            client_generation: None,
+            client_nonce: None,
+            client_mac: None,
             session_id: None,
             agent_id: None,
             message: None,
@@ -1960,6 +2120,11 @@ fn accept_gateway_socket_loop(listener: UnixListener, state: Arc<GatewaySocketSt
 /// Handle one local socket client using JSON-line requests and responses.
 fn handle_gateway_socket_client(mut stream: UnixStream, state: Arc<GatewaySocketState>) {
     let connection_id = state.allocate_connection_id();
+    let authentication_deadline = Instant::now() + AUTHENTICATION_TIMEOUT;
+    match authenticate_gateway_socket(&mut stream, &state, connection_id, authentication_deadline) {
+        Ok(true) => {}
+        Ok(false) | Err(()) => return,
+    }
     let _ = stream.set_read_timeout(Some(REGISTRATION_LEASE_DURATION));
     loop {
         state.prune_registry();
@@ -2003,27 +2168,172 @@ fn handle_gateway_socket_client(mut stream: UnixStream, state: Arc<GatewaySocket
         .disconnect(connection_id);
 }
 
+/// Complete mutual authentication, or serve one minimal readiness request.
+fn authenticate_gateway_socket(
+    stream: &mut UnixStream,
+    state: &GatewaySocketState,
+    connection_id: u64,
+    deadline: Instant,
+) -> Result<bool, ()> {
+    let fail = |stream: &mut UnixStream| {
+        let response = serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": false,
+            "error": "authentication failed",
+        });
+        write_gateway_socket_response(stream, &response);
+    };
+    let request = match read_gateway_socket_request_until(stream, deadline) {
+        Ok(Some(request)) => request,
+        Ok(None) | Err(_) => {
+            fail(stream);
+            return Err(());
+        }
+    };
+    if request.kind == "status" && request.protocol_version == SOCKET_PROTOCOL_VERSION {
+        let response = serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": true,
+            "ready": true,
+            "gateway_generation": state.generation.as_str(),
+        });
+        write_gateway_socket_response(stream, &response);
+        return Ok(false);
+    }
+    let Some(key_id) = request
+        .key_id
+        .and_then(|value| GatewayKeyId::parse(value).ok())
+    else {
+        fail(stream);
+        return Err(());
+    };
+    let Some(extension_instance) = request.extension_instance else {
+        fail(stream);
+        return Err(());
+    };
+    let Some(client_generation) = request
+        .client_generation
+        .and_then(|value| ClientGeneration::parse(value).ok())
+    else {
+        fail(stream);
+        return Err(());
+    };
+    let Some(client_nonce) = request
+        .client_nonce
+        .and_then(|value| ClientNonce::parse(value).ok())
+    else {
+        fail(stream);
+        return Err(());
+    };
+    let valid_hello = request.protocol_version == SOCKET_PROTOCOL_VERSION
+        && request.kind == "hello"
+        && extension_instance == EXTENSION_INSTANCE;
+    let Some(key) = state
+        .auth_keys
+        .iter()
+        .find(|key| key.key_id() == key_id)
+        .cloned()
+        .filter(|_| valid_hello)
+    else {
+        fail(stream);
+        return Err(());
+    };
+    let server_nonce = ServerNonce::random();
+    let fields = AuthFields {
+        key_id: &key_id,
+        gateway_generation: &state.generation,
+        client_generation: &client_generation,
+        client_nonce: &client_nonce,
+        server_nonce: &server_nonce,
+    };
+    let challenge = serde_json::json!({
+        "protocol_version": SOCKET_PROTOCOL_VERSION,
+        "ok": true,
+        "kind": "challenge",
+        "gateway_generation": state.generation.as_str(),
+        "server_nonce": server_nonce.as_str(),
+        "server_mac": key.server_proof(&fields).encode(),
+    });
+    if !write_gateway_socket_response(stream, &challenge) {
+        return Err(());
+    }
+    let authenticate = match read_gateway_socket_request_until(stream, deadline) {
+        Ok(Some(request)) => request,
+        Ok(None) | Err(_) => {
+            fail(stream);
+            return Err(());
+        }
+    };
+    let expected = key.client_proof(&fields);
+    let actual = authenticate
+        .client_mac
+        .as_deref()
+        .and_then(|value| AuthProof::parse(value).ok());
+    if authenticate.protocol_version != SOCKET_PROTOCOL_VERSION
+        || authenticate.kind != "authenticate"
+        || !actual
+            .as_ref()
+            .is_some_and(|proof| key.verify_proof(&expected, proof))
+    {
+        fail(stream);
+        return Err(());
+    }
+    let response = serde_json::json!({
+        "protocol_version": SOCKET_PROTOCOL_VERSION,
+        "ok": true,
+        "kind": "authenticated",
+        "gateway_generation": state.generation.as_str(),
+        "heartbeat_interval_seconds": SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
+        "registration_lease_seconds": REGISTRATION_LEASE_DURATION.as_secs(),
+        "reannounce_required": true,
+        "deliveries": [],
+    });
+    if !write_gateway_socket_response(stream, &response) {
+        return Err(());
+    }
+    state.registry.lock().expect("registry lock").authenticate(
+        connection_id,
+        client_generation,
+        Instant::now(),
+    );
+    Ok(true)
+}
+
 /// Apply one parsed local socket request to the gateway registry.
 fn handle_gateway_socket_request(
     state: &GatewaySocketState,
     connection_id: u64,
     request: GatewaySocketRequest,
 ) -> serde_json::Value {
+    if matches!(request.kind.as_str(), "hello" | "authenticate") {
+        return serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": false,
+            "error": "authentication failed",
+        });
+    }
+    if let Err(error) = state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .ensure_active(connection_id)
+    {
+        return serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": false,
+            "error": bounded_socket_error(&error),
+        });
+    }
     match request.kind.as_str() {
         "status" => state.status_response(false),
-        "hello" => {
-            state
-                .registry
-                .lock()
-                .expect("registry lock")
-                .hello(connection_id, Instant::now());
-            state.status_response(true)
-        }
         "heartbeat" => registry_result(state, connection_id, |registry| {
             registry.heartbeat(connection_id, Instant::now())
         }),
         "register_agent" => registry_result(state, connection_id, |registry| {
             registry.register_agent(connection_id, request, Instant::now())
+        }),
+        "complete_reannouncement" => registry_result(state, connection_id, |registry| {
+            registry.complete_reannouncement(connection_id)
         }),
         "unregister_agent" => registry_result(state, connection_id, |registry| {
             registry.unregister_agent(connection_id, request)
@@ -2032,11 +2342,19 @@ fn handle_gateway_socket_request(
             state.send_agent_message(connection_id, request)
         }),
         "ack_delivery" => {
+            if let Err(error) = state
+                .registry
+                .lock()
+                .expect("registry lock")
+                .ensure_reconciled(connection_id)
+            {
+                return socket_response(state, Err(error), Vec::new());
+            }
             let report_id = request
                 .report_id
                 .ok_or_else(|| "telegram gateway request requires `report_id`".to_owned());
-            let session_id = required_request_field(request.session_id, "session_id");
-            let agent_id = required_request_field(request.agent_id, "agent_id");
+            let session_id = required_session_id(request.session_id);
+            let agent_id = required_agent_id(request.agent_id);
             socket_result(state, connection_id, || {
                 state.acknowledge_delivery(
                     report_id?,
@@ -2079,12 +2397,14 @@ fn registry_result<F>(state: &GatewaySocketState, connection_id: u64, f: F) -> s
 where
     F: FnOnce(&mut GatewayRegistry) -> Result<(), String>,
 {
-    let result = {
+    let (result, reconciled) = {
         let mut registry = state.registry.lock().expect("registry lock");
         registry.prune_expired(Instant::now());
-        f(&mut registry)
+        let result = f(&mut registry);
+        let reconciled = registry.ensure_reconciled(connection_id).is_ok();
+        (result, reconciled)
     };
-    let deliveries = if result.is_ok() {
+    let deliveries = if result.is_ok() && reconciled {
         state.durable_deliveries_for_connection(connection_id)
     } else {
         Vec::new()
@@ -2099,7 +2419,7 @@ fn socket_response(
     deliveries: Vec<GatewayDelivery>,
 ) -> serde_json::Value {
     match result {
-        Ok(()) => successful_socket_response(&state.generation, &deliveries),
+        Ok(()) => successful_socket_response(state.generation.as_str(), &deliveries),
         Err(error) => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
             "ok": false,
@@ -2164,11 +2484,42 @@ fn write_gateway_socket_response(stream: &mut UnixStream, response: &serde_json:
 fn read_gateway_socket_request(
     stream: &UnixStream,
 ) -> Result<Option<GatewaySocketRequest>, String> {
+    read_gateway_socket_request_with_deadline(stream, None)
+}
+
+/// Read one handshake request before the shared absolute deadline.
+fn read_gateway_socket_request_until(
+    stream: &UnixStream,
+    deadline: Instant,
+) -> Result<Option<GatewaySocketRequest>, String> {
+    read_gateway_socket_request_with_deadline_and_clock(stream, Some(deadline), Instant::now)
+}
+
+fn read_gateway_socket_request_with_deadline(
+    stream: &UnixStream,
+    deadline: Option<Instant>,
+) -> Result<Option<GatewaySocketRequest>, String> {
+    read_gateway_socket_request_with_deadline_and_clock(stream, deadline, Instant::now)
+}
+
+fn read_gateway_socket_request_with_deadline_and_clock(
+    stream: &UnixStream,
+    deadline: Option<Instant>,
+    mut now: impl FnMut() -> Instant,
+) -> Result<Option<GatewaySocketRequest>, String> {
     let mut reader = stream
         .try_clone()
         .map_err(|error| format!("cloning gateway socket stream: {error}"))?;
     let mut request = Vec::new();
     loop {
+        if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(now())
+                .ok_or_else(|| "gateway socket authentication timed out".to_owned())?;
+            reader
+                .set_read_timeout(Some(remaining))
+                .map_err(|error| format!("configuring gateway socket timeout: {error}"))?;
+        }
         let mut byte = [0_u8; 1];
         match reader.read(&mut byte) {
             Ok(0) => {
@@ -2219,6 +2570,20 @@ fn required_request_field(value: Option<String>, name: &str) -> Result<String, S
         .ok_or_else(|| format!("gateway socket request requires `{name}`"))
 }
 
+/// Parse one required Tau session identifier from a socket request.
+fn required_session_id(value: Option<String>) -> Result<tau_proto::SessionId, String> {
+    let value = required_request_field(value, "session_id")?;
+    tau_proto::SessionId::parse(value)
+        .map_err(|_| "gateway socket request has invalid `session_id`".to_owned())
+}
+
+/// Parse one required Tau agent identifier from a socket request.
+fn required_agent_id(value: Option<String>) -> Result<tau_proto::AgentId, String> {
+    let value = required_request_field(value, "agent_id")?;
+    tau_proto::AgentId::parse(&value)
+        .map_err(|_| "gateway socket request has invalid `agent_id`".to_owned())
+}
+
 /// Extract and validate a required outbound message without trimming content.
 fn required_message_field(value: Option<String>) -> Result<String, String> {
     value
@@ -2227,12 +2592,8 @@ fn required_message_field(value: Option<String>) -> Result<String, String> {
 }
 
 /// Return a per-process gateway generation label for reconnect detection.
-fn gateway_generation() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{timestamp:x}")
+fn gateway_generation() -> GatewayGeneration {
+    GatewayGeneration::random()
 }
 
 /// Create a private directory, rejecting symlink final components.
@@ -2335,7 +2696,7 @@ fn parse_u64_flag(flag: &str, value: &str) -> Result<u64, String> {
 
 /// Return concise usage text for the MVP daemon.
 fn gateway_usage() -> String {
-    "Usage: tau-telegram-gateway --allowed-user-id <telegram-user-id> [--allowed-user-id <id> ...] [--allowed-user-ids <id,id>] [--bot-token-env TELEGRAM_BOT_TOKEN] [--chat-id <chat-id>] [--api-base <url>] [--poll-timeout-seconds <seconds>] [--state-dir <path>] [--runtime-dir <path>]".to_owned()
+    "Usage: tau-telegram-gateway --allowed-user-id <telegram-user-id> --client-secret-file <path> [--previous-client-secret-file <path>] [--allowed-user-id <id> ...] [--allowed-user-ids <id,id>] [--bot-token-env TELEGRAM_BOT_TOKEN] [--chat-id <chat-id>] [--api-base <url>] [--poll-timeout-seconds <seconds>] [--state-dir <path>] [--runtime-dir <path>]".to_owned()
 }
 
 /// Return help text sent to Telegram users.
