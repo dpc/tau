@@ -799,6 +799,12 @@ Tau then sends one dedicated no-tools Chat Completions request to that exact
 model. It commits only a validated summary as untrusted synthetic historical
 context; it never adds model text to the system prompt. Public Responses and
 models without this declaration remain unsupported.
+The model may emit reasoning text before its summary. Tau applies
+`max_output_bytes` separately to the aggregate reasoning text and the assistant
+message, discards the reasoning, and rejects every other output item. The
+assistant message must contain exactly 12 nonempty lines with no blank or extra
+lines: each of the six exact summary-v1 headings on its own line, immediately
+followed by one content line.
 The context window must match the model field. Input and output limits must be
 positive and fit conservatively within that window; units are bytes, tokens,
 and bytes respectively, with an additional 1,024-token worst-case request and

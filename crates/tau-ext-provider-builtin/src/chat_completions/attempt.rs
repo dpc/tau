@@ -273,8 +273,26 @@ fn validate_summary_output(
     items: Vec<tau_proto::ContextItem>,
     config: super::LocalSummaryCompactionConfig,
 ) -> Result<tau_proto::ContextItem, String> {
-    let [tau_proto::ContextItem::Message(message)] = items.as_slice() else {
-        return Err("summary compactor returned non-text output".to_owned());
+    let mut message = None;
+    let mut reasoning_bytes = 0_u64;
+    for item in &items {
+        match item {
+            tau_proto::ContextItem::Message(item) if message.is_none() => message = Some(item),
+            tau_proto::ContextItem::ReasoningText(item) => {
+                reasoning_bytes = reasoning_bytes
+                    .checked_add(u64::try_from(item.text.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        "summary compactor reasoning exceeds its byte limit".to_owned()
+                    })?;
+                if config.max_output_bytes.get() < reasoning_bytes {
+                    return Err("summary compactor reasoning exceeds its byte limit".to_owned());
+                }
+            }
+            _ => return Err("summary compactor returned unsupported output".to_owned()),
+        }
+    }
+    let Some(message) = message else {
+        return Err("summary compactor did not return exactly one message".to_owned());
     };
     if message.role != tau_proto::ContextRole::Assistant {
         return Err("summary compactor returned an invalid role".to_owned());
@@ -303,7 +321,7 @@ fn validate_summary_output(
     let lines = text.lines().collect::<Vec<_>>();
     if lines.len() != HEADINGS.len() * 2
         || HEADINGS.iter().enumerate().any(|(index, heading)| {
-            lines[index * 2].trim() != *heading || lines[index * 2 + 1].trim().is_empty()
+            lines[index * 2] != *heading || lines[index * 2 + 1].trim().is_empty()
         })
     {
         return Err("summary compactor output does not match summary-v1".to_owned());

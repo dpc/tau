@@ -180,9 +180,11 @@ Standalone summary compaction is available only through an exact model's
 explicit `local_summary_compaction` declaration with a matching context window
 and bounded input/output limits. The provider runtime never persists the full
 compactor request, including debug capture, and never retries after semantic
-output. Only validated bounded text can become an explicitly untrusted
-user-role historical checkpoint. Re-review locality, budgeting, capture, and
-terminalization whenever this profile or dispatch path changes.
+output. Only one validated bounded assistant message can become an explicitly
+untrusted user-role historical checkpoint. The validator separately byte-bounds
+and discards reasoning text and rejects every other output item. Re-review
+locality, budgeting, capture, and terminalization whenever this profile or
+dispatch path changes.
 Known-remote OpenRouter conversion strips the local-only declaration.
 Provider settings contain no credentials. The extension reads typed version-zero
 OAuth and API-key records only through its configured-instance Secret RPC,

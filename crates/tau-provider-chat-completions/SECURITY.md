@@ -43,6 +43,8 @@ Only a model with an explicit `local_summary_compaction` profile may run Tau's
 transcript-v1 summary compactor. The dedicated exact-model request has no tools,
 omits image bytes while retaining typed metadata and an explicit loss marker,
 and is excluded from durable provider debug capture. Only a bounded, validated
-six-section result persists, as untrusted synthetic user-role history. Failures
-after semantic output terminalize without resend. Revisit this boundary when
-changing compactor serialization, capture, retries, validation, or eligibility.
+six-section result persists, as untrusted synthetic user-role history. Separately
+byte-bounded reasoning text may accompany that result but is discarded. Other
+semantic output is rejected. Failures after semantic output terminalize without
+resend. Revisit this boundary when changing compactor serialization, capture,
+retries, validation, or eligibility.

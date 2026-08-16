@@ -17,9 +17,12 @@ The explicitly opted-in local Chat Completions summary compactor is the narrow
 transcript-v1 exception to byte-identical provider conversion. Its dedicated
 no-tools request serializes typed history as canonical JSON, intentionally omits
 image bytes while retaining image metadata and an explicit loss marker, and
-persists only a bounded validated synthetic user-role checkpoint. The complete
-compactor request is never persisted, including in provider debug captures.
-Failures after semantic output are terminal and never ambiguously resent.
+persists only a bounded validated synthetic user-role checkpoint. Its output may
+contain separately byte-bounded reasoning text, which Tau discards; exactly one
+assistant message in the strict 12-line summary-v1 shape must remain, and every
+other semantic output is rejected. The complete compactor request is never
+persisted, including in provider debug captures. Failures after semantic output
+are terminal and never ambiguously resent.
 
 ## Recovery authority
 

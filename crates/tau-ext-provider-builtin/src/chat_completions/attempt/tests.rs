@@ -29,13 +29,7 @@ use crate::chat_completions::{
 /// historical checkpoint while malformed schemas and oversized text fail.
 #[test]
 fn summary_output_is_bounded_and_lowered_to_historical_context() {
-    let config = LocalSummaryCompactionConfig {
-        serialization_profile: LocalSummaryCompactionSerializationProfile::LocalTranscriptV1,
-        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
-        max_input_bytes: NonZeroU64::new(4096).expect("positive"),
-        max_output_tokens: NonZeroU32::new(512).expect("positive"),
-        max_output_bytes: NonZeroU64::new(4096).expect("positive"),
-    };
+    let config = summary_config(4096);
     let summary = [
         "Goal:",
         "goal",
@@ -75,6 +69,7 @@ fn summary_output_is_bounded_and_lowered_to_historical_context() {
         "preamble\nGoal:\ngoal\nConstraints:\nnone\nDecisions:\none\nProgress:\ndone\nOpen Work:\nnext\nCritical Facts:\nfact",
         "Goal:\ngoal\nConstraints:\n\nDecisions:\none\nProgress:\ndone\nOpen Work:\nnext\nCritical Facts:\nfact",
         "Constraints:\nnone\nGoal:\ngoal\nDecisions:\none\nProgress:\ndone\nOpen Work:\nnext\nCritical Facts:\nfact",
+        " Goal:\ngoal\nConstraints:\nnone\nDecisions:\none\nProgress:\ndone\nOpen Work:\nnext\nCritical Facts:\nfact",
     ] {
         let malformed = tau_proto::ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
@@ -103,6 +98,78 @@ fn summary_output_is_bounded_and_lowered_to_historical_context() {
     );
 }
 
+/// Ensures local-summary reasoning is independently bounded and discarded
+/// rather than entering the durable synthetic checkpoint.
+#[test]
+fn summary_output_discards_separately_bounded_reasoning() {
+    let items = vec![
+        reasoning_item("private"),
+        valid_summary_item(),
+        reasoning_item(" thought"),
+    ];
+
+    let accepted =
+        validate_summary_output(items, summary_config(128)).expect("bounded reasoning and summary");
+    let encoded = serde_json::to_string(&accepted).expect("summary message");
+    assert!(!encoded.contains("private"));
+    assert!(!encoded.contains("thought"));
+
+    assert!(
+        validate_summary_output(
+            vec![
+                reasoning_item(&"x".repeat(64)),
+                valid_summary_item(),
+                reasoning_item(&"x".repeat(65)),
+            ],
+            summary_config(128),
+        )
+        .is_err()
+    );
+}
+
+/// Ensures reasoning never substitutes for the one required assistant message
+/// and every non-reasoning side item remains fail-closed.
+#[test]
+fn summary_output_requires_one_assistant_message_and_rejects_other_items() {
+    let config = summary_config(4096);
+    assert!(validate_summary_output(vec![reasoning_item("only reasoning")], config).is_err());
+    assert!(
+        validate_summary_output(
+            vec![
+                reasoning_item("before"),
+                valid_summary_item(),
+                valid_summary_item(),
+            ],
+            config,
+        )
+        .is_err()
+    );
+    for unsupported in [
+        tau_proto::ContextItem::CompactionTrigger,
+        tau_proto::ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(
+            tau_proto::CborValue::Null,
+        )),
+    ] {
+        assert!(
+            validate_summary_output(
+                vec![reasoning_item("before"), valid_summary_item(), unsupported],
+                config,
+            )
+            .is_err()
+        );
+    }
+}
+
+fn summary_config(max_output_bytes: u64) -> LocalSummaryCompactionConfig {
+    LocalSummaryCompactionConfig {
+        serialization_profile: LocalSummaryCompactionSerializationProfile::LocalTranscriptV1,
+        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
+        max_input_bytes: NonZeroU64::new(4096).expect("positive"),
+        max_output_tokens: NonZeroU32::new(512).expect("positive"),
+        max_output_bytes: NonZeroU64::new(max_output_bytes).expect("positive"),
+    }
+}
+
 fn summary_text() -> &'static str {
     "Goal:\ngoal\nConstraints:\nnone\nDecisions:\none\nProgress:\ndone\nOpen Work:\nnext\nCritical Facts:\nfact"
 }
@@ -115,5 +182,12 @@ fn valid_summary_item() -> tau_proto::ContextItem {
         }],
         phase: None,
         responses_raw_json: None,
+    })
+}
+
+fn reasoning_item(text: &str) -> tau_proto::ContextItem {
+    tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+        kind: tau_proto::ReasoningTextKind::Full,
+        text: text.to_owned(),
     })
 }
