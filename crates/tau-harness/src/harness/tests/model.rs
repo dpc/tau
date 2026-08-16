@@ -885,6 +885,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: message.to_owned(),
             }),
         );

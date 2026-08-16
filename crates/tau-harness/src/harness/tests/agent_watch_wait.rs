@@ -734,6 +734,7 @@ fn cold_resume_replays_long_wait_context_without_runtime_state() {
                     sender_id,
                     kind: tau_proto::AgentMessageKind::WatchLongWait,
                     watch_long_wait: Some(wait),
+                    watch_lifecycle: None,
                     ..
                 } if sender_id.as_str() == watched_id
                     && wait.threshold_minutes == 15

@@ -2212,6 +2212,8 @@ pub enum AgentMessageKind {
     /// An automatic structured notification that a watched agent crossed a
     /// long-wait threshold.
     WatchLongWait,
+    /// An automatic structured, content-free watched-agent lifecycle terminal.
+    WatchLifecycle,
 }
 
 impl AgentMessageKind {
@@ -2275,7 +2277,11 @@ pub struct AgentMessageReceived {
     /// [`AgentMessageKind::WatchLongWait`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_long_wait: Option<AgentWatchLongWaitNotification>,
-    /// Message body.
+    /// Structured lifecycle terminal carried by
+    /// [`AgentMessageKind::WatchLifecycle`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_lifecycle: Option<AgentWatchLifecycleNotification>,
+    /// Message body. Must be empty for [`AgentMessageKind::WatchLifecycle`].
     pub message: String,
 }
 
@@ -2469,6 +2475,34 @@ pub struct AgentWatchLongWaitNotification {
     pub status_epoch: u64,
     /// Newly crossed threshold in whole minutes.
     pub threshold_minutes: u32,
+}
+
+/// Closed watched-agent lifecycle after an unexpected endpoint unload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWatchLifecycleState {
+    /// The watched endpoint can no longer accept work.
+    Stopped,
+}
+
+/// Content-free reason why an unexpected watched endpoint stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWatchLifecycleReason {
+    /// Cold recovery found durable delegation ownership without a complete
+    /// completion route.
+    RestoredDelegationRouteLost,
+    /// Any other unexpected unload while a surviving watcher remained.
+    UnexpectedUnload,
+}
+
+/// Structured terminal lifecycle projection delivered to one watcher.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentWatchLifecycleNotification {
+    /// Closed terminal lifecycle.
+    pub state: AgentWatchLifecycleState,
+    /// Content-free failure category.
+    pub reason: AgentWatchLifecycleReason,
 }
 
 /// Durable agent branch-state fact: the selected head moved, so the next

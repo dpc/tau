@@ -1,6 +1,10 @@
 //! Interrupted worker foreground-tool restore acceptance.
 
-use tau_proto::{AgentId, Event, SessionAgentListScope, SessionId};
+use tau_proto::{
+    AgentId, AgentNavigationMode, AgentRuntimeState, Event, SessionAgentFacts,
+    SessionAgentLifecycle, SessionAgentListEntry, SessionAgentListScope, SessionAgentPersistence,
+    SessionId,
+};
 
 use super::super::daemon_support::{disconnect_ui, spawn_daemon};
 use super::{
@@ -143,19 +147,67 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
     }
     let current_c = observer_c.roster(&session_id, SessionAgentListScope::Current)?;
     let history_c = observer_c.roster(&session_id, SessionAgentListScope::History)?;
-    if current_c != current_b || history_c != history_b {
-        return Err("S6 Boot C changed current/history durable membership".into());
+    if durable_roster_membership(&current_c) != durable_roster_membership(&current_b)
+        || durable_roster_membership(&history_c) != durable_roster_membership(&history_b)
+    {
+        return Err(format!(
+            "S6 Boot C changed current/history durable membership: \
+             current_b={current_b:?}, current_c={current_c:?}, \
+             history_b={history_b:?}, history_c={history_c:?}"
+        )
+        .into());
+    }
+    let worker_c = current_c
+        .iter()
+        .find(|entry| entry.agent_id == identities.worker)
+        .ok_or("S6 Boot C omitted the reconstructed worker")?;
+    if !matches!(
+        worker_c.lifecycle,
+        SessionAgentLifecycle::Live {
+            runtime_state: AgentRuntimeState::Idle,
+            navigation_mode: AgentNavigationMode::ActiveAuto,
+        }
+    ) {
+        return Err(format!(
+            "S6 Boot C did not restore the delegated worker as idle auto-active: {worker_c:?}"
+        )
+        .into());
     }
     disconnect_ui(&mut observer_c.peer)?;
     daemon_c.finish()?;
 
     let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
-    if load_agent_events(&fixture, &identities.worker)? != worker_events_b {
-        return Err("S6 Boot C changed the unloaded worker journal".into());
-    }
     fixture.assert_consumed()?;
     Ok(())
+}
+
+/// Durable roster fields, with transient live runtime details reduced to their
+/// membership lifecycle class.
+fn durable_roster_membership(
+    entries: &[SessionAgentListEntry],
+) -> Vec<(
+    AgentId,
+    &'static str,
+    SessionAgentPersistence,
+    SessionAgentFacts,
+)> {
+    entries
+        .iter()
+        .map(|entry| {
+            let lifecycle = match entry.lifecycle {
+                SessionAgentLifecycle::Live { .. } => "live",
+                SessionAgentLifecycle::Unavailable => "unavailable",
+                SessionAgentLifecycle::Unloaded => "unloaded",
+            };
+            (
+                entry.agent_id.clone(),
+                lifecycle,
+                entry.persistence,
+                entry.facts.clone(),
+            )
+        })
+        .collect()
 }
 
 /// Builds the closed three-main-action/two-worker-action S6 grammar.

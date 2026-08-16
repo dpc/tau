@@ -574,7 +574,27 @@ pub(crate) fn agent_message_activation_class(
             .watch_long_wait
             .is_some()
             .then_some(IsolatedWatchNotification),
+        tau_proto::AgentMessageKind::WatchLifecycle => message
+            .watch_lifecycle
+            .is_some()
+            .then_some(IsolatedWatchNotification),
     }
+}
+
+fn watch_retirement_event_matches(
+    event: &Event,
+    completion: &interception::WatchRetirementCompletion,
+) -> bool {
+    matches!(
+        event,
+        Event::AgentMessageReceived(message)
+            if message.message_id == completion.message_id
+                && message.sender_id == completion.watched_agent_id
+                && message.recipient_id == completion.watcher_id
+                && message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+                && message.watch_lifecycle.is_some()
+                && message.message.is_empty()
+    )
 }
 
 fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
@@ -2034,10 +2054,31 @@ pub(crate) enum PendingPeerReceiveCompletion {
 pub(crate) enum AgentMessageRecipientStatus {
     /// The recipient is known and can receive messages now.
     Live,
+    /// The restored transcript remains inspectable, but its interrupted request
+    /// cannot be resumed safely in this harness runtime.
+    RestoredUnavailable,
     /// The recipient id was known earlier but its agent has stopped.
     Stopped,
     /// The recipient id has never been observed by this harness.
     Unknown,
+}
+
+/// Runtime facts derived from one restored agent journal before the endpoint is
+/// exposed to message and watch admission.
+struct RestoredAgentRuntime {
+    /// Creation role when it remains available in current configuration.
+    role: Option<String>,
+    /// Durable prompt owner, detached to `User` after terminal evidence.
+    originator: tau_proto::PromptOriginator,
+    /// Default navigation mode reconstructed from durable ancestry.
+    navigation_mode: tau_proto::AgentNavigationMode,
+    /// Durable parent identity for an outstanding parented request.
+    parent_agent: Option<tau_proto::AgentId>,
+    /// Whether the immutable creator proves this was an `agent_start` tool
+    /// worker.
+    tool_backed_start: bool,
+    /// Whether every run-local route needed to resume the request is derivable.
+    resumable: bool,
 }
 
 /// Connection lifecycle requested by one handled client input message.
@@ -2564,6 +2605,19 @@ pub struct Harness {
     last_live_egress_lag_warning: Option<Instant>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
+    /// Restored members whose pre-restart request route is not reconstructible,
+    /// keyed by stable id with their durable creation role.
+    pub(crate) restored_unavailable_agents: HashMap<String, String>,
+    /// Closed reason selected before an unexpected watched endpoint unloads.
+    pending_agent_unload_reasons: HashMap<String, tau_proto::AgentWatchLifecycleReason>,
+    /// Endpoint ids whose pending unload is an expected completion or cleanup.
+    expected_agent_unloads: HashSet<String>,
+    /// Unexpected endpoint retirements waiting for all watcher lifecycle
+    /// appends.
+    pending_watch_retirements: HashMap<String, subagents_tool::PendingWatchRetirement>,
+    /// Outstanding built-in delegation query to child correlation. Cold restore
+    /// rebuilds this map from durable child originators before input admission.
+    pub(crate) pending_builtin_delegates: HashMap<String, String>,
     /// Global harness state. Currently only tracks per-session init
     /// (waiting on extensions to announce skills + AGENTS.md). Agent
     /// turn state is per-agent; multiple agents may have
@@ -3424,6 +3478,11 @@ impl Harness {
             long_wait_materialization_budget: None,
             last_live_egress_lag_warning: None,
             stopped_agent_ids: HashSet::new(),
+            restored_unavailable_agents: HashMap::new(),
+            pending_agent_unload_reasons: HashMap::new(),
+            expected_agent_unloads: HashSet::new(),
+            pending_watch_retirements: HashMap::new(),
+            pending_builtin_delegates: HashMap::new(),
             turn_state: TurnState::Idle,
             session_init_progress_generation: SessionInitProgressGeneration::default(),
             debug_log: None,
@@ -4760,7 +4819,7 @@ impl Harness {
                                 &command.conversation_id,
                                 Some(crate::harness::harness_connection_id()),
                                 Event::AgentMessageSent(tau_proto::AgentMessageSent {
-                                    message_id: command.auth_message_id,
+                                    message_id: command.auth_message_id.clone(),
                                     sender_id: command.sender_id,
                                     recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
                                         session_id: command.recipient_session_id.clone(),
@@ -4779,7 +4838,16 @@ impl Harness {
                             tau_proto::CborValue::Map(vec![
                                 (
                                     tau_proto::CborValue::Text("status".to_owned()),
-                                    tau_proto::CborValue::Text("Message sent".to_owned()),
+                                    tau_proto::CborValue::Text(format!(
+                                        "Message committed: {}; recipient was live; response not guaranteed",
+                                        command.auth_message_id
+                                    )),
+                                ),
+                                (
+                                    tau_proto::CborValue::Text("message_id".to_owned()),
+                                    tau_proto::CborValue::Text(
+                                        command.auth_message_id.to_string(),
+                                    ),
                                 ),
                                 (
                                     tau_proto::CborValue::Text("recipient".to_owned()),
@@ -5841,7 +5909,7 @@ impl Harness {
         &mut self,
         source: Option<&tau_proto::ConnectionId>,
         event: Event,
-    ) {
+    ) -> bool {
         debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
         let recorded_at = tau_proto::UnixMicros::now();
         let source_id = source.cloned();
@@ -5863,7 +5931,7 @@ impl Harness {
                     "message fact {} failed to persist: {error}",
                     event.name()
                 ));
-                return;
+                return false;
             }
         };
 
@@ -5881,6 +5949,7 @@ impl Harness {
         self.with_derived_publish_source(source.cloned(), |harness| {
             harness.react_to_committed_event(source, &event, true, None);
         });
+        true
     }
 
     /// Append a direct agent semantic fact after any explicit lifecycle stop.
@@ -6125,6 +6194,19 @@ impl Harness {
         persist: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        let watch_retirement = sync_head_for
+            .as_ref()
+            .and_then(ConversationHeadSync::watch_retirement)
+            .cloned();
+        if let Some(completion) = watch_retirement.as_ref()
+            && !watch_retirement_event_matches(&event, completion)
+        {
+            self.finish_watch_retirement_delivery(completion, false);
+            self.emit_harness_failure(
+                "watch lifecycle publication was replaced with an invalid event",
+            );
+            return;
+        }
         if !self.prompt_publication_is_authorized(&event, sync_head_for.as_ref()) {
             self.fail_prompt_dispatch_continuation(
                 sync_head_for.as_ref(),
@@ -6307,6 +6389,9 @@ impl Harness {
                         sync_head_for.as_ref(),
                         "compact prompt materialization failed to commit",
                     );
+                }
+                if let Some(completion) = watch_retirement.as_ref() {
+                    self.finish_watch_retirement_delivery(completion, false);
                 }
                 return;
             }
@@ -6576,6 +6661,9 @@ impl Harness {
         }
         if let Some((cid, completion, through)) = agent_publish_completion {
             self.complete_agent_publish(&cid, completion, through);
+        }
+        if let Some(completion) = watch_retirement.as_ref() {
+            self.finish_watch_retirement_delivery(completion, true);
         }
         if let Some(continuation) = sync_head_for
             .as_ref()
@@ -7308,7 +7396,13 @@ impl Harness {
                     tau_proto::CborValue::Map(vec![
                         (
                             tau_proto::CborValue::Text("status".to_owned()),
-                            tau_proto::CborValue::Text("Message sent".to_owned()),
+                            tau_proto::CborValue::Text(format!(
+                                "Message committed: {message_id}; recipient was live; response not guaranteed"
+                            )),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("message_id".to_owned()),
+                            tau_proto::CborValue::Text(message_id.to_string()),
                         ),
                         (
                             tau_proto::CborValue::Text("recipient".to_owned()),
@@ -7342,7 +7436,7 @@ impl Harness {
         }
         self.uncommitted_peer_auto_starts.remove(recipient_id);
         if let Some(cid) = self.agent_routes.get(recipient_id.as_str()).cloned() {
-            self.remove_agent(&cid);
+            self.remove_agent_expected(&cid);
         }
     }
 
@@ -8203,7 +8297,16 @@ impl Harness {
         if let Event::SessionAgentUnloaded(unloaded) = event
             && unloaded.session_id == self.current_session_id
         {
-            self.retire_agent_watch_endpoint(unloaded.agent_id.as_str());
+            let reason = self
+                .pending_agent_unload_reasons
+                .remove(unloaded.agent_id.as_str())
+                .or_else(|| {
+                    (!self
+                        .expected_agent_unloads
+                        .remove(unloaded.agent_id.as_str()))
+                    .then_some(tau_proto::AgentWatchLifecycleReason::UnexpectedUnload)
+                });
+            self.retire_agent_watch_endpoint(unloaded.agent_id.as_str(), reason);
             self.agent_navigation_modes.remove(&unloaded.agent_id);
         }
         if let Event::SessionAgentUnloaded(unloaded) = event
@@ -8233,6 +8336,9 @@ impl Harness {
             self.tombstone_ephemeral_provider_prompts_for_agent(&cid);
             self.agents.remove(&cid);
             self.cancel_agent_synchronized_publications(&cid);
+        }
+        if let Event::StartAgentResult(result) = event {
+            self.notify_watchers_about_start_agent_result(result);
         }
         if let Event::AgentMessageReceived(message) = event {
             self.activate_received_agent_message(message, append_outcome);
@@ -8326,6 +8432,8 @@ impl Harness {
                 .any(|pending| pending.agent_id == recipient_id)
         {
             AgentMessageRecipientStatus::Live
+        } else if self.restored_unavailable_agents.contains_key(recipient_id) {
+            AgentMessageRecipientStatus::RestoredUnavailable
         } else if self.stopped_agent_ids.contains(recipient_id)
             || self.session_ever_loaded_agents.contains(recipient_id)
         {
@@ -10304,7 +10412,7 @@ impl Harness {
             }
         }
         if let Some(cid) = cid {
-            self.remove_agent(&cid);
+            self.remove_agent_expected(&cid);
         }
     }
 
@@ -10436,7 +10544,7 @@ impl Harness {
                 }
             }
             if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) {
-                self.remove_agent(&cid);
+                self.remove_agent_expected(&cid);
             }
         }
     }
@@ -17417,7 +17525,7 @@ impl Harness {
                 .is_some()
         });
         if marked_owner {
-            self.remove_agent(cid);
+            self.remove_agent_expected(cid);
             return;
         }
         self.cancel_pending_context_claim(cid);
@@ -17448,7 +17556,7 @@ impl Harness {
             );
         }
         self.release_start_agent_request(cid);
-        self.remove_agent(cid);
+        self.remove_agent_expected(cid);
         self.try_advance_queue();
     }
 
@@ -19648,6 +19756,10 @@ impl Harness {
             name: extension_name.clone(),
             query_id: query.query_id.clone(),
         };
+        if is_tool_backed && &source_id == harness_connection_id() {
+            self.pending_builtin_delegates
+                .insert(query.query_id.clone(), agent_id.clone());
+        }
         let initial_metadata: Vec<_> = peer_entrypoint_endpoint
             .then(|| tau_proto::AgentInitialMetadata {
                 key: tau_proto::AgentMetadataKey::new(
@@ -19809,6 +19921,7 @@ impl Harness {
             conv.source_connection = None;
             conv.parent_tool_call_id = None;
             conv.parent_agent_id = None;
+            conv.restored_tool_backed_start = false;
             conv.task_name = None;
             conv.delegate_input_stats = Default::default();
         }
@@ -22312,6 +22425,11 @@ impl Harness {
         self.agent_watch_provider_deliveries.clear();
         self.pending_long_wait_notifications.clear();
         self.stopped_agent_ids.clear();
+        self.restored_unavailable_agents.clear();
+        self.pending_agent_unload_reasons.clear();
+        self.expected_agent_unloads.clear();
+        self.pending_watch_retirements.clear();
+        self.pending_builtin_delegates.clear();
 
         self.current_session_id = new_session_id.clone();
         self.current_session_start_reason = reason;
@@ -22369,7 +22487,7 @@ impl Harness {
         for agent_id in agent_ids {
             self.pending_rendered_prompts.remove(&agent_id);
             if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) {
-                self.remove_agent(&cid);
+                self.remove_agent_expected(&cid);
             }
         }
     }
@@ -23630,6 +23748,19 @@ impl Harness {
         self.remove_agent_after_prompt_closure(cid);
     }
 
+    /// Remove an endpoint as part of a normal completion or explicit cleanup.
+    fn remove_agent_expected(&mut self, cid: &AgentId) {
+        if let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.clone())
+            && !self.pending_agent_unload_reasons.contains_key(&agent_id)
+        {
+            self.expected_agent_unloads.insert(agent_id);
+        }
+        self.remove_agent(cid);
+    }
+
     /// Tear down runtime state only after any marked prompt closure committed.
     fn remove_agent_after_prompt_closure(&mut self, cid: &AgentId) {
         self.tombstone_ephemeral_provider_prompts_for_agent(cid);
@@ -23717,7 +23848,14 @@ impl Harness {
         };
         self.cancel_agent_synchronized_publications(cid);
         if !self.unload_agent_from_session_if_loaded(&session_id, &agent_id) {
-            self.retire_agent_watch_endpoint(&agent_id);
+            let reason = self
+                .pending_agent_unload_reasons
+                .remove(&agent_id)
+                .or_else(|| {
+                    (!self.expected_agent_unloads.remove(&agent_id))
+                        .then_some(tau_proto::AgentWatchLifecycleReason::UnexpectedUnload)
+                });
+            self.retire_agent_watch_endpoint(&agent_id, reason);
             self.agent_routes.remove(&agent_id);
             self.stopped_agent_ids.insert(agent_id);
             self.agents.remove(cid);
@@ -23975,6 +24113,7 @@ impl Harness {
             .extend(ever_loaded.iter().cloned());
         self.session_roster_ever_loaded_agents = ever_loaded;
         self.session_roster_loaded_agents = loaded_agents.iter().cloned().collect();
+        let mut restored_parent_edges = Vec::new();
         for agent_id in loaded_agents {
             let agent_id_string = agent_id.to_string();
             match self.agent_store.lock_and_recover_agent(agent_id.as_str()) {
@@ -24014,8 +24153,32 @@ impl Harness {
                 .agent(agent_id.as_str())
                 .and_then(|tree| tree.display_name().map(str::to_owned))
                 .or_else(|| meta.and_then(|meta| meta.display_name));
-            let (role, originator, navigation_mode) =
-                self.restored_agent_runtime_from_log(agent_id.as_str());
+            let restored_runtime = self.restored_agent_runtime_from_log(agent_id.as_str());
+            if !restored_runtime.resumable {
+                self.restored_unavailable_agents.insert(
+                    agent_id_string,
+                    restored_runtime
+                        .role
+                        .unwrap_or_else(|| self.selected_role.clone()),
+                );
+                continue;
+            }
+            let builtin_query_id = match &restored_runtime.originator {
+                tau_proto::PromptOriginator::Extension { name, query_id }
+                    if name == harness_extension_name() && restored_runtime.tool_backed_start =>
+                {
+                    Some(query_id.clone())
+                }
+                _ => None,
+            };
+            let RestoredAgentRuntime {
+                role,
+                originator,
+                navigation_mode,
+                parent_agent,
+                tool_backed_start,
+                resumable: _,
+            } = restored_runtime;
             let peer_entrypoint_endpoint = self
                 .agent_store
                 .agent(agent_id.as_str())
@@ -24059,6 +24222,8 @@ impl Harness {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.head = head;
                 conv.originator = originator;
+                conv.source_connection =
+                    tool_backed_start.then(|| crate::harness::harness_connection_id().clone());
                 conv.role = role.clone();
                 conv.display_name = display_name.clone();
                 conv.persistence = persistence;
@@ -24071,7 +24236,7 @@ impl Harness {
                     self.current_session_id.clone(),
                     originator,
                     head,
-                    None,
+                    tool_backed_start.then(|| crate::harness::harness_connection_id().clone()),
                 );
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.role = role.clone();
@@ -24079,6 +24244,16 @@ impl Harness {
                 conv.persistence = persistence;
                 conv.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
                 self.agents.insert(cid.clone(), conv);
+            }
+            if let Some(parent_agent) = parent_agent {
+                restored_parent_edges.push((cid.clone(), parent_agent));
+            }
+            if let Some(conv) = self.agents.get_mut(&cid) {
+                conv.restored_tool_backed_start = tool_backed_start;
+            }
+            if let Some(query_id) = builtin_query_id {
+                self.pending_builtin_delegates
+                    .insert(query_id, agent_id_string.clone());
             }
             let restored_next_prompt_index = self.next_prompt_index_from_log(agent_id.as_str());
             if let Some(conv) = self.agents.get_mut(&cid)
@@ -24277,6 +24452,13 @@ impl Harness {
                         },
                     ),
                 );
+            }
+        }
+        for (child_cid, parent_agent_id) in restored_parent_edges {
+            if let Some(parent_cid) = self.agent_routes.get(parent_agent_id.as_str()).cloned()
+                && let Some(child) = self.agents.get_mut(&child_cid)
+            {
+                child.parent_agent_id = Some(parent_cid);
             }
         }
         if !self.provider_model_info.is_empty() {
@@ -24712,14 +24894,7 @@ impl Harness {
 
     /// Restores durable descriptive facts while detaching a completed worker
     /// from the run-local start request that created it.
-    fn restored_agent_runtime_from_log(
-        &self,
-        agent_id: &str,
-    ) -> (
-        Option<String>,
-        tau_proto::PromptOriginator,
-        tau_proto::AgentNavigationMode,
-    ) {
+    fn restored_agent_runtime_from_log(&self, agent_id: &str) -> RestoredAgentRuntime {
         let events = self
             .agent_store
             .agent_events(agent_id)
@@ -24734,17 +24909,20 @@ impl Harness {
         let role = creation
             .map(|started| started.role.clone())
             .filter(|role| self.available_roles.contains_key(role));
-        let historical_originator = events
-            .iter()
-            .find_map(|record| match &record.event {
-                Event::AgentPromptSubmitted(submitted) => Some(submitted.originator.clone()),
-                Event::ProviderResponseFinished(finished) => Some(finished.originator.clone()),
-                Event::ProviderToolResult(result) => Some(result.originator.clone()),
-                Event::ToolBackgroundResult(result) => Some(result.originator.clone()),
-                Event::ToolBackgroundError(error) => Some(error.originator.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| tau_proto::PromptOriginator::Extension {
+        let historical_originator = events.iter().find_map(|record| match &record.event {
+            Event::AgentPromptSubmitted(submitted) => Some(submitted.originator.clone()),
+            Event::ProviderResponseFinished(finished) => Some(finished.originator.clone()),
+            Event::ProviderToolResult(result) => Some(result.originator.clone()),
+            Event::ToolBackgroundResult(result) => Some(result.originator.clone()),
+            Event::ToolBackgroundError(error) => Some(error.originator.clone()),
+            _ => None,
+        });
+        let durable_extension_originator = matches!(
+            historical_originator,
+            Some(tau_proto::PromptOriginator::Extension { .. })
+        );
+        let historical_originator =
+            historical_originator.unwrap_or_else(|| tau_proto::PromptOriginator::Extension {
                 name: harness_extension_name().clone(),
                 query_id: format!("restored-{agent_id}"),
             });
@@ -24754,14 +24932,51 @@ impl Harness {
             &historical_originator,
         );
         if completed_worker {
-            (
+            return RestoredAgentRuntime {
                 role,
-                tau_proto::PromptOriginator::User,
-                tau_proto::AgentNavigationMode::ActiveAuto,
+                originator: tau_proto::PromptOriginator::User,
+                navigation_mode: tau_proto::AgentNavigationMode::ActiveAuto,
+                parent_agent: None,
+                tool_backed_start: false,
+                resumable: true,
+            };
+        }
+        let parent_agent = creation.and_then(|started| started.parent_agent.clone());
+        let tool_backed_start = creation.is_some_and(|started| {
+            matches!(started.creator, Some(tau_proto::AgentCreator::Agent { .. }))
+                && started.parent_agent.is_some()
+        });
+        let peer_entrypoint = creation.is_some_and(|started| {
+            started.metadata.iter().any(|metadata| {
+                metadata.key.as_str()
+                    == path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
+                    && metadata.value == CborValue::Bool(true)
+            })
+        });
+        let harness_delegation = matches!(
+            &historical_originator,
+            tau_proto::PromptOriginator::Extension { name, query_id }
+                if name == harness_extension_name()
+                    && query_id.starts_with("delegate-")
+                    && tool_backed_start
+        );
+        let extension_side_request = creation.is_some_and(|started| {
+            matches!(
+                started.creator,
+                Some(tau_proto::AgentCreator::Extension { .. })
             )
-        } else {
-            let navigation_mode = default_navigation_mode(&historical_originator);
-            (role, historical_originator, navigation_mode)
+        });
+        let resumable = historical_originator.is_user()
+            || harness_delegation
+            || peer_entrypoint
+            || (!durable_extension_originator && !extension_side_request);
+        RestoredAgentRuntime {
+            role,
+            navigation_mode: default_navigation_mode(&historical_originator),
+            originator: historical_originator,
+            parent_agent,
+            tool_backed_start,
+            resumable,
         }
     }
 
@@ -25241,6 +25456,7 @@ impl Harness {
         initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
     ) {
         self.stopped_agent_ids.remove(agent_id);
+        self.restored_unavailable_agents.remove(agent_id);
         let agent_id_proto = crate::parse_agent_id(agent_id);
         let has_creation = self
             .agent_store
@@ -25797,7 +26013,8 @@ impl Harness {
         let is_non_tool_ext_query = matches!(
             conv.originator,
             tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.parent_tool_call_id.is_none();
+        ) && conv.parent_tool_call_id.is_none()
+            && !conv.restored_tool_backed_start;
         let tool_choice = tau_proto::ToolChoice::Auto;
         // Legacy cache-sharing hint for older provider implementations. The
         // first-party ChatGPT/Codex provider now derives cache keys only from
@@ -26020,7 +26237,8 @@ impl Harness {
         let is_non_tool_ext_query = matches!(
             conv.originator,
             tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.parent_tool_call_id.is_none();
+        ) && conv.parent_tool_call_id.is_none()
+            && !conv.restored_tool_backed_start;
         if let Some(message) = self.shell_tool_style_error(Some(&model)) {
             self.emit_harness_failure(&message);
             self.fail_initial_prompt_materialization(
@@ -28407,6 +28625,7 @@ impl Harness {
                 conv.originator,
                 tau_proto::PromptOriginator::Extension { .. }
             ) && conv.parent_tool_call_id.is_none()
+                && !conv.restored_tool_backed_start
         })
     }
 
@@ -28684,14 +28903,27 @@ impl Harness {
                 );
             }
         } else {
-            // Should never happen — `source_connection` is set in
-            // `handle_start_agent_request` when the conversation is
-            // spawned. Surface it via `harness.notice` rather than
-            // silently dropping so a future regression is visible.
+            let agent_id = self
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.clone())
+                .unwrap_or_else(|| cid.to_string());
+            self.pending_agent_unload_reasons.insert(
+                agent_id.clone(),
+                tau_proto::AgentWatchLifecycleReason::RestoredDelegationRouteLost,
+            );
+            tracing::error!(
+                target: "tau_harness::agent_lifecycle",
+                %agent_id,
+                %query_id,
+                extension = %name,
+                reason = "no_source_connection",
+                action = "unload",
+                "start-agent result route lost"
+            );
             self.emit_harness_failure(&format!(
-                "start-agent-request result for `{}` (extension `{}`) had no source connection — \
-                     dropping",
-                query_id, name
+                "agent_id={agent_id} query_id={query_id} extension={name} \
+                 reason=no_source_connection action=unload"
             ));
         }
     }
@@ -28740,7 +28972,9 @@ impl Harness {
         completed_prompt_id: Option<&AgentPromptId>,
     ) {
         let keep_parented_conversation = self.agents.get(cid).is_some_and(|conv| {
-            conv.parent_tool_call_id.is_some() || conv.parent_agent_id.is_some()
+            conv.parent_tool_call_id.is_some()
+                || conv.parent_agent_id.is_some()
+                || conv.restored_tool_backed_start
         });
         let replacement_prompt_in_flight = keep_parented_conversation
             && self
@@ -28762,7 +28996,7 @@ impl Harness {
         if keep_parented_conversation {
             self.detach_completed_parented_start_agent(cid);
         } else {
-            self.remove_agent(cid);
+            self.remove_agent_expected(cid);
         }
         self.try_advance_queue();
     }

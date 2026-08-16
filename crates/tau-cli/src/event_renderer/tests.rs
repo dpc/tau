@@ -776,6 +776,7 @@ fn received_agent_message(
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: message.to_owned(),
     })
 }
@@ -1392,6 +1393,7 @@ fn watch_work_status_renders_all_reportable_states() {
                 initial: false,
             }),
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "must not render".to_owned(),
         });
 
@@ -1441,6 +1443,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
                 initial,
             }),
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: String::new(),
         })
     };
@@ -1514,6 +1517,7 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         }),
         watch_work_status: None,
         watch_long_wait: None,
+                watch_lifecycle: None,
         message: "<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;".to_owned(),
     });
     let mut initial_provider = provider.clone();
@@ -1540,6 +1544,7 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
             status_epoch: 1,
             threshold_minutes: 5,
         }),
+        watch_lifecycle: None,
         message: String::new(),
     });
 
@@ -1633,6 +1638,7 @@ fn watch_work_status_visibly_escapes_structural_unicode() {
             initial: false,
         }),
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "must not render".to_owned(),
     });
 

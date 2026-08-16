@@ -351,6 +351,10 @@ pub(crate) struct Agent {
     /// start. Teardown uses it after tool routing disappears, and completed
     /// parented starts use its presence to retain and detach the worker.
     pub(crate) parent_agent_id: Option<AgentId>,
+    /// Cold restore proved that this extension-owned request came from the
+    /// built-in `agent_start` tool even though its transient tool-call id is
+    /// gone.
+    pub(crate) restored_tool_backed_start: bool,
     /// Human-friendly name shown in UIs. Falls back to the stable agent id.
     pub(crate) display_name: Option<String>,
     /// Optional request task label surfaced in the UI for a side agent.
@@ -754,6 +758,7 @@ impl Agent {
             lifecycle_notification_only_turn: false,
             parent_tool_call_id: None,
             parent_agent_id: None,
+            restored_tool_backed_start: false,
             display_name: None,
             task_name: None,
             delegate_input_stats: ToolUseStats::default(),

@@ -1037,6 +1037,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: "persisted <message>& body".to_owned(),
             }),
         );
@@ -1941,6 +1942,7 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: "deferred behind repaired aggregate".to_owned(),
             }),
         )

@@ -1166,6 +1166,7 @@ pub(crate) fn assemble_prompt_context_from(
                 watch_provider_status,
                 watch_work_status,
                 watch_long_wait,
+                watch_lifecycle,
                 message,
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
@@ -1325,6 +1326,34 @@ pub(crate) fn assemble_prompt_context_from(
                                         text: crate::internal_envelope::frame(&format!(
                                             "Watched agent {sender_id} has spent over {} minutes waiting.",
                                             wait.threshold_minutes
+                                        )),
+                                    }],
+                                    phase: None,
+                                    responses_raw_json: None,
+                                })],
+                            },
+                        ));
+                    }
+                }
+                tau_proto::AgentMessageKind::WatchLifecycle => {
+                    if let (tau_core::AgentMessageDirection::Inbound, Some(lifecycle)) =
+                        (direction, watch_lifecycle.as_ref())
+                    {
+                        let reason = match lifecycle.reason {
+                            tau_proto::AgentWatchLifecycleReason::RestoredDelegationRouteLost => {
+                                "restored delegation lost its completion route"
+                            }
+                            tau_proto::AgentWatchLifecycleReason::UnexpectedUnload => {
+                                "unexpected unload"
+                            }
+                        };
+                        blocks.push(tau_proto::ContextBlock::UserInput(
+                            tau_proto::UserInputBlock {
+                                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                                    role: tau_proto::ContextRole::User,
+                                    content: vec![tau_proto::ContentPart::Text {
+                                        text: crate::internal_envelope::frame(&format!(
+                                            "Watched agent {sender_id} stopped: {reason}"
                                         )),
                                     }],
                                     phase: None,

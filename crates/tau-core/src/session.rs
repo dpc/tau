@@ -193,6 +193,8 @@ pub enum AgentEntry {
         watch_work_status: Option<Box<tau_proto::AgentWatchWorkStatusNotification>>,
         /// Typed long-wait threshold for receiver-only watch projections.
         watch_long_wait: Option<Box<tau_proto::AgentWatchLongWaitNotification>>,
+        /// Structured watched-agent lifecycle terminal.
+        watch_lifecycle: Option<Box<tau_proto::AgentWatchLifecycleNotification>>,
         /// Message body.
         message: String,
     },
@@ -2170,6 +2172,7 @@ impl AgentTree {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: message.message.clone(),
         })
     }
@@ -2192,6 +2195,7 @@ impl AgentTree {
             watch_provider_status: message.watch_provider_status.clone(),
             watch_work_status: message.watch_work_status.clone().map(Box::new),
             watch_long_wait: message.watch_long_wait.clone().map(Box::new),
+            watch_lifecycle: message.watch_lifecycle.clone().map(Box::new),
             message: message.message.clone(),
         })
     }
@@ -2420,7 +2424,9 @@ impl AgentTree {
                     && ((message.kind == AgentMessageKind::WatchWorkStatus)
                         == message.watch_work_status.is_some())
                     && ((message.kind == AgentMessageKind::WatchLongWait)
-                        == message.watch_long_wait.is_some());
+                        == message.watch_long_wait.is_some())
+                    && ((message.kind == AgentMessageKind::WatchLifecycle)
+                        == message.watch_lifecycle.is_some());
                 let work_status_shape_valid =
                     message.watch_work_status.as_ref().is_none_or(|status| {
                         (status.phase == tau_proto::AgentWorkStatusPhase::Unreported)
@@ -2438,9 +2444,15 @@ impl AgentTree {
                                 && title.trim() == title
                         })
                     });
+                let lifecycle_body_valid =
+                    message.kind != AgentMessageKind::WatchLifecycle || message.message.is_empty();
                 Some(if !payload_matches_kind {
                     Err(AgentEventValidationError::new(
                         "watch payload must be present exactly for its matching watch message kind",
+                    ))
+                } else if !lifecycle_body_valid {
+                    Err(AgentEventValidationError::new(
+                        "watch lifecycle messages must be content-free",
                     ))
                 } else if !work_status_shape_valid {
                     Err(AgentEventValidationError::new(

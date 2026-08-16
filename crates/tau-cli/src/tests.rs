@@ -2774,6 +2774,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
             }),
             watch_work_status: None,
             watch_long_wait: None,
+                watch_lifecycle: None,
             message: "<tau_internal>Watched agent watched-agent provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;".to_owned(),
         });
     let mut wrong_kind_provider = provider_snapshot.clone();
@@ -7359,6 +7360,7 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "overview semantic body".to_owned(),
         },
     ));
@@ -7443,6 +7445,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
             }),
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: provider_status_body.to_owned(),
         },
     ));
@@ -7463,6 +7466,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
                 status_epoch: 1,
                 threshold_minutes: 5,
             }),
+            watch_lifecycle: None,
             message: String::new(),
         },
     ));
@@ -7505,6 +7509,7 @@ fn external_agent_messages_render_session_agent_labels() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "hello back".to_owned(),
         },
     ));
@@ -11012,6 +11017,7 @@ fn watched_agent_stats_redraws_status_row() {
                 initial: true,
             }),
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: String::new(),
         },
     ));
@@ -11591,6 +11597,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
                 initial: false,
             }),
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: String::new(),
         })
     };

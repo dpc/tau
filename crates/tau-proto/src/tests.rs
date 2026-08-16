@@ -1238,6 +1238,7 @@ fn representative_events() -> Vec<Event> {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "hello back".to_owned(),
         }),
         Event::AgentWatchesUpdated(AgentWatchesUpdated {
@@ -2823,6 +2824,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "hello back".to_owned(),
     });
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
@@ -2867,6 +2869,7 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "hello".to_owned(),
     };
     let message_json = serde_json::to_value(&explicit_message).expect("serialize message");

@@ -276,6 +276,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: semantic_text.clone(),
         }),
         24,

@@ -29,7 +29,10 @@ These external message facts are separate from the harness-owned inter-session
 and agent-to-agent message events documented below.
 
 The harness-owned `message` tool lets an agent send an asynchronous short text
-note to another agent or session. Every successful send is recorded as an
+note to another agent or session. Success returns
+`Message committed: <message-id>; recipient was live; response not guaranteed`.
+This reports harness acceptance and correlation, not inference, reply, or
+completion. Every successful send is recorded as an
 `agent.message_sent` sender projection; agent recipients also get a separate
 `agent.message_received` recipient projection with the same `message_id`.
 Agent-to-agent UI display depends on `:set show-messages`. When shown fully in
@@ -175,7 +178,8 @@ inter-session messaging. The snapshot is bounded and racy and contains only
 session id, project basename, and current-session status. It does not enumerate
 remote agents. The independent `agent_discovery` group enables
 `agent_list({query?, role?, group?, state?, limit?})`, which lists only redacted
-loaded/pending agents in the caller's current session.
+pending, live, restored-unavailable, and stopped agents in the caller's current
+session.
 
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
@@ -202,7 +206,8 @@ status. Later `working`, `done`, `blocked`, and harness-invalidated `unknown`
 transitions arrive as typed notifications. The harness does not infer semantic
 progress from provider or tool activity.
 Enabling requires the target agent to be live. An enable request for a stopped
-or unknown target fails without creating any watch relation or notification
+or unknown target, or a `restored_unavailable` target whose old completion route
+cannot be rebuilt, fails without creating any watch relation or notification
 state; after reloading the same agent id, explicitly enable a fresh watch.
 The session-local watch topology is a directed acyclic graph. Enabling
 `watcher -> watched` fails without changing watch state if `watched` already
@@ -237,6 +242,10 @@ Unloading either the watcher or watched agent disables every watch involving
 that endpoint and discards its current provider snapshot and notification
 dedupe state. These relations do not return if the same agent is loaded again;
 enable a new watch to create a fresh subscription.
+
+Before an unexpected watched-agent unload is pruned, surviving watchers receive
+one content-free typed stopped lifecycle notification. Expected completion and
+explicit cleanup prune without that failure notification.
 
 Work-status titles are model-authored metadata. Tau bounds and escapes them
 before presentation; they are not routing data or trusted instructions.

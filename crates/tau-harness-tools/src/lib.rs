@@ -19,7 +19,7 @@ mod status;
 
 #[cfg(test)]
 use status::parse_args as parse_status_args;
-use tau_harness::internal_tools::{InternalSkill, InternalSkillSource};
+use tau_harness::internal_tools::{InternalAgentState, InternalSkill, InternalSkillSource};
 use tau_harness::{AgentId, AgentToolCall, HarnessError, InternalToolHandler, InternalToolHost};
 use tau_proto::{
     BackgroundSupport, CborValue, Event, StartAgentRequest, ToolCallId, ToolName, ToolResultKind,
@@ -53,7 +53,6 @@ struct BuiltinTools {
 
 #[derive(Default)]
 struct BuiltinState {
-    pending_delegates: HashMap<String, PendingDelegate>,
     cancel_requested: HashSet<ToolCallId>,
     in_progress_tool_names: HashMap<ToolCallId, ToolName>,
     next_delegate_query_id: u64,
@@ -61,7 +60,6 @@ struct BuiltinState {
 
 impl BuiltinState {
     fn clear_session_runtime_state(&mut self) {
-        self.pending_delegates.clear();
         self.cancel_requested.clear();
         self.in_progress_tool_names.clear();
     }
@@ -207,10 +205,6 @@ impl BuiltinState {
             .map(ToString::to_string)
             .unwrap_or_default()
     }
-}
-
-struct PendingDelegate {
-    agent_id: String,
 }
 
 impl InternalToolHandler for BuiltinTools {
@@ -371,7 +365,7 @@ impl InternalToolHandler for BuiltinTools {
                     _ => Ok(()),
                 }
             }
-            Event::StartAgentResult(result) => self.handle_start_agent_result(host, result),
+            Event::StartAgentResult(_) => Ok(()),
             Event::ToolCancelRequest(_) => Ok(()),
             Event::StartAgentAccepted(_) => Ok(()),
             _ => {
@@ -420,11 +414,16 @@ impl BuiltinTools {
             );
             return Ok(());
         };
-        let query_id = {
-            let mut state = self.state.lock().expect("builtin tool state poisoned");
-            let query_id = format!("delegate-{}", state.next_delegate_query_id);
-            state.next_delegate_query_id += 1;
-            query_id
+        let query_id = loop {
+            let query_id = {
+                let mut state = self.state.lock().expect("builtin tool state poisoned");
+                let query_id = format!("delegate-{}", state.next_delegate_query_id);
+                state.next_delegate_query_id = state.next_delegate_query_id.wrapping_add(1);
+                query_id
+            };
+            if host.agent_id_for_harness_start_query(&query_id).is_none() {
+                break query_id;
+            }
         };
         let prompt_stats = ToolUseStats::for_text(&parsed.prompt);
         let start_request = delegate_start_request(
@@ -448,15 +447,6 @@ impl BuiltinTools {
                 return Ok(());
             }
         };
-        {
-            let mut state = self.state.lock().expect("builtin tool state poisoned");
-            state.pending_delegates.insert(
-                query_id,
-                PendingDelegate {
-                    agent_id: agent_id.clone(),
-                },
-            );
-        }
         host.try_set_agent_watch(
             &self_agent_id,
             &agent_id,
@@ -479,25 +469,6 @@ impl BuiltinTools {
         host.drain_start_agent_requests()
     }
 
-    fn handle_start_agent_result(
-        &self,
-        host: &mut InternalToolHost<'_>,
-        result: &tau_proto::StartAgentResult,
-    ) -> Result<(), HarnessError> {
-        let Some(pending) = self
-            .state
-            .lock()
-            .expect("builtin tool state poisoned")
-            .pending_delegates
-            .remove(&result.query_id)
-        else {
-            return Ok(());
-        };
-        if let Some(message) = start_agent_watch_notification_message(&pending.agent_id, result) {
-            self.notify_agent_watchers(host, &pending.agent_id, message);
-        }
-        Ok(())
-    }
     fn handle_agent_watch_tool_call(
         &self,
         host: &mut InternalToolHost<'_>,
@@ -556,34 +527,6 @@ impl BuiltinTools {
             }
         }
         Ok(())
-    }
-
-    fn notify_agent_watchers(
-        &self,
-        host: &mut InternalToolHost<'_>,
-        sender_id: &str,
-        message: String,
-    ) {
-        let watchers = host.watchers_for_agent(sender_id);
-        let mut failed_watchers = Vec::new();
-        for watcher_id in watchers {
-            if watcher_id != sender_id
-                && host
-                    .publish_agent_watch_response_from_agent_ids(
-                        sender_id,
-                        watcher_id.clone(),
-                        message.clone(),
-                    )
-                    .is_err()
-            {
-                failed_watchers.push(watcher_id);
-            }
-        }
-        if !failed_watchers.is_empty() {
-            for watcher_id in failed_watchers {
-                host.prune_agent_watch(&watcher_id, sender_id);
-            }
-        }
     }
 }
 
@@ -1281,7 +1224,7 @@ fn handle_message_tool_call(
         match parse_message_recipient(&parsed.recipient_id, &host.current_session_id())? {
             MessageRecipientAddress::LocalAgent(agent_id) => host
                 .publish_agent_message(conversation_id, agent_id.to_string(), parsed.message)
-                .map(|()| MessageToolFlow::Finished),
+                .map(MessageToolFlow::Finished),
             MessageRecipientAddress::LocalSession => host
                 .publish_local_peer_message(
                     conversation_id,
@@ -1310,12 +1253,12 @@ fn handle_message_tool_call(
         }
     });
     match result {
-        Ok(MessageToolFlow::Finished) => host.finish_tool_with_result(
+        Ok(MessageToolFlow::Finished(message_id)) => host.finish_tool_with_result(
             conversation_id,
             call_id,
             visible_tool_name,
             call.tool_type,
-            "Message sent".to_owned(),
+            format!("Message committed: {message_id}; recipient was live; response not guaranteed"),
             None,
         ),
         Ok(MessageToolFlow::PendingPeer | MessageToolFlow::PendingExternal) => {}
@@ -1332,7 +1275,7 @@ fn handle_message_tool_call(
 }
 
 enum MessageToolFlow {
-    Finished,
+    Finished(tau_proto::AgentMessageId),
     PendingPeer,
     PendingExternal,
 }
@@ -1394,7 +1337,7 @@ struct DiscoveryArgs {
     query: Option<String>,
     role: Option<String>,
     group: Option<String>,
-    state: Option<String>,
+    state: Option<InternalAgentState>,
     limit: usize,
 }
 
@@ -1414,7 +1357,13 @@ fn parse_discovery_args(arguments: &CborValue, agent_list: bool) -> Result<Disco
             ("query", CborValue::Text(value)) => parsed.query = Some(value.clone()),
             ("role", CborValue::Text(value)) if agent_list => parsed.role = Some(value.clone()),
             ("group", CborValue::Text(value)) if agent_list => parsed.group = Some(value.clone()),
-            ("state", CborValue::Text(value)) if agent_list => parsed.state = Some(value.clone()),
+            ("state", CborValue::Text(value)) if agent_list => {
+                parsed.state = Some(InternalAgentState::parse(value).ok_or_else(|| {
+                    "`state` must be `pending`, `idle`, `running`, `restored_unavailable`, or \
+                     `stopped`"
+                        .to_owned()
+                })?);
+            }
             ("limit", CborValue::Integer(value)) => {
                 let limit: u64 = (*value)
                     .try_into()
@@ -1437,16 +1386,10 @@ fn parse_discovery_args(arguments: &CborValue, agent_list: bool) -> Result<Disco
         ("query", parsed.query.as_ref()),
         ("role", parsed.role.as_ref()),
         ("group", parsed.group.as_ref()),
-        ("state", parsed.state.as_ref()),
     ] {
         if value.is_some_and(|value| value.len() > 256) {
             return Err(format!("`{name}` exceeds 256 bytes"));
         }
-    }
-    if let Some(state) = parsed.state.as_deref()
-        && !matches!(state, "pending" | "idle" | "running")
-    {
-        return Err("`state` must be `pending`, `idle`, or `running`".to_owned());
     }
     Ok(parsed)
 }
@@ -1517,10 +1460,7 @@ fn handle_agent_list_tool_call(
                     .group
                     .as_ref()
                     .is_none_or(|group| group == &agent.group)
-                && parsed
-                    .state
-                    .as_deref()
-                    .is_none_or(|state| state == agent.state)
+                && parsed.state.is_none_or(|state| agent.state == state)
         })
         .collect::<Vec<_>>();
     let truncated = agents.len() > parsed.limit;
@@ -1547,7 +1487,7 @@ fn handle_agent_list_tool_call(
                             ),
                             (
                                 CborValue::Text("state".to_owned()),
-                                CborValue::Text(agent.state.to_owned()),
+                                CborValue::Text(agent.state.as_str().to_owned()),
                             ),
                             (
                                 CborValue::Text("self".to_owned()),
@@ -1774,23 +1714,6 @@ fn sanitized_display_agent_id(arguments: &CborValue) -> Option<String> {
         .map(tau_proto::AgentId::into_string)
 }
 
-fn start_agent_watch_notification_message(
-    _agent_id: &str,
-    result: &tau_proto::StartAgentResult,
-) -> Option<String> {
-    // A completed `agent_start` is the watched agent's final response to its
-    // delegating watcher. That terminal delegation result is watchable even when
-    // the delegating watcher itself was running as a side agent; filtering of
-    // internal/tool-completion continuations applies to per-turn provider
-    // responses, not to this explicit delegation result.
-    if let Some(error) = result.error.as_deref()
-        && !error.trim().is_empty()
-    {
-        return Some("agent failed".to_owned());
-    }
-    (!result.text.trim().is_empty()).then(|| result.text.clone())
-}
-
 #[derive(Debug)]
 struct DelegateArgs {
     prompt: String,
@@ -1933,7 +1856,7 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent or another session. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Commit an async message to another agent or another session. Success returns the stable message id and confirms acceptance, not recipient inference, reply, or completion. Use a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or `<session-id>/<agent-id>` as `recipient_id`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient local agent id, another session as `&session`, or an agent in another session as `&session/@agent` or `session/agent`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {
@@ -1975,9 +1898,9 @@ fn agent_list_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(AGENT_LIST_TOOL_NAME),
         model_visible_name: None,
-        description: Some("List a bounded, redacted, current-session-only snapshot of loaded or pending agents. Results are racy and sorted by agent id.".to_owned()),
+        description: Some("List a bounded, redacted, current-session-only snapshot of pending, resumable live, restored-unavailable, and stopped agents. Results are racy and sorted by agent id.".to_owned()),
         tool_type: ToolType::Function,
-        parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256,"description":"Optional case-insensitive literal match over agent id."},"role":{"type":"string","maxLength":256,"description":"Exact creation-role filter."},"group":{"type":"string","maxLength":256,"description":"Exact creation-role-group filter."},"state":{"type":"string","maxLength":256,"enum":["pending","idle","running"]},"limit":{"type":"integer","minimum":1,"maximum":DISCOVERY_MAX_RESULTS}},"additionalProperties":false})),
+        parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256,"description":"Optional case-insensitive literal match over agent id."},"role":{"type":"string","maxLength":256,"description":"Exact creation-role filter."},"group":{"type":"string","maxLength":256,"description":"Exact creation-role-group filter."},"state":{"type":"string","maxLength":256,"enum":["pending","idle","running","restored_unavailable","stopped"]},"limit":{"type":"integer","minimum":1,"maximum":DISCOVERY_MAX_RESULTS}},"additionalProperties":false})),
         format: None,
         tags: vec![tau_proto::ToolTag::new("harness:discovery:agent")],
         enabled_by_default: false,

@@ -405,5 +405,5 @@ enable_tool_groups:
 `session_list` returns only bounded, basename-redacted live sessions available
 for inter-session messaging. `agent_list` returns a bounded
 current-session-only snapshot of agent id, creation role/group,
-`pending|idle|running`, and self status. Neither tool grants messaging, watching,
+`pending|idle|running|restored_unavailable|stopped`, and self status. Neither tool grants messaging, watching,
 starting, or compaction authority.

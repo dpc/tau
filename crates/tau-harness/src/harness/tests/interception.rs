@@ -81,6 +81,147 @@ fn clear_interception_fixture_models(h: &mut Harness) {
     h.set_provider_models(&crate::test_connection_id(&provider_id), Vec::new());
 }
 
+/// Unexpected watched-agent teardown must retain topology while its durable
+/// lifecycle fact is parked in interception, then prune only after commit.
+#[test]
+fn watched_agent_retirement_waits_for_intercepted_lifecycle_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let interceptor = connect_test_tool(&mut h, "watch-retirement-owner");
+    h.handle_extension_event(
+        "watch-retirement-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.remove_agent(&watched_cid);
+    let intercepted = intercepted_payload(&interceptor);
+    assert!(matches!(
+        intercepted.0,
+        Event::AgentMessageReceived(ref message)
+            if message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+                && message.message.is_empty()
+    ));
+    assert!(
+        h.watchers_for_agent(watched_id.as_str())
+            .iter()
+            .any(|id| id == watcher_id.as_str())
+    );
+    assert!(
+        h.pending_watch_retirements
+            .contains_key(watched_id.as_str())
+    );
+
+    h.handle_extension_event(
+        "watch-retirement-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release lifecycle");
+    assert!(
+        !h.pending_watch_retirements
+            .contains_key(watched_id.as_str()),
+        "barrier remained after committed lifecycle: {:?}",
+        h.pending_watch_retirements.keys().collect::<Vec<_>>()
+    );
+    assert!(h.watchers_for_agent(watched_id.as_str()).is_empty());
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+                    && message.sender_id == watched_id
+                    && message.recipient_id == watcher_id
+                    && message.message.is_empty()
+            })
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Unloading a watcher whose lifecycle receive is parked must fail that barrier
+/// entry before draining interception, so target topology cannot remain
+/// pending.
+#[test]
+fn unloading_watcher_settles_intercepted_lifecycle_as_failed() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let interceptor = connect_test_tool(&mut h, "watch-retirement-cancel-owner");
+    h.handle_extension_event(
+        "watch-retirement-cancel-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.remove_agent(&watched_cid);
+    let intercepted = intercepted_payload(&interceptor);
+    assert!(matches!(
+        intercepted.0,
+        Event::AgentMessageReceived(ref message)
+            if message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+                && message.recipient_id == watcher_id
+    ));
+    assert!(
+        h.pending_watch_retirements
+            .contains_key(watched_id.as_str())
+    );
+
+    h.remove_agent(&watcher_cid);
+
+    assert!(
+        !h.pending_watch_retirements
+            .contains_key(watched_id.as_str())
+    );
+    assert!(h.watchers_for_agent(watched_id.as_str()).is_empty());
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+                    && message.sender_id == watched_id
+                    && message.recipient_id == watcher_id
+            })
+            .count(),
+        0,
+        "canceled lifecycle receive must not be claimed as durable"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A Working-gated final cannot be dropped after interception; its reminder
 /// starts only after the candidate commits.
 #[test]
@@ -5279,6 +5420,7 @@ fn agent_message_received_event(recipient_id: &str) -> Event {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "hello".to_owned(),
     })
 }

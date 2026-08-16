@@ -698,6 +698,10 @@ transient runtime observations and never enter semantic replay. See
    semantic projection fields: UIs may supplement ids from authoritative folded
    metadata without changing message content or routing identity. See
    [agent-messaging.md](agent-messaging.md) for model-facing tool examples.
+  Unexpected watched-agent unload also uses this event with
+  `kind=watch_lifecycle`, an exactly empty `message`, and the matching structured
+  `watch_lifecycle { state, reason }` payload. The payload is present if and only
+  if the kind is `watch_lifecycle`.
 - **`extension.event`** — Custom extension-defined event with an
   extension-owned dotted name and CBOR payload. The nested name must have
   non-empty category and call segments, and must not use reserved first-party
@@ -935,8 +939,8 @@ terminal silently no-op. See
 
 `provider.response_updated.status.retry` carries structured retry facts independently of human display text. The harness projects current retry and terminal state as `agent.message_received` with `kind=watch_provider_status`. Its nested `state` is tagged by `phase`; variant-specific required fields prevent retry, recovery, blocked, uncertain, and terminal shapes from being mixed. `recovering_context` is reserved for reactive compaction. The nonzero `agent_watch_retry_notification_threshold` harness setting inclusively suppresses live `retrying` delivery through its configured attempt. Above it, the first occurrence of each retry category produces a live model notification; later same-category attempts only refresh the current snapshot. Zero disables threshold suppression. Per watch subscription, turn generation, and provider prompt, `recovering_context` is delivered once, while each sanitized `blocked` and `dispatch_uncertain` category is delivered once. Terminal failure is always delivered. Initial late-watch snapshots are client-visible but non-prompt; historical attempts are not replayed.
 
-`agent.message_received` also supports `watch_work_status` and
-`watch_long_wait`. Work status carries a closed phase, runtime-local status
+`agent.message_received` also supports `watch_work_status`, `watch_long_wait`,
+and `watch_lifecycle`. Work status carries a closed phase, runtime-local status
 epoch, optional canonical title of at most 160 UTF-8 bytes, and initial-snapshot
 marker. Long-wait delivery carries the work epoch and newly crossed whole-minute
 threshold; it is never a late-watch historical snapshot. The harness accumulates
@@ -945,6 +949,8 @@ and emits thresholds at 15, 30, 60, 120, 240, 360, then every 120 minutes.
 Current runtime accounting, monotonic timestamps, and crossed-threshold cursors
 are not restored; already committed recipient projections remain durable replay
 context without restarting timers or live fanout.
+Lifecycle delivery is content-free and reports a stopped watched endpoint with
+the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 
 ### Reactive context recovery fields
 

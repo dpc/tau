@@ -58,6 +58,20 @@ pub(crate) enum PostCommitContinuation {
     PromptMaterialization(PromptDispatchContinuation),
     /// Full transient prompt awaiting directed provider delivery.
     PromptDelivery(PromptDispatchContinuation),
+    /// Unexpected watched-agent retirement awaiting one exact lifecycle append.
+    WatchRetirement(WatchRetirementCompletion),
+}
+
+/// Correlation for one watcher delivery in a pending topology-retirement
+/// barrier.
+#[derive(Clone)]
+pub(crate) struct WatchRetirementCompletion {
+    /// Endpoint whose watch topology is retiring.
+    pub(crate) watched_agent_id: tau_proto::AgentId,
+    /// Surviving watcher receiving the lifecycle fact.
+    pub(crate) watcher_id: tau_proto::AgentId,
+    /// Exact lifecycle message identity.
+    pub(crate) message_id: tau_proto::AgentMessageId,
 }
 
 use crate::harness::Harness;
@@ -256,6 +270,14 @@ impl ConversationHeadSync {
                 PostCommitContinuation::PromptMaterialization(continuation)
                 | PostCommitContinuation::PromptDelivery(continuation),
             ) => Some(continuation),
+            _ => None,
+        }
+    }
+
+    /// Returns one unexpected watch-retirement delivery correlation.
+    pub(crate) fn watch_retirement(&self) -> Option<&WatchRetirementCompletion> {
+        match self.continuation.as_ref() {
+            Some(PostCommitContinuation::WatchRetirement(completion)) => Some(completion),
             _ => None,
         }
     }
@@ -810,6 +832,7 @@ impl Harness {
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
         let mut canceled_prompt_ids = Vec::new();
         let mut canceled_initial_prompts = Vec::new();
+        let mut canceled_watch_retirements = Vec::new();
         let removed_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
             pending
                 .sync_head_for
@@ -839,6 +862,13 @@ impl Harness {
                 .and_then(ConversationHeadSync::completion)
             {
                 canceled_initial_prompts.push(correlation.clone());
+            }
+            if let Some(completion) = pending
+                .sync_head_for
+                .as_ref()
+                .and_then(ConversationHeadSync::watch_retirement)
+            {
+                canceled_watch_retirements.push(completion.clone());
             }
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             self.rollback_rejected_activation_successor(&pending.event);
@@ -870,6 +900,14 @@ impl Harness {
             {
                 canceled_initial_prompts.push(correlation.clone());
             }
+            if canceled
+                && let Some(completion) = publish
+                    .sync_head_for
+                    .as_ref()
+                    .and_then(ConversationHeadSync::watch_retirement)
+            {
+                canceled_watch_retirements.push(completion.clone());
+            }
             !canceled
         });
         for prompt_id in canceled_prompt_ids {
@@ -881,6 +919,9 @@ impl Harness {
                 tau_proto::AgentPromptFailureStage::LifecycleTeardown,
                 "agent teardown discarded initial prompt submission",
             );
+        }
+        for completion in &canceled_watch_retirements {
+            self.finish_watch_retirement_delivery(completion, false);
         }
         if removed_pending {
             // Canceling one agent's intercepted completion unblocks the global

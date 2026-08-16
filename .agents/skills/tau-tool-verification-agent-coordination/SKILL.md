@@ -116,7 +116,7 @@ Wait for both delegates. In their final logs, verify that:
 * The agent_start result exposes `self_agent_id` and `sub_agent_id` without redundant aliases.
 * Each agent saw the direct main-agent messages addressed to it.
 * Each agent saw the peer message from the other agent.
-* Each `COMMAND: SEND_PEER` caused exactly one peer `message` call with result `Message sent`.
+* Each `COMMAND: SEND_PEER` caused exactly one peer `message` call with result beginning `Message committed: msg-` and ending `response not guaranteed`.
 * Delayed messages arrived even though the agents were already running.
 * The visible sender ID for messages from the main agent is present and matches the `self_agent_id` from the agent_start result. Save that sender ID; it is the main agent recipient ID for the next phase.
 
@@ -151,7 +151,7 @@ Parent queued-tool delivery probe. nonce=queued-tool-message-001. Reply via mess
 
 Expected behavior:
 
-* The message call returns `Message sent`.
+* The message call returns `Message committed: <message-id>; recipient was live; response not guaranteed`.
 * The delegate responds to the parent with `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` instead of remaining stuck behind the queued `sleep 5`.
 * If event logs are available, verify that the `AgentMessage` was recorded, the not-yet-started queued tool call was terminalized with `ToolCancelled`, and a new `AgentPromptCreated` was emitted for the delegate message prompt.
 * The long backgrounded `sleep 30` may still complete later in the delegate conversation. Its completion should not be delivered to the parent conversation or block the message response.
@@ -239,7 +239,7 @@ Report concise but complete findings:
   completed recipient, empty payload, rich content payload.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed messages, duplicate messages, or ordering uncertainty.
-* Confirm the `message` success output is only `Message sent`; delivery is async, so no delivery receipt is expected.
+* Confirm the `message` success output includes a stable message ID and `response not guaranteed`; it confirms async acceptance, not delivery completion.
 * Include whether errors distinguish completed recipients from unknown recipients. Current behavior may use the same unknown-recipient error for both.
 * Include whether parent recipient ID discovery was clear from `self_agent_id` or still had to be inferred from sub-agent logs.
 * Include whether the delivered wrapper preserved literal `<message>` openings

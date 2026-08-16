@@ -1651,6 +1651,7 @@ fn watch_response(
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: content.to_owned(),
     }
 }
@@ -1670,6 +1671,7 @@ fn watch_prompt(
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: content.to_owned(),
     }
 }

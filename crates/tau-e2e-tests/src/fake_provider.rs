@@ -2125,11 +2125,22 @@ impl FakeState {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
+                let committed_message_id = results.first().and_then(|result| {
+                    result
+                        .output
+                        .body
+                        .strip_prefix("Message committed: ")
+                        .and_then(|body| {
+                            body.strip_suffix("; recipient was live; response not guaranteed")
+                        })
+                });
                 if results.len() != 1
                     || results[0].call_id != *call_id
                     || results[0].tool_type != ToolType::Function
                     || results[0].status != tau_proto::ToolResultStatus::Success
-                    || results[0].output.body != "Message sent"
+                    || committed_message_id.is_none_or(|message_id| {
+                        tau_proto::AgentMessageId::parse(message_id).is_err()
+                    })
                     || prompt.context.flatten_iter().any(|item| {
                         matches!(
                             item,

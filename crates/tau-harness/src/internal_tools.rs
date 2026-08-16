@@ -72,8 +72,49 @@ pub struct InternalAgentSummary {
     pub role: String,
     /// Role group containing the creation role.
     pub group: String,
-    /// `pending`, `idle`, or `running`.
-    pub state: &'static str,
+    /// Current-session lifecycle state.
+    pub state: InternalAgentState,
+}
+
+/// Lifecycle states exposed by the built-in `agent_list` tool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalAgentState {
+    /// Accepted creation has not dispatched yet.
+    Pending,
+    /// Resumable endpoint is idle.
+    Idle,
+    /// Resumable endpoint is running.
+    Running,
+    /// Cold restore retained the transcript but could not reconstruct its
+    /// route.
+    RestoredUnavailable,
+    /// Known endpoint has unloaded.
+    Stopped,
+}
+
+impl InternalAgentState {
+    /// Stable tool-facing spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::RestoredUnavailable => "restored_unavailable",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// Parse one tool-facing spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "idle" => Some(Self::Idle),
+            "running" => Some(Self::Running),
+            "restored_unavailable" => Some(Self::RestoredUnavailable),
+            "stopped" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
 }
 
 /// Public snapshot of a skill Markdown source.
@@ -235,8 +276,8 @@ impl<'a> InternalToolHost<'a> {
                     role,
                     agent_id,
                     state: match agent.published_runtime_state {
-                        tau_proto::AgentRuntimeState::Idle => "idle",
-                        tau_proto::AgentRuntimeState::Running => "running",
+                        tau_proto::AgentRuntimeState::Idle => InternalAgentState::Idle,
+                        tau_proto::AgentRuntimeState::Running => InternalAgentState::Running,
                     },
                 })
             })
@@ -246,11 +287,61 @@ impl<'a> InternalToolHost<'a> {
                 group: self.harness.role_group_name_for_role(&role),
                 agent_id,
                 role,
-                state: "pending",
+                state: InternalAgentState::Pending,
             },
         ));
+        summaries.extend(self.harness.restored_unavailable_agents.iter().map(
+            |(agent_id, role)| InternalAgentSummary {
+                group: self.harness.role_group_name_for_role(role),
+                agent_id: agent_id.clone(),
+                role: role.clone(),
+                state: InternalAgentState::RestoredUnavailable,
+            },
+        ));
+        let represented = summaries
+            .iter()
+            .map(|summary| summary.agent_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        summaries.extend(
+            self.harness
+                .stopped_agent_ids
+                .iter()
+                .filter(|agent_id| !represented.contains(agent_id.as_str()))
+                .map(|agent_id| {
+                    let role = self
+                        .harness
+                        .agent_store
+                        .agent_events(agent_id.as_str())
+                        .ok()
+                        .and_then(|events| {
+                            events.into_iter().find_map(|record| match record.event {
+                                tau_proto::Event::AgentStarted(started) => Some(started.role),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_else(|| self.harness.selected_role.clone());
+                    InternalAgentSummary {
+                        group: self.harness.role_group_name_for_role(&role),
+                        agent_id: agent_id.to_string(),
+                        role,
+                        state: InternalAgentState::Stopped,
+                    }
+                }),
+        );
         summaries.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
         summaries
+    }
+
+    /// Derive the child endpoint for one still-outstanding built-in delegation.
+    ///
+    /// The durable extension originator supplies query correlation. Warm and
+    /// cold completion therefore use the same source instead of a
+    /// process-local map.
+    pub fn agent_id_for_harness_start_query(&self, query_id: &str) -> Option<String> {
+        self.harness
+            .pending_builtin_delegates
+            .get(query_id)
+            .cloned()
     }
 
     /// Start bounded runtime-dir peer-session discovery off the harness event
@@ -647,7 +738,7 @@ impl<'a> InternalToolHost<'a> {
         conversation_id: &AgentId,
         recipient_id: String,
         message: String,
-    ) -> Result<(), String> {
+    ) -> Result<tau_proto::AgentMessageId, String> {
         self.harness
             .publish_agent_message_from_agent(conversation_id, recipient_id, message)
     }
@@ -711,7 +802,7 @@ impl<'a> InternalToolHost<'a> {
         sender_agent_id: &str,
         recipient_id: String,
         message: String,
-    ) -> Result<(), String> {
+    ) -> Result<tau_proto::AgentMessageId, String> {
         let sender_cid = self.sender_conversation_id(sender_agent_id)?;
         self.harness
             .publish_agent_message_from_agent(&sender_cid, recipient_id, message)

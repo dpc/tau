@@ -231,6 +231,7 @@ fn durable_message_wake_extends_session_retention() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "operational wake".to_owned(),
         }),
     );
@@ -1308,6 +1309,7 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "later durable message wake".to_owned(),
         }),
     );
@@ -1323,6 +1325,7 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "second durable message wake".to_owned(),
         }),
     );
@@ -2945,15 +2948,14 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
     let agent_id = {
         let mut h = echo_harness(&sp).expect("start");
         h.selected_model = Some("test/model".into());
-        connect_test_tool(&mut h, "conn-delegate");
         let parent = ensure_test_user_agent(&mut h);
         h.tool_agents.insert("delegate-call".into(), parent);
         h.handle_start_agent_request(
-            &crate::test_connection_id("conn-delegate"),
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
             StartAgentRequest {
                 trusted_internal_spans: Vec::new(),
                 parent_agent: None,
-                query_id: "q-role".to_owned(),
+                query_id: "delegate-9".to_owned(),
                 instruction: "side task".to_owned(),
                 role: Some("engineer-senior".to_owned()),
                 input_stats: tau_proto::ToolUseStats::default(),
@@ -2962,7 +2964,7 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
             },
         )
         .expect("start delegate");
-        let cid = ext_query_cid(&h, "q-role").expect("delegated conversation");
+        let cid = ext_query_cid(&h, "delegate-9").expect("delegated conversation");
         let agent_id = h
             .agents
             .get(&cid)
@@ -5134,6 +5136,7 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "external message".to_owned(),
         }),
     );
@@ -11391,6 +11394,7 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: "typed message deferred Q".to_owned(),
             }),
         ),
@@ -11592,6 +11596,7 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: "Q after closure".to_owned(),
             }),
         );
@@ -15214,6 +15219,7 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: body.to_owned(),
             }),
         );
@@ -15340,6 +15346,7 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: body.to_owned(),
             }),
         );
@@ -16966,6 +16973,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "readiness message suffix".to_owned(),
         }),
     );
@@ -17909,6 +17917,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "branch B wake".to_owned(),
         }),
     );
@@ -23150,6 +23159,7 @@ fn agent_message_interrupts_recipient_active_wait() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "please stop waiting".to_owned(),
         }),
     );
@@ -23312,6 +23322,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "queued manager message".to_owned(),
         }),
     );
@@ -24670,6 +24681,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "target owner only".to_owned(),
         }),
     );
@@ -24693,6 +24705,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "waiter should resume".to_owned(),
         }),
     );
@@ -25222,17 +25235,17 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
 fn cold_restore_does_not_detach_worker_with_message_continuation() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
-    let worker_agent_id = {
+    let (worker_agent_id, parent_agent_id) = {
         let mut h = echo_harness(&sp).expect("start");
         h.selected_model = Some("test/model".into());
-        let _delegate_events = connect_test_tool(&mut h, "conn-message-cut");
         let parent_cid = ensure_test_user_agent(&mut h);
+        let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
         h.tool_agents.insert("message-cut-call".into(), parent_cid);
-        let mut query = ext_query("q-message-cut");
+        let mut query = ext_query("delegate-3");
         query.tool_call_id = Some("message-cut-call".into());
-        h.handle_start_agent_request(&crate::test_connection_id("conn-message-cut"), query)
+        h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
             .expect("start worker");
-        let worker_cid = ext_query_cid(&h, "q-message-cut").expect("worker");
+        let worker_cid = ext_query_cid(&h, "delegate-3").expect("worker");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
         let first_prompt_id = h
             .prompt_agents
@@ -25251,14 +25264,15 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: "continue before completion".to_owned(),
             }),
         );
         let mut response =
             provider_text_response(&first_prompt_id, worker_agent_id.clone(), "first answer");
         response.originator = tau_proto::PromptOriginator::Extension {
-            name: crate::test_extension_name("conn-message-cut"),
-            query_id: "q-message-cut".to_owned(),
+            name: crate::test_extension_name(HARNESS_CONNECTION_ID),
+            query_id: "delegate-3".to_owned(),
         };
         h.handle_provider_response_finished(response)
             .expect("finish first worker round");
@@ -25271,8 +25285,18 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
                 .iter()
                 .any(|(prompt_id, cid)| cid == &worker_cid && prompt_id != &first_prompt_id)
         );
+        h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "keep coordinating".to_owned(),
+            agent_id: parent_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+        .expect("leave coordinator interrupted");
         h.shutdown().expect("shutdown continuation cut");
-        worker_agent_id
+        (worker_agent_id, parent_agent_id)
     };
 
     let mut resumed =
@@ -25281,12 +25305,404 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
     let worker_cid = resumed
         .agent_routes
         .get(worker_agent_id.as_str())
+        .cloned()
         .expect("interrupted worker remains routed");
     assert!(matches!(
-        resumed.agents[worker_cid].originator,
+        resumed.agents[&worker_cid].originator,
         tau_proto::PromptOriginator::Extension { .. }
     ));
+    assert_eq!(
+        resumed.agents[&worker_cid].source_connection.as_ref(),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID))
+    );
+    assert!(resumed.agents[&worker_cid].restored_tool_backed_start);
+    assert_eq!(
+        path_crate_internal_tools::InternalToolHost::new(&mut resumed)
+            .agent_id_for_harness_start_query("delegate-3"),
+        Some(worker_agent_id.to_string())
+    );
+    let parent_cid = resumed
+        .agent_routes
+        .get(parent_agent_id.as_str())
+        .cloned()
+        .expect("restored parent");
+    assert_eq!(
+        resumed.agents[&worker_cid].parent_agent_id,
+        Some(parent_cid.clone())
+    );
+    resumed
+        .try_set_agent_watch(
+            parent_agent_id.as_str(),
+            worker_agent_id.as_str(),
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        )
+        .expect("watch restored worker");
+    resumed
+        .publish_agent_message_from_agent(
+            &parent_cid,
+            worker_agent_id.to_string(),
+            "continue after restart".to_owned(),
+        )
+        .expect("message restored worker");
+    let continued_prompt_id = resumed.agents[&worker_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("message continuation prompt");
+    resumed.register_harness_tools();
+    let mut reply = provider_text_response(&continued_prompt_id, worker_agent_id.clone(), "");
+    reply.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+    reply.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: "reply-parent".into(),
+        name: ToolName::new("message"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text(parent_agent_id.to_string()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Text("restart acknowledged".to_owned()),
+            ),
+        ]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    reply.originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name(HARNESS_CONNECTION_ID),
+        query_id: "delegate-3".to_owned(),
+    };
+    resumed
+        .handle_provider_response_finished(reply)
+        .expect("worker replies to parent");
+    let final_prompt_id = resumed.agents[&worker_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("worker continuation after reply");
+    let mut final_response =
+        provider_text_response(&final_prompt_id, worker_agent_id.clone(), "worker final");
+    final_response.originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name(HARNESS_CONNECTION_ID),
+        query_id: "delegate-3".to_owned(),
+    };
+    resumed
+        .handle_provider_response_finished(final_response)
+        .expect("complete restored worker");
+    assert_eq!(
+        event_log_events(&resumed)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::StartAgentResult(result) if result.query_id == "delegate-3"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        resumed
+            .agent_store
+            .agent_events(parent_agent_id.as_str())
+            .expect("parent journal")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentMessageReceived(message)
+                    if message.kind == tau_proto::AgentMessageKind::WatchResponse
+                        && message.sender_id == worker_agent_id
+            ))
+            .count(),
+        1
+    );
+    assert!(resumed.agent_routes.contains_key(worker_agent_id.as_str()));
+    assert!(!event_log_contains_any_source(&resumed, |event| matches!(
+        event,
+        Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
+    )));
     resumed.shutdown().expect("shutdown resumed cut");
+}
+
+/// A restored extension request without a reconstructible requester route must
+/// remain inspectable but reject watch and message admission before provider
+/// work.
+#[test]
+fn cold_restore_classifies_unroutable_extension_worker_as_unavailable() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let (worker_agent_id, parent_agent_id) = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = Some("test/model".into());
+        let _extension = connect_test_tool(&mut h, "external-delegate");
+        let parent_cid = ensure_test_user_agent(&mut h);
+        let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
+        h.tool_agents.insert("external-call".into(), parent_cid);
+        let mut query = ext_query("external-query");
+        query.tool_call_id = Some("external-call".into());
+        h.handle_start_agent_request(&crate::test_connection_id("external-delegate"), query)
+            .expect("start extension worker");
+        let worker_cid = ext_query_cid(&h, "external-query").expect("worker");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+        h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "keep coordinating".to_owned(),
+            agent_id: parent_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+        .expect("leave coordinator interrupted");
+        h.shutdown().expect("shutdown interrupted worker");
+        (worker_agent_id, parent_agent_id)
+    };
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert!(!resumed.agent_routes.contains_key(worker_agent_id.as_str()));
+    assert!(
+        resumed
+            .restored_unavailable_agents
+            .contains_key(worker_agent_id.as_str())
+    );
+    assert_eq!(
+        resumed.agent_message_recipient_status(worker_agent_id.as_str()),
+        crate::harness::AgentMessageRecipientStatus::RestoredUnavailable
+    );
+    let watch_error = resumed
+        .try_set_agent_watch(
+            parent_agent_id.as_str(),
+            worker_agent_id.as_str(),
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        )
+        .expect_err("unavailable target must reject watch");
+    assert!(watch_error.contains("cannot resume its pre-restart delegation"));
+    let parent_cid = resumed
+        .agent_routes
+        .get(parent_agent_id.as_str())
+        .cloned()
+        .expect("parent route");
+    let message_error = resumed
+        .publish_agent_message_from_agent(
+            &parent_cid,
+            worker_agent_id.to_string(),
+            "must not run".to_owned(),
+        )
+        .expect_err("unavailable target must reject message");
+    assert!(message_error.contains("cannot resume its pre-restart delegation"));
+    assert!(
+        resumed
+            .prompt_agents
+            .values()
+            .all(|cid| cid != &crate::parse_agent_id(worker_agent_id.as_str()))
+    );
+    let summaries =
+        path_crate_internal_tools::InternalToolHost::new(&mut resumed).current_agent_summaries();
+    assert!(summaries.iter().any(|summary| {
+        summary.agent_id == worker_agent_id.as_str()
+            && summary.state == path_crate_internal_tools::InternalAgentState::RestoredUnavailable
+    }));
+    resumed.remove_agent(&parent_cid);
+    let summaries =
+        path_crate_internal_tools::InternalToolHost::new(&mut resumed).current_agent_summaries();
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.agent_id == parent_agent_id.as_str()
+                && summary.state == path_crate_internal_tools::InternalAgentState::Stopped)
+    );
+    resumed.shutdown().expect("shutdown resumed harness");
+}
+
+/// Pre-accounting journals can lack `AgentStarted.creator`; an extension
+/// originator alone must never count as a reconstructible completion route.
+#[test]
+fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailable() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = tau_proto::AgentId::parse("legacy-extension-worker").expect("agent id");
+    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+    let mut session_store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    session_store
+        .record_session_meta("s1")
+        .expect("session metadata");
+    session_store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("legacy-init")
+                    .expect("initialization id"),
+                session_id: test_session_id("s1"),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+        )
+        .expect("membership");
+    let mut agent_store = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+    for event in [
+        Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: agent_id.clone(),
+            creator: None,
+            parent_agent: None,
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id.clone(),
+            text: "unfinished legacy extension work".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::Extension {
+                name: crate::test_extension_name("legacy-extension"),
+                query_id: "legacy-query".to_owned(),
+            },
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    ] {
+        agent_store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                event,
+                tau_proto::UnixMicros::now(),
+            )
+            .expect("legacy event");
+    }
+    drop(agent_store);
+    drop(session_store);
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    assert!(!h.agent_routes.contains_key(agent_id.as_str()));
+    assert!(
+        h.restored_unavailable_agents
+            .contains_key(agent_id.as_str())
+    );
+    assert_eq!(
+        h.agent_message_recipient_status(agent_id.as_str()),
+        crate::harness::AgentMessageRecipientStatus::RestoredUnavailable
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A live side request that loses its completion route must preserve the exact
+/// structured diagnostic and notify each surviving watcher once before prune.
+#[test]
+fn route_loss_emits_one_typed_lifecycle_before_watch_prune() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let _extension = connect_test_tool(&mut h, "route-loss-extension");
+    let watcher_cid = ensure_test_user_agent(&mut h);
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    let second_watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let second_watcher_id = durable_agent_id_for_conversation(&h, &second_watcher_cid);
+    h.handle_start_agent_request(
+        &crate::test_connection_id("route-loss-extension"),
+        ext_query("route-loss-query"),
+    )
+    .expect("start side request");
+    let worker_cid = ext_query_cid(&h, "route-loss-query").expect("worker");
+    let worker_id = durable_agent_id_for_conversation(&h, &worker_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        worker_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        second_watcher_id.as_str(),
+        worker_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.agents
+        .get_mut(&worker_cid)
+        .expect("worker")
+        .source_connection = None;
+    let prompt_id = h
+        .agents
+        .get(&worker_cid)
+        .and_then(|agent| agent.in_flight_prompt.clone())
+        .expect("worker prompt");
+    let mut terminal = provider_text_response(&prompt_id, worker_id.clone(), "terminal");
+    terminal.originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name("route-loss-extension"),
+        query_id: "route-loss-query".to_owned(),
+    };
+    h.handle_provider_response_finished(terminal)
+        .expect("finish route-lost request");
+
+    let lifecycle = session_agent_message_received_events(&h);
+    for expected_watcher in [&watcher_id, &second_watcher_id] {
+        let deliveries: Vec<_> = lifecycle
+            .iter()
+            .filter(|message| {
+                message.sender_id == worker_id
+                    && message.recipient_id == *expected_watcher
+                    && message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+            })
+            .collect();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].message, "");
+        assert_eq!(
+            deliveries[0].watch_lifecycle,
+            Some(tau_proto::AgentWatchLifecycleNotification {
+                state: tau_proto::AgentWatchLifecycleState::Stopped,
+                reason: tau_proto::AgentWatchLifecycleReason::RestoredDelegationRouteLost,
+            })
+        );
+    }
+    assert!(h.watchers_for_agent(worker_id.as_str()).is_empty());
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
+                && notice.message == format!(
+                    "agent_id={worker_id} query_id=route-loss-query \
+                     extension=route-loss-extension reason=no_source_connection action=unload"
+                )
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Expected endpoint cleanup prunes topology without falsely reporting the
+/// teardown to a surviving watcher as an unexpected failure.
+#[test]
+fn expected_watched_agent_cleanup_prunes_without_failure_lifecycle() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    h.remove_agent_expected(&watched_cid);
+
+    assert!(h.watchers_for_agent(watched_id.as_str()).is_empty());
+    assert!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .all(|message| message.kind != tau_proto::AgentMessageKind::WatchLifecycle)
+    );
+    h.shutdown().expect("shutdown");
 }
 
 /// Reactive context recovery is an explicit continuation, not evidence that a
@@ -25327,7 +25743,9 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
 
     let mut cold_reader =
         echo_harness_for("classification-only", &sp).expect("open cold journal reader");
-    let (_, originator, _) = cold_reader.restored_agent_runtime_from_log(worker_agent_id.as_str());
+    let originator = cold_reader
+        .restored_agent_runtime_from_log(worker_agent_id.as_str())
+        .originator;
     assert!(matches!(
         originator,
         tau_proto::PromptOriginator::Extension { .. }
@@ -25716,6 +26134,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "please include this".to_owned(),
         }),
     );
@@ -29512,7 +29931,10 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
     assert!(!h.agent_watches.contains_key(&watcher_id));
     assert!(!h.agent_watchers.contains_key(&watcher_id));
     // Exercise the local fallback after the committed unload reaction.
-    h.retire_agent_watch_endpoint(&watcher_id);
+    h.retire_agent_watch_endpoint(
+        &watcher_id,
+        Some(tau_proto::AgentWatchLifecycleReason::UnexpectedUnload),
+    );
     let durable_before = h
         .agent_store
         .agent_events(&watcher_id)
@@ -29655,7 +30077,31 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         provider_deliveries_after_unload
     );
     // Exercise the local fallback after the committed unload reaction.
-    h.retire_agent_watch_endpoint(&watched_id);
+    h.retire_agent_watch_endpoint(
+        &watched_id,
+        Some(tau_proto::AgentWatchLifecycleReason::UnexpectedUnload),
+    );
+    let lifecycle_messages: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.recipient_id.as_str() == watcher_id
+                && message.sender_id.as_str() == watched_id
+                && message.kind == tau_proto::AgentMessageKind::WatchLifecycle
+        })
+        .collect();
+    assert_eq!(
+        lifecycle_messages.len(),
+        1,
+        "the committed unload must notify a surviving watcher exactly once"
+    );
+    assert_eq!(lifecycle_messages[0].message, "");
+    assert_eq!(
+        lifecycle_messages[0].watch_lifecycle,
+        Some(tau_proto::AgentWatchLifecycleNotification {
+            state: tau_proto::AgentWatchLifecycleState::Stopped,
+            reason: tau_proto::AgentWatchLifecycleReason::UnexpectedUnload,
+        })
+    );
     let durable_before = h
         .agent_store
         .agent_events(&watcher_id)
@@ -30944,6 +31390,7 @@ fn agent_message_status_activation_class_covers_watch_prompt() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: String::new(),
     };
     for kind in [
@@ -33610,7 +34057,14 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 CborValue::Map(vec![
                     (
                         CborValue::Text("status".to_owned()),
-                        CborValue::Text("Message sent".to_owned()),
+                        CborValue::Text(
+                            "Message committed: delivered-reused-message; recipient was live; response not guaranteed"
+                                .to_owned(),
+                        ),
+                    ),
+                    (
+                        CborValue::Text("message_id".to_owned()),
+                        CborValue::Text("delivered-reused-message".to_owned()),
                     ),
                     (
                         CborValue::Text("recipient".to_owned()),
@@ -33623,7 +34077,14 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
                 CborValue::Map(vec![
                     (
                         CborValue::Text("status".to_owned()),
-                        CborValue::Text("Message sent".to_owned()),
+                        CborValue::Text(
+                            "Message committed: delivered-auto-started-message; recipient was live; response not guaranteed"
+                                .to_owned(),
+                        ),
+                    ),
+                    (
+                        CborValue::Text("message_id".to_owned()),
+                        CborValue::Text("delivered-auto-started-message".to_owned()),
                     ),
                     (
                         CborValue::Text("recipient".to_owned()),
@@ -34813,6 +35274,21 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
             .count(),
         1
     );
+    let sent_message_id = sender_events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentMessageSent(message)
+                if message.recipient
+                    == tau_proto::AgentMessageRecipient::Agent {
+                        agent_id: recipient_id.clone(),
+                    }
+                    && message.message == BODY =>
+            {
+                Some(message.message_id.to_string())
+            }
+            _ => None,
+        })
+        .expect("sender message projection");
     assert_eq!(
         sender_events
             .iter()
@@ -34820,7 +35296,9 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
                 &record.event,
                 Event::ProviderToolResult(result)
                     if result.call_id.as_str() == MESSAGE_CALL_ID
-                        && result.result == CborValue::Text("Message sent".to_owned())
+                        && result.result == CborValue::Text(format!(
+                            "Message committed: {sent_message_id}; recipient was live; response not guaranteed"
+                        ))
             ))
             .count(),
         1
@@ -34891,6 +35369,7 @@ fn terminating_agent_route_rejects_direct_work() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "must be rejected".to_owned(),
         },
         Some(&tau_core::AgentAppendOutcome {
@@ -35026,6 +35505,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "branch-owned input".to_owned(),
         }),
     );
@@ -35194,6 +35674,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                     watch_provider_status: None,
                     watch_work_status: None,
                     watch_long_wait: None,
+                    watch_lifecycle: None,
                     message: "provider-loss deferred Q".to_owned(),
                 })
             }
@@ -36079,6 +36560,7 @@ fn inbound_agent_message_events_are_ignored() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "forged received".to_owned(),
     });
     for forged in [forged_sent, forged_received] {

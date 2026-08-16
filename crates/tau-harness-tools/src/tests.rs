@@ -910,23 +910,6 @@ fn agent_watch_cycle_error_preserves_safe_display_and_details() {
     assert_eq!(display.status, ToolUseStatus::Error);
 }
 
-/// A completed `agent_start` result is the child agent's terminal answer to the
-/// watcher that delegated it. That final result remains watchable even though
-/// non-user per-turn provider responses are filtered elsewhere.
-#[test]
-fn agent_watch_forwards_terminal_agent_start_result() {
-    let result = tau_proto::StartAgentResult {
-        query_id: "delegate-1".to_owned(),
-        text: "delegated final".to_owned(),
-        error: None,
-    };
-
-    assert_eq!(
-        start_agent_watch_notification_message("agent-a", &result),
-        Some("delegated final".to_owned())
-    );
-}
-
 /// Ensures the message tool rejects the removed `user` recipient rather than
 /// treating that reserved value as an ordinary agent identifier.
 #[test]
@@ -1207,12 +1190,6 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     let call_id = ToolCallId::from("shell-call");
     state.cancel_requested.insert(call_id.clone());
     state.record_tool_started(call_id.clone(), ToolName::new("shell"));
-    state.pending_delegates.insert(
-        "delegate-1".to_owned(),
-        PendingDelegate {
-            agent_id: "agent-child".to_owned(),
-        },
-    );
 
     state.record_runtime_bookkeeping_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
         session_id: "session-next"
@@ -1222,7 +1199,6 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
 
     assert!(state.cancel_requested.is_empty());
     assert!(state.in_progress_tool_names.is_empty());
-    assert!(state.pending_delegates.is_empty());
 }
 
 /// Ensures whitespace-only cancellation targets are rejected as empty rather
@@ -1613,6 +1589,17 @@ fn discovery_arguments_are_strict_and_bounded() {
     let parsed = parse_discovery_args(&valid, false).expect("valid session filters");
     assert_eq!(parsed.query.as_deref(), Some("peer"));
     assert_eq!(parsed.limit, DISCOVERY_MAX_RESULTS);
+    for state in ["restored_unavailable", "stopped"] {
+        let parsed = parse_discovery_args(
+            &CborValue::Map(vec![(
+                CborValue::Text("state".to_owned()),
+                CborValue::Text(state.to_owned()),
+            )]),
+            true,
+        )
+        .expect("advertised agent state");
+        assert_eq!(parsed.state, InternalAgentState::parse(state));
+    }
     assert!(
         parse_discovery_args(
             &CborValue::Map(vec![(

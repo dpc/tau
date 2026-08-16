@@ -31,8 +31,29 @@ use wait_tracker::{
     wait_timeout_args,
 };
 
+/// Runtime barrier that delays topology pruning until every lifecycle append
+/// reaches a terminal commit or failure outcome.
+pub(crate) struct PendingWatchRetirement {
+    deliveries: HashMap<tau_proto::AgentMessageId, PendingWatchRetirementDelivery>,
+}
+
+struct PendingWatchRetirementDelivery {
+    watcher_id: tau_proto::AgentId,
+    outcome: WatchRetirementDeliveryOutcome,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WatchRetirementDeliveryOutcome {
+    Pending,
+    Committed,
+    Failed,
+}
+
 use crate::error::HarnessError;
 use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
+use crate::harness::interception::{
+    ConversationHeadSync, PostCommitContinuation, WatchRetirementCompletion,
+};
 use crate::harness::{
     AgentMessageRecipientStatus, AgentToolCall, BackgroundCompletionPromptMode, Harness,
     PendingExternalAgentMessageAuth,
@@ -866,7 +887,7 @@ impl Harness {
         agent_id: &AgentId,
         recipient_id: String,
         message: String,
-    ) -> Result<(), String> {
+    ) -> Result<tau_proto::AgentMessageId, String> {
         self.publish_agent_delivery_from_agent(
             agent_id,
             recipient_id,
@@ -909,6 +930,7 @@ impl Harness {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: message.clone(),
         };
         self.pending_external_receive_acks.insert(
@@ -959,6 +981,7 @@ impl Harness {
             message,
             tau_proto::AgentMessageKind::WatchResponse,
         )
+        .map(|_| ())
     }
 
     /// Validate and apply one session-local watch relation at the authoritative
@@ -985,6 +1008,12 @@ impl Harness {
         if enable {
             match self.agent_message_recipient_status(watched_agent_id) {
                 AgentMessageRecipientStatus::Live => {}
+                AgentMessageRecipientStatus::RestoredUnavailable => {
+                    return Err(format!(
+                        "agent is restored but cannot resume its pre-restart delegation: \
+                         `{watched_agent_id}`; start a replacement"
+                    ));
+                }
                 AgentMessageRecipientStatus::Stopped => {
                     return Err(format!("agent is not live: `{watched_agent_id}`"));
                 }
@@ -1122,6 +1151,51 @@ impl Harness {
             .unwrap_or_default()
     }
 
+    /// Project one built-in delegation terminal to its current watchers.
+    ///
+    /// Query correlation is derived from the loaded worker's durable
+    /// originator, so cold restore does not depend on handler-local pending
+    /// state.
+    pub(crate) fn notify_watchers_about_start_agent_result(
+        &mut self,
+        result: &tau_proto::StartAgentResult,
+    ) {
+        let Some(sender_id) = self.pending_builtin_delegates.remove(&result.query_id) else {
+            return;
+        };
+        let Some(sender_cid) = self.agent_routes.get(&sender_id).cloned() else {
+            return;
+        };
+        let message = if result
+            .error
+            .as_deref()
+            .is_some_and(|error| !error.trim().is_empty())
+        {
+            Some("agent failed".to_owned())
+        } else {
+            (!result.text.trim().is_empty()).then(|| result.text.clone())
+        };
+        let Some(message) = message else {
+            return;
+        };
+        let mut failed_watchers = Vec::new();
+        for watcher_id in self.watchers_for_agent(&sender_id) {
+            if self
+                .publish_agent_watch_response_from_agent(
+                    &sender_cid,
+                    watcher_id.clone(),
+                    message.clone(),
+                )
+                .is_err()
+            {
+                failed_watchers.push(watcher_id);
+            }
+        }
+        for watcher_id in failed_watchers {
+            self.prune_agent_watch(&watcher_id, &sender_id);
+        }
+    }
+
     /// Return a safe one-line current provider snapshot for an `agent_watch`
     /// tool result. Historical attempts and provider-authored text are
     /// excluded.
@@ -1153,7 +1227,146 @@ impl Harness {
     /// the unloaded watcher does not receive another event addressed to it.
     ///
     /// See `SPEC-agent-watch`.
-    pub(crate) fn retire_agent_watch_endpoint(&mut self, agent_id: &str) {
+    pub(crate) fn retire_agent_watch_endpoint(
+        &mut self,
+        agent_id: &str,
+        reason: Option<tau_proto::AgentWatchLifecycleReason>,
+    ) {
+        if self.pending_watch_retirements.contains_key(agent_id) {
+            return;
+        }
+        let Some(reason) = reason else {
+            self.prune_agent_watch_endpoint(agent_id);
+            return;
+        };
+        let sender_id = crate::parse_agent_id(agent_id);
+        let deliveries = self
+            .agent_watchers
+            .get(agent_id)
+            .into_iter()
+            .flatten()
+            .filter(|watcher_id| {
+                self.agent_message_recipient_status(watcher_id) == AgentMessageRecipientStatus::Live
+            })
+            .map(|watcher_id| {
+                let watcher_id = crate::parse_agent_id(watcher_id);
+                let message_id = next_agent_message_id(&sender_id);
+                (message_id, watcher_id)
+            })
+            .collect::<Vec<_>>();
+        if deliveries.is_empty() {
+            self.prune_agent_watch_endpoint(agent_id);
+            return;
+        }
+        self.pending_watch_retirements.insert(
+            agent_id.to_owned(),
+            PendingWatchRetirement {
+                deliveries: deliveries
+                    .iter()
+                    .map(|(message_id, watcher_id)| {
+                        (
+                            message_id.clone(),
+                            PendingWatchRetirementDelivery {
+                                watcher_id: watcher_id.clone(),
+                                outcome: WatchRetirementDeliveryOutcome::Pending,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        );
+        for (message_id, watcher_id) in deliveries {
+            let event = Event::AgentMessageReceived(AgentMessageReceived {
+                message_id: message_id.clone(),
+                sender_id: sender_id.clone(),
+                sender_session_id: None,
+                recipient_id: watcher_id.clone(),
+                kind: tau_proto::AgentMessageKind::WatchLifecycle,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                watch_lifecycle: Some(tau_proto::AgentWatchLifecycleNotification {
+                    state: tau_proto::AgentWatchLifecycleState::Stopped,
+                    reason,
+                }),
+                message: String::new(),
+            });
+            let watcher_cid = self
+                .agent_routes
+                .get(watcher_id.as_str())
+                .cloned()
+                .expect("live watcher route checked while installing retirement barrier");
+            let sync = ConversationHeadSync {
+                cid: watcher_cid,
+                agent_id: Some(watcher_id.clone()),
+                session_generation: self.current_session_generation,
+                fold_parent: None,
+                suppress_activation_dispatch: false,
+                continuation: Some(PostCommitContinuation::WatchRetirement(
+                    WatchRetirementCompletion {
+                        watched_agent_id: sender_id.clone(),
+                        watcher_id,
+                        message_id,
+                    },
+                )),
+                notify_watchers: false,
+            };
+            self.enqueue_publish(
+                Some(crate::harness::harness_connection_id()),
+                event,
+                true,
+                true,
+                Some(sync),
+            );
+        }
+    }
+
+    /// Mark one lifecycle append terminal and prune after the full barrier.
+    pub(crate) fn finish_watch_retirement_delivery(
+        &mut self,
+        completion: &WatchRetirementCompletion,
+        committed: bool,
+    ) {
+        let watched_agent_id = completion.watched_agent_id.to_string();
+        let Some(retirement) = self.pending_watch_retirements.get_mut(&watched_agent_id) else {
+            return;
+        };
+        let Some(delivery) = retirement.deliveries.get_mut(&completion.message_id) else {
+            return;
+        };
+        if delivery.watcher_id != completion.watcher_id
+            || delivery.outcome != WatchRetirementDeliveryOutcome::Pending
+        {
+            return;
+        }
+        delivery.outcome = if committed {
+            WatchRetirementDeliveryOutcome::Committed
+        } else {
+            WatchRetirementDeliveryOutcome::Failed
+        };
+        if !committed {
+            tracing::error!(
+                target: "tau_harness::agent_lifecycle",
+                watched_agent_id,
+                watcher_id = %completion.watcher_id,
+                message_id = %completion.message_id,
+                reason = "watch_lifecycle_append_failed",
+                action = "prune_after_barrier",
+                "watched-agent lifecycle delivery failed"
+            );
+        }
+        if retirement
+            .deliveries
+            .values()
+            .any(|delivery| delivery.outcome == WatchRetirementDeliveryOutcome::Pending)
+        {
+            return;
+        }
+        self.pending_watch_retirements.remove(&watched_agent_id);
+        self.prune_agent_watch_endpoint(&watched_agent_id);
+    }
+
+    fn prune_agent_watch_endpoint(&mut self, agent_id: &str) {
         self.pending_long_wait_notifications.retain_mut(|batch| {
             if batch.sender_id == agent_id {
                 return false;
@@ -1310,6 +1523,7 @@ impl Harness {
                     initial,
                 }),
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: String::new(),
             }),
         );
@@ -1344,6 +1558,7 @@ impl Harness {
                     status_epoch,
                     threshold_minutes,
                 }),
+                watch_lifecycle: None,
                 message: String::new(),
             }),
         );
@@ -1494,6 +1709,7 @@ impl Harness {
                 watch_provider_status: Some(status),
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message,
             }),
         );
@@ -1505,7 +1721,7 @@ impl Harness {
         recipient_id: String,
         message: String,
         kind: tau_proto::AgentMessageKind,
-    ) -> Result<(), String> {
+    ) -> Result<tau_proto::AgentMessageId, String> {
         let sender_id = self
             .ensure_agent_id_for_agent(agent_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
@@ -1514,6 +1730,12 @@ impl Harness {
         }
         match self.agent_message_recipient_status(&recipient_id) {
             AgentMessageRecipientStatus::Live => {}
+            AgentMessageRecipientStatus::RestoredUnavailable => {
+                return Err(format!(
+                    "restored message recipient cannot resume its pre-restart delegation: \
+                     `{recipient_id}`; start a replacement"
+                ));
+            }
             AgentMessageRecipientStatus::Stopped => {
                 return Err(format!("stopped message recipient: `{recipient_id}`"));
             }
@@ -1542,7 +1764,7 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
-                message_id,
+                message_id: message_id.clone(),
                 sender_id,
                 sender_session_id: None,
                 recipient_id,
@@ -1550,10 +1772,11 @@ impl Harness {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message,
             }),
         );
-        Ok(())
+        Ok(message_id)
     }
 
     /// Prepare the sender-side projection for an external message and start a
@@ -1794,6 +2017,7 @@ impl Harness {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: request.message,
         };
         self.pending_external_receive_acks.insert(
@@ -1865,6 +2089,7 @@ impl Harness {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: None,
+                watch_lifecycle: None,
                 message: request.message,
             }),
         );
@@ -1896,6 +2121,13 @@ impl Harness {
         };
         match self.agent_message_recipient_status(recipient_id.as_str()) {
             AgentMessageRecipientStatus::Live => {}
+            AgentMessageRecipientStatus::RestoredUnavailable => {
+                return Err(format!(
+                    "restored message recipient cannot resume its pre-restart delegation: `{}`; \
+                     start a replacement",
+                    recipient_id
+                ));
+            }
             AgentMessageRecipientStatus::Stopped => {
                 return Err(format!("stopped message recipient: `{}`", recipient_id));
             }
@@ -2033,7 +2265,7 @@ impl Harness {
         if let Err(error) = self.start_peer_agent_request(pending) {
             self.release_peer_input_rate(&recipient_id, admitted_at);
             if let Some(cid) = self.agent_routes.get(recipient_id.as_str()).cloned() {
-                self.remove_agent(&cid);
+                self.remove_agent_expected(&cid);
             }
             return Err(format!("{INTER_SESSION_UNAVAILABLE}: {error}"));
         }
@@ -2159,12 +2391,14 @@ impl Harness {
             self.publish_agent_message_from_agent(agent_id, parsed.recipient_id, parsed.message)
         });
         match result {
-            Ok(()) => self.finish_harness_owned_tool_with_result(
+            Ok(message_id) => self.finish_harness_owned_tool_with_result(
                 agent_id,
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                "Message sent".to_owned(),
+                format!(
+                    "Message committed: {message_id}; recipient was live; response not guaranteed"
+                ),
                 None,
             ),
             Err(message) => self.finish_harness_owned_tool_with_error(

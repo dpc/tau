@@ -1678,6 +1678,7 @@ fn validate_event_enforces_watch_payload_discriminator() {
             watch_provider_status,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: String::new(),
         });
         assert!(
@@ -1711,6 +1712,7 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
                 initial: true,
             }),
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: String::new(),
         })
     };
@@ -1755,8 +1757,8 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
     .expect("the exact 160-byte boundary must remain valid");
 }
 
-/// Ensures both new watch kinds require exactly their matching typed payload
-/// and reject the same payload on an ordinary message.
+/// Ensures semantic watch kinds require exactly their matching typed payload
+/// and lifecycle facts remain content-free.
 #[test]
 fn validate_event_enforces_semantic_watch_payload_discriminators() {
     let id = agent_id();
@@ -1791,6 +1793,7 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
             watch_provider_status: None,
             watch_work_status,
             watch_long_wait,
+            watch_lifecycle: None,
             message: String::new(),
         });
         assert_eq!(
@@ -1798,6 +1801,43 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
             "watch payload must be present exactly for its matching watch message kind"
         );
     }
+    let lifecycle = tau_proto::AgentWatchLifecycleNotification {
+        state: tau_proto::AgentWatchLifecycleState::Stopped,
+        reason: tau_proto::AgentWatchLifecycleReason::UnexpectedUnload,
+    };
+    let lifecycle_event = |kind, watch_lifecycle, message| {
+        Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-lifecycle")
+                .expect("valid message id"),
+            sender_id: other_agent_id(),
+            sender_session_id: None,
+            recipient_id: id.clone(),
+            kind,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle,
+            message,
+        })
+    };
+    assert_eq!(
+        validation_error(
+            &tree,
+            lifecycle_event(
+                AgentMessageKind::WatchLifecycle,
+                Some(lifecycle.clone()),
+                "content must not survive".to_owned(),
+            )
+        ),
+        "watch lifecycle messages must be content-free"
+    );
+    assert_eq!(
+        validation_error(
+            &tree,
+            lifecycle_event(AgentMessageKind::Message, Some(lifecycle), String::new())
+        ),
+        "watch payload must be present exactly for its matching watch message kind"
+    );
 }
 
 /// Ensures metadata set/unset facts fold into side state without creating
@@ -2005,6 +2045,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "inbound after fact".to_owned(),
         }),
     );
@@ -2193,6 +2234,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "sibling materializes now".to_owned(),
     });
     let (_, sibling_node) = apply_persisted_test_record(
@@ -2218,6 +2260,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "descendant waits".to_owned(),
     });
     let (_, descendant_node) = apply_persisted_test_record(
@@ -2329,6 +2372,7 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "Q".to_owned(),
     });
     let second_input = Event::AgentMessageReceived(AgentMessageReceived {
@@ -2340,6 +2384,7 @@ fn inference_deferred_input_v1_matches_live_append_and_cold_replay() {
         watch_provider_status: None,
         watch_work_status: None,
         watch_long_wait: None,
+        watch_lifecycle: None,
         message: "Q2".to_owned(),
     });
     let raw_input = Event::MessageDelivered(tau_proto::MessageDelivered::new(

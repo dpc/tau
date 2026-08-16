@@ -64,6 +64,20 @@ agent, session, and restore journals for either caller-supplied
 Canonical child lifecycle, membership, transcript, acceptance, and result
 behavior retains its existing classification.
 
+Before restart admission opens, cold recovery classifies every interrupted
+delegation. An outstanding built-in `agent_start` worker reconstructs its harness
+source route and query-to-worker correlation from durable start facts, remains
+tool-backed, and can finish exactly once through the ordinary result path. A
+restored extension-owned delegation whose result route cannot be reconstructed is
+not loaded as Live: `agent_list` reports its exact state as
+`restored_unavailable`, and message or watch admission rejects it before provider
+work. Missing completion routes retain structured agent, query, extension, reason,
+and unload-action diagnostics. Message and watch behavior follow
+[SPEC-agent-message-delivery](SPEC-agent-message-delivery.md) and
+[SPEC-agent-watch](SPEC-agent-watch.md); the approved persistence/interface shape
+is governed by
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
+
 After a parented worker completes, its durable child lifecycle remains loaded
 and addressable independently of the completed request. This includes both a
 tool-backed start and an explicit-parent typed `agent.start_request` with no

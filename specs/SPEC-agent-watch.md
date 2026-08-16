@@ -22,16 +22,33 @@ Session-local watch state is an acyclic directed graph represented by authoritat
 `agent.watches_updated` snapshots keyed by watcher. The harness maintains the forward watch set and reverse
 watcher index only as runtime/session state, publishes complete replacement snapshots
 for each watcher, and does not persist watch relationships into agent display names.
-Committed agent unload is an endpoint lifecycle boundary: it atomically retires every
-incoming and outgoing relation, subscription identity, provider snapshot, and
-delivery-dedupe bucket. Surviving watchers receive a replacement topology snapshot,
-while no event is addressed to the unloaded endpoint. Watch enable classification and
-mutation are one harness-loop operation. Only a Live target may create topology,
-subscription, or notification state; Stopped and Unknown targets fail without changing
-the forward or reverse topology, subscription identity, provider snapshot, or
-delivery-dedupe state. Reloading the same id does not revive retired relations and
-requires a fresh enable and subscription. Disable remains idempotent for known stopped
-endpoints. After Live-target validation, a genuinely new `watcher -> watched` edge
+Committed agent unload is an endpoint lifecycle boundary. Before pruning topology
+for an unexpected unload, every surviving watcher receives one durable,
+content-free `WatchLifecycle` message with state `Stopped` and reason
+`UnexpectedUnload` or `RestoredDelegationRouteLost`. Its `watch_lifecycle` payload
+is present if and only if its kind is `WatchLifecycle`, and its ordinary message
+body is exactly empty. The fact activates as an isolated watch notification.
+Replay reconstructs transcript context from it but never recreates watch topology
+or fans it out again. Expected one-shot completion, explicit cancellation, preview
+cleanup, and failed auto-start cleanup prune without a lifecycle fact. The harness
+installs a runtime barrier for the complete surviving-watcher set before publishing
+any lifecycle fact. Interception may park a fact; pruning waits until every delivery
+has either committed or failed persistence/validation. A failed delivery produces a
+structured harness failure and never claims a receive. Once all deliveries are
+terminal, the harness atomically retires every incoming and outgoing relation,
+subscription identity, provider snapshot, and delivery-dedupe bucket and publishes
+replacement topology snapshots. No notification is addressed to the unloaded
+endpoint. The barrier is runtime-only: restart drops it with the nonpersisted
+topology, retains already committed facts as replay context, and never refans them.
+
+Watch enable classification and mutation are one harness-loop operation. Only a
+resumable Live target may create topology, subscription, or notification state.
+Restored unavailable, Stopped, and Unknown targets fail with distinct diagnostics
+without changing the forward or reverse topology, subscription identity, provider
+snapshot, or delivery-dedupe state. Reloading the same id does not revive retired
+relations and requires a fresh enable and subscription. Disable remains idempotent for
+known stopped endpoints. After Live-target validation, a genuinely new
+`watcher -> watched` edge
 is rejected without changing any watch state when `watched` already reaches
 `watcher`, with diagnostic:
 

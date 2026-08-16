@@ -73,7 +73,8 @@ existing ownership and kind/state validation:
 The same rules cover errors, cancellation, and background-result closure. A
 tool-calling assistant and its complete result aggregate are indivisible.
 Sender projections created by a successful message tool therefore remain on the
-active branch after that tool's compact `Message sent` result.
+active branch after its compact acceptance result. That result includes the stable
+message ID and explicitly says that recipient response is not guaranteed.
 
 Only newly marked ordinary checkpoints use inference-owned placement. Legacy
 checkpoints preserve commit-order placement and node IDs. The private journal
@@ -105,7 +106,11 @@ prompt text:
   wrappers and replace only their own exact closing sentinel in each body;
 - current provider and work-status kinds render wording reconstructed from their
   structured state; current long-wait kinds render their harness-derived
-  threshold.
+  threshold; and
+- `WatchLifecycle` renders its structured stopped state and reason without a body.
+
+`watch_lifecycle` is present if and only if `kind` is `WatchLifecycle`, and its
+ordinary message body is exactly empty.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
 harness instructions. Model-authored work titles receive trusted-frame visible
@@ -122,9 +127,12 @@ attributes retain separate attribute-safe escaping. See
 The omission affects provider context only. The sender-owned
 `AgentMessageSent` fact remains durable, ordered, replayed, and delivered to
 typed UI consumers. It does not alter the original `message` tool call or its
-compact `Message sent` result. An agent recipient retains its authenticated
+compact acceptance result. An agent recipient retains its authenticated
 inbound user-role projection. UI rendering continues to consume the directional
-facts under its existing message-display policy.
+facts under its existing message-display policy. Success reports harness
+acceptance with the stable correlation ID; the sender and recipient projections
+remain separate under the nontransactional crash boundary below. Success never
+promises recipient inference, reply, or completion.
 
 ## Live activation and waits
 
@@ -151,7 +159,7 @@ Activation classes are:
 
 - ordinary agent input for `Message`, `WatchResponse`, and `WatchPrompt`;
 - isolated provider/work-status watch input for noninitial model-visible
-  provider and work-status projections; and
+  provider and work-status projections and typed lifecycle notifications; and
 - no activation for initial or redundant structured watch snapshots.
 
 Explicit message intake never becomes watch-prompt fanout. Isolated current

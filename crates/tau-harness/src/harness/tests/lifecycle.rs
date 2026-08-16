@@ -10140,6 +10140,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
             watch_provider_status: None,
             watch_work_status: None,
             watch_long_wait: None,
+            watch_lifecycle: None,
             message: "notice".to_owned(),
         }),
     );
