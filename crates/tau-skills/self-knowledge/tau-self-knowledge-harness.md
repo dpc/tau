@@ -110,8 +110,13 @@ Embedded helpers such as `run_embedded_message` do not create a daemon socket. T
 
 ## Waiting for input and background tools
 
-`wait({})` consumes the next completed background call for the current
-conversation, and `wait({"tool_call_id":"..."})` consumes that exact call.
+Completion notifications mean the result is queued; they do not consume it.
+`wait({})` consumes the oldest unconsumed completed background result for the
+current conversation. Only if none is complete and an owned background call is
+running does it wait for the next completion; otherwise it returns an error.
+Use `wait({"tool_call_id":"..."})` when targeting a specific call: it is
+unambiguous. A wait can suppress or remove a completion notification only while
+it remains pending; a notification already delivered to the model stays visible.
 `wait({"timeout_minutes":N})` instead waits for activating input without
 consuming either input or background results. `N` must be a positive integer;
 `harness.yaml` silently clamps it to the inclusive

@@ -3716,7 +3716,7 @@ fn interception_preserves_internal_prompt_kind_and_text() {
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
                 inference_activation: true,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-                text: "Tool call `completed` is complete.".to_owned(),
+                text: "Tool call `completed` completed. Its result is queued; use `wait` to consume it.".to_owned(),
                 trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::Internal,
                 internal_kind: Some(tau_proto::InternalPromptKind::BackgroundToolCompletion),

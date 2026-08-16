@@ -22848,8 +22848,8 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
     h.shutdown().expect("shutdown");
 }
 
-/// If a completion notice is queued but not steered yet, `wait({})` should
-/// remove it while returning the already-completed background result.
+/// A completion notice must state that its result remains queued, and
+/// `wait({})` must return that retained result while removing the notice.
 #[test]
 fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     let td = TempDir::new().expect("tempdir");
@@ -22875,6 +22875,10 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     seed_tools_running(&mut h, &cid, Vec::new());
     h.queue_background_completion_prompt(&cid, &call_id);
     let completion_prompt = background_completion_prompt(&call_id);
+    assert_eq!(
+        completion_prompt,
+        "Tool call `bg-any-after` completed. Its result is queued; use `wait` to consume it."
+    );
     assert!(
         h.agents[&cid]
             .pending_prompts

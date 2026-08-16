@@ -264,11 +264,10 @@ fn wait_call(target_call_id: &str) -> AgentToolCall {
     }
 }
 
-/// The model-facing wait contract bounds only input waits, advertises the
-/// configured silent clamp without schema-rejecting larger values, and
-/// preserves `{}`.
+/// The model-facing wait contract explains that completion notifications retain
+/// their results and that bare waits drain the oldest completed result first.
 #[test]
-fn wait_spec_documents_optional_non_consuming_input_mode() {
+fn wait_spec_documents_completion_retention_and_optional_non_consuming_input_mode() {
     let spec = wait_tool_spec();
     let parameters = spec.parameters.expect("wait parameters");
     assert_eq!(
@@ -296,6 +295,16 @@ fn wait_spec_documents_optional_non_consuming_input_mode() {
     assert!(description.contains("`wait({\"timeout_minutes\":N})`"));
     assert!(description.contains("five through 1,440 minutes by default"));
     assert!(description.contains("do not consume"));
+    assert!(description.contains("oldest unconsumed completed background result"));
+    assert!(
+        description.contains(
+            "If no background result is complete and an owned background call is running"
+        )
+    );
+    assert!(description.contains("otherwise it returns an error"));
+    assert!(description.contains("`wait({\"tool_call_id\":\"ID\"})`"));
+    assert!(description.contains("notifications leave results queued until `wait` consumes them"));
+    assert!(description.contains("only while it is pending"));
 }
 
 fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {

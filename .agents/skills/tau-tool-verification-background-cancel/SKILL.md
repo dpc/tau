@@ -27,12 +27,39 @@ Tool call `<tool_call_id>` is running in the background.
 When the real tool finishes, Tau queues an internal, UI-hidden prompt for the owning conversation saying:
 
 ```
-[tau-internal] Tool call `<tool_call_id>` is complete.
+[tau-internal] Tool call `<tool_call_id>` completed. Its result is queued; use
+`wait` to consume it.
 ```
 
-This prompt is model-visible only if it reaches the agent before the completion is consumed by `wait`. If the agent is already in a model turn, the prompt may sit in the pending prompt queue. A later `wait` can consume the completed result and suppress/remove that queued prompt before the model ever sees it. This is expected and is not a delivery failure.
+This prompt is a notification, not result delivery or consumption. The completed
+result remains queued until `wait` consumes it. The prompt is model-visible only
+if it reaches the agent before the completion is consumed by `wait`. If the
+agent is already in a model turn, the prompt may sit in the pending prompt
+queue. A later `wait` can consume the completed result and suppress/remove that
+queued prompt before the model ever sees it. This is expected and is not a
+delivery failure.
 
-The agent can call `wait({"tool_call_id": "..."})` to collect that specific real result, or `wait({})` to wait for the first background completion in the current conversation. The no-arg form is conversation-scoped: it must not consume completions from parent, child, or sibling conversations. The tool description shown to agents often says not to call `wait` until they know the tool call has completed. This is an optimization to avoid wasting tokens: for foreground calls, the normal tool call result will arrive without an extra `wait`, and for background calls Tau will wake the agent when the completion prompt is delivered. It is not a technical requirement. The `wait` tool must work well when called for tool calls that are still running, and it must have reasonable semantics in all cases. If `wait` is used for a backgrounded call before completion, Tau suppresses that internal completion prompt while still emitting the real background result/error event. If `wait` consumes an already-completed result before its queued completion prompt is delivered to the model, Tau also suppresses/removes that prompt. If `wait({})` consumes a completion, it suppresses the normal `[tau-internal] Tool call ... is complete.` prompt for that completion and returns an `original_tool_call_id: <tool_call_id>` provider-visible header so the agent knows which background call was collected.
+The agent can call `wait({"tool_call_id": "..."})` to collect that specific real
+result; this is the unambiguous choice when targeting a call. `wait({})`
+consumes the oldest unconsumed completed background result in the current
+conversation. Only if none is complete and an owned background call is running
+does it wait for the next completion; otherwise it returns an error. The no-arg
+form is conversation-scoped: it must not consume completions from parent, child,
+or sibling conversations. The tool description shown to agents often says not
+to call `wait` until they know the tool call has completed. This is an
+optimization to avoid wasting tokens: for foreground calls, the normal tool
+call result will arrive without an extra `wait`, and for background calls Tau
+will wake the agent when the completion prompt is delivered. It is not a
+technical requirement. The `wait` tool must work well when called for tool
+calls that are still running, and it must have reasonable semantics in all
+cases. If `wait` is used for a backgrounded call before completion, Tau
+suppresses that internal completion prompt while still emitting the real
+background result/error event. If `wait` consumes an already-completed result
+before its queued completion prompt is delivered to the model, Tau also
+suppresses/removes that prompt. It cannot suppress a notification already
+delivered to the model. If `wait({})` consumes a completion, it returns an
+`original_tool_call_id: <tool_call_id>` provider-visible header so the agent
+knows which background call was collected.
 
 `wait({"timeout_minutes": N})` is the separate activating-input form. `N` must
 be a positive integer and values above 60 are silently capped at 60. It returns
@@ -83,7 +110,7 @@ the active process/search behavior and cannot roll back effects already started.
 
 Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Unknown ids should be distinguished from already-completed ids. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 
-When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model when no wait consumes the completion first, and `wait` returns a completed result once and only once. Completion prompt suppression is expected when a matching `wait` is already active before the background call finishes, and also when a completion prompt has been queued but not yet delivered to the model before `wait` consumes the result. If the tool finishes first and Tau already showed `[tau-internal] Tool call ... is complete.` to the model, a later `wait` can still consume the result and that earlier prompt is not a bug.
+When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model when no wait consumes the completion first, and `wait` returns a completed result once and only once. Completion prompt suppression is expected when a matching `wait` is already active before the background call finishes, and also when a completion prompt has been queued but not yet delivered to the model before `wait` consumes the result. If the tool finishes first and Tau already showed `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` to the model, a later `wait` can still consume the result and that earlier prompt is not a bug.
 
 
 ### Cancel tool verification plan
@@ -164,7 +191,7 @@ Run this phase only when `agent_start` returns a background tool-call id.
 
 Start another long-sleeping sub-agent with `agent_start`. Cancel it, then call `wait({})`. Expect the canceled error and an `original_tool_call_id` header matching the agent_start call ID.
 
-Start a third long-sleeping delegate. Call `cancel` and `wait({"tool_call_id": id})` in parallel or as close together as possible. Expect `wait` to return the canceled result. The later `[tau-internal] Tool call ... is complete.` prompt for that same call should be suppressed. If the prompt still appears after `wait` was already active for that call, record it as a discrepancy. If the completion prompt appears before the wait call is active, do not count it as a suppression failure.
+Start a third long-sleeping delegate. Call `cancel` and `wait({"tool_call_id": id})` in parallel or as close together as possible. Expect `wait` to return the canceled result. The later `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` prompt for that same call should be suppressed while pending. If the prompt still appears after `wait` was already active for that call, record it as a discrepancy. If the completion prompt appears before the wait call is active, do not count it as a suppression failure.
 
 #### Phase 3: invalid targets and duplicate requests
 
@@ -236,7 +263,7 @@ Do not send messages. Do not do anything else.
 
 Let the delegate run long enough for the inner shell call to background, usually about 3 seconds. Then cancel the delegate and wait for the agent_start result. Expect `error: Tool call canceled`.
 
-After the delegate cancel result is consumed, watch for stray completion prompts for any other tool call ID, especially the inner shell call. If a stray `[tau-internal] Tool call ... is complete.` prompt appears, call `wait` for that ID and record the full result. Treat this as a leak unless there is a clear documented reason it belongs to the parent conversation.
+After the delegate cancel result is consumed, watch for stray completion prompts for any other tool call ID, especially the inner shell call. If a stray `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` prompt appears, call `wait` for that ID and record the full result. Treat this as a leak unless there is a clear documented reason it belongs to the parent conversation.
 
 If no stray completion appears before the inner `sleep 12` would have finished, record that no leak was observed. This check caught a prior manual discrepancy where a canceled delegate's inner `sleep` later produced a parent-visible completion.
 
