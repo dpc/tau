@@ -4,9 +4,9 @@ Agent roles are named aliases for the model and model-behavior settings Tau shou
 
 Harness configuration can name a fallback profile with top-level
 `default_profile: local`. Tau uses it when neither `--profile` nor
-`TAU_PROFILE` names one; omit it, or set it to `null`, to use only base
-configuration. `--profile focused` selects only `profiles.focused`; it does
-not inherit the fallback profile.
+`TAU_PROFILE` names profiles; omit it, or set it to `null`, to use only base
+configuration. `--profile focused,review` applies only `profiles.focused` then
+`profiles.review`; it does not inherit the fallback profile.
 
 `agents`, a role group, and a role can set these provider/model fields:
 
@@ -136,13 +136,17 @@ for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", pri
 ## Configuration profiles
 
 Use `profiles` for named, opt-in role adjustments without replacing normal base
-configuration. `tau --profile focused` selects a profile; `TAU_PROFILE=focused`
-does the same when the flag is absent. Otherwise, `default_profile: focused`
-selects a fallback; omit it or set it to `null` to source no profile. Tau
-rejects an unknown selected name. The selected profile loads after
+configuration. `tau --profile focused,review` selects profiles in that exact
+order; `TAU_PROFILE=focused,review` does the same when the flag is absent.
+ASCII spaces and tabs around names are ignored, but empty or whitespace-only
+segments and unknown names fail startup. Repeated names are applied repeatedly.
+Otherwise,
+`default_profile: focused` selects one fallback; omit it or set it to `null`
+to source no profile. Its surrounding ASCII spaces/tabs are ignored, but it
+cannot use comma-separated syntax. Selected profiles load after
 `harness.yaml` and `harness.d` files, but before
 `--harness-config` and role CLI overrides, so a relative profile setting uses the
-base setting as its starting point:
+accumulated base and earlier profiles as its starting point:
 
 ```yaml
 agents:
@@ -175,7 +179,7 @@ settings; keep those in base files or use a normal command-line override.
 `tau component harness` runs in the current process, so it cannot apply
 `--profile`; its normal base-configured `default_profile` still applies, and
 set `TAU_PROFILE` before launching it to override that fallback. Normal
-`tau --profile NAME` startup and render commands forward the resolved selection
+`tau --profile NAME[,NAME...]` startup and render commands forward the resolved selection
 to their spawned harness daemon.
 
 Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `agents.default_role` selects the startup role; if omitted, Tau starts on the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.

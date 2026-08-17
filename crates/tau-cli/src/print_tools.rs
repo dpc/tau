@@ -39,7 +39,7 @@ impl From<tau_proto::ToolDefinition> for ModelVisibleToolDefinition {
 
 pub(crate) fn run_print_tools(
     role: Option<&str>,
-    profile: Option<&tau_config::settings::ProfileName>,
+    profile: Option<&tau_config::settings::ProfileSelection>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],

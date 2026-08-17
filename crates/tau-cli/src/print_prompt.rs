@@ -36,7 +36,7 @@ impl RenderDiagnosticKind {
 pub(crate) fn run_print_prompt(
     role: Option<&str>,
     enable_agents_md: bool,
-    profile: Option<&tau_config::settings::ProfileName>,
+    profile: Option<&tau_config::settings::ProfileSelection>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],
@@ -58,7 +58,7 @@ pub(crate) fn run_print_prompt(
 
 pub(crate) fn run_print_system_prompt(
     role: &str,
-    profile: Option<&tau_config::settings::ProfileName>,
+    profile: Option<&tau_config::settings::ProfileSelection>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],
@@ -81,7 +81,7 @@ pub(crate) fn run_print_system_prompt(
 fn launch_render_daemon(
     kind: RenderDiagnosticKind,
     role: Option<&str>,
-    profile: Option<&tau_config::settings::ProfileName>,
+    profile: Option<&tau_config::settings::ProfileSelection>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],

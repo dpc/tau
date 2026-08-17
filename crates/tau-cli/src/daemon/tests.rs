@@ -1,5 +1,5 @@
 use tau_config::settings as path_tau_config_settings;
-use tau_config::settings::ProfileName;
+use tau_config::settings::ProfileSelection;
 
 use super::*;
 
@@ -320,8 +320,9 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
     }));
 }
 
-/// Ensures a resolved CLI profile reaches the daemon and an absent selection
-/// clears inherited profile state rather than changing child configuration.
+/// Ensures an ordered CLI profile selection reaches the daemon unchanged and an
+/// absent selection clears inherited profile state rather than changing child
+/// configuration.
 #[test]
 fn daemon_command_sets_and_clears_profile_env() {
     let spec = |profile| DaemonCommandSpec {
@@ -341,10 +342,10 @@ fn daemon_command_sets_and_clears_profile_env() {
         },
         storage_mode: HarnessStorageMode::Durable,
     };
-    let profile = ProfileName::parse("focused").expect("profile");
+    let profile = ProfileSelection::parse("focused,review").expect("profile selection");
     let selected = build_daemon_command(spec(Some(&profile)));
     assert!(selected.get_envs().any(|(key, value)| {
-        key == tau_config::settings::TAU_PROFILE_ENV && value == Some("focused".as_ref())
+        key == tau_config::settings::TAU_PROFILE_ENV && value == Some("focused,review".as_ref())
     }));
 
     let absent = build_daemon_command(spec(None));

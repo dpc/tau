@@ -4,8 +4,8 @@ use std::{ffi as path_std_ffi, path as path_std_path};
 
 use tau_config::settings as path_tau_config_settings;
 use tau_config::settings::{
-    ExtensionCliOverride, ExtensionEntry, HarnessConfigCliOverride, HarnessSettings, ProfileName,
-    load_harness_settings_in,
+    ExtensionCliOverride, ExtensionEntry, HarnessConfigCliOverride, HarnessSettings,
+    ProfileSelection, load_harness_settings_in,
 };
 use tempfile::TempDir;
 
@@ -317,7 +317,7 @@ profiles:
 "#,
     )
     .expect("write configured profile");
-    let profile = ProfileName::parse("focused").expect("profile");
+    let profile = ProfileSelection::parse("focused").expect("profile selection");
     validate_profile_extension_targets(&dirs, &profile).expect("known profile targets");
 
     std::fs::write(
@@ -337,6 +337,31 @@ profiles:
         error
             .to_string()
             .contains("configuration profile `focused` changes unknown extension `std-pmi`"),
+        "{error}"
+    );
+
+    std::fs::write(
+        tempdir.path().join("harness.yaml"),
+        r#"
+profiles:
+  focused:
+    extensions:
+      std-pim:
+        enable: false
+  later:
+    extensions:
+      std-pmi:
+        enable: false
+"#,
+    )
+    .expect("write ordered profile typo");
+    let ordered = ProfileSelection::parse("focused,later").expect("ordered profile selection");
+    let error = validate_profile_extension_targets(&dirs, &ordered)
+        .expect_err("later profile target must be validated");
+    assert!(
+        error
+            .to_string()
+            .contains("configuration profile `later` changes unknown extension `std-pmi`"),
         "{error}"
     );
 }

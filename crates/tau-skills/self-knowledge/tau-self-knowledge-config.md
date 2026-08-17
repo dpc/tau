@@ -46,6 +46,22 @@ Tau follows the XDG directory layout on Linux:
 
 Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
 
+## Configuration profiles
+
+`harness.yaml` can define named `profiles` patches for roles and supported
+extension settings. `tau --profile work,review` applies the normal built-in and
+user base configuration first, then `profiles.work`, then `profiles.review`.
+Later profiles use the ordinary config merge rules, so a later scalar replaces
+an earlier one and nested extension config maps merge recursively.
+
+`TAU_PROFILE=work,review` selects the same ordered stack when `--profile` is
+absent. ASCII spaces and tabs around names are ignored; empty, whitespace-only,
+and unknown items fail startup. Tau preserves duplicates, so
+`--profile work,work` applies the `work` patch twice. Without either selector,
+`default_profile: work`
+selects one base-configured fallback profile. Its surrounding ASCII spaces/tabs
+are ignored, but it does not accept list syntax.
+
 ## Built-in defaults
 
 Tau layers these defaults underneath user config and `*.d/*.yaml` drop-ins.

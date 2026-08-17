@@ -44,12 +44,13 @@
 # first role.
 #   default_role: engineer
 
-# `default_profile` optionally selects a named fallback after base config/drop-ins
+# `default_profile` optionally selects one fallback after base config/drop-ins
 # and before CLI overrides. `--profile` and `TAU_PROFILE` take precedence. Omit
 # it (or set it to `null`) to load only base configuration when neither explicit
-# selector is present.
-# Profiles do not inherit from the fallback; `--profile focused` applies only
-# `profiles.focused`.
+# selector is present. ASCII spaces/tabs around its name are ignored, but it
+# cannot use comma-separated syntax.
+# Profiles do not inherit from the fallback; `--profile focused,review` applies
+# only `profiles.focused` then `profiles.review`.
 # default_profile: default
 # profiles:
 #   default:

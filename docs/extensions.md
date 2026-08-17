@@ -300,14 +300,18 @@ Tau-managed secrets, but it does not make them an operating-system sandbox. See
 ## Configuration layers
 
 Built-in defaults load first, followed by `harness.yaml`, lexically sorted
-`harness.d/*.yaml` or `*.yml` drop-ins, the selected profile, and ordered
-command-line overrides. `--profile NAME` wins over `TAU_PROFILE=NAME`; when
-neither selects a name, top-level `default_profile: NAME` selects a fallback.
-Omit `default_profile`, or set it to `null`, to load only base layers. Named
-profiles do not inherit the fallback profile: each profile independently
-patches the base layers. A profile can change the global `tau_state_access`
-default plus `enable` and arbitrary `config` for a base-configured or built-in
-extension, and CLI overrides still win:
+`harness.d/*.yaml` or `*.yml` drop-ins, selected profiles, and ordered
+command-line overrides. `--profile NAME[,NAME...]` wins over
+`TAU_PROFILE=NAME[,NAME...]`; when neither selects a name, top-level
+`default_profile: NAME` selects one fallback profile. Omit `default_profile`,
+or set it to `null`, to load only base layers. Named profiles do not inherit
+the fallback profile. Its surrounding ASCII spaces/tabs are ignored, but it
+cannot use comma-separated syntax. A comma-separated selection patches the accumulated configuration
+left-to-right, so `--profile xyz,foo` applies `xyz` then `foo`; repeated names
+also apply repeatedly. ASCII spaces and tabs around names are ignored, while
+empty or whitespace-only segments and unknown names fail startup. A profile can
+change the global `tau_state_access` default plus `enable` and arbitrary `config` for a
+base-configured or built-in extension, and CLI overrides still win:
 
 ```yaml
 default_profile: focused

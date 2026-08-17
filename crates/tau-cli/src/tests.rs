@@ -279,20 +279,20 @@ fn dev_print_prompt_uses_shared_role_flag() {
     ));
 }
 
-/// Ensures `--profile` stays a root-owned harness selection and reaches the
-/// same argument bundle as other startup configuration options.
+/// Ensures `--profile` keeps its root-owned ordered selection syntax through
+/// command parsing before startup forwards it to the harness.
 #[test]
 fn profile_flag_parses_as_root_harness_selection() {
     let cli = path_super_cli::Cli::parse_from([
         "tau",
         "--profile",
-        "focused",
+        "focused,review",
         "--role",
         "engineer",
         "dev",
         "print-prompt",
     ]);
-    assert_eq!(cli.harness.profile.as_deref(), Some("focused"));
+    assert_eq!(cli.harness.profile.as_deref(), Some("focused,review"));
     assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
 }
 
@@ -2105,10 +2105,10 @@ fn initial_session_started_omits_session_status_and_role_placeholder() {
     assert!(!vt.screen_contains(80, "no role selected"));
 }
 
-/// Ensures the resolved profile name follows the session-directory status while
-/// absent selection does not add a synthetic startup line.
+/// Ensures the resolved profile stack follows the session-directory status
+/// while absent selection does not add a synthetic startup line.
 #[test]
-fn session_directory_status_reports_only_named_startup_profiles() {
+fn session_directory_status_reports_only_selected_startup_profile_stacks() {
     let session_dir = HarnessSessionDir {
         session_id: test_session_id("tau-agent-test"),
         path: "/tmp/tau-agent-test".into(),
@@ -2121,7 +2121,10 @@ fn session_directory_status_reports_only_named_startup_profiles() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.set_startup_profile(Some("someprofile".to_owned()));
+    renderer.set_startup_profile_selection(Some(
+        path_tau_config_settings::ProfileSelection::parse("focused,review")
+            .expect("profile selection"),
+    ));
     renderer.handle(&Event::HarnessSessionDir(session_dir.clone()));
     sync(&handle);
     let named_lines = visible_lines(&vt, 100);
@@ -2133,7 +2136,7 @@ fn session_directory_status_reports_only_named_startup_profiles() {
         named_lines
             .get(session_line + 1)
             .map(|line| line.trim_end()),
-        Some("▤ config profile: someprofile")
+        Some("▤ config profile stack: focused,review")
     );
 
     let (_term, handle, vt) = setup(100, 24);
@@ -2144,7 +2147,7 @@ fn session_directory_status_reports_only_named_startup_profiles() {
     );
     renderer.handle(&Event::HarnessSessionDir(session_dir));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "config profile:"));
+    assert!(!vt.screen_contains(100, "config profile stack:"));
 }
 
 /// A theme refresh between an optimistic session switch and its authoritative

@@ -21,6 +21,89 @@ fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
     command.output().expect("run tau preview")
 }
 
+/// Ensures a render subprocess forwards comma-separated profiles to its daemon
+/// and lets the later profile override the earlier startup role.
+#[test]
+fn print_prompt_applies_ordered_profile_stack_in_spawned_harness() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    std::fs::create_dir_all(&config_dir).expect("config directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+profiles:
+  first:
+    agents:
+      default_role: first-role
+  second:
+    agents:
+      default_role: second-role
+agents:
+  role_groups:
+    preview:
+      roles:
+        first-role:
+          prompt_fragments:
+            - name: preview.first
+              priority: 10
+              text: FIRST PROFILE PREVIEW
+        second-role:
+          prompt_fragments:
+            - name: preview.second
+              priority: 10
+              text: SECOND PROFILE PREVIEW
+"#,
+    )
+    .expect("write profile fixture");
+
+    let output = preview(
+        &home,
+        None,
+        &["--profile", "first,second", "dev", "print-prompt"],
+    );
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let prompt = String::from_utf8(output.stdout).expect("UTF-8 prompt");
+    assert!(
+        !prompt.contains("FIRST PROFILE PREVIEW"),
+        "earlier profile still selected the startup role: {prompt}"
+    );
+    assert!(
+        prompt.contains("SECOND PROFILE PREVIEW"),
+        "later profile did not select its startup role: {prompt}"
+    );
+}
+
+/// Ensures a whitespace-normalized default profile reaches a spawned harness as
+/// one profile rather than becoming absent or a differently parsed selection.
+#[test]
+fn print_prompt_forwards_normalized_default_profile_to_spawned_harness() {
+    let home = TempDir::new().expect("temporary home");
+    let config_dir = home.path().join(".config/tau");
+    std::fs::create_dir_all(&config_dir).expect("config directory");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+default_profile: " focused "
+profiles:
+  focused:
+    agents:
+      prompt_fragments:
+        - name: preview.default
+          priority: 10
+          text: DEFAULT PROFILE PREVIEW
+"#,
+    )
+    .expect("write default profile fixture");
+
+    let output = preview(&home, None, &["--role", "engineer", "dev", "print-prompt"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("DEFAULT PROFILE PREVIEW"),
+        "{:?}",
+        output.stdout
+    );
+}
+
 fn assert_no_runtime_pairs(home: &Path) {
     let harnesses = home.join(".runtime/tau/harnesses");
     assert_eq!(

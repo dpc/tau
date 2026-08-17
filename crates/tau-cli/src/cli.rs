@@ -42,7 +42,7 @@ pub struct HarnessArgs {
     #[arg(short = 'r', long = "role")]
     pub role: Option<String>,
 
-    /// Select a configuration profile before CLI overrides.
+    /// Select comma-separated configuration profiles before CLI overrides.
     #[arg(long = "profile", value_name = "PROFILE")]
     pub profile: Option<String>,
 

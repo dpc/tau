@@ -2624,11 +2624,11 @@ impl std::error::Error for SettingsError {
     }
 }
 
-/// Environment variable selecting a named harness configuration profile.
+/// Environment variable selecting an ordered harness configuration profile
+/// stack.
 pub const TAU_PROFILE_ENV: &str = "TAU_PROFILE";
 
-/// A validated profile name selected from the CLI, environment, or base
-/// configuration fallback.
+/// One validated profile name inside an ordered configuration selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileName(String);
 
@@ -2658,37 +2658,115 @@ impl fmt::Display for ProfileName {
     }
 }
 
-/// Resolves the profile selected by a CLI flag or [`TAU_PROFILE_ENV`].
+/// An ordered, nonempty selection of named configuration profiles.
+///
+/// Each entry is applied after the preceding one. Selection syntax ignores
+/// surrounding ASCII spaces and tabs, matching comma-separated extension
+/// environment settings, but retains duplicate names and their order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileSelection {
+    /// Nonempty profile names in their exact application order, including
+    /// deliberate duplicates.
+    profiles: Vec<ProfileName>,
+}
+
+impl ProfileSelection {
+    /// Parses comma-separated nonempty profile names.
+    ///
+    /// It trims only ASCII spaces and tabs around every item. Empty segments
+    /// and items containing only any Unicode whitespace are configuration
+    /// errors.
+    pub fn parse(value: impl Into<String>) -> Result<Self, SettingsError> {
+        let value = value.into();
+        let mut profiles = Vec::new();
+        for (index, item) in value.split(',').enumerate() {
+            let name = item.trim_matches([' ', '\t']);
+            if name.is_empty() || name.chars().all(char::is_whitespace) {
+                return Err(SettingsError::Config(config::ConfigError::Message(
+                    format!(
+                        "configuration profile item {} is empty; expected NAME[,NAME...]",
+                        index + 1
+                    ),
+                )));
+            }
+            profiles.push(ProfileName::parse(name)?);
+        }
+        Ok(Self { profiles })
+    }
+
+    /// Returns the selected profile names in application order.
+    #[must_use]
+    pub fn names(&self) -> &[ProfileName] {
+        &self.profiles
+    }
+}
+
+impl TryFrom<ProfileName> for ProfileSelection {
+    type Error = SettingsError;
+
+    /// Converts one canonical profile name into a one-item selection.
+    ///
+    /// This rejects a name that list parsing would split or trim, so a
+    /// selection constructed in-process has the same identity when it crosses
+    /// the daemon's [`TAU_PROFILE_ENV`] transport.
+    fn try_from(profile: ProfileName) -> Result<Self, Self::Error> {
+        let profile_name = profile.to_string();
+        let selection = Self::parse(profile_name.clone())?;
+        if selection.names().len() != 1 || selection.names()[0].as_str() != profile_name {
+            return Err(SettingsError::Config(config::ConfigError::Message(
+                "configuration profile must be one canonical selection item".to_owned(),
+            )));
+        }
+        Ok(selection)
+    }
+}
+
+impl fmt::Display for ProfileSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, profile) in self.profiles.iter().enumerate() {
+            if index != 0 {
+                f.write_str(",")?;
+            }
+            profile.fmt(f)?;
+        }
+        Ok(())
+    }
+}
+
+/// Resolves the profile selection from a CLI flag or [`TAU_PROFILE_ENV`].
 ///
 /// An explicit CLI value wins over the environment, which both win over the
 /// top-level `default_profile` from layered base configuration. Empty
-/// selections fail so typoed shell expansions do not silently select no
-/// profile.
-pub fn selected_profile(cli_profile: Option<&str>) -> Result<Option<ProfileName>, SettingsError> {
+/// selections fail so typoed shell expansions do not silently select no stack.
+pub fn selected_profile(
+    cli_profile: Option<&str>,
+) -> Result<Option<ProfileSelection>, SettingsError> {
     selected_profile_in(&TauDirs::default(), cli_profile)
 }
 
-/// Resolves a profile for one explicit directory layout.
+/// Resolves an ordered profile selection for one explicit directory layout.
 ///
 /// This reads only base configuration while finding `default_profile`, so a
-/// profile cannot influence which profile is selected.
+/// profile cannot influence which selection is applied.
 pub fn selected_profile_in(
     dirs: &TauDirs,
     cli_profile: Option<&str>,
-) -> Result<Option<ProfileName>, SettingsError> {
+) -> Result<Option<ProfileSelection>, SettingsError> {
     selected_profile_in_from_sources(dirs, cli_profile, std::env::var_os(TAU_PROFILE_ENV))
 }
 
-/// Resolves a profile from an explicit directory layout and already-read
+/// Resolves an ordered profile selection from an explicit directory layout and
+/// already-read
 /// command-line and environment sources.
 fn selected_profile_in_from_sources(
     dirs: &TauDirs,
     cli_profile: Option<&str>,
     environment_profile: Option<OsString>,
-) -> Result<Option<ProfileName>, SettingsError> {
+) -> Result<Option<ProfileSelection>, SettingsError> {
     match selected_profile_from_sources(cli_profile, environment_profile)? {
         Some(profile) => Ok(Some(profile)),
-        None => default_profile_in(dirs),
+        None => default_profile_in(dirs)
+            .and_then(|profile| profile.map(ProfileSelection::try_from).transpose()),
     }
 }
 
@@ -2696,7 +2774,7 @@ fn selected_profile_in_from_sources(
 fn selected_profile_from_sources(
     cli_profile: Option<&str>,
     environment_profile: Option<OsString>,
-) -> Result<Option<ProfileName>, SettingsError> {
+) -> Result<Option<ProfileSelection>, SettingsError> {
     let profile = match cli_profile {
         Some(profile) => Some(profile.to_owned()),
         None => environment_profile
@@ -2710,7 +2788,7 @@ fn selected_profile_from_sources(
             .transpose()?,
     };
     match profile {
-        Some(profile) => ProfileName::parse(profile).map(Some),
+        Some(profile) => ProfileSelection::parse(profile).map(Some),
         None => Ok(None),
     }
 }
@@ -2976,7 +3054,8 @@ pub fn load_harness_settings_with_cli_overrides_in(
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<HarnessSettings, SettingsError> {
-    let profile = default_profile_in(dirs)?;
+    let profile = default_profile_in(dirs)
+        .and_then(|profile| profile.map(ProfileSelection::try_from).transpose())?;
     load_harness_settings_with_profile_and_cli_overrides_in(
         dirs,
         profile.as_ref(),
@@ -2989,7 +3068,8 @@ pub fn load_harness_settings_with_cli_overrides_in(
 /// layers without applying any profile or command-line override.
 ///
 /// An absent or explicit-null value selects no profile. A nonempty value names
-/// one profile which the caller must load and validate normally.
+/// one profile after trimming surrounding ASCII spaces/tabs. It rejects commas
+/// so its exact one-name selection round-trips through [`TAU_PROFILE_ENV`].
 pub fn default_profile_in(dirs: &TauDirs) -> Result<Option<ProfileName>, SettingsError> {
     let fallback: HarnessDefaultProfile = load_yaml_layered_with_builtin_and_harness_overrides(
         BUILT_IN_HARNESS_YAML,
@@ -2998,11 +3078,25 @@ pub fn default_profile_in(dirs: &TauDirs) -> Result<Option<ProfileName>, Setting
         &[],
         &[],
     )?;
-    fallback.default_profile.map(ProfileName::parse).transpose()
+    fallback
+        .default_profile
+        .map(parse_default_profile_name)
+        .transpose()
 }
 
-/// Loads settings with an optional explicitly supplied profile after file
-/// layers and before command-line configuration and role overrides.
+/// Parses one base-configured fallback profile without accepting list syntax.
+fn parse_default_profile_name(value: String) -> Result<ProfileName, SettingsError> {
+    let name = value.trim_matches([' ', '\t']);
+    if name.contains(',') || name.chars().all(char::is_whitespace) {
+        return Err(SettingsError::Config(config::ConfigError::Message(
+            "default_profile must name exactly one profile".to_owned(),
+        )));
+    }
+    ProfileName::parse(name)
+}
+
+/// Loads settings with an optional explicitly supplied profile selection after
+/// file layers and before command-line configuration and role overrides.
 ///
 /// Callers that select profiles through process environment should resolve that
 /// selection with [`selected_profile_in`] for the same directory layout and
@@ -3011,12 +3105,12 @@ pub fn default_profile_in(dirs: &TauDirs) -> Result<Option<ProfileName>, Setting
 /// layers for profile validation.
 pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     dirs: &TauDirs,
-    profile_name: Option<&ProfileName>,
+    profile_selection: Option<&ProfileSelection>,
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<HarnessSettings, SettingsError> {
-    let profiles = match profile_name {
-        Some(name) => load_harness_profile_layers(dirs, name)?,
+    let profiles = match profile_selection {
+        Some(selection) => load_harness_profile_layers(dirs, selection)?,
         None => Vec::new(),
     };
     let mut settings: HarnessSettings = load_yaml_layered_with_builtin_and_harness_overrides(
@@ -3392,11 +3486,28 @@ fn profile_config_source(
     Ok(config::File::from_str(&yaml, config::FileFormat::Yaml).required(true))
 }
 
-/// Loads one selected profile from every built-in/user/drop-in source in order.
+/// Loads every selected profile from every built-in/user/drop-in source in
+/// selection order.
 ///
 /// Keeping these patches separate preserves additive role semantics and
 /// relative provider-setting resolution across profile definitions.
 fn load_harness_profile_layers(
+    dirs: &TauDirs,
+    selection: &ProfileSelection,
+) -> Result<Vec<HarnessProfile>, SettingsError> {
+    let mut profiles = Vec::new();
+    for name in selection.names() {
+        profiles.extend(load_harness_profile_layers_for_name(dirs, name)?);
+    }
+    Ok(profiles)
+}
+
+/// Loads one named profile from every built-in/user/drop-in source in order.
+///
+/// This deliberately replays a repeated name rather than sharing a parsed
+/// patch: a duplicate selected profile is a later layer with normal merge
+/// effects.
+fn load_harness_profile_layers_for_name(
     dirs: &TauDirs,
     name: &ProfileName,
 ) -> Result<Vec<HarnessProfile>, SettingsError> {
@@ -3433,7 +3544,7 @@ pub fn profile_extension_names_in(
     dirs: &TauDirs,
     name: &ProfileName,
 ) -> Result<BTreeSet<String>, SettingsError> {
-    Ok(load_harness_profile_layers(dirs, name)?
+    Ok(load_harness_profile_layers_for_name(dirs, name)?
         .into_iter()
         .flat_map(|profile| profile.extensions.into_keys())
         .collect())

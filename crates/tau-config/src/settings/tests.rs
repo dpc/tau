@@ -183,28 +183,28 @@ fn selected_profile_prefers_cli_over_environment() {
         selected_profile_in_from_sources(&dirs, Some("cli"), Some("environment".into()))
             .expect("valid profile selection")
             .expect("CLI selection")
-            .as_str(),
+            .to_string(),
         "cli"
     );
     assert_eq!(
         selected_profile_in_from_sources(&dirs, None, Some("environment".into()))
             .expect("valid environment profile")
             .expect("environment selection")
-            .as_str(),
+            .to_string(),
         "environment"
     );
     assert_eq!(
         selected_profile_in_from_sources(&dirs, None, None)
             .expect("configured fallback profile")
             .expect("configured selection")
-            .as_str(),
+            .to_string(),
         "configured"
     );
     assert_eq!(
         selected_profile_in_from_sources(&dirs, Some("configured"), None)
             .expect("explicit default profile")
             .expect("explicit selection")
-            .as_str(),
+            .to_string(),
         "configured"
     );
     assert_eq!(
@@ -213,17 +213,137 @@ fn selected_profile_prefers_cli_over_environment() {
     );
 }
 
-/// Ensures empty and non-UTF-8 profile selections fail at the shared API
-/// boundary instead of reaching profile lookup as arbitrary strings.
+/// Ensures profile selection accepts only nonempty comma-separated names while
+/// retaining left-to-right duplicates instead of silently changing a request.
 #[test]
 fn selected_profile_rejects_invalid_names() {
-    assert!(ProfileName::parse("").is_err());
+    assert_eq!(
+        ProfileSelection::parse(" xyz,\tfoo ")
+            .expect("space/tab around selection names")
+            .to_string(),
+        "xyz,foo"
+    );
+    assert_eq!(
+        ProfileSelection::parse("xyz,xyz")
+            .expect("duplicate selection")
+            .names()
+            .len(),
+        2
+    );
+    for name in [" xyz", "xyz,foo"] {
+        assert!(
+            ProfileSelection::try_from(ProfileName::parse(name).expect("profile name")).is_err(),
+            "{name:?} must not become a different one-item selection"
+        );
+    }
+    for selection in ["", " ", "\t", "\n", "\u{a0}", ",xyz", "xyz,", "xyz,,foo"] {
+        assert!(
+            ProfileSelection::parse(selection).is_err(),
+            "{selection:?} must reject an empty profile item"
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
 
         assert!(selected_profile_from_sources(None, Some(OsString::from_vec(vec![0xff]))).is_err());
     }
+}
+
+/// Ensures the built-in base, user base, and every named profile form one
+/// ordered stack, including duplicate profile applications and unknown names.
+#[test]
+fn selected_profiles_apply_all_layers_in_exact_order() {
+    let td = TempDir::new().expect("tempdir");
+    let dirs = dirs_with_config(td.path());
+    assert_eq!(
+        load_harness_settings_in(&dirs)
+            .expect("built-in base")
+            .tau_state_access,
+        TauStateAccess::ReadOnly
+    );
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+tau_state_access: legacy
+agents:
+  effort: low
+  role_groups:
+    base:
+      roles:
+        layered: {}
+extensions:
+  core-shell:
+    config:
+      nested:
+        user: base
+        shared: user
+profiles:
+  xyz:
+    tau_state_access: read_only
+    agents:
+      effort: increase
+    extensions:
+      core-shell:
+        config:
+          nested:
+            xyz: selected
+            shared: xyz
+  foo:
+    tau_state_access: hidden
+    extensions:
+      core-shell:
+        config:
+          nested:
+            foo: selected
+            shared: foo
+"#,
+    )
+    .expect("write user base and profiles");
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs,
+        Some(&profile_selection("xyz,foo")),
+        &[],
+        &[],
+    )
+    .expect("load selected stack");
+    assert_eq!(settings.tau_state_access, TauStateAccess::Hidden);
+    assert_eq!(
+        settings.extensions["core-shell"].config,
+        Some(serde_json::json!({
+            "nested": {
+                "user": "base",
+                "xyz": "selected",
+                "foo": "selected",
+                "shared": "foo"
+            }
+        }))
+    );
+
+    let duplicated = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs,
+        Some(&profile_selection("xyz,xyz")),
+        &[],
+        &[],
+    )
+    .expect("replay duplicate profile");
+    assert_eq!(
+        duplicated.roles["layered"].effort,
+        Some(tau_proto::Effort::High)
+    );
+
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs,
+        Some(&profile_selection("xyz,missing,foo")),
+        &[],
+        &[],
+    )
+    .expect_err("unknown profile in ordered selection");
+    assert_eq!(
+        error.to_string(),
+        "unknown configuration profile: `missing`"
+    );
 }
 
 fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
@@ -233,8 +353,8 @@ fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
     }
 }
 
-fn profile_name(value: &str) -> ProfileName {
-    ProfileName::parse(value).expect("valid profile name")
+fn profile_selection(value: &str) -> ProfileSelection {
+    ProfileSelection::parse(value).expect("valid profile selection")
 }
 
 fn dirs_with_config_and_state(
@@ -3195,7 +3315,7 @@ profiles:
 
     let dirs = dirs_with_config(td.path());
     let implicit = load_harness_settings_in(&dirs).expect("load configured default profile");
-    let default = profile_name("default");
+    let default = profile_selection("default");
     let explicit =
         load_harness_settings_with_profile_and_cli_overrides_in(&dirs, Some(&default), &[], &[])
             .expect("load explicit default profile");
@@ -3241,6 +3361,40 @@ profiles:
     assert_eq!(settings.default_role.as_deref(), Some("engineer"));
 }
 
+/// Ensures a configured default normalizes surrounding ASCII spaces/tabs while
+/// remaining one transport-safe profile name for daemon forwarding.
+#[test]
+fn default_profile_normalizes_one_name_for_daemon_round_trip() {
+    for value in [" focused ", "\tfocused\t"] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!("default_profile: {value:?}\n"),
+        )
+        .expect("write default selection");
+        let profile = default_profile_in(&dirs_with_config(td.path()))
+            .expect("read default profile")
+            .expect("configured default profile");
+        assert_eq!(profile.as_str(), "focused");
+        assert_eq!(
+            ProfileSelection::parse(profile.to_string()).expect("reparse daemon environment"),
+            ProfileSelection::parse("focused").expect("expected selection")
+        );
+    }
+    for value in [" \t ", "\n", "\u{a0}", "focused,review"] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!("default_profile: {value:?}\n"),
+        )
+        .expect("write invalid default");
+        assert!(
+            default_profile_in(&dirs_with_config(td.path())).is_err(),
+            "{value:?} must not select a fallback"
+        );
+    }
+}
+
 /// Ensures a configured fallback still validates its named profile rather than
 /// silently falling back to base settings when its target is absent.
 #[test]
@@ -3284,7 +3438,7 @@ profiles:
 
     let dirs = dirs_with_config(td.path());
     let implicit = load_harness_settings_in(&dirs).expect("load implicit default profile");
-    let focused = profile_name("focused");
+    let focused = profile_selection("focused");
     let explicit =
         load_harness_settings_with_profile_and_cli_overrides_in(&dirs, Some(&focused), &[], &[])
             .expect("load explicit named profile");
@@ -3317,7 +3471,7 @@ profiles:
     )
     .expect("write profile");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3354,7 +3508,7 @@ profiles:
 "#,
     )
     .expect("write profile");
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let overrides =
         [
             HarnessConfigCliOverride::from_str("agents.role_groups.precedence.effort=increase")
@@ -3409,7 +3563,7 @@ profiles:
             .expect("extension override"),
     ];
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3459,7 +3613,7 @@ profiles:
     )
     .expect("write profile drop-in");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let profiled = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3514,7 +3668,7 @@ profiles:
     )
     .expect("write profile drop-in");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3525,7 +3679,7 @@ profiles:
     assert!(settings.roles.contains_key("profile-role"));
     assert_eq!(settings.extensions["core-shell"].enable, Some(false));
 
-    let profile = profile_name("missing");
+    let profile = profile_selection("missing");
     let error = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3578,7 +3732,7 @@ profiles:
     )
     .expect("write profile drop-in");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3620,7 +3774,7 @@ profiles:
     )
     .expect("write profile");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3668,7 +3822,7 @@ profiles:
     )
     .expect("write profile drop-in");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let base = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3709,7 +3863,7 @@ profiles:
     )
     .expect("write profile");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3736,7 +3890,7 @@ profiles:
     )
     .expect("write profiles");
 
-    let profile = profile_name("invalid");
+    let profile = profile_selection("invalid");
     let error = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -3811,7 +3965,7 @@ profiles:
 "#,
     )
     .expect("write profile drop-in");
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let overrides =
         [
             HarnessConfigCliOverride::from_str("extensions.core-shell.config.shell.command=bash")
@@ -3864,7 +4018,7 @@ profiles:
 "#,
     )
     .expect("write profile");
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -4769,7 +4923,7 @@ profiles:
     )
     .expect("write profile");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),
@@ -4808,7 +4962,7 @@ profiles:
     )
     .expect("write config");
 
-    let profile = profile_name("focused");
+    let profile = profile_selection("focused");
     let settings = load_harness_settings_with_profile_and_cli_overrides_in(
         &dirs_with_config(td.path()),
         Some(&profile),

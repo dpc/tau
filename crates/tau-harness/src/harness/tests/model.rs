@@ -2189,7 +2189,8 @@ profiles:
         config_dir: Some(td.path().to_path_buf()),
         state_dir: None,
     };
-    let profile = path_tau_config_settings::ProfileName::parse("focused").expect("profile");
+    let profile =
+        path_tau_config_settings::ProfileSelection::parse("focused").expect("profile selection");
     let settings =
         path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
             &dirs,
@@ -2241,7 +2242,8 @@ profiles:
         config_dir: Some(td.path().to_path_buf()),
         state_dir: None,
     };
-    let profile = path_tau_config_settings::ProfileName::parse("focused").expect("profile");
+    let profile =
+        path_tau_config_settings::ProfileSelection::parse("focused").expect("profile selection");
     let settings =
         path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
             &dirs,

@@ -35,13 +35,14 @@ use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolLineSegment, ToolStatus, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
-    config_profile_block, diff_payload_counts, extension_status_block, format_context_token_count,
-    format_token_count, pending_tool_call_display, render_action_output_block,
-    render_compaction_block, render_diff_tool_block, render_harness_notice,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_tool_use_state_without_status, render_turn_stats_block_with_cumulative_usage,
-    session_status_block, streaming_block, streaming_block_with_indicator_suffix,
-    synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
+    config_profile_selection_block, diff_payload_counts, extension_status_block,
+    format_context_token_count, format_token_count, pending_tool_call_display,
+    render_action_output_block, render_compaction_block, render_diff_tool_block,
+    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
+    render_tool_use_state, render_tool_use_state_without_status,
+    render_turn_stats_block_with_cumulative_usage, session_status_block, streaming_block,
+    streaming_block_with_indicator_suffix, synthesize_fallback_display, tool_duration_suffix,
+    ui_dir_block,
 };
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
 use crate::{
@@ -527,8 +528,8 @@ pub(crate) struct EventRenderer {
     current_session_id: Option<tau_proto::SessionId>,
     /// Flat totals folded from every durable provider terminal in this session.
     session_token_usage: tau_proto::TokenUsageCounts,
-    /// Named profile resolved before this UI started its daemon.
-    startup_profile: Option<String>,
+    /// Ordered profile selection resolved before this UI started its daemon.
+    startup_profile_selection: Option<tau_config::settings::ProfileSelection>,
     /// Filesystem context used to rebuild the right prompt after session
     /// events.
     right_prompt_paths: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
@@ -1838,7 +1839,7 @@ impl EventRenderer {
             model_status_block: None,
             current_session_id: None,
             session_token_usage: tau_proto::TokenUsageCounts::default(),
-            startup_profile: None,
+            startup_profile_selection: None,
             right_prompt_paths: None,
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
@@ -1936,9 +1937,13 @@ impl EventRenderer {
         self.draft_retargeter = Some(DraftRetargeter { handle, session_id });
     }
 
-    /// Sets the named profile resolved for the daemon this UI starts.
-    pub(crate) fn set_startup_profile(&mut self, profile: Option<String>) {
-        self.startup_profile = profile;
+    /// Sets the ordered profile selection resolved for the daemon this UI
+    /// starts.
+    pub(crate) fn set_startup_profile_selection(
+        &mut self,
+        selection: Option<tau_config::settings::ProfileSelection>,
+    ) {
+        self.startup_profile_selection = selection;
     }
 
     /// Configures the filesystem context rendered beside the current session.
@@ -8214,9 +8219,11 @@ impl EventRenderer {
                 session_dir.status.as_str(),
             ),
         );
-        if let Some(profile) = self.startup_profile.as_deref() {
-            self.handle
-                .print_output("config-profile", config_profile_block(&self.theme, profile));
+        if let Some(selection) = self.startup_profile_selection.as_ref() {
+            self.handle.print_output(
+                "config-profile-selection",
+                config_profile_selection_block(&self.theme, &selection.to_string()),
+            );
         }
     }
 

@@ -12,7 +12,7 @@ Each supervised component independently defaults
 restores its ambient view of Tau harness runtime sockets.
 
 Extension availability is layered in this order: built-in defaults, harness
-configuration/drop-ins, the selected profile, and ordered `--harness-config` layers,
+configuration/drop-ins, selected profiles, and ordered `--harness-config` layers,
 `TAU_ENABLE_EXTENSIONS` named enables, then extension CLI overrides in argv order.
 
 `tau-config` is the boundary between user-authored files/CLI overrides and the
@@ -29,11 +29,15 @@ overrides.
   lexical order above the base user file.
 - `--harness-config KEY=VALUE` overrides are the highest-precedence harness
   config layers and must preserve command-line order.
-- A selected `profiles.<name>` patch loads after built-in/user/drop-in files and
-  before `--harness-config` layers. `--profile <name>` wins over `TAU_PROFILE`;
-  when neither selects a name, top-level base-layer `default_profile` selects a
-  fallback profile. An absent or null `default_profile` sources no profile. An
-  unknown selected name is an explicit error.
+- Selected `profiles.<name>` patches load after built-in/user/drop-in files and
+  before `--harness-config` layers. `--profile <name[,name...]>` wins over
+  `TAU_PROFILE`; selected names apply left-to-right, including duplicates. ASCII
+  spaces and tabs around names are ignored, while empty or whitespace-only
+  segments and unknown names are explicit errors. When neither selects a name,
+  top-level base-layer
+  `default_profile` selects one exact fallback profile after trimming surrounding
+  ASCII spaces/tabs and rejects comma-separated syntax. An absent or null
+  `default_profile` sources no profile.
 - Config discovery is fallible: unreadable base paths, unreadable drop-in
   directories, bad directory entries, and non-directory `*.d` paths are explicit
   config errors.
@@ -144,7 +148,7 @@ Role metadata is merged through domain-specific logic rather than generic YAML
 array replacement:
 
 - Role sources retain their normal order (built-ins, files/drop-ins, selected
-  profile, then ordered `--harness-config` layers) within each scope. After
+  profile stack, then ordered `--harness-config` layers) within each scope. After
   collecting them, `agents` defaults (`enable`, `visible`, `model`, `effort`, `verbosity`,
   `thinking_summary`, `service_tier`, and `compaction`) apply to every role,
   then role-group defaults, then per-role overrides. `agents.enable` defaults
@@ -186,9 +190,10 @@ metadata, role groups and roles, plus `extensions.<name>.enable` and arbitrary
 Extension config objects merge recursively; arrays, scalars, nested nulls, and
 type mismatches replace lower precedence values, and no deletion sentinel
 exists. A top-level extension `config: null` retains its existing absent/no-op
-compatibility. Profile patches replay after base file layers, so relative values
-resolve against base settings, and before CLI role or `--harness-config`
-patches.
+compatibility. Profile patches replay after base file layers in selected
+left-to-right order, so `--profile xyz,foo` applies `xyz` then `foo` and
+relative values resolve against the accumulated settings, before CLI role or
+`--harness-config` patches.
 
 `default_profile` is base selection configuration, evaluated from built-in,
 user, and ordered `harness.d` layers before profile loading. A later null value

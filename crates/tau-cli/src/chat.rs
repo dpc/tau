@@ -1193,7 +1193,7 @@ pub(crate) fn run_chat(
         settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
-    renderer.set_startup_profile(startup_profile);
+    renderer.set_startup_profile_selection(startup_profile);
     renderer.set_osc8_links(settings.osc8_links);
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
     renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());
@@ -1469,14 +1469,16 @@ fn start_chat_daemon(
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
     ephemeral: bool,
-) -> Result<(Option<String>, ui_logging::UiLogging, DaemonHandle, Instant), CliError> {
-    let startup_profile = (!attach)
-        .then(|| {
-            cli_overrides
-                .profile
-                .map(|profile| profile.as_str().to_owned())
-        })
-        .flatten();
+) -> Result<
+    (
+        Option<tau_config::settings::ProfileSelection>,
+        ui_logging::UiLogging,
+        DaemonHandle,
+        Instant,
+    ),
+    CliError,
+> {
+    let startup_profile = (!attach).then(|| cli_overrides.profile.cloned()).flatten();
     let state_dir = tau_session_inspect::default_state_dir();
     let ui_logging = if ephemeral {
         ui_logging::init_ephemeral()
