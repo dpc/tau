@@ -5,6 +5,9 @@ mod sampling;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 pub use prompt_cache::{
     OpenAiExplicitPromptCacheMode, OpenAiPromptCache, OpenAiPromptCacheBoundary,
     OpenAiPromptCacheOptions, OpenAiPromptCachePolicy, OpenAiPromptCacheTtl,
@@ -15,6 +18,12 @@ use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName};
 
 use self::sampling::ResponsesResponseSampler;
 use crate::OpenAiPromptCacheKey;
+
+#[cfg(test)]
+thread_local! {
+    /// Values observed at the actual adapter call seam in the current test.
+    static FORWARDED_DEBUG_CAPTURE_POLICY: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+}
 
 /// One serialized generic public Responses provider profile.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -246,6 +255,7 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
     model: &ResponsesModel,
+    debug_provider_requests: bool,
     writer: &mut tau_proto::PeerOutputWriter<W>,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
@@ -278,14 +288,18 @@ pub fn run_prompt_attempt<W: std::io::Write>(
         id: model.id.clone(),
     };
     let mut sampler = ResponsesResponseSampler::new();
-    let outcome = tau_provider_responses::run_attempt(
-        prompt,
-        &config,
-        &model,
-        &mut |progress| sampler.emit_if_due(agent_prompt_id, prompt, progress, writer),
-        is_canceled,
-        network,
-    );
+    let outcome =
+        forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
+            tau_provider_responses::run_attempt_with_debug(
+                prompt,
+                &config,
+                &model,
+                debug_provider_requests,
+                &mut |progress| sampler.emit_if_due(agent_prompt_id, prompt, progress, writer),
+                is_canceled,
+                network,
+            )
+        });
     match outcome {
         tau_provider_responses::AttemptOutcome::Completed(success) => {
             sampler.latest_items = success.progress_items;
@@ -326,6 +340,25 @@ pub fn run_prompt_attempt<W: std::io::Write>(
             }
         }
     }
+}
+
+/// Forward the durable-session capture decision unchanged across the extension
+/// boundary into the generic Responses adapter.
+fn forward_debug_capture_policy<T>(
+    debug_provider_requests: bool,
+    run: impl FnOnce(bool) -> T,
+) -> T {
+    #[cfg(test)]
+    FORWARDED_DEBUG_CAPTURE_POLICY.with(|observed| {
+        observed.borrow_mut().push(debug_provider_requests);
+    });
+    run(debug_provider_requests)
+}
+
+/// Drain policy values observed at the real adapter invocation seam.
+#[cfg(test)]
+fn take_forwarded_debug_capture_policy() -> Vec<bool> {
+    FORWARDED_DEBUG_CAPTURE_POLICY.with(|observed| std::mem::take(&mut *observed.borrow_mut()))
 }
 
 /// Extension-owned outcome for the generic Responses finite attempt.

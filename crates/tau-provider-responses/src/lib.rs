@@ -4,6 +4,7 @@
 //! implementation. It sends a complete typed transcript on every turn.
 
 mod deadlines;
+mod debug_capture;
 mod websocket;
 
 use std::collections::BTreeMap;
@@ -23,6 +24,8 @@ use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_error_code,
 };
 use tokio::runtime as path_tokio_runtime;
+
+use self::debug_capture::DebugCapture;
 
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
@@ -304,6 +307,60 @@ pub fn run_attempt(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
+    run_attempt_with_debug(
+        prompt,
+        config,
+        model,
+        false,
+        on_update,
+        is_canceled,
+        network,
+    )
+}
+
+/// Run one cancellable full-transcript public Responses attempt with private
+/// debug capture controlled by the extension's durable-session policy.
+#[allow(clippy::too_many_arguments)]
+pub fn run_attempt_with_debug(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    on_update: &mut impl FnMut(AttemptProgress),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
+    run_attempt_with_capture(
+        prompt,
+        config,
+        model,
+        DebugCapture::new(debug_capture_enabled(prompt, debug_provider_requests)),
+        on_update,
+        is_canceled,
+        network,
+    )
+}
+
+/// Apply the durable-session policy and suppress standalone compaction
+/// diagnostics, whose material is intentionally outside provider capture.
+fn debug_capture_enabled(
+    prompt: &tau_proto::AgentPromptCreated,
+    debug_provider_requests: bool,
+) -> bool {
+    debug_provider_requests && prompt.operation != tau_proto::PromptOperation::StandaloneCompaction
+}
+
+/// Run an attempt with already-selected capture policy and sink.
+#[allow(clippy::too_many_arguments)]
+fn run_attempt_with_capture(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    debug_capture: DebugCapture,
+    on_update: &mut impl FnMut(AttemptProgress),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
     let initial = AttemptProgress {
         output_items: Vec::new(),
         response_bytes_received: 0,
@@ -314,19 +371,27 @@ pub fn run_attempt(
     }
     let body = match build_request(prompt, config, model) {
         Ok(body) => body,
-        Err(error) => return terminal(error, initial),
+        Err(error) => {
+            debug_capture.submit_error(prompt, config, model, &error, &initial);
+            return terminal(error, initial);
+        }
     };
     let runtime = match path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
-        Err(_) => return terminal(Error::StreamFailure, initial),
+        Err(_) => {
+            debug_capture.submit_error(prompt, config, model, &Error::StreamFailure, &initial);
+            return terminal(Error::StreamFailure, initial);
+        }
     };
     let result = runtime.block_on(stream(
         prompt,
         config,
+        model,
         &body,
+        debug_capture.clone(),
         on_update,
         is_canceled,
         network,
@@ -336,8 +401,16 @@ pub fn run_attempt(
             let progress = state.progress();
             let output_items = state.output_items();
             if state.has_incomplete_reasoning() {
+                debug_capture.submit_error(
+                    prompt,
+                    config,
+                    model,
+                    &Error::UnsupportedOutput,
+                    &progress,
+                );
                 terminal(Error::UnsupportedOutput, progress)
             } else if output_items.is_empty() {
+                debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
                 terminal(Error::EmptyResponse, progress)
             } else {
                 let stop_reason = if output_items
@@ -348,6 +421,9 @@ pub fn run_attempt(
                 } else {
                     ProviderStopReason::EndTurn
                 };
+                state
+                    .debug_capture
+                    .submit_response(prompt, config, model, &state, stop_reason);
                 AttemptOutcome::Completed(AttemptSuccess {
                     progress_items: progress.output_items,
                     output_items,
@@ -358,12 +434,19 @@ pub fn run_attempt(
                 })
             }
         }
-        Ok(state) => terminal(Error::EmptyResponse, state.progress()),
+        Ok(state) => {
+            let progress = state.progress();
+            debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
+            terminal(Error::EmptyResponse, progress)
+        }
         Err((Error::Canceled, progress)) => AttemptOutcome::Canceled { progress },
-        Err((error, progress)) => match error.retry() {
-            Some(decision) => AttemptOutcome::Retryable { decision, progress },
-            None => terminal(error, progress),
-        },
+        Err((error, progress)) => {
+            debug_capture.submit_error(prompt, config, model, &error, &progress);
+            match error.retry() {
+                Some(decision) => AttemptOutcome::Retryable { decision, progress },
+                None => terminal(error, progress),
+            }
+        }
     }
 }
 
@@ -756,6 +839,8 @@ struct State {
     response_id: Option<String>,
     /// Monotonic revision advanced only by qualifying semantic observations.
     semantic_progress_revision: u64,
+    /// Private bounded capture state, inactive unless diagnostics are enabled.
+    debug_capture: DebugCapture,
 }
 
 /// Raw JSON projections retained alongside semantically parsed Responses
@@ -937,6 +1022,7 @@ impl State {
 
     fn apply_event(&mut self, data: &str) -> Result<bool, Error> {
         let event: Value = serde_json::from_str(data).map_err(|_| Error::Json)?;
+        self.debug_capture.record_event(&event, data);
         let raw_event: RawEvent<'_> = serde_json::from_str(data).map_err(|_| Error::Json)?;
         let qualifying_progress = match event["type"].as_str().unwrap_or("") {
             "response.output_item.added" => {
@@ -1108,25 +1194,54 @@ impl State {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream(
-    _prompt: &tau_proto::AgentPromptCreated,
+    prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
+    model: &AttemptModel,
     body: &RequestBody,
+    debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptProgress),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<State, (Error, AttemptProgress)> {
     match config.transport {
-        Transport::Sse => stream_sse(config, body, on_update, is_canceled, network).await,
+        Transport::Sse => {
+            stream_sse(
+                prompt,
+                config,
+                model,
+                body,
+                debug_capture,
+                on_update,
+                is_canceled,
+                network,
+            )
+            .await
+        }
         Transport::Websocket => {
-            websocket::stream(config, body, on_update, is_canceled, network).await
+            websocket::stream(
+                prompt,
+                config,
+                model,
+                body,
+                debug_capture,
+                on_update,
+                is_canceled,
+                network,
+            )
+            .await
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_sse(
+    prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
+    model: &AttemptModel,
     body: &RequestBody,
+    debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptProgress),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
@@ -1145,6 +1260,10 @@ async fn stream_sse(
     if !config.api_key.trim().is_empty() {
         request = request.bearer_auth(&config.api_key);
     }
+    if is_canceled() {
+        return Err((Error::Canceled, State::default().progress()));
+    }
+    debug_capture.submit_request(prompt, config, model, body);
     let header_deadline = Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT;
     let mut send = Box::pin(request.send());
     let response = loop {
@@ -1187,7 +1306,10 @@ async fn stream_sse(
         return Err((Error::Http(status, body), State::default().progress()));
     }
     let mut response = response;
-    let mut state = State::default();
+    let mut state = State {
+        debug_capture,
+        ..Default::default()
+    };
     let mut pending = Vec::new();
     let mut deadlines = deadlines::StreamDeadlines::new(Instant::now());
     loop {

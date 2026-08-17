@@ -9,6 +9,27 @@ bounds apply before the
 parser admits only supported assistant text, plain reasoning, and Function
 calls.
 
+Explicit durable-session debug capture stores the finalized HTTP/SSE request at
+its send boundary or the exact WebSocket `response.create` envelope at frame
+send. It stores a bounded successful-response event snapshot after validation,
+or bounded metadata for non-cancellation failures. WebSocket connection and
+upgrade failures therefore have no request artifact; cancellation has no error
+artifact; cancellation after request send can leave the already-submitted
+request artifact. Disabled capture and standalone compaction construct and
+submit no capture metadata.
+
+Each private `.json.zst` artifact has a strict 1 MiB uncompressed serialization
+ceiling; successful responses separately retain at most 512 KiB and 4,096 raw
+events. Oversized artifacts become content-free truncation records. The adapter
+recursively omits embedded image data URLs, including those in replay sidecars,
+function extras, raw successful events, and opaque HTTP error bodies. It redacts
+exact occurrences of the untrimmed configured API key in values and keys, and
+replaces an object if redaction would collide two keys. This is not general
+secret scrubbing: other provider-controlled prompt and response content can
+remain sensitive. Queue pressure, compression, filesystem failure, or shutdown
+can omit an artifact. Captures never enter ordinary logs, journals, status, or
+UI events.
+
 The parser accepts at most 1,024 distinct provider output indices per attempt.
 It rejects an out-of-range index or terminal output array before allocating a
 slot, which bounds index-driven heap growth and ordered insertion work. Revisit

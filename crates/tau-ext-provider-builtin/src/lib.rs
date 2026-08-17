@@ -6165,6 +6165,7 @@ where
         prompt,
         provider,
         model,
+        context.debug_provider_requests,
         writer,
         &mut || TurnAbort::is_aborted(retry_ctx),
         context.runtime.network(),

@@ -344,3 +344,47 @@ fn plain_reasoning_progress_emits_append_only_full_thinking() {
         "sampler must never publish a non-append replacement if an upstream parser regresses"
     );
 }
+/// The complete extension attempt path must pass both durable-session policy
+/// values unchanged at the actual generic Responses adapter invocation.
+#[test]
+fn debug_capture_policy_is_forwarded_to_generic_responses() {
+    let prompt = tau_proto::AgentPromptCreated {
+        agent_prompt_id: "responses-forwarding".parse().expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("responses-forwarding").expect("agent id"),
+        session_id: "responses-forwarding".parse().expect("session id"),
+        system_prompt: String::new(),
+        context: tau_proto::PromptContext::default(),
+        tools: Vec::new(),
+        tools_ref: None,
+        model: "responses/test".parse().expect("model id"),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    };
+    let provider = ResponsesProvider {
+        base_url: "not a URL".to_owned(),
+        ..ResponsesProvider::default()
+    };
+    let model: ResponsesModel =
+        serde_json::from_value(serde_json::json!({"id": "test-model"})).expect("model");
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(Default::default(), None);
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    for enabled in [true, false] {
+        let _ = run_prompt_attempt(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &provider,
+            &model,
+            enabled,
+            &mut writer,
+            &mut || false,
+            &network,
+        );
+    }
+    assert_eq!(super::take_forwarded_debug_capture_policy(), [true, false]);
+}

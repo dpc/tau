@@ -50,6 +50,184 @@ fn responses_tool_result_marks_omitted_images_without_byte_egress() {
     );
 }
 
+/// Real attempt entry points emit typed build and outbound failures, emit no
+/// cancellation record, and retain no material when capture policy is disabled
+/// or the prompt is standalone compaction.
+#[test]
+fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let sink: Arc<dyn Fn(tau_provider::debug_capture_writer::ProviderDebugCapture) + Send + Sync> =
+        Arc::new(move |capture| captured.lock().expect("capture lock").push(capture));
+    let model = AttemptModel {
+        id: ModelName::new("test-model"),
+    };
+    let config = AttemptConfig {
+        base_url: "http://example.invalid".to_owned(),
+        api_key: " exact-secret ".to_owned(),
+        max_output_tokens: 0,
+        transport: Transport::Sse,
+        prompt_cache: None,
+    };
+
+    let mut invalid = minimal_prompt();
+    invalid.tools.push(tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("custom"),
+        model_visible_name: None,
+        description: None,
+        parameters: None,
+        tool_type: ToolType::Custom,
+        format: None,
+    });
+    let outcome = run_attempt_with_capture(
+        &invalid,
+        &config,
+        &model,
+        DebugCapture::with_test_sink(true, Arc::clone(&sink)),
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    assert!(matches!(outcome, AttemptOutcome::Terminal(_)));
+
+    let mut environment = BTreeMap::new();
+    environment.insert("http_proxy".to_owned(), "not a proxy URL".to_owned());
+    let outcome = run_attempt_with_capture(
+        &minimal_prompt(),
+        &config,
+        &model,
+        DebugCapture::with_test_sink(true, Arc::clone(&sink)),
+        &mut |_| {},
+        &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(environment, None),
+    );
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+
+    let outcome = run_attempt_with_capture(
+        &minimal_prompt(),
+        &config,
+        &model,
+        DebugCapture::with_test_sink(true, Arc::clone(&sink)),
+        &mut |_| {},
+        &mut || true,
+        &test_network(),
+    );
+    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
+
+    let mut standalone = minimal_prompt();
+    standalone.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    assert!(!debug_capture_enabled(&standalone, true));
+    let _ = run_attempt_with_capture(
+        &invalid,
+        &config,
+        &model,
+        DebugCapture::with_test_sink(debug_capture_enabled(&standalone, true), Arc::clone(&sink)),
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    let _ = run_attempt_with_capture(
+        &invalid,
+        &config,
+        &model,
+        DebugCapture::with_test_sink(false, Arc::clone(&sink)),
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+
+    let captures = captures.lock().expect("capture lock");
+    assert_eq!(
+        captures.len(),
+        2,
+        "disabled and canceled attempts add nothing"
+    );
+    assert!(captures.iter().all(|capture| capture.class()
+        == tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse));
+    let build: Value = serde_json::from_slice(captures[0].json()).expect("build capture");
+    assert_eq!(build["error"]["kind"], "unsupported_tool");
+    let outbound: Value = serde_json::from_slice(captures[1].json()).expect("outbound capture");
+    assert_eq!(outbound["error"]["kind"], "outbound");
+    assert_eq!(outbound["error"]["route"], "Proxy");
+    assert_eq!(outbound["error"]["phase"], "Configure");
+    assert_eq!(outbound["error"]["category"], "InvalidConfiguration");
+}
+
+/// The public attempt entry point applies enabled, disabled, and standalone
+/// policy to a successful event stream rather than only to pre-dispatch errors.
+#[test]
+fn public_attempt_applies_debug_capture_policy_to_successful_streams() {
+    let enabled = successful_public_sse_captures(true, tau_proto::PromptOperation::Inference);
+    assert_eq!(enabled.len(), 2);
+    assert_eq!(
+        enabled[0].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+    );
+    assert_eq!(
+        enabled[1].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+    );
+    assert!(
+        successful_public_sse_captures(false, tau_proto::PromptOperation::Inference).is_empty()
+    );
+    assert!(
+        successful_public_sse_captures(true, tau_proto::PromptOperation::StandaloneCompaction)
+            .is_empty()
+    );
+}
+
+fn successful_public_sse_captures(
+    debug_provider_requests: bool,
+    operation: tau_proto::PromptOperation,
+) -> Vec<tau_provider::debug_capture_writer::ProviderDebugCapture> {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind capture policy server");
+    let address = listener
+        .local_addr()
+        .expect("capture policy server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept capture policy request");
+        let _ = read_http_request(&mut socket);
+        let body = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"policy-response\",",
+            "\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[",
+            "{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n",
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write capture policy response");
+    });
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let sink = Arc::new(move |capture| captured.lock().expect("capture lock").push(capture));
+    let mut prompt = minimal_prompt();
+    prompt.operation = operation;
+    let outcome = DebugCapture::with_test_sink_scope(sink, || {
+        run_attempt_with_debug(
+            &prompt,
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: String::new(),
+                max_output_tokens: 0,
+                transport: Transport::Sse,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            debug_provider_requests,
+            &mut |_| {},
+            &mut || false,
+            &test_network(),
+        )
+    });
+    server.join().expect("join capture policy server");
+    assert!(matches!(outcome, AttemptOutcome::Completed(_)));
+    std::mem::take(&mut *captures.lock().expect("capture lock"))
+}
+
 /// Public Responses usage preserves OpenAI cache reads and writes as separate
 /// ordinary-request observations with unknown expiry confidence. This prevents
 /// counters from promoting observed reuse into a hard TTL or renewal guarantee.
@@ -1021,7 +1199,12 @@ fn http_sse_attempt_posts_responses_and_completes() {
         assert_eq!(request["input"][2]["arguments"], "{ \"path\" : \"/tmp\" }");
         assert_eq!(request["input"][3]["type"], "function_call_output");
         assert_eq!(request["input"][3]["output"], "tool result");
-        let body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n";
+        let oversized_raw = serde_json::json!({
+            "type": "response.unknown",
+            "padding": "x".repeat(debug_capture::MAX_RESPONSE_EVENT_BYTES),
+        });
+        let terminal = "data: {\"type\":\"response.completed\",\"diagnostic\":\"DaTa:ImAgE/PNG;base64,raw-event-canary\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n";
+        let body = format!("data: {oversized_raw}\n\n{terminal}");
         write!(
             socket,
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -1029,11 +1212,49 @@ fn http_sse_attempt_posts_responses_and_completes() {
         )
         .expect("write response");
     });
-    let outcome = run_attempt(
-        &prompt_with_replayed_user_text(),
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let debug_capture = DebugCapture::with_test_sink(
+        true,
+        Arc::new(move |capture| captured.lock().expect("capture lock").push(capture)),
+    );
+    let mut prompt = prompt_with_replayed_user_text();
+    prompt.system_prompt = "before  capture-secret  after".to_owned();
+    let tau_proto::ContextBlock::AssistantResponse(block) = &mut prompt.context.blocks[1] else {
+        panic!("assistant replay block");
+    };
+    let ContextItem::Message(message) = &mut block.output_items[0] else {
+        panic!("assistant replay message");
+    };
+    message.responses_raw_json = Some(
+        r#"{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"assistant replay"}],"diagnostic":"DATA:Image/PNG;base64,replay-sidecar-canary"}"#
+            .to_owned(),
+    );
+    let ContextItem::ToolCall(call) = &mut block.output_items[1] else {
+        panic!("assistant replay tool call");
+    };
+    call.responses_envelope
+        .as_mut()
+        .expect("tool envelope")
+        .extra_fields = Some(tau_proto::CborValue::Map(vec![
+        (
+            tau_proto::CborValue::Text("diagnostic".to_owned()),
+            tau_proto::CborValue::Text("Data:IMAGE/png;base64,function-extra-canary".to_owned()),
+        ),
+        (
+            tau_proto::CborValue::Text("prefix capture-secret suffix".to_owned()),
+            tau_proto::CborValue::Text("credential-value  capture-secret  canary".to_owned()),
+        ),
+        (
+            tau_proto::CborValue::Text("prefix[REDACTED]suffix".to_owned()),
+            tau_proto::CborValue::Text("collision-canary".to_owned()),
+        ),
+    ]));
+    let outcome = run_attempt_with_capture(
+        &prompt,
         &AttemptConfig {
             base_url: format!("http://{address}"),
-            api_key: String::new(),
+            api_key: " capture-secret ".to_owned(),
             max_output_tokens: 0,
             transport: Transport::Sse,
             prompt_cache: Some(PromptCachePolicy::Explicit),
@@ -1041,6 +1262,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
+        debug_capture,
         &mut |_| {},
         &mut || false,
         &tau_provider::OutboundNetworkPolicy::from_environment(BTreeMap::new(), None),
@@ -1050,6 +1272,35 @@ fn http_sse_attempt_posts_responses_and_completes() {
         panic!("Responses SSE attempt must complete");
     };
     assert_eq!(success.provider_response_id.as_deref(), Some("resp_1"));
+    let captures = captures.lock().expect("capture lock");
+    assert_eq!(captures.len(), 2);
+    assert_eq!(
+        captures[0].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+    );
+    assert_eq!(
+        captures[1].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+    );
+    let request: Value = serde_json::from_slice(captures[0].json()).expect("request capture");
+    assert_eq!(request["body"]["stream"], true);
+    let request_text = String::from_utf8_lossy(captures[0].json());
+    assert!(!request_text.contains("replay-sidecar-canary"));
+    assert!(!request_text.contains("function-extra-canary"));
+    assert!(!request_text.contains("capture-secret"));
+    assert!(!request_text.contains("collision-canary"));
+    assert!(request_text.contains("projected_key_collision"));
+    let response: Value = serde_json::from_slice(captures[1].json()).expect("response capture");
+    assert_eq!(response["provider_response_id"], "resp_1");
+    assert_eq!(
+        response["raw_events"].as_array().expect("raw events").len(),
+        1
+    );
+    assert_eq!(
+        response["raw_events"][0]["diagnostic"],
+        "[image data omitted]"
+    );
+    assert_eq!(response["raw_events_truncated"], true);
 }
 
 /// Public Responses requests must always transmit the harness-effective effort:
@@ -1499,7 +1750,13 @@ fn websocket_attempt_uses_response_create_protocol() {
             ))
             .expect("send completed response");
     });
-    let outcome = run_attempt(
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let debug_capture = DebugCapture::with_test_sink(
+        true,
+        Arc::new(move |capture| captured.lock().expect("capture lock").push(capture)),
+    );
+    let outcome = run_attempt_with_capture(
         &cache_prefix_prompt(),
         &AttemptConfig {
             base_url: format!("http://{address}"),
@@ -1511,6 +1768,7 @@ fn websocket_attempt_uses_response_create_protocol() {
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
+        debug_capture,
         &mut |_| {},
         &mut || false,
         &test_network(),
@@ -1520,6 +1778,19 @@ fn websocket_attempt_uses_response_create_protocol() {
         panic!("WebSocket Responses attempt must complete");
     };
     assert_eq!(success.provider_response_id.as_deref(), Some("resp_ws"));
+    let captures = captures.lock().expect("capture lock");
+    assert_eq!(captures.len(), 2);
+    assert_eq!(
+        captures[0].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+    );
+    let request: Value = serde_json::from_slice(captures[0].json()).expect("request capture");
+    assert_eq!(request["body"]["type"], "response.create");
+    assert!(request["body"].get("stream").is_none());
+    assert_eq!(
+        captures[1].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+    );
 }
 
 /// A rejected WebSocket upgrade must remain on the selected transport and
@@ -1539,7 +1810,8 @@ fn websocket_rejected_upgrade_is_terminal() {
         let mut request = [0_u8; 4096];
         let read = socket.read(&mut request).expect("read upgrade request");
         assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /responses "));
-        let body = r#"{"error":{"code":"invalid_api_key"}}"#;
+        let body =
+            r#"{"error":{"code":"invalid_api_key","detail":"DATA:IMAGE/PNG;base64,error-canary"}}"#;
         write!(
             socket,
             "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -1547,7 +1819,13 @@ fn websocket_rejected_upgrade_is_terminal() {
         )
         .expect("write upgrade rejection");
     });
-    let outcome = run_attempt(
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let debug_capture = DebugCapture::with_test_sink(
+        true,
+        Arc::new(move |capture| captured.lock().expect("capture lock").push(capture)),
+    );
+    let outcome = run_attempt_with_capture(
         &minimal_prompt(),
         &AttemptConfig {
             base_url: format!("http://{address}"),
@@ -1559,6 +1837,7 @@ fn websocket_rejected_upgrade_is_terminal() {
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
+        debug_capture,
         &mut |_| {},
         &mut || false,
         &test_network(),
@@ -1572,6 +1851,18 @@ fn websocket_rejected_upgrade_is_terminal() {
         Some(tau_proto::ProviderFailureKind::RequestRejected)
     );
     assert_eq!(failure.message, "provider returned HTTP 401");
+    let captures = captures.lock().expect("capture lock");
+    assert_eq!(
+        captures.len(),
+        1,
+        "upgrade failure sends no response.create"
+    );
+    assert_eq!(
+        captures[0].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+    );
+    let error: Value = serde_json::from_slice(captures[0].json()).expect("error capture");
+    assert_eq!(error["error"]["body"], "[image data omitted]");
 }
 
 /// Binary and oversized text frames must fail the finite WebSocket attempt
@@ -1632,12 +1923,18 @@ fn websocket_rejects_cumulative_response_overflow() {
 fn websocket_stalled_peer_cancels_without_close_wait() {
     let mut polls = 0_u8;
     let started = Instant::now();
-    let outcome = run_websocket_message(Message::Ping(Vec::new().into()), &mut || {
-        polls = polls.saturating_add(1);
-        5 <= polls
-    });
+    let (outcome, captures) =
+        run_websocket_messages_captured(vec![Message::Ping(Vec::new().into())], &mut || {
+            polls = polls.saturating_add(1);
+            8 <= polls
+        });
     assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
     assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(captures.len(), 1, "cancellation adds no response artifact");
+    assert_eq!(
+        captures[0].class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+    );
 }
 
 fn run_websocket_message(
@@ -1651,6 +1948,16 @@ fn run_websocket_messages(
     messages: Vec<Message>,
     is_canceled: &mut impl FnMut() -> bool,
 ) -> AttemptOutcome {
+    run_websocket_messages_captured(messages, is_canceled).0
+}
+
+fn run_websocket_messages_captured(
+    messages: Vec<Message>,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> (
+    AttemptOutcome,
+    Vec<tau_provider::debug_capture_writer::ProviderDebugCapture>,
+) {
     let stall = matches!(messages.as_slice(), [Message::Ping(_)]);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
     let address = listener.local_addr().expect("WebSocket server address");
@@ -1674,7 +1981,9 @@ fn run_websocket_messages(
             let _ = socket.read();
         }
     });
-    let outcome = run_attempt(
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&captures);
+    let outcome = run_attempt_with_capture(
         &minimal_prompt(),
         &AttemptConfig {
             base_url: format!("http://{address}"),
@@ -1686,12 +1995,17 @@ fn run_websocket_messages(
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
+        DebugCapture::with_test_sink(
+            true,
+            Arc::new(move |capture| captured.lock().expect("capture lock").push(capture)),
+        ),
         &mut |_| {},
         is_canceled,
         &test_network(),
     );
     join_websocket_peer(server);
-    outcome
+    let captures = std::mem::take(&mut *captures.lock().expect("capture lock"));
+    (outcome, captures)
 }
 
 fn accept_websocket_peer(listener: &TcpListener) -> TcpStream {

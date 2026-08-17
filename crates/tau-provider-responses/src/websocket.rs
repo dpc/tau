@@ -11,8 +11,8 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use super::{
-    AttemptConfig, AttemptProgress, CANCELLATION_POLL_INTERVAL, Error, MAX_EVENT_BYTES,
-    MAX_RESPONSE_BYTES, RequestBody, State, deadlines, read_capped_error_body,
+    AttemptConfig, AttemptModel, AttemptProgress, CANCELLATION_POLL_INTERVAL, DebugCapture, Error,
+    MAX_EVENT_BYTES, MAX_RESPONSE_BYTES, RequestBody, State, deadlines, read_capped_error_body,
 };
 
 /// Runs one fresh-socket WebSocket attempt.
@@ -22,9 +22,13 @@ use super::{
 /// a failed or closed `store=false` connection is not a valid continuation
 /// authority, and compatible endpoints need not implement OpenAI's
 /// connection-local cache. The selected transport never falls back to SSE.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream(
+    prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
+    model: &AttemptModel,
     body: &RequestBody,
+    debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptProgress),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
@@ -125,6 +129,10 @@ pub(super) async fn stream(
     );
     let serialized =
         serde_json::to_string(&envelope).map_err(|_| (Error::Json, State::default().progress()))?;
+    if is_canceled() {
+        return Err((Error::Canceled, State::default().progress()));
+    }
+    debug_capture.submit_wire_request(prompt, config, model, &envelope);
     send_bounded(
         &mut socket,
         Message::Text(serialized.into()),
@@ -134,7 +142,10 @@ pub(super) async fn stream(
     )
     .await?;
 
-    let mut state = State::default();
+    let mut state = State {
+        debug_capture,
+        ..Default::default()
+    };
     loop {
         if is_canceled() {
             return Err((Error::Canceled, state.progress()));
@@ -160,6 +171,7 @@ pub(super) async fn stream(
                 let value: Value = serde_json::from_str(text.as_ref())
                     .map_err(|_| (Error::Json, state.progress()))?;
                 if let Some(error) = provider_terminal_error(&value) {
+                    state.debug_capture.record_event(&value, text.as_ref());
                     return Err((error, state.progress()));
                 }
                 let qualifying_progress = state

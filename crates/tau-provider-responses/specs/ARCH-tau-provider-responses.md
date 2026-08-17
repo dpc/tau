@@ -31,6 +31,27 @@ sidecars; a terminal without that array accepts only a contiguous accumulated
 sequence. Invalid indices, gaps, and non-array terminal output fail the finite
 attempt rather than inventing an order.
 
+When the extension enables durable-session provider diagnostics, the adapter
+selects the existing HTTP/SSE or WebSocket capture class. HTTP/SSE records the
+final request at the `reqwest` send boundary. WebSocket records the exact
+`response.create` envelope at its frame-send boundary, after connection and
+upgrade work. A successful response is recorded only after terminal validation;
+non-cancellation build, runtime, transport, HTTP/provider, parsing, and validation
+failures produce bounded error metadata. Cancellation produces no error capture,
+though a request capture remains when cancellation arrives after that request's
+send boundary. Standalone compaction and disabled durable-session diagnostics
+construct no capture metadata and submit nothing.
+
+Response snapshots retain at most 512 KiB and 4,096 raw event JSON values.
+Serialization writes through a strict 1 MiB ceiling and replaces an oversized
+record with content-free truncation metadata without first materializing the
+oversized JSON. Before submission, the adapter recursively removes embedded image
+data URLs from requests, replay sidecars, function extras, successful raw events,
+and opaque HTTP error bodies. It also replaces exact occurrences of the untrimmed
+API key actually dispatched, including JSON keys; a projected-key collision
+fails closed by replacing that object. The shared writer keeps these best-effort
+artifacts separate from logs, journals, UI events, and the typed transcript.
+
 Each transport gives request dispatch, connection, and response-header work
 five minutes. After successful headers, one response stream has a separate
 ten-minute absolute deadline plus a five-minute semantic-idle deadline.
