@@ -195,7 +195,7 @@ fn cleanup_provider_captures(
     }
 }
 
-/// Remove recognized capture files from one legacy or instance-specific sink.
+/// Remove recognized capture files from one provider capture sink.
 fn cleanup_provider_capture_directory(
     directory: &Path,
     retention: Duration,
@@ -225,7 +225,7 @@ fn cleanup_provider_capture_candidate(
     }
 }
 
-/// Return whether a filename is one legacy or compressed provider capture.
+/// Return whether a filename is one compressed provider capture.
 fn is_provider_capture_filename(filename: &str) -> bool {
     path_tau_config_provider_debug_capture::ProviderDebugCaptureFilename::parse(filename).is_some()
 }

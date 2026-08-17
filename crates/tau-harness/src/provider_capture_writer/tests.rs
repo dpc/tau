@@ -14,7 +14,6 @@ fn job(session_dir: &Path, bytes: &[u8]) -> CaptureWriteJob {
             1,
             &prompt,
             tau_proto::ProviderDebugCaptureClass::HttpSseRequest,
-            ProviderDebugCaptureFormat::ZstdJson,
         ),
         zstd: bytes.to_vec(),
     }

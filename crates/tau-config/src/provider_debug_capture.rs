@@ -18,25 +18,6 @@ fn class_label(class: ProviderDebugCaptureClass) -> &'static str {
     }
 }
 
-/// On-disk encoding represented by one provider capture filename.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderDebugCaptureFormat {
-    /// Historical uncompressed JSON.
-    LegacyJson,
-    /// New zstd-compressed JSON.
-    ZstdJson,
-}
-
-impl ProviderDebugCaptureFormat {
-    /// Return the exact filename extension.
-    fn extension(self) -> &'static str {
-        match self {
-            Self::LegacyJson => ".json",
-            Self::ZstdJson => ".json.zst",
-        }
-    }
-}
-
 /// Validated provider capture basename shared by writers and retention cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderDebugCaptureFilename {
@@ -51,29 +32,20 @@ impl ProviderDebugCaptureFilename {
         timestamp_micros: u128,
         agent_prompt_id: &tau_proto::AgentPromptId,
         class: ProviderDebugCaptureClass,
-        format: ProviderDebugCaptureFormat,
     ) -> Self {
         Self {
             basename: format!(
-                "{timestamp_micros}-{}-{}{}",
+                "{timestamp_micros}-{}-{}.json.zst",
                 agent_prompt_id.as_str(),
                 class_label(class),
-                format.extension()
             ),
         }
     }
 
-    /// Parse an exact legacy or compressed provider capture basename.
+    /// Parse an exact compressed provider capture basename.
     #[must_use]
     pub fn parse(basename: &str) -> Option<Self> {
-        let (stem, format) = basename
-            .strip_suffix(".json.zst")
-            .map(|stem| (stem, ProviderDebugCaptureFormat::ZstdJson))
-            .or_else(|| {
-                basename
-                    .strip_suffix(".json")
-                    .map(|stem| (stem, ProviderDebugCaptureFormat::LegacyJson))
-            })?;
+        let stem = basename.strip_suffix(".json.zst")?;
         let (prefix, class) = [
             ProviderDebugCaptureClass::HttpSseRequest,
             ProviderDebugCaptureClass::WebsocketRequest,
@@ -95,7 +67,7 @@ impl ProviderDebugCaptureFilename {
         }
         let timestamp_micros = timestamp.parse().ok()?;
         let agent_prompt_id = tau_proto::AgentPromptId::parse(agent_prompt_id).ok()?;
-        let filename = Self::new(timestamp_micros, &agent_prompt_id, class, format);
+        let filename = Self::new(timestamp_micros, &agent_prompt_id, class);
         (filename.as_str() == basename).then_some(filename)
     }
 

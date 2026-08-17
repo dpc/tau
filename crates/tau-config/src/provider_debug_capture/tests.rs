@@ -1,9 +1,9 @@
-use super::{ProviderDebugCaptureClass, ProviderDebugCaptureFilename, ProviderDebugCaptureFormat};
+use super::{ProviderDebugCaptureClass, ProviderDebugCaptureFilename};
 
-/// Ensures construction and parsing agree for every supported capture class
-/// and both historical and current encodings.
+/// Ensures construction and parsing agree for every supported compressed
+/// capture class, while legacy uncompressed names are rejected.
 #[test]
-fn filename_round_trips_every_supported_class_and_format() {
+fn filename_round_trips_every_supported_compressed_class_only() {
     let prompt = tau_proto::AgentPromptId::parse("sp-6").expect("prompt id");
     for class in [
         ProviderDebugCaptureClass::HttpSseRequest,
@@ -14,16 +14,19 @@ fn filename_round_trips_every_supported_class_and_format() {
         ProviderDebugCaptureClass::ResponsesAttemptFailure,
         ProviderDebugCaptureClass::CompactHttpFailure,
     ] {
-        for format in [
-            ProviderDebugCaptureFormat::LegacyJson,
-            ProviderDebugCaptureFormat::ZstdJson,
-        ] {
-            let filename = ProviderDebugCaptureFilename::new(123, &prompt, class, format);
-            assert_eq!(
-                ProviderDebugCaptureFilename::parse(filename.as_str()),
-                Some(filename)
-            );
-        }
+        let filename = ProviderDebugCaptureFilename::new(123, &prompt, class);
+        assert_eq!(
+            ProviderDebugCaptureFilename::parse(filename.as_str()),
+            Some(filename.clone())
+        );
+        let legacy = filename
+            .as_str()
+            .strip_suffix(".zst")
+            .expect("compressed suffix");
+        assert!(
+            ProviderDebugCaptureFilename::parse(legacy).is_none(),
+            "{legacy} must remain unsupported"
+        );
     }
 }
 
@@ -36,7 +39,6 @@ fn compact_http_failure_has_distinct_compressed_filename() {
         123,
         &prompt,
         ProviderDebugCaptureClass::CompactHttpFailure,
-        ProviderDebugCaptureFormat::ZstdJson,
     );
     assert_eq!(
         filename.as_str(),
@@ -50,6 +52,7 @@ fn compact_http_failure_has_distinct_compressed_filename() {
 fn filename_parser_rejects_unrelated_and_malformed_names() {
     for invalid in [
         "notes-http-sse-request.json",
+        "123-prompt-http-sse-request.json",
         "backup-websocket-response.json.zst",
         "-prompt-http-sse-request.json",
         "abc-prompt-http-sse-request.json",

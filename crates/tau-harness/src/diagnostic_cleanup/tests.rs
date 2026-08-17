@@ -55,8 +55,8 @@ fn startup_cleanup_honors_persistence_retention_and_current_session() {
     );
 }
 
-/// Ensures cleanup removes legacy and compressed provider captures alongside
-/// the JSONL mirror while preserving canonical and unrelated files.
+/// Ensures cleanup removes compressed provider captures alongside the JSONL
+/// mirror while preserving canonical, legacy, and unrelated files.
 #[test]
 fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     let temp = TempDir::new().expect("temp state");
@@ -69,8 +69,6 @@ fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     let captures = session.join("debug/provider-requests");
     std::fs::create_dir_all(&captures).expect("capture dir");
     for name in [
-        "1-prompt-http-sse-request.json",
-        "2-prompt-http-sse-response.json",
         "3-prompt-websocket-request.json.zst",
         "4-prompt-websocket-response.json.zst",
     ] {
@@ -78,6 +76,8 @@ fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     }
     for name in [
         "unrelated.json",
+        "1-prompt-http-sse-request.json",
+        "2-prompt-http-sse-response.json",
         "request.json",
         "x-response.json",
         "x-request.json.gz",
@@ -100,8 +100,6 @@ fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     assert!(session.join("other.jsonl").exists());
     assert!(session.join("debug/canonical.cbor").exists());
     for name in [
-        "1-prompt-http-sse-request.json",
-        "2-prompt-http-sse-response.json",
         "3-prompt-websocket-request.json.zst",
         "4-prompt-websocket-response.json.zst",
     ] {
@@ -109,6 +107,8 @@ fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     }
     for name in [
         "unrelated.json",
+        "1-prompt-http-sse-request.json",
+        "2-prompt-http-sse-response.json",
         "request.json",
         "x-response.json",
         "x-request.json.gz",
@@ -163,14 +163,13 @@ fn cleanup_keeps_recent_diagnostic_jsonl() {
     assert!(session.join("events.jsonl").exists());
 }
 
-/// Ensures the shared cutoff removes JSONL, legacy captures, and compressed
-/// captures at the exact boundary while keeping each one just below it.
+/// Ensures the shared cutoff removes JSONL and compressed captures at the exact
+/// boundary while keeping each one just below it.
 #[test]
 fn cleanup_applies_exact_shared_cutoff_to_every_diagnostic_class() {
     let retention = Duration::from_secs(60);
     for relative in [
         "events.jsonl",
-        "debug/provider-requests/1-prompt-http-sse-request.json",
         "debug/provider-requests/1-prompt-websocket-response.json.zst",
         "debug/provider-requests/1-prompt-compact-http-failure.json.zst",
     ] {
@@ -359,7 +358,7 @@ fn cleanup_isolates_removal_errors_within_one_session() {
     let sessions = temp.path().join("sessions");
     let captures = sessions.join("one/debug/provider-requests");
     std::fs::create_dir_all(&captures).expect("capture dir");
-    let first = captures.join("1-prompt-http-sse-request.json");
+    let first = captures.join("1-prompt-http-sse-request.json.zst");
     let second = captures.join("2-prompt-unknown-response.json.zst");
     std::fs::write(&first, b"first").expect("first capture");
     std::fs::write(&second, b"second").expect("second capture");

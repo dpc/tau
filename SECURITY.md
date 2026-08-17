@@ -346,8 +346,8 @@ repairs nor salvages it. Re-check bounds under held locks, path switching,
 per-line lock reacquisition, overflow recovery, I/O retry, global poison,
 warning coalescing, and nonjoining exit whenever debug-log I/O changes.
 Startup cleanup applies the configured time window only to unlocked session
-`events.jsonl` regular files and exact legacy `.json` or compressed `.json.zst`
-provider request/response captures. It does not follow symlinks or remove
+`events.jsonl` regular files and exact compressed `.json.zst` provider
+request/response captures. It does not follow symlinks or remove
 canonical agent/session journals, unrelated debug files, or extension-owned
 JSONL.
 

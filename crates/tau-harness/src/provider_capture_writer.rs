@@ -7,9 +7,7 @@ use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tau_config::provider_debug_capture::{
-    ProviderDebugCaptureFilename, ProviderDebugCaptureFormat,
-};
+use tau_config::provider_debug_capture::ProviderDebugCaptureFilename;
 
 #[cfg(test)]
 mod tests;
@@ -86,7 +84,6 @@ pub(crate) fn enqueue(
         timestamp_micros,
         &capture.agent_prompt_id,
         capture.class,
-        ProviderDebugCaptureFormat::ZstdJson,
     );
     let agent_prompt_id = capture.agent_prompt_id.clone();
     let job = CaptureWriteJob {

@@ -115,8 +115,7 @@ The setting does not suppress other provider-work phases or terminal failures.
 `tau-config::provider_debug_capture` owns the dependency-neutral provider
 capture basename contract shared by provider writers and harness retention:
 canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid
-transport/direction class, and exact legacy `.json` or current `.json.zst`
-extension.
+transport/direction class, and exact compressed `.json.zst` extension.
 
 The recognized current classes include
 `responses-attempt-failure.json.zst`. It uses the same eligibility, path
