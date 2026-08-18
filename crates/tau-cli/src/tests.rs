@@ -11,16 +11,16 @@ use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
-    AgentCompactionTriggered, AgentManualCompactionRequested, AgentPromptCreated,
+    AgentCompacted, AgentCompactionTriggered, AgentManualCompactionRequested, AgentPromptCreated,
     AgentPromptFailed, AgentPromptQueued, AgentPromptRejected, AgentPromptSteered,
     AgentPromptSubmitted, AgentPromptTerminated, AgentPromptTerminationReason,
-    AgentStandaloneCompactionStarted, CborValue, ContentPart, ContextItem, ContextRole, Effort,
-    Event, ExtensionReady, HarnessContextUsageChanged, HarnessRoleInfo, HarnessRoleSelected,
-    HarnessRolesAvailable, HarnessSessionDir, MessageItem, OpaqueProviderItem,
-    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
-    SessionDirStatus, SessionStartReason, SessionStarted, ThinkingSummary, ToolBackgroundResult,
-    ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction,
-    Verbosity,
+    AgentStandaloneCompactionFailed, AgentStandaloneCompactionStarted, CborValue, ContentPart,
+    ContextItem, ContextRole, Effort, Event, ExtensionReady, HarnessContextUsageChanged,
+    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, HarnessSessionDir, MessageItem,
+    OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
+    ServiceTier, SessionDirStatus, SessionStartReason, SessionStarted, ThinkingSummary,
+    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
+    UiRoleUpdateAction, Verbosity,
 };
 
 use super::agent_navigation::AgentNavigationState;
@@ -1785,6 +1785,32 @@ fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::A
     }
 }
 
+fn standalone_compaction_started(
+    transaction_id: &str,
+    agent_prompt_id: &str,
+) -> AgentStandaloneCompactionStarted {
+    AgentStandaloneCompactionStarted {
+        agent_id: agent_id("main"),
+        transaction_id: tau_proto::CompactionTransactionId::parse(transaction_id)
+            .expect("known-safe compaction transaction id"),
+        compact_prompt_id: test_agent_prompt_id(agent_prompt_id),
+        cut: tau_proto::AgentHead::Root,
+        resume_through: None,
+        model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+    }
+}
+
+fn standalone_compaction_prompt_started(agent_prompt_id: &str) -> tau_proto::AgentPromptStarted {
+    tau_proto::AgentPromptStarted {
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        ..agent_prompt_started(agent_prompt_id, "s1")
+    }
+}
+
 /// Builds a fresh bound danger snapshot for selected-agent quota wiring tests.
 fn danger_quota_event(model: &tau_proto::ModelId) -> Event {
     let now = super::event_renderer::unix_time_millis();
@@ -3157,10 +3183,7 @@ fn manual_compaction_lifecycle_status_follows_target_agent_selection() {
         100,
         "Agent manager accepted compaction request for reviewer-KH50 (cr-48-0)"
     ));
-    assert!(vt.screen_contains(
-        100,
-        "Starting compaction request cr-48-0 for reviewer-KH50 (ct-48)"
-    ));
+    assert!(!vt.screen_contains(100, "Starting compaction request"));
 }
 
 #[test]
@@ -11015,6 +11038,274 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
 
     assert!(!vt.screen_contains(80, "compact"));
     assert!(!vt.screen_contains(80, "manual compaction requested"));
+}
+
+/// Ensures a typed standalone compaction lifecycle renders only compact
+/// progress and terminal markers while keeping streamed compactor text out of
+/// the transcript and editor context.
+#[test]
+fn standalone_compaction_stream_is_hidden_from_cli_output() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        standalone_compaction_started("ct-private", "ap-private"),
+    ));
+    renderer.handle(&Event::ProviderPromptSubmitted(
+        tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: test_agent_prompt_id("ap-private"),
+            originator: tau_proto::PromptOriginator::User,
+        },
+    ));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("ap-private"),
+            "private compactor answer",
+            Some("private compactor reasoning".to_owned()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(100, "private compactor answer"),
+        "the delayed typed start must remove output that earlier generic events rendered"
+    );
+
+    renderer.handle(&Event::AgentPromptStarted(
+        standalone_compaction_prompt_started("ap-private"),
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "compact Compacting…"));
+    assert!(!vt.screen_contains(100, "private compactor answer"));
+    assert!(!vt.screen_contains(100, "private compactor reasoning"));
+    let editor_context = renderer.editor_context();
+    let editor_context = editor_context.lock().expect("editor context");
+    assert!(editor_context.current_response.is_none());
+    assert!(editor_context.last_response.is_none());
+    drop(editor_context);
+
+    renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        agent_id: agent_id("main"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-private")
+                .expect("known-safe compaction transaction id"),
+        ),
+        cut: Some(tau_proto::AgentHead::Root),
+        suffix_end: Some(tau_proto::AgentHead::Root),
+        compact_prompt_id: Some(test_agent_prompt_id("ap-private")),
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: vec![assistant_message_item("private checkpoint")],
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "compact complete"));
+    assert!(!vt.screen_contains(100, "Compacting…"));
+    assert!(!vt.screen_contains(100, "private checkpoint"));
+    assert!(!renderer.agent_has_active_prompt_for_test("main"));
+    assert!(!renderer.main_agent_turn_active_for_test());
+    assert!(
+        !renderer
+            .agent_in_progress_state()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+/// Ensures cold catch-up can fold the durable standalone start and replacement
+/// boundary, without the live-only prompt-start fact, without an assistant turn
+/// or stale compaction marker.
+#[test]
+fn standalone_compaction_replay_retires_private_progress() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        standalone_compaction_started("ct-replay", "ap-replay"),
+    ));
+    renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        agent_id: agent_id("main"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-replay")
+                .expect("known-safe compaction transaction id"),
+        ),
+        cut: Some(tau_proto::AgentHead::Root),
+        suffix_end: Some(tau_proto::AgentHead::Root),
+        compact_prompt_id: Some(test_agent_prompt_id("ap-replay")),
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: vec![assistant_message_item("synthetic checkpoint")],
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(100, "Compacting…"));
+    assert!(!vt.screen_contains(100, "synthetic checkpoint"));
+    assert!(!vt.screen_contains(100, "◆"));
+}
+
+/// Ensures failed and terminated standalone lifecycles remove their private
+/// progress marker without clearing or rendering any compactor output.
+#[test]
+fn standalone_compaction_terminal_failures_clear_private_progress() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        standalone_compaction_started("ct-failed", "ap-failed"),
+    ));
+    renderer.handle(&Event::AgentPromptStarted(
+        standalone_compaction_prompt_started("ap-failed"),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionFailed(
+        AgentStandaloneCompactionFailed {
+            agent_id: agent_id("main"),
+            transaction_id: tau_proto::CompactionTransactionId::parse("ct-failed")
+                .expect("known-safe compaction transaction id"),
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: None,
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "compact failed"));
+    assert!(!vt.screen_contains(100, "Compacting…"));
+    assert!(!renderer.agent_has_active_prompt_for_test("main"));
+    assert!(!renderer.main_agent_turn_active_for_test());
+
+    renderer.handle(&Event::AgentPromptStarted(
+        standalone_compaction_prompt_started("ap-terminated"),
+    ));
+    renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        agent_id: agent_id("main"),
+        agent_prompt_id: test_agent_prompt_id("ap-terminated"),
+        reason: AgentPromptTerminationReason::Canceled,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "compact stopped"));
+    assert!(!vt.screen_contains(100, "Compacting…"));
+}
+
+/// Ensures standalone success and failure retire a watched side agent's
+/// prompt fallback without waiting for an agent-stats snapshot.
+#[test]
+fn standalone_compaction_terminals_clear_hidden_watched_activity() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("manager".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: test_session_id("s1"),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![agent_id("engineer")],
+            changed_agent_id: Some(agent_id("engineer")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+
+    let mut started = standalone_compaction_started("ct-side-success", "ap-side-success");
+    started.agent_id = agent_id("engineer");
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(started));
+    let mut prompt = standalone_compaction_prompt_started("ap-side-success");
+    prompt.agent_id = agent_id("engineer");
+    renderer.handle(&Event::AgentPromptStarted(prompt));
+    sync(&handle);
+    assert_eq!(renderer.active_side_agent_count_for_test(), 1);
+    assert!(vt.screen_contains(100, "❓✨ @engineer"));
+    assert!(vt.screen_contains(100, "@1"));
+
+    renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        agent_id: agent_id("engineer"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-side-success")
+                .expect("known-safe compaction transaction id"),
+        ),
+        cut: Some(tau_proto::AgentHead::Root),
+        suffix_end: Some(tau_proto::AgentHead::Root),
+        compact_prompt_id: Some(test_agent_prompt_id("ap-side-success")),
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: Vec::new(),
+    }));
+    sync(&handle);
+    assert_eq!(renderer.active_side_agent_count_for_test(), 0);
+    assert!(vt.screen_contains(100, "❓💤 @engineer"));
+    assert!(!vt.screen_contains(100, "@1"));
+
+    let mut started = standalone_compaction_started("ct-side-failed", "ap-side-failed");
+    started.agent_id = agent_id("engineer");
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(started));
+    let mut prompt = standalone_compaction_prompt_started("ap-side-failed");
+    prompt.agent_id = agent_id("engineer");
+    renderer.handle(&Event::AgentPromptStarted(prompt));
+    sync(&handle);
+    assert_eq!(renderer.active_side_agent_count_for_test(), 1);
+    assert!(vt.screen_contains(100, "❓✨ @engineer"));
+    assert!(vt.screen_contains(100, "@1"));
+
+    renderer.handle(&Event::AgentStandaloneCompactionFailed(
+        AgentStandaloneCompactionFailed {
+            agent_id: agent_id("engineer"),
+            transaction_id: tau_proto::CompactionTransactionId::parse("ct-side-failed")
+                .expect("known-safe compaction transaction id"),
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: None,
+        },
+    ));
+    sync(&handle);
+    assert_eq!(renderer.active_side_agent_count_for_test(), 0);
+    assert!(vt.screen_contains(100, "❓💤 @engineer"));
+    assert!(!vt.screen_contains(100, "@1"));
+}
+
+/// Ensures normal inference continues to render provider deltas when an
+/// unrelated malformed standalone lifecycle does not carry its compact
+/// operation.
+#[test]
+fn malformed_standalone_lifecycle_does_not_hide_inference_stream() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    let mut malformed = standalone_compaction_started("ct-malformed", "ap-inference");
+    malformed.operation = tau_proto::PromptOperation::Inference;
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(malformed));
+    renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
+        "ap-inference",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("ap-inference"),
+            "ordinary inference answer",
+            Some("ordinary inference reasoning".to_owned()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "ordinary inference answer"));
+    assert!(vt.screen_contains(100, "ordinary inference reasoning"));
 }
 
 #[test]

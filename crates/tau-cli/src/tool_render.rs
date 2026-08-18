@@ -381,7 +381,11 @@ pub(crate) enum ToolStatus {
 /// invocation.
 #[derive(Clone, Copy)]
 pub(crate) enum CompactionStatus {
+    /// The compaction stopped without an accepted replacement window.
+    Failure,
+    /// The compaction completed with an accepted replacement window.
     Success,
+    /// The compaction provider work is still in progress.
     Progress,
 }
 
@@ -898,6 +902,7 @@ pub(crate) fn render_compaction_block(
     let name = themed.add_style(names::TOOL_NAME);
     let spacer = themed.add_style(names::TOOL_ARGS);
     let status_style = themed.add_style(match status {
+        CompactionStatus::Failure => names::TOOL_STATUS_ERROR,
         CompactionStatus::Success => names::TOOL_STATUS_SUCCESS,
         CompactionStatus::Progress => names::PROGRESS_INDICATOR,
     });

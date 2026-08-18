@@ -468,6 +468,13 @@ pub(crate) struct EventRenderer {
     /// unknown prompts are still allowed for the no-agent adoptable
     /// transcript path.
     finished_provider_prompts: HashSet<String>,
+    /// Standalone-compaction transactions and their private provider prompts.
+    ///
+    /// This belongs to the owning transcript snapshot so a hidden agent's
+    /// failure can retire its own compacting marker without affecting the
+    /// selected agent.
+    standalone_compaction_transactions:
+        HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
     /// Visible watched-agent status-row blocks keyed by watched agent id.
     watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Shared current visible agent mirror for prompt submission.
@@ -478,9 +485,9 @@ pub(crate) struct EventRenderer {
     /// Per-`agent_prompt_id` UI state. An entry is created on
     /// `AgentPromptStarted` (or `ProviderPromptSubmitted` for prompts
     /// without an explicit start event) and torn down on
-    /// `ProviderResponseFinished` or `AgentPromptTerminated`. Storing the
-    /// response block id, thinking block id/text, and dispatch timestamp in one
-    /// place means every
+    /// `ProviderResponseFinished`, `AgentPromptTerminated`, or standalone
+    /// compaction outcome. Storing the response block id, thinking block
+    /// id/text, and dispatch timestamp in one place means every
     /// per-prompt cleanup is a single `prompts.remove(spid)` instead of
     /// four separate `.remove()` calls easy to forget when extending.
     prompts: HashMap<String, PromptState>,
@@ -746,6 +753,9 @@ struct AgentUiState {
     watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     editor_conversation_context: EditorConversationContext,
     prompts: HashMap<String, PromptState>,
+    /// Standalone-compaction transactions owned by this transcript snapshot.
+    standalone_compaction_transactions:
+        HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     queued_user_blocks: VecDeque<QueuedUserBlock>,
     submitted_prompt_ctx_ids: VecDeque<String>,
@@ -1286,9 +1296,13 @@ struct TurnStatsBlockEntry {
 /// event observed for the prompt (`AgentPromptStarted`,
 /// fallback `AgentPromptCreated`, or
 /// `ProviderPromptSubmitted`) through `ProviderResponseFinished` or
-/// `AgentPromptTerminated`.
+/// `AgentPromptTerminated`; standalone compaction outcomes also retire their
+/// private prompt state.
 #[derive(Default)]
 struct PromptState {
+    /// Whether this is a standalone-compaction provider prompt whose semantic
+    /// output remains private to the harness.
+    is_standalone_compaction: bool,
     /// Live agent-response block. `None` until the first provider update
     /// allocates a response/progress block.
     response_block_id: Option<tau_cli_term::BlockId>,
@@ -1827,6 +1841,7 @@ impl EventRenderer {
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
             finished_provider_prompts: HashSet::new(),
+            standalone_compaction_transactions: HashMap::new(),
             watched_agent_blocks: HashMap::new(),
             current_agent_state: path_std_sync::Arc::new(path_std_sync::Mutex::new(None)),
             draft_retargeter: None,
@@ -2584,6 +2599,9 @@ impl EventRenderer {
             watched_agent_blocks: std::mem::take(&mut self.watched_agent_blocks),
             editor_conversation_context: std::mem::take(&mut self.editor_conversation_context),
             prompts: std::mem::take(&mut self.prompts),
+            standalone_compaction_transactions: std::mem::take(
+                &mut self.standalone_compaction_transactions,
+            ),
             last_user_block: self.last_user_block.take(),
             queued_user_blocks: std::mem::take(&mut self.queued_user_blocks),
             submitted_prompt_ctx_ids: std::mem::take(&mut self.submitted_prompt_ctx_ids),
@@ -2637,6 +2655,7 @@ impl EventRenderer {
             self.publish_editor_conversation_context();
         }
         self.prompts = state.prompts;
+        self.standalone_compaction_transactions = state.standalone_compaction_transactions;
         self.last_user_block = state.last_user_block;
         self.queued_user_blocks = state.queued_user_blocks;
         self.submitted_prompt_ctx_ids = state.submitted_prompt_ctx_ids;
@@ -2863,6 +2882,18 @@ impl EventRenderer {
     #[cfg(test)]
     pub(crate) fn main_agent_turn_active_for_test(&self) -> bool {
         self.main_agent_turn_active
+    }
+
+    /// Reports whether generic prompt fallback still marks an agent active.
+    #[cfg(test)]
+    pub(crate) fn agent_has_active_prompt_for_test(&self, agent_id: &str) -> bool {
+        self.active_agent_prompts.contains_key(agent_id)
+    }
+
+    /// Reports the generic active side-agent count without reading terminal UI.
+    #[cfg(test)]
+    pub(crate) fn active_side_agent_count_for_test(&self) -> usize {
+        self.active_side_agent_count()
     }
 
     /// Reports whether the selected main agent has effective live activity.
@@ -3464,6 +3495,7 @@ impl EventRenderer {
         self.awaiting_new_agent_selection = false;
         self.agents_ui_state.clear();
         self.prompts.clear();
+        self.standalone_compaction_transactions.clear();
         self.last_user_block = None;
         self.queued_user_blocks.clear();
         self.submitted_prompt_ctx_ids.clear();
@@ -3930,6 +3962,11 @@ impl EventRenderer {
             Event::ProviderResponseFinished(finished) => {
                 self.agent_activity
                     .finish_prompt_if_active(&finished.agent_prompt_id, &finished.output_items);
+            }
+            Event::AgentCompacted(compacted) => {
+                if let Some(prompt_id) = &compacted.compact_prompt_id {
+                    self.agent_activity.finish_prompt(prompt_id, &[]);
+                }
             }
             Event::AgentPromptTerminated(terminated) => {
                 self.agent_activity
@@ -4608,6 +4645,10 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         target_agent_id: String,
     ) {
+        let refresh_visible_watch_activity = matches!(
+            event,
+            Event::AgentCompacted(_) | Event::AgentStandaloneCompactionFailed(_)
+        );
         let visible_agent_id = self.displayed_agent_id.clone();
         let visible_state =
             self.take_visible_agent_state_with_output(tau_cli_term::OutputSnapshot::default());
@@ -4628,6 +4669,10 @@ impl EventRenderer {
         self.agents_ui_state.insert(target_agent_id, target_state);
         self.restore_renderer_bookkeeping(visible_state);
         self.displayed_agent_id = visible_agent_id;
+        if refresh_visible_watch_activity {
+            self.refresh_watched_agent_blocks();
+            self.render_model_status_if_present();
+        }
         self.publish_editor_conversation_context();
     }
 
@@ -5144,6 +5189,12 @@ impl EventRenderer {
             }
             Event::AgentStandaloneCompactionStarted(started) => {
                 EventAgentIdResolution::Agent(started.agent_id.to_string())
+            }
+            Event::AgentStandaloneCompactionFailed(failed) => {
+                EventAgentIdResolution::Agent(failed.agent_id.to_string())
+            }
+            Event::AgentCompacted(compacted) => {
+                EventAgentIdResolution::Agent(compacted.agent_id.to_string())
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 EventAgentIdResolution::Agent(changed.agent_id.to_string())
@@ -6197,14 +6248,41 @@ impl EventRenderer {
         self.clear_accepted_submission_indicator();
         self.finished_provider_prompts
             .remove(prompt.agent_prompt_id.as_str());
-        let state = self
-            .prompts
-            .entry(prompt.agent_prompt_id.to_string())
-            .or_default();
-        if state.started_at.is_some() {
+        let is_standalone_compaction = matches!(
+            prompt.operation,
+            tau_proto::PromptOperation::StandaloneCompaction
+        );
+        let (already_started, had_visible_output) = {
+            let state = self
+                .prompts
+                .entry(prompt.agent_prompt_id.to_string())
+                .or_default();
+            if is_standalone_compaction {
+                state.is_standalone_compaction = true;
+            }
+            (
+                state.started_at.is_some(),
+                state.response_block_id.is_some() || state.thinking_block_id.is_some(),
+            )
+        };
+        if is_standalone_compaction {
+            self.clear_standalone_compaction_output(prompt.agent_prompt_id.as_str());
+            if had_visible_output && prompt.originator.is_user() {
+                self.set_editor_current_response(None);
+            }
+            self.update_live_compaction_block(
+                prompt.agent_prompt_id.as_str(),
+                Some((CompactionStatus::Progress, "Compacting…".to_owned())),
+            );
             return;
         }
-        state.started_at = Some(Instant::now());
+        if already_started {
+            return;
+        }
+        self.prompts
+            .entry(prompt.agent_prompt_id.to_string())
+            .or_default()
+            .started_at = Some(Instant::now());
         self.clear_editor_current_response_for_user_prompt(prompt.originator.is_user());
         self.last_user_block = None;
         self.promote_next_queued_prompt("user-prompt-created");
@@ -6217,6 +6295,12 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
+        if self.finish_standalone_compaction_prompt(
+            terminated.agent_prompt_id.as_str(),
+            Some(("stopped", CompactionStatus::Failure)),
+        ) {
+            return;
+        }
         self.clear_accepted_submission_indicator();
         self.clear_editor_current_response_for_user_prompt(terminated.originator.is_user());
         self.finished_provider_prompts
@@ -6234,6 +6318,84 @@ impl EventRenderer {
             self.handle.remove_block(block_id);
         }
         self.handle.redraw();
+    }
+
+    /// Removes any visible response state created before a standalone prompt's
+    /// typed lifecycle fact arrived.
+    fn clear_standalone_compaction_output(&mut self, prompt_id: &str) {
+        let Some(state) = self.prompts.get_mut(prompt_id) else {
+            return;
+        };
+        state.response_text_by_index.clear();
+        state.thinking_text_by_index.clear();
+        state.thinking_text = None;
+        state.missing_response_prefix = false;
+        state.missing_thinking_prefix = false;
+        state.response_markdown_cache = MarkdownStreamCache::default();
+        state.thinking_markdown_cache = MarkdownStreamCache::default();
+        if let Some(block_id) = state.response_block_id.take() {
+            self.handle.remove_block(block_id);
+        }
+        if let Some(block_id) = state.thinking_block_id.take() {
+            self.handle.remove_block(block_id);
+        }
+        if let Some(block_id) = state.compaction_block_id.take() {
+            self.handle.remove_block(block_id);
+        }
+    }
+
+    /// Retires one private standalone compaction prompt and, when present,
+    /// replaces its live marker with a content-free terminal marker.
+    fn finish_standalone_compaction_prompt(
+        &mut self,
+        prompt_id: &str,
+        terminal: Option<(&str, CompactionStatus)>,
+    ) -> bool {
+        let Some(state) = self.prompts.remove(prompt_id) else {
+            self.standalone_compaction_transactions
+                .retain(|_, mapped_prompt_id| mapped_prompt_id.as_str() != prompt_id);
+            return false;
+        };
+        if !state.is_standalone_compaction {
+            self.prompts.insert(prompt_id.to_owned(), state);
+            return false;
+        }
+        self.standalone_compaction_transactions
+            .retain(|_, mapped_prompt_id| mapped_prompt_id.as_str() != prompt_id);
+        self.finished_provider_prompts.insert(prompt_id.to_owned());
+        if let Some(block_id) = state.thinking_block_id {
+            self.handle.remove_block(block_id);
+        }
+        if let Some(block_id) = state.compaction_block_id {
+            self.handle.remove_block(block_id);
+        }
+        if let Some(block_id) = state.response_block_id {
+            self.handle.remove_block(block_id);
+        }
+        if let Some((text, status)) = terminal {
+            self.handle.print_output(
+                "standalone-compaction-terminal",
+                render_compaction_block(&self.theme, text, status),
+            );
+        }
+        self.handle.redraw();
+        true
+    }
+
+    /// Completes one standalone provider prompt in both the private transcript
+    /// projection and the generic prompt-activity fallback.
+    fn complete_standalone_compaction_prompt(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        prompt_id: &tau_proto::AgentPromptId,
+        terminal: Option<(&str, CompactionStatus)>,
+    ) {
+        self.finish_standalone_compaction_prompt(prompt_id.as_str(), terminal);
+        self.mark_agent_prompt_inactive(agent_id.as_str(), prompt_id.as_str());
+        self.agent_activity.finish_prompt(prompt_id, &[]);
+        if !self.agent_activity.has_active_prompts() {
+            self.set_main_agent_turn_active(false);
+        }
     }
 
     fn promote_next_queued_prompt(&mut self, label: &'static str) {
@@ -6282,6 +6444,13 @@ impl EventRenderer {
         self.prompt_agents
             .entry(spid.to_owned())
             .or_insert_with(|| update.agent_id.to_string());
+        if self
+            .prompts
+            .get(spid)
+            .is_some_and(|state| state.is_standalone_compaction)
+        {
+            return;
+        }
         if self.is_stale_terminal_stats_only_update(update) {
             return;
         }
@@ -6615,6 +6784,9 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
     ) {
+        if self.finish_standalone_compaction_prompt(finished.agent_prompt_id.as_str(), None) {
+            return;
+        }
         if finished.originator.is_user()
             && tool_calls_from_output_items(&finished.output_items).is_empty()
         {
@@ -8154,23 +8326,45 @@ impl EventRenderer {
                 true
             }
             Event::AgentStandaloneCompactionStarted(started) => {
-                let tau_proto::StandaloneCompactionTrigger::ManualAgentTool { request_id, .. } =
-                    &started.trigger
-                else {
-                    return true;
-                };
-                let notice = tau_proto::HarnessNotice::new(
-                    tau_proto::notice_kind::HARNESS_NOTICE,
-                    format!(
-                        "Starting compaction request {request_id} for {} ({})",
-                        started.agent_id, started.transaction_id
-                    ),
-                    tau_proto::NoticeLevel::Info,
-                );
-                if notice.visible_at(self.notice_level) {
-                    self.handle.print_output(
-                        "manual-compaction-started",
-                        render_harness_notice(&self.theme, &notice),
+                if matches!(
+                    started.operation,
+                    tau_proto::PromptOperation::StandaloneCompaction
+                ) {
+                    self.standalone_compaction_transactions.insert(
+                        started.transaction_id.clone(),
+                        started.compact_prompt_id.clone(),
+                    );
+                }
+                true
+            }
+            Event::AgentCompacted(compacted) => {
+                let prompt_id = compacted.compact_prompt_id.as_ref().cloned().or_else(|| {
+                    compacted
+                        .transaction_id
+                        .as_ref()
+                        .and_then(|transaction_id| {
+                            self.standalone_compaction_transactions
+                                .remove(transaction_id)
+                        })
+                });
+                if let Some(prompt_id) = prompt_id {
+                    self.complete_standalone_compaction_prompt(
+                        &compacted.agent_id,
+                        &prompt_id,
+                        Some(("complete", CompactionStatus::Success)),
+                    );
+                }
+                true
+            }
+            Event::AgentStandaloneCompactionFailed(failed) => {
+                if let Some(prompt_id) = self
+                    .standalone_compaction_transactions
+                    .remove(&failed.transaction_id)
+                {
+                    self.complete_standalone_compaction_prompt(
+                        &failed.agent_id,
+                        &prompt_id,
+                        Some(("failed", CompactionStatus::Failure)),
                     );
                 }
                 true
