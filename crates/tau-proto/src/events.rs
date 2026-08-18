@@ -2010,7 +2010,7 @@ pub struct ToolCancelRequest {
 /// Tool/Core peers submit this payload as [`Event::ToolCancelledReported`].
 /// The harness publishes [`Event::ToolCancelled`] only for accepted foreground
 /// cancellation; backgrounded cancellation becomes [`ToolBackgroundError`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancelled {
     /// Stable id of the cancelled tool call.
     pub call_id: ToolCallId,
@@ -2023,6 +2023,12 @@ pub struct ToolCancelled {
     /// durable terminal fact unambiguous on replay.
     #[serde(default)]
     pub presentation: ToolResultPresentation,
+    /// Generic UI state for the cancelled tool use.
+    ///
+    /// This is a complete replacement display, matching progress and terminal
+    /// result/error display semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolUseState>,
 }
 
 // ---------------------------------------------------------------------------

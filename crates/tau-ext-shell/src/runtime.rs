@@ -417,6 +417,7 @@ impl ShellRuntime {
                     call_id: pending_workdir.invoke.call_id,
                     tool_name: pending_workdir.invoke.tool_name,
                     tool_type: tau_proto::ToolType::Function,
+                    display: None,
                 })
             } else if pending_workdir.matched_request {
                 let output = path_crate_tools::workdir::output(cwd);
@@ -528,6 +529,7 @@ impl ShellRuntime {
                 call_id: pending.invoke.call_id,
                 tool_name: pending.invoke.tool_name,
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             })
         } else {
             Event::ToolError(tau_proto::ToolError {

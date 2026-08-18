@@ -1,21 +1,27 @@
 //! Generic web-search extension backed by hosted MCP search providers.
 //!
-//! The extension registers Exa-backed `web_search` by default and also exposes
-//! Parallel.ai-backed `web_search` / `web_fetch` tools. The Parallel tools use
-//! collision-free Tau-internal names and are disabled by default so roles can
-//! opt into them without creating a duplicate model-visible `web_search`.
-//! The extension's architecture and security boundaries are summarized in
-//! `ARCH-tau-ext-websearch`.
+//! The extension registers composite `web_search` and `web_fetch` tools that
+//! rotate between Exa and Parallel and fail over sequentially.
+//! Provider-specific tools use collision-free Tau-internal names and remain
+//! disabled by default. The extension's architecture and security boundaries
+//! are summarized in `ARCH-tau-ext-websearch`.
 //! Provider trust, transport sanitization, and test isolation follow
 //! `SPEC-tau-ext-websearch-provider-boundary` and
 //! `testing.md`.
 
+mod composite;
+
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use composite::{
+    CompositeCall, HostedProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal,
+};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     CborValue, Event, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolStarted,
@@ -29,10 +35,10 @@ static SATURATION_HOOK: Mutex<Option<(tau_proto::ToolCallId, mpsc::Sender<bool>)
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "websearch";
 
-/// Tau-internal tool name for the default Exa web search.
+/// Tau-internal tool name for the explicit Exa web search.
 pub const EXA_TOOL_NAME: &str = "websearch_exa";
 
-/// Backwards-compatible alias for the default Exa tool name.
+/// Backwards-compatible alias for the explicit Exa tool name.
 pub const TOOL_NAME: &str = EXA_TOOL_NAME;
 
 /// Tau-internal tool name for Parallel web search.
@@ -40,6 +46,15 @@ pub const PARALLEL_SEARCH_TOOL_NAME: &str = "websearch_parallel_search";
 
 /// Tau-internal tool name for Parallel web fetch.
 pub const PARALLEL_FETCH_TOOL_NAME: &str = "websearch_parallel_fetch";
+
+/// Tau-internal tool name for Exa web fetch.
+pub const EXA_FETCH_TOOL_NAME: &str = "websearch_exa_fetch";
+
+/// Tau-internal tool name for composite web search.
+pub const HYBRID_SEARCH_TOOL_NAME: &str = "websearch_hybrid_search";
+
+/// Tau-internal tool name for composite web fetch.
+pub const HYBRID_FETCH_TOOL_NAME: &str = "websearch_hybrid_fetch";
 
 /// Tool name advertised to models for search tools.
 pub const MODEL_VISIBLE_SEARCH_TOOL_NAME: &str = "web_search";
@@ -61,6 +76,7 @@ pub const DEFAULT_ENDPOINT: &str = DEFAULT_EXA_ENDPOINT;
 pub const DEFAULT_PARALLEL_ENDPOINT: &str = "https://search.parallel.ai/mcp";
 
 const EXA_REMOTE_TOOL: &str = "web_search_exa";
+const EXA_REMOTE_FETCH_TOOL: &str = "web_fetch_exa";
 const PARALLEL_REMOTE_SEARCH_TOOL: &str = "web_search";
 const PARALLEL_REMOTE_FETCH_TOOL: &str = "web_fetch";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -81,11 +97,19 @@ const WEB_CONTENT_CLOSE: &str = "</tau_web_content>";
 const WEB_CONTENT_CLOSE_VISIBLE: &str = "&lt;/tau_web_content&gt;";
 const HTTP_TOO_MANY_REQUESTS: u16 = 429;
 const RATE_LIMITED_ERROR: &str = "web service rate-limited the request; try again later.";
+const MAX_PROVIDER_ATTEMPTS: usize = 3;
+const ATTEMPT_CHIP_MAX_CHARS: usize = 96;
+const AGGREGATE_ERROR_MAX_BYTES: usize = 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum WebAdapter {
     Exa,
     Parallel,
+    #[cfg(test)]
+    Third,
+    #[cfg(test)]
+    Fourth,
 }
 
 impl WebAdapter {
@@ -93,11 +117,26 @@ impl WebAdapter {
         match self {
             Self::Exa => "exa",
             Self::Parallel => "parallel",
+            #[cfg(test)]
+            Self::Third => "third",
+            #[cfg(test)]
+            Self::Fourth => "fourth",
+        }
+    }
+
+    const fn display_name(self) -> &'static str {
+        match self {
+            Self::Exa => "Exa",
+            Self::Parallel => "Parallel",
+            #[cfg(test)]
+            Self::Third => "Third",
+            #[cfg(test)]
+            Self::Fourth => "Fourth",
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WebOperation {
     Search,
     Fetch,
@@ -146,6 +185,26 @@ trait Searcher: Send + Sync + 'static {
     /// Search Exa for `query`, returning decoded bounded provider text.
     fn search(&self, query: &str, num_results: u32) -> Result<String, String>;
 
+    /// Fetch one URL through Exa.
+    fn fetch(&self, _url: &str) -> Result<String, String> {
+        Err("exa fetch is unavailable".to_owned())
+    }
+
+    /// Search with one scheduler-owned deadline slice.
+    fn search_with_timeout(
+        &self,
+        query: &str,
+        num_results: u32,
+        _timeout: Duration,
+    ) -> Result<String, String> {
+        self.search(query, num_results)
+    }
+
+    /// Fetch with one scheduler-owned deadline slice.
+    fn fetch_with_timeout(&self, url: &str, _timeout: Duration) -> Result<String, String> {
+        self.fetch(url)
+    }
+
     /// Apply a runtime endpoint update from a harness `Configure`.
     fn set_endpoint(&self, _endpoint: String) {}
 }
@@ -156,12 +215,22 @@ trait ParallelClient: Send + Sync + 'static {
     /// Call one remote Parallel MCP tool with JSON arguments.
     fn call(&self, remote_tool: &str, arguments: serde_json::Value) -> Result<String, String>;
 
+    /// Call one remote tool with one scheduler-owned deadline slice.
+    fn call_with_timeout(
+        &self,
+        remote_tool: &str,
+        arguments: serde_json::Value,
+        _timeout: Duration,
+    ) -> Result<String, String> {
+        self.call(remote_tool, arguments)
+    }
+
     /// Apply a runtime endpoint update from a harness `Configure`.
     fn set_endpoint(&self, _endpoint: String) {}
 }
 
 /// Extension-side config carried in `HarnessOutputMessage::Configure.config`.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ExtConfig {
     /// Backwards-compatible Exa endpoint override.
@@ -171,10 +240,26 @@ struct ExtConfig {
     /// Parallel endpoint override. No API-key/auth configuration is supported;
     /// Tau uses Parallel's default unauthenticated endpoint.
     parallel_endpoint: Option<String>,
+    /// Ordered providers used for model-visible web search.
+    search_providers: Vec<WebAdapter>,
+    /// Ordered providers used for model-visible web fetch.
+    fetch_providers: Vec<WebAdapter>,
+}
+
+impl Default for ExtConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            exa_endpoint: None,
+            parallel_endpoint: None,
+            search_providers: vec![WebAdapter::Exa, WebAdapter::Parallel],
+            fetch_providers: vec![WebAdapter::Exa, WebAdapter::Parallel],
+        }
+    }
 }
 
 impl ExtConfig {
-    fn validate(self) -> Result<Self, String> {
+    fn validate(self) -> Result<ValidatedConfig, String> {
         if self.endpoint.is_some()
             && self.exa_endpoint.is_some()
             && self.endpoint != self.exa_endpoint
@@ -192,8 +277,30 @@ impl ExtConfig {
                 validate_endpoint(name, endpoint)?;
             }
         }
-        Ok(self)
+        let search_pool = ProviderPool::new("search_providers", self.search_providers)?;
+        let fetch_pool = ProviderPool::new("fetch_providers", self.fetch_providers)?;
+        Ok(ValidatedConfig {
+            endpoint: self.endpoint,
+            exa_endpoint: self.exa_endpoint,
+            parallel_endpoint: self.parallel_endpoint,
+            search_pool,
+            fetch_pool,
+        })
     }
+}
+
+/// Fully validated runtime configuration built before state mutation.
+struct ValidatedConfig {
+    /// Backwards-compatible Exa endpoint override.
+    endpoint: Option<String>,
+    /// Explicit Exa endpoint override.
+    exa_endpoint: Option<String>,
+    /// Parallel endpoint override.
+    parallel_endpoint: Option<String>,
+    /// Validated non-empty search provider pool.
+    search_pool: ProviderPool,
+    /// Validated non-empty fetch provider pool.
+    fetch_pool: ProviderPool,
 }
 
 fn run_with_clients<R, W>(
@@ -210,6 +317,17 @@ where
     let state = WebsearchState {
         searcher,
         parallel_client,
+        search_pool: ProviderPool::new(
+            "search_providers",
+            vec![WebAdapter::Exa, WebAdapter::Parallel],
+        )
+        .expect("built-in search pool is valid"),
+        fetch_pool: ProviderPool::new(
+            "fetch_providers",
+            vec![WebAdapter::Exa, WebAdapter::Parallel],
+        )
+        .expect("built-in fetch pool is valid"),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
         sem: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         completed_tx,
         completed_rx,
@@ -256,8 +374,7 @@ fn run_websearch_loop(
     loop {
         while let Ok(completed) = runtime.state().completed_rx.try_recv() {
             let CompletedTool { terminal, _permit } = completed;
-            let terminal = terminal?;
-            #[cfg(test)]
+            let terminal = arbitrate_cancelled_terminal(&runtime.state().cancellations, terminal?);
             let call_id = match &terminal {
                 tau_client::ToolTerminalOutcome::Result(result) => result.call_id.clone(),
                 tau_client::ToolTerminalOutcome::Failure(error) => error.call_id.clone(),
@@ -270,6 +387,12 @@ fn run_websearch_loop(
                 runtime.state().sem.available() < MAX_IN_FLIGHT,
             );
             runtime.handle().report_tool_terminal(terminal)?;
+            runtime
+                .state()
+                .cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&call_id);
             drop(_permit);
         }
         match runtime.try_recv()? {
@@ -343,11 +466,28 @@ impl TauExtension for WebsearchExtension {
                     tracing::info!(target: LOG_TARGET, provider = "parallel", "applying endpoint override");
                     cx.state.parallel_client.set_endpoint(endpoint);
                 }
+                cx.state.search_pool = cfg.search_pool;
+                cx.state.fetch_pool = cfg.fetch_pool;
                 Ok(())
             })
+            .tool(hybrid_search_tool_spec(), handle_tool_invocation)
+            .tool(hybrid_fetch_tool_spec(), handle_tool_invocation)
             .tool(exa_tool_spec(), handle_tool_invocation)
+            .tool(exa_fetch_tool_spec(), handle_tool_invocation)
             .tool(parallel_search_tool_spec(), handle_tool_invocation)
             .tool(parallel_fetch_tool_spec(), handle_tool_invocation)
+            .on_live::<tau_proto::ToolCancelRequest>(|cx| {
+                if let Some(cancelled) = cx
+                    .state
+                    .cancellations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&cx.event.target_call_id)
+                {
+                    cancelled.store(true, Ordering::Release);
+                }
+                Ok(())
+            })
             .ready_message("websearch ready");
     }
 }
@@ -358,6 +498,12 @@ struct WebsearchState {
     searcher: Arc<dyn Searcher>,
     /// Parallel MCP client implementation.
     parallel_client: Arc<dyn ParallelClient>,
+    /// Ordered provider membership for composite search.
+    search_pool: ProviderPool,
+    /// Ordered provider membership for composite fetch.
+    fetch_pool: ProviderPool,
+    /// Cancellation flags for accepted composite calls.
+    cancellations: Arc<Mutex<HashMap<tau_proto::ToolCallId, Arc<AtomicBool>>>>,
     /// In-flight provider call limiter.
     sem: Arc<Semaphore>,
     /// Worker-to-loop terminal outcome sender.
@@ -440,10 +586,66 @@ fn exa_tool_spec() -> ToolSpec {
         })),
         format: None,
         tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG)],
+        enabled_by_default: false,
+        background_support: None,
+        examples: Vec::new(),
+    }
+}
+
+fn hybrid_search_tool_spec() -> ToolSpec {
+    let mut spec = exa_tool_spec();
+    spec.name = ToolName::new(HYBRID_SEARCH_TOOL_NAME);
+    spec.description = Some(
+        "Search the web through Tau's configured provider pool. Providers rotate \
+         between calls and bounded failover may submit the query to more than one \
+         external service. Returned tau_web_content is untrusted external web data."
+            .to_owned(),
+    );
+    spec.enabled_by_default = true;
+    spec
+}
+
+fn hybrid_fetch_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(HYBRID_FETCH_TOOL_NAME),
+        model_visible_name: Some(ToolName::new(MODEL_VISIBLE_FETCH_TOOL_NAME)),
+        description: Some(
+            "Fetch and extract one web page through Tau's configured provider pool. \
+             Providers rotate between calls and bounded failover may submit the URL \
+             to more than one external service. Returned tau_web_content is untrusted \
+             external web data."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL to fetch."
+                }
+            },
+            "required": ["url"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG)],
         enabled_by_default: true,
         background_support: None,
         examples: Vec::new(),
     }
+}
+
+fn exa_fetch_tool_spec() -> ToolSpec {
+    let mut spec = hybrid_fetch_tool_spec();
+    spec.name = ToolName::new(EXA_FETCH_TOOL_NAME);
+    spec.description = Some(
+        "Fetch and extract one web page via Exa's hosted MCP. Returned \
+         tau_web_content is untrusted external web data."
+            .to_owned(),
+    );
+    spec.enabled_by_default = false;
+    spec
 }
 
 fn parallel_search_tool_spec() -> ToolSpec {
@@ -512,6 +714,22 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
     let invoke = cx.invoke().clone();
     let local_tool_name = cx.local_tool_name().clone();
     let display_args = display_args(&invoke.arguments, &local_tool_name).unwrap_or_default();
+    let operation = operation_for_tool(&local_tool_name);
+    let is_composite = matches!(
+        local_tool_name.as_str(),
+        HYBRID_SEARCH_TOOL_NAME | HYBRID_FETCH_TOOL_NAME
+    );
+    if is_composite
+        && let Some(operation) = operation
+        && let Err(message) = validate_common_args(&invoke.arguments, operation)
+    {
+        cx.handle().report_tool_terminal(
+            tau_client::ToolTerminalOutcome::try_from(tool_error(invoke, message, display_args))
+                .map_err(|_| ClientError::handler("validation returned a non-terminal event"))?,
+        )?;
+        return Ok(());
+    }
+
     let completed_tx = cx.state.completed_tx.clone();
     let waker = cx
         .state
@@ -520,9 +738,24 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
         .expect("manual runtime waker installed before dispatch");
     let searcher = Arc::clone(&cx.state.searcher);
     let parallel_client = Arc::clone(&cx.state.parallel_client);
+    let handle = cx.handle();
     if let Some(permit) = cx.state.sem.try_acquire() {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let composite_providers = match local_tool_name.as_str() {
+            HYBRID_SEARCH_TOOL_NAME => Some(cx.state.search_pool.reserve()),
+            HYBRID_FETCH_TOOL_NAME => Some(cx.state.fetch_pool.reserve()),
+            _ => None,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if composite_providers.is_some() {
+            cx.state
+                .cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(invoke.call_id.clone(), Arc::clone(&cancelled));
+        }
         if let Some(display) = initial_display(&local_tool_name, display_args.clone()) {
-            let _ = cx.handle().report_tool_progress_detached(ToolProgress {
+            let _ = handle.report_tool_progress_detached(ToolProgress {
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 message: None,
@@ -531,13 +764,32 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
             });
         }
         std::thread::spawn(move || {
-            let event = dispatch_tool_invoke(
-                invoke,
-                &local_tool_name,
-                searcher.as_ref(),
-                parallel_client.as_ref(),
-                display_args,
-            );
+            let event = if let (Some(providers), Some(operation)) = (composite_providers, operation)
+            {
+                let dispatcher = HostedProviderDispatcher {
+                    searcher: searcher.as_ref(),
+                    parallel_client: parallel_client.as_ref(),
+                };
+                CompositeCall {
+                    invoke,
+                    operation,
+                    providers,
+                    display_args,
+                    cancelled: cancelled.as_ref(),
+                    dispatcher: &dispatcher,
+                    handle: Some(&handle),
+                    deadline,
+                }
+                .run()
+            } else {
+                dispatch_tool_invoke(
+                    invoke,
+                    &local_tool_name,
+                    searcher.as_ref(),
+                    parallel_client.as_ref(),
+                    display_args,
+                )
+            };
             let terminal = tau_client::ToolTerminalOutcome::try_from(event).map_err(|event| {
                 ClientError::handler(format!(
                     "websearch dispatch returned non-terminal event {}",
@@ -563,6 +815,25 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
     Ok(())
 }
 
+fn operation_for_tool(tool_name: &ToolName) -> Option<WebOperation> {
+    match tool_name.as_str() {
+        HYBRID_SEARCH_TOOL_NAME | EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME => {
+            Some(WebOperation::Search)
+        }
+        HYBRID_FETCH_TOOL_NAME | EXA_FETCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME => {
+            Some(WebOperation::Fetch)
+        }
+        _ => None,
+    }
+}
+
+fn validate_common_args(arguments: &CborValue, operation: WebOperation) -> Result<(), String> {
+    match operation {
+        WebOperation::Search => parse_exa_args(arguments).map(|_| ()),
+        WebOperation::Fetch => validate_parallel_args(arguments, "url"),
+    }
+}
+
 fn dispatch_tool_invoke(
     invoke: ToolStarted,
     local_tool_name: &ToolName,
@@ -572,6 +843,7 @@ fn dispatch_tool_invoke(
 ) -> Event {
     match local_tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher, display_args),
+        EXA_FETCH_TOOL_NAME => dispatch_exa_fetch(invoke, searcher, display_args),
         PARALLEL_SEARCH_TOOL_NAME => dispatch_parallel(
             invoke,
             parallel_client,
@@ -604,7 +876,12 @@ fn dispatch_tool_invoke(
 fn initial_display(local_tool_name: &ToolName, args: String) -> Option<ToolUseState> {
     matches!(
         local_tool_name.as_str(),
-        EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME
+        HYBRID_SEARCH_TOOL_NAME
+            | HYBRID_FETCH_TOOL_NAME
+            | EXA_TOOL_NAME
+            | EXA_FETCH_TOOL_NAME
+            | PARALLEL_SEARCH_TOOL_NAME
+            | PARALLEL_FETCH_TOOL_NAME
     )
     .then_some(ToolUseState {
         args,
@@ -620,18 +897,22 @@ fn initial_display(local_tool_name: &ToolName, args: String) -> Option<ToolUseSt
 /// query values, configured provider endpoints, or provider-returned data.
 fn display_args(arguments: &CborValue, local_tool_name: &ToolName) -> Option<String> {
     match local_tool_name.as_str() {
-        EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME => cbor_text_field(arguments, "query")
-            .map(|query| format!("query: {}", bounded_display_metadata(&query))),
-        PARALLEL_FETCH_TOOL_NAME => cbor_text_field(arguments, "url").map(|url| {
-            let target = match Url::parse(&url) {
-                Ok(url) => url
-                    .host_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "(hostless URL)".to_owned()),
-                Err(_) => url,
-            };
-            format!("fetch: {}", bounded_display_metadata(&target))
-        }),
+        HYBRID_SEARCH_TOOL_NAME | EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME => {
+            cbor_text_field(arguments, "query")
+                .map(|query| format!("query: {}", bounded_display_metadata(&query)))
+        }
+        HYBRID_FETCH_TOOL_NAME | EXA_FETCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME => {
+            cbor_text_field(arguments, "url").map(|url| {
+                let target = match Url::parse(&url) {
+                    Ok(url) => url
+                        .host_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "(hostless URL)".to_owned()),
+                    Err(_) => url,
+                };
+                format!("fetch: {}", bounded_display_metadata(&target))
+            })
+        }
         _ => None,
     }
 }
@@ -685,6 +966,39 @@ fn cbor_field<'a>(arguments: &'a CborValue, key: &str) -> Option<&'a CborValue> 
             CborValue::Text(entry_key) if entry_key == key => Some(value),
             _ => None,
         })
+}
+
+fn dispatch_exa_fetch(invoke: ToolStarted, searcher: &dyn Searcher, display_args: String) -> Event {
+    if let Err(message) = validate_parallel_args(&invoke.arguments, "url") {
+        return tool_error(invoke, message, display_args);
+    }
+    let Some(url) = cbor_text_field(&invoke.arguments, "url") else {
+        return tool_error(
+            invoke,
+            "missing string argument: url".to_owned(),
+            display_args,
+        );
+    };
+    match searcher.fetch(&url) {
+        Ok(text) => {
+            let projected = match project_web_content(WebAdapter::Exa, WebOperation::Fetch, &text) {
+                Ok(projected) => projected,
+                Err(message) => return tool_error(invoke, message, display_args),
+            };
+            Event::ToolResult(ToolResult {
+                presentation: Default::default(),
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text(projected),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: Some(ok_display(&text, display_args)),
+                originator: invoke.originator,
+            })
+        }
+        Err(message) => tool_error(invoke, message, display_args),
+    }
 }
 
 fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher, display_args: String) -> Event {
@@ -811,7 +1125,7 @@ fn project_web_content(
         adapter.as_str(),
         operation.as_str()
     );
-    if output.len() + body.len() + WEB_CONTENT_CLOSE.len() > TOOL_OUTPUT_MAX_BYTES {
+    if TOOL_OUTPUT_MAX_BYTES < output.len() + body.len() + WEB_CONTENT_CLOSE.len() {
         return Err(format!(
             "{} MCP projected web content exceeded {TOOL_OUTPUT_MAX_BYTES} bytes",
             adapter.as_str()
@@ -938,7 +1252,7 @@ fn parse_num_results(value: &CborValue) -> Result<u32, String> {
     if raw < 1 {
         return Err("`num_results` must be >= 1".to_owned());
     }
-    if raw > i128::from(MAX_NUM_RESULTS) {
+    if i128::from(MAX_NUM_RESULTS) < raw {
         return Err(format!("`num_results` must be <= {MAX_NUM_RESULTS}"));
     }
     Ok(raw as u32)
@@ -985,7 +1299,6 @@ fn cbor_to_json(value: &CborValue) -> Result<serde_json::Value, String> {
 
 struct HttpExaSearcher {
     endpoint: Mutex<String>,
-    agent: ureq::Agent,
 }
 
 impl Default for HttpExaSearcher {
@@ -998,13 +1311,21 @@ impl HttpExaSearcher {
     fn new(endpoint: String) -> Self {
         Self {
             endpoint: Mutex::new(endpoint),
-            agent: provider_http_agent(),
         }
     }
 }
 
 impl Searcher for HttpExaSearcher {
     fn search(&self, query: &str, num_results: u32) -> Result<String, String> {
+        self.search_with_timeout(query, num_results, REQUEST_TIMEOUT)
+    }
+
+    fn search_with_timeout(
+        &self,
+        query: &str,
+        num_results: u32,
+        timeout: Duration,
+    ) -> Result<String, String> {
         let endpoint = self
             .endpoint
             .lock()
@@ -1022,10 +1343,35 @@ impl Searcher for HttpExaSearcher {
                 },
             },
         });
-        let payload = post_mcp(&self.agent, &endpoint, body, "exa")?;
+        let payload = post_mcp(&provider_http_agent(timeout), &endpoint, body, "exa")?;
         let text = decode_mcp_text_result(&payload, "exa")
             .map_err(|e| sanitize_endpoint_error(&e, &endpoint))?;
         limit_tool_output(text, "exa").map_err(|e| sanitize_endpoint_error(&e, &endpoint))
+    }
+
+    fn fetch(&self, url: &str) -> Result<String, String> {
+        self.fetch_with_timeout(url, REQUEST_TIMEOUT)
+    }
+
+    fn fetch_with_timeout(&self, url: &str, timeout: Duration) -> Result<String, String> {
+        let endpoint = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": EXA_REMOTE_FETCH_TOOL,
+                "arguments": {"urls": [url]},
+            },
+        });
+        let payload = post_mcp(&provider_http_agent(timeout), &endpoint, body, "exa")?;
+        let text = decode_mcp_text_result(&payload, "exa")
+            .map_err(|error| sanitize_endpoint_error(&error, &endpoint))?;
+        limit_tool_output(text, "exa").map_err(|error| sanitize_endpoint_error(&error, &endpoint))
     }
 
     fn set_endpoint(&self, endpoint: String) {
@@ -1035,7 +1381,6 @@ impl Searcher for HttpExaSearcher {
 
 struct HttpParallelClient {
     endpoint: Mutex<String>,
-    agent: ureq::Agent,
 }
 
 impl Default for HttpParallelClient {
@@ -1048,13 +1393,21 @@ impl HttpParallelClient {
     fn new(endpoint: String) -> Self {
         Self {
             endpoint: Mutex::new(endpoint),
-            agent: provider_http_agent(),
         }
     }
 }
 
 impl ParallelClient for HttpParallelClient {
     fn call(&self, remote_tool: &str, arguments: serde_json::Value) -> Result<String, String> {
+        self.call_with_timeout(remote_tool, arguments, REQUEST_TIMEOUT)
+    }
+
+    fn call_with_timeout(
+        &self,
+        remote_tool: &str,
+        arguments: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<String, String> {
         let endpoint = self
             .endpoint
             .lock()
@@ -1069,7 +1422,7 @@ impl ParallelClient for HttpParallelClient {
                 "arguments": arguments,
             },
         });
-        let payload = post_mcp(&self.agent, &endpoint, body, "parallel")?;
+        let payload = post_mcp(&provider_http_agent(timeout), &endpoint, body, "parallel")?;
         let text = decode_mcp_text_result(&payload, "parallel")
             .map_err(|e| sanitize_endpoint_error(&e, &endpoint))?;
         limit_tool_output(text, "parallel").map_err(|e| sanitize_endpoint_error(&e, &endpoint))
@@ -1080,12 +1433,12 @@ impl ParallelClient for HttpParallelClient {
     }
 }
 
-fn provider_http_agent() -> ureq::Agent {
+fn provider_http_agent(timeout: Duration) -> ureq::Agent {
     let tls_config = path_ureq_tls::TlsConfig::builder()
         .root_certs(path_ureq_tls::RootCerts::PlatformVerifier)
         .build();
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(REQUEST_TIMEOUT))
+        .timeout_global(Some(timeout))
         .max_redirects(0)
         .http_status_as_error(false)
         .tls_config(tls_config)
@@ -1129,7 +1482,7 @@ fn read_success_body(reader: impl std::io::Read, provider: &str) -> Result<Strin
         .take(SUCCESS_BODY_MAX_BYTES as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("reading {provider} MCP response: {e}"))?;
-    if buf.len() > SUCCESS_BODY_MAX_BYTES {
+    if SUCCESS_BODY_MAX_BYTES < buf.len() {
         return Err(format!(
             "{provider} MCP response exceeded {SUCCESS_BODY_MAX_BYTES} bytes"
         ));
@@ -1138,7 +1491,7 @@ fn read_success_body(reader: impl std::io::Read, provider: &str) -> Result<Strin
 }
 
 fn limit_tool_output(text: String, provider: &str) -> Result<String, String> {
-    if text.len() > TOOL_OUTPUT_MAX_BYTES {
+    if TOOL_OUTPUT_MAX_BYTES < text.len() {
         Err(format!(
             "{provider} MCP text result exceeded {TOOL_OUTPUT_MAX_BYTES} bytes"
         ))
@@ -1219,7 +1572,7 @@ fn read_capped(reader: impl std::io::Read) -> String {
     let _ = reader
         .take(ERROR_BODY_MAX_BYTES as u64 + 1)
         .read_to_end(&mut buf);
-    let truncated = buf.len() > ERROR_BODY_MAX_BYTES;
+    let truncated = ERROR_BODY_MAX_BYTES < buf.len();
     if truncated {
         buf.truncate(ERROR_BODY_MAX_BYTES);
     }
@@ -1251,12 +1604,20 @@ fn decode_mcp_text_result(payload: &str, provider: &str) -> Result<String, Strin
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("MCP returned a JSON-RPC error");
-        if message.len() > TOOL_OUTPUT_MAX_BYTES {
+        if TOOL_OUTPUT_MAX_BYTES < message.len() {
             return Err(format!(
                 "{provider} MCP JSON-RPC error message exceeded {TOOL_OUTPUT_MAX_BYTES} bytes"
             ));
         }
         return Err(message.to_owned());
+    }
+    if json
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err(format!("{provider} MCP returned a tool error"));
     }
     let content = json
         .get("result")

@@ -1404,6 +1404,7 @@ fn foreign_terminal_does_not_transfer_call_status_or_output() {
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
+                    display: None,
                 }),
             ),
         ],
@@ -1546,6 +1547,7 @@ fn foreign_cancellation_request_does_not_classify_local_terminal() {
                     call_id: "source".into(),
                     tool_name: tau_proto::ToolName::new("test"),
                     tool_type: tau_proto::ToolType::Function,
+                    display: None,
                 }),
             ),
         ];
@@ -2241,6 +2243,7 @@ fn integrity_rejects_placeholder_terminals_and_wrong_cancellation_requests() {
                 call_id: "call".into(),
                 tool_name: tau_proto::ToolName::new("test"),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             }),
         ),
     ];

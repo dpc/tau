@@ -220,8 +220,9 @@ authorization explicit:
 - **XMPP:** the disabled-by-default bridge supports fixed recipients or
   per-agent MUC rooms with allowlisted senders and TLS transport. See the
   [XMPP README](crates/tau-ext-xmpp/README.md).
-- **Web search:** the bundled extension exposes Exa search by default and
-  optional Parallel search and fetch tools. See the
+- **Web search:** the bundled extension rotates and fails over between Exa and
+  Parallel search/fetch by default, with independent explicit single-provider
+  modes. See the
   [web-search README](crates/tau-ext-websearch/README.md).
 - **Notifications:** configurable hooks can emit terminal signals or run
   commands when user-originated turns start or finish, or when one or all loaded

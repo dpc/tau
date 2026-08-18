@@ -2296,6 +2296,7 @@ fn dispatch_cancellable_non_shell_tool(
                 call_id,
                 tool_name,
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             });
             let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
             let _ = tx.report_tool_terminal(event);
@@ -2404,6 +2405,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 call_id: invoke.call_id.clone(),
                 tool_name: invoke.tool_name.clone(),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             })
         }
         Err(crate::display::ToolFailure {

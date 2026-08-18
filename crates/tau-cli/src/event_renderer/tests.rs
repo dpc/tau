@@ -435,6 +435,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
             call_id: "blocker-cancel".into(),
             tool_name: tau_proto::ToolName::new("blocker"),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         }),
         tau_proto::UnixMicros::new(5),
         5,
@@ -458,7 +459,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         .map(|entry| rendered_tool_header(&entry.display))
         .collect::<Vec<_>>();
     assert!(headers[0].starts_with("blocker add 0s err: failed"));
-    assert!(headers[1].starts_with("blocker cancel 0s err: cancelled"));
+    assert!(headers[1].starts_with("blocker cancel 0s cancelled"));
     assert_eq!(headers[2], "blocker list 0s ok");
     assert!(
         renderer

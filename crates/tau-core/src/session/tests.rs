@@ -2107,6 +2107,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 call_id: third_call_id.clone(),
                 tool_name: ToolName::new("third_tool"),
                 tool_type: ToolType::Function,
+                display: None,
             }),
         )
         .is_none()

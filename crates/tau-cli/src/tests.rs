@@ -9542,11 +9542,13 @@ fn provider_visible_update_omits_response_stats_suffix() {
     assert!(!vt.screen_contains(80, "(2s, 5B, Δ5B/s, 2B/s)"));
 }
 
+/// Ensures cancellation clears active-tool state and preserves a producer's
+/// generic attempt-history display while normalizing the terminal status.
 #[test]
 fn agent_in_progress_clears_when_tool_is_cancelled() {
-    let (_term, handle, _vt) = setup(80, 24);
+    let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
-        handle,
+        handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
@@ -9576,9 +9578,18 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
+        display: Some(tau_proto::ToolUseState {
+            args: "query: example".to_owned(),
+            info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+            ..Default::default()
+        }),
     }));
 
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "✗ Exa → ⊘ Parallel cancelled"));
 }
 
 #[test]
@@ -9696,6 +9707,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         call_id: "delegate-call".into(),
         tool_name: tau_proto::ToolName::new("agent_start"),
         tool_type: tau_proto::ToolType::Function,
+        display: None,
     }));
     renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
         query_id: "q1".to_owned(),

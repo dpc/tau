@@ -11,6 +11,10 @@ use tau_proto::{
     HarnessOutputWriter, ToolStarted,
 };
 
+use super::composite::{
+    AttemptOutcome, AttemptRecord, CompositeCall, FailureCategory, HostedProviderDispatcher,
+    ProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal, attempt_budget, attempt_chip,
+};
 use super::*;
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -409,7 +413,7 @@ fn prefixed_exa_invocation_dispatches_by_logical_name() {
         Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
     );
     let tools = drain_startup(&mut reader);
-    assert_eq!(tools[0].name.as_str(), "work_websearch_exa");
+    assert_eq!(tools[0].name.as_str(), "work_websearch_hybrid_search");
 
     let mut started = exa_started("prefixed-call", "namespaced query");
     let Event::ToolStarted(invoke) = &mut started else {
@@ -469,6 +473,885 @@ fn exa_started(call_id: &str, query: &str) -> Event {
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         originator: tau_proto::PromptOriginator::User,
     })
+}
+
+fn hybrid_search_started(call_id: &str, query: &str) -> Event {
+    let Event::ToolStarted(mut started) = exa_started(call_id, query) else {
+        unreachable!();
+    };
+    started.tool_name = ToolName::new(HYBRID_SEARCH_TOOL_NAME);
+    Event::ToolStarted(started)
+}
+
+fn hybrid_fetch_started(call_id: &str, url: &str) -> Event {
+    Event::ToolStarted(ToolStarted {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(HYBRID_FETCH_TOOL_NAME),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("url".to_owned()),
+            CborValue::Text(url.to_owned()),
+        )]),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent"),
+        originator: tau_proto::PromptOriginator::User,
+    })
+}
+
+fn read_terminal_including_progress(reader: &mut EventReader<BufReader<UnixStream>>) -> Event {
+    loop {
+        let event = reader
+            .read_event_including_display_progress()
+            .expect("read")
+            .expect("terminal");
+        if matches!(
+            event,
+            Event::ToolResultReported(_)
+                | Event::ToolErrorReported(_)
+                | Event::ToolCancelledReported(_)
+        ) {
+            return event;
+        }
+    }
+}
+
+/// Ensures the composite tries providers in configured order, records the
+/// failed provider, and returns only the successful provider's provenance.
+#[test]
+fn hybrid_search_fails_over_with_ordered_attempt_display() {
+    let exa = StubSearcher::err(RATE_LIMITED_ERROR);
+    let parallel = StubParallelClient::ok("Title: fallback\nURL: https://example.test");
+    let (mut reader, mut writer) = spawn_extension(exa.clone(), parallel.clone());
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&hybrid_search_started("hybrid-failover", "fallback query"))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let mut progress_chips = Vec::new();
+    let result = loop {
+        match reader
+            .read_event_including_display_progress()
+            .expect("read")
+            .expect("event")
+        {
+            Event::ToolProgressReported(progress) => {
+                if let Some(display) = progress.display {
+                    progress_chips.extend(display.info_chips);
+                }
+            }
+            Event::ToolResultReported(result) => break result,
+            event => panic!("unexpected event: {event:?}"),
+        }
+    };
+    assert_eq!(progress_chips, ["… Exa", "✗ Exa → … Parallel"]);
+    let CborValue::Text(text) = result.result else {
+        panic!("expected text");
+    };
+    assert!(text.contains("adapter=\"parallel\" operation=\"search\""));
+    assert_eq!(
+        result.display.expect("display").info_chips,
+        vec!["✗ Exa → ✓ Parallel"]
+    );
+    assert_eq!(exa.calls.lock().expect("calls").len(), 1);
+    assert_eq!(parallel.calls.lock().expect("calls").len(), 1);
+}
+
+/// Ensures accepted composite calls reserve their primaries independently of
+/// completion outcome and rotate the next call to Parallel.
+#[test]
+fn hybrid_search_round_robin_advances_once_per_accepted_call() {
+    let exa = StubSearcher::ok("Title: exa\nURL: https://exa.test");
+    let parallel = StubParallelClient::ok("Title: parallel\nURL: https://parallel.test");
+    let (mut reader, mut writer) = spawn_extension(exa.clone(), parallel.clone());
+    drain_startup(&mut reader);
+
+    for (call_id, query) in [("hybrid-first", "first"), ("hybrid-second", "second")] {
+        writer
+            .write_event(&hybrid_search_started(call_id, query))
+            .expect("write");
+        writer.flush().expect("flush");
+        let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader)
+        else {
+            panic!("expected result");
+        };
+        let expected = if query == "first" {
+            "✓ Exa"
+        } else {
+            "✓ Parallel"
+        };
+        assert_eq!(result.display.expect("display").info_chips, vec![expected]);
+    }
+    assert_eq!(exa.calls.lock().expect("calls").len(), 1);
+    assert_eq!(parallel.calls.lock().expect("calls").len(), 1);
+}
+
+/// Ensures validation rejection and replay suppression do not reserve a
+/// composite cursor slot before the next live admitted call.
+#[test]
+fn invalid_and_replayed_hybrid_calls_do_not_advance_cursor() {
+    let exa = StubSearcher::ok("exa result");
+    let parallel = StubParallelClient::ok("parallel result");
+    let (mut reader, mut writer) = spawn_extension(exa.clone(), parallel.clone());
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "hybrid-invalid".into(),
+            tool_name: ToolName::new(HYBRID_SEARCH_TOOL_NAME),
+            arguments: CborValue::Map(Vec::new()),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write invalid");
+    writer.flush().expect("flush invalid");
+    assert!(matches!(
+        read_terminal_including_progress(&mut reader),
+        Event::ToolErrorReported(_)
+    ));
+
+    writer
+        .write_message(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1_700_000_000_000_000),
+            hybrid_search_started("hybrid-replay", "replayed"),
+        ))
+        .expect("write replay");
+    writer
+        .write_event(&hybrid_search_started("hybrid-live", "live"))
+        .expect("write live");
+    writer.flush().expect("flush");
+    let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader) else {
+        panic!("expected live result");
+    };
+    assert_eq!(result.display.expect("display").info_chips, ["✓ Exa"]);
+    assert_eq!(exa.calls.lock().expect("calls").len(), 1);
+    assert!(parallel.calls.lock().expect("calls").is_empty());
+}
+
+/// Ensures overlapping admissions reserve Exa then Parallel before either
+/// provider completes, independent of worker completion order.
+#[test]
+fn concurrent_hybrid_admissions_reserve_in_protocol_order() {
+    /// Shared deterministic barrier for both provider workers.
+    struct HeldState {
+        /// Provider names that reached the barrier.
+        started: Mutex<Vec<&'static str>>,
+        /// Wakes the test and provider workers when state changes.
+        wake: Condvar,
+        /// Whether provider workers may complete.
+        released: Mutex<bool>,
+    }
+
+    /// Held Exa search implementation.
+    struct HeldExa {
+        /// Shared worker barrier.
+        state: Arc<HeldState>,
+    }
+
+    impl Searcher for HeldExa {
+        fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            self.state.started.lock().expect("started").push("Exa");
+            self.state.wake.notify_all();
+            let mut released = self.state.released.lock().expect("released");
+            while !*released {
+                released = self.state.wake.wait(released).expect("wait");
+            }
+            Ok("exa".to_owned())
+        }
+    }
+
+    /// Held Parallel search implementation.
+    struct HeldParallel {
+        /// Shared worker barrier.
+        state: Arc<HeldState>,
+    }
+
+    impl ParallelClient for HeldParallel {
+        fn call(
+            &self,
+            _remote_tool: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<String, String> {
+            self.state.started.lock().expect("started").push("Parallel");
+            self.state.wake.notify_all();
+            let mut released = self.state.released.lock().expect("released");
+            while !*released {
+                released = self.state.wake.wait(released).expect("wait");
+            }
+            Ok("parallel".to_owned())
+        }
+    }
+
+    let state = Arc::new(HeldState {
+        started: Mutex::new(Vec::new()),
+        wake: Condvar::new(),
+        released: Mutex::new(false),
+    });
+    let (mut reader, mut writer) = spawn_extension(
+        Arc::new(HeldExa {
+            state: Arc::clone(&state),
+        }),
+        Arc::new(HeldParallel {
+            state: Arc::clone(&state),
+        }),
+    );
+    drain_startup(&mut reader);
+    writer
+        .write_event(&hybrid_search_started("concurrent-first", "first"))
+        .expect("first");
+    writer
+        .write_event(&hybrid_search_started("concurrent-second", "second"))
+        .expect("second");
+    writer.flush().expect("flush");
+
+    let mut started = state.started.lock().expect("started");
+    while started.len() < 2 {
+        started = state.wake.wait(started).expect("wait");
+    }
+    started.sort_unstable();
+    assert_eq!(started.as_slice(), ["Exa", "Parallel"]);
+    drop(started);
+    *state.released.lock().expect("released") = true;
+    state.wake.notify_all();
+
+    let mut chips = BTreeMap::new();
+    while chips.len() < 2 {
+        if let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader) {
+            chips.insert(
+                result.call_id.as_str().to_owned(),
+                result.display.expect("display").info_chips,
+            );
+        }
+    }
+    assert_eq!(chips["concurrent-first"], ["✓ Exa"]);
+    assert_eq!(chips["concurrent-second"], ["✓ Parallel"]);
+}
+
+/// Ensures empty decoded text is a distinct failover outcome rather than a
+/// successful terminal.
+#[test]
+fn hybrid_search_empty_result_fails_over() {
+    let exa = StubSearcher::ok(" \n ");
+    let parallel = StubParallelClient::ok("fallback");
+    let (mut reader, mut writer) = spawn_extension(exa, parallel);
+    drain_startup(&mut reader);
+    writer
+        .write_event(&hybrid_search_started("hybrid-empty", "query"))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader) else {
+        panic!("expected result");
+    };
+    assert_eq!(
+        result.display.expect("display").info_chips,
+        vec!["∅ Exa → ✓ Parallel"]
+    );
+}
+
+/// Ensures all-provider failure exposes only stable bounded categories and the
+/// ordered compact attempt history.
+#[test]
+fn hybrid_search_all_provider_failure_is_normalized() {
+    let exa = StubSearcher::err(RATE_LIMITED_ERROR);
+    let parallel = StubParallelClient::err("transport connection reset at secret endpoint");
+    let (mut reader, mut writer) = spawn_extension(exa, parallel);
+    drain_startup(&mut reader);
+    writer
+        .write_event(&hybrid_search_started("hybrid-error", "query"))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let Event::ToolErrorReported(error) = read_terminal_including_progress(&mut reader) else {
+        panic!("expected error");
+    };
+    assert_eq!(
+        error.message,
+        "web_search failed after 2 attempts: exa=rate_limited, parallel=transport"
+    );
+    assert!(!error.message.contains("secret"));
+    assert_eq!(
+        error.display.expect("display").info_chips,
+        vec!["✗ Exa → ✗ Parallel"]
+    );
+}
+
+/// Ensures provider lists retain configured order, cap an invocation at three,
+/// and rotate primaries without depending on provider implementation details.
+#[test]
+fn provider_reservation_is_bounded_and_rotating() {
+    let mut pool = ProviderPool::new(
+        "fixture",
+        vec![
+            WebAdapter::Exa,
+            WebAdapter::Parallel,
+            WebAdapter::Third,
+            WebAdapter::Fourth,
+        ],
+    )
+    .expect("pool");
+    assert_eq!(
+        pool.reserve().as_ref(),
+        vec![WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::Third]
+    );
+    assert_eq!(
+        pool.reserve().as_ref(),
+        vec![WebAdapter::Parallel, WebAdapter::Third, WebAdapter::Fourth]
+    );
+}
+
+/// Ensures search and fetch admission reserve independent primaries even when
+/// their calls interleave.
+#[test]
+fn search_and_fetch_provider_pools_rotate_independently() {
+    let configured = vec![WebAdapter::Exa, WebAdapter::Parallel];
+    let mut search = ProviderPool::new("search", configured.clone()).expect("search");
+    let mut fetch = ProviderPool::new("fetch", configured).expect("fetch");
+    assert_eq!(search.reserve()[0], WebAdapter::Exa);
+    assert_eq!(fetch.reserve()[0], WebAdapter::Exa);
+    assert_eq!(search.reserve()[0], WebAdapter::Parallel);
+    assert_eq!(fetch.reserve()[0], WebAdapter::Parallel);
+}
+
+/// Ensures the production extension wiring advances interleaved search and
+/// fetch cursors independently.
+#[test]
+fn interleaved_hybrid_search_and_fetch_use_independent_runtime_cursors() {
+    /// Exa stub supporting both configured capabilities.
+    struct SearchAndFetchExa;
+
+    impl Searcher for SearchAndFetchExa {
+        fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            Ok("exa search".to_owned())
+        }
+
+        fn fetch(&self, _url: &str) -> Result<String, String> {
+            Ok("exa fetch".to_owned())
+        }
+    }
+
+    let (mut reader, mut writer) = spawn_extension(
+        Arc::new(SearchAndFetchExa),
+        StubParallelClient::ok("parallel"),
+    );
+    drain_startup(&mut reader);
+    for event in [
+        hybrid_search_started("cursor-search-1", "first"),
+        hybrid_fetch_started("cursor-fetch-1", "https://example.test/first"),
+        hybrid_search_started("cursor-search-2", "second"),
+        hybrid_fetch_started("cursor-fetch-2", "https://example.test/second"),
+    ] {
+        writer.write_event(&event).expect("write");
+        writer.flush().expect("flush");
+        let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader)
+        else {
+            panic!("expected result");
+        };
+        let expected = match result.call_id.as_str() {
+            "cursor-search-1" | "cursor-fetch-1" => "✓ Exa",
+            "cursor-search-2" | "cursor-fetch-2" => "✓ Parallel",
+            call_id => panic!("unexpected call: {call_id}"),
+        };
+        assert_eq!(result.display.expect("display").info_chips, [expected]);
+    }
+}
+
+/// Ensures fail-fast busy admission does not reserve or advance a provider
+/// cursor before a later accepted call.
+#[test]
+fn busy_rejection_does_not_advance_provider_pool() {
+    let sem = Arc::new(Semaphore::new(1));
+    let mut pool =
+        ProviderPool::new("search", vec![WebAdapter::Exa, WebAdapter::Parallel]).expect("pool");
+    let permit = sem.try_acquire().expect("first admission");
+    assert_eq!(pool.reserve()[0], WebAdapter::Exa);
+    assert!(sem.try_acquire().is_none(), "second admission must be busy");
+    drop(permit);
+    assert!(sem.try_acquire().is_some(), "later admission succeeds");
+    assert_eq!(pool.reserve()[0], WebAdapter::Parallel);
+}
+
+/// Ensures production fail-fast busy rejection does not reserve a composite
+/// cursor slot before the next admitted runtime call.
+#[test]
+fn busy_hybrid_runtime_rejection_preserves_next_primary() {
+    /// Shared gate holding both provider implementations in flight.
+    struct BusyGate {
+        /// Number of provider attempts that reached the gate.
+        started: Mutex<usize>,
+        /// Wakes the test and held providers.
+        wake: Condvar,
+        /// Whether held providers may return.
+        released: Mutex<bool>,
+    }
+
+    impl BusyGate {
+        /// Hold one provider call until the test releases all calls.
+        fn hold(&self) {
+            *self.started.lock().expect("started") += 1;
+            self.wake.notify_all();
+            let mut released = self.released.lock().expect("released");
+            while !*released {
+                released = self.wake.wait(released).expect("wait");
+            }
+        }
+    }
+
+    /// Blocking Exa implementation.
+    struct BusyExa {
+        /// Shared provider gate.
+        gate: Arc<BusyGate>,
+    }
+
+    impl Searcher for BusyExa {
+        fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            self.gate.hold();
+            Ok("exa".to_owned())
+        }
+    }
+
+    /// Blocking Parallel implementation.
+    struct BusyParallel {
+        /// Shared provider gate.
+        gate: Arc<BusyGate>,
+    }
+
+    impl ParallelClient for BusyParallel {
+        fn call(
+            &self,
+            _remote_tool: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<String, String> {
+            self.gate.hold();
+            Ok("parallel".to_owned())
+        }
+    }
+
+    let gate = Arc::new(BusyGate {
+        started: Mutex::new(0),
+        wake: Condvar::new(),
+        released: Mutex::new(false),
+    });
+    let (mut reader, mut writer) = spawn_extension(
+        Arc::new(BusyExa {
+            gate: Arc::clone(&gate),
+        }),
+        Arc::new(BusyParallel {
+            gate: Arc::clone(&gate),
+        }),
+    );
+    drain_startup(&mut reader);
+    for index in 0..MAX_IN_FLIGHT {
+        writer
+            .write_event(&hybrid_search_started(
+                &format!("busy-admitted-{index}"),
+                "query",
+            ))
+            .expect("admitted");
+    }
+    writer.flush().expect("flush admitted");
+    let mut started = gate.started.lock().expect("started");
+    while *started < MAX_IN_FLIGHT {
+        started = gate.wake.wait(started).expect("wait");
+    }
+    drop(started);
+
+    writer
+        .write_event(&hybrid_search_started("busy-rejected", "query"))
+        .expect("busy");
+    writer.flush().expect("flush busy");
+    let Event::ToolErrorReported(error) = read_terminal_including_progress(&mut reader) else {
+        panic!("expected busy error");
+    };
+    assert!(error.message.contains("busy"));
+
+    *gate.released.lock().expect("released") = true;
+    gate.wake.notify_all();
+    let mut completed = 0;
+    while completed < MAX_IN_FLIGHT {
+        if matches!(
+            read_terminal_including_progress(&mut reader),
+            Event::ToolResultReported(_)
+        ) {
+            completed += 1;
+        }
+    }
+
+    writer
+        .write_event(&hybrid_search_started("after-busy", "query"))
+        .expect("after busy");
+    writer.flush().expect("flush after busy");
+    let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader) else {
+        panic!("expected result");
+    };
+    assert_eq!(result.display.expect("display").info_chips, ["✓ Exa"]);
+}
+
+/// Ensures the actual composite scheduler accepts a third adapter, issues at
+/// most three attempts from a four-provider reservation, and reports that exact
+/// ordered history without policy changes.
+#[test]
+fn composite_scheduler_handles_third_provider_and_max_three() {
+    /// Synthetic adapter registry proving scheduler/provider separation.
+    struct SyntheticDispatcher {
+        /// Issued provider identities in exact scheduler order.
+        calls: Mutex<Vec<WebAdapter>>,
+    }
+
+    impl ProviderDispatcher for SyntheticDispatcher {
+        fn call(
+            &self,
+            provider: WebAdapter,
+            _operation: WebOperation,
+            _search: Option<(&str, u32)>,
+            _url: Option<&str>,
+            _timeout: Duration,
+        ) -> Result<String, String> {
+            self.calls.lock().expect("calls").push(provider);
+            Err("provider failed".to_owned())
+        }
+    }
+
+    let dispatcher = SyntheticDispatcher {
+        calls: Mutex::new(Vec::new()),
+    };
+    let cancelled = AtomicBool::new(false);
+    let Event::ToolStarted(invoke) = hybrid_search_started("third-provider", "query") else {
+        unreachable!();
+    };
+    let event = CompositeCall {
+        invoke,
+        operation: WebOperation::Search,
+        providers: vec![WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::Third]
+            .into_boxed_slice(),
+        display_args: "query: query".to_owned(),
+        cancelled: &cancelled,
+        dispatcher: &dispatcher,
+        handle: None,
+        deadline: Instant::now() + REQUEST_TIMEOUT,
+    }
+    .run();
+    let Event::ToolError(error) = event else {
+        panic!("expected error");
+    };
+    assert_eq!(
+        error.message,
+        "web_search failed after 3 attempts: exa=provider, parallel=provider, third=provider"
+    );
+    assert_eq!(
+        error.display.expect("display").info_chips,
+        ["✗ Exa → ✗ Parallel → ✗ Third"]
+    );
+    assert_eq!(
+        dispatcher.calls.lock().expect("calls").as_slice(),
+        [WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::Third]
+    );
+}
+
+/// Ensures one-entry operation lists are valid explicit single-provider modes
+/// while empty and duplicate lists fail during configuration.
+#[test]
+fn provider_list_configuration_distinguishes_single_and_invalid_modes() {
+    let single: ExtConfig = serde_json::from_value(serde_json::json!({
+        "search_providers": ["parallel"],
+        "fetch_providers": ["exa"]
+    }))
+    .expect("deserialize");
+    let mut single = single.validate().expect("single mode");
+    assert_eq!(
+        single.search_pool.reserve().as_ref(),
+        [WebAdapter::Parallel]
+    );
+    assert_eq!(single.fetch_pool.reserve().as_ref(), [WebAdapter::Exa]);
+
+    for invalid in [
+        serde_json::json!({"search_providers": []}),
+        serde_json::json!({"fetch_providers": ["exa", "exa"]}),
+    ] {
+        let config: ExtConfig = serde_json::from_value(invalid).expect("deserialize invalid");
+        assert!(config.validate().is_err());
+    }
+}
+
+/// Ensures deadline slices divide only the remaining total so unused time
+/// carries to later attempts without extending the call deadline.
+#[test]
+fn attempt_deadline_budget_divides_remaining_time() {
+    assert_eq!(
+        attempt_budget(Duration::from_secs(45), 3),
+        Duration::from_secs(15)
+    );
+    assert_eq!(
+        attempt_budget(Duration::from_secs(44), 2),
+        Duration::from_secs(22)
+    );
+    assert_eq!(
+        attempt_budget(Duration::from_secs(21), 1),
+        Duration::from_secs(21)
+    );
+}
+
+/// Ensures worker scheduling delay consumes the admission-anchored deadline
+/// before the first provider slice is calculated.
+#[test]
+fn composite_deadline_is_anchored_before_worker_entry() {
+    /// Search stub recording scheduler-provided attempt slices.
+    struct TimeoutSearcher {
+        /// Observed timeout slices in call order.
+        timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl Searcher for TimeoutSearcher {
+        fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            unreachable!("scheduler uses timeout-aware entry point")
+        }
+
+        fn search_with_timeout(
+            &self,
+            _query: &str,
+            _num_results: u32,
+            timeout: Duration,
+        ) -> Result<String, String> {
+            self.timeouts.lock().expect("timeouts").push(timeout);
+            Ok("result".to_owned())
+        }
+    }
+
+    let searcher = TimeoutSearcher {
+        timeouts: Mutex::new(Vec::new()),
+    };
+    let cancelled = AtomicBool::new(false);
+    let Event::ToolStarted(invoke) = hybrid_search_started("delayed-worker", "query") else {
+        unreachable!();
+    };
+    let event = CompositeCall {
+        invoke,
+        operation: WebOperation::Search,
+        providers: vec![WebAdapter::Exa, WebAdapter::Parallel].into_boxed_slice(),
+        display_args: "query: query".to_owned(),
+        cancelled: &cancelled,
+        dispatcher: &HostedProviderDispatcher {
+            searcher: &searcher,
+            parallel_client: StubParallelClient::ok("unused").as_ref(),
+        },
+        handle: None,
+        deadline: Instant::now() + Duration::from_secs(20),
+    }
+    .run();
+    assert!(matches!(event, Event::ToolResult(_)));
+    let timeout = searcher.timeouts.lock().expect("timeouts")[0];
+    assert!(timeout <= Duration::from_secs(10));
+
+    let Event::ToolStarted(invoke) = hybrid_search_started("expired-worker", "query") else {
+        unreachable!();
+    };
+    let event = CompositeCall {
+        invoke,
+        operation: WebOperation::Search,
+        providers: vec![WebAdapter::Exa].into_boxed_slice(),
+        display_args: "query: query".to_owned(),
+        cancelled: &cancelled,
+        dispatcher: &HostedProviderDispatcher {
+            searcher: &searcher,
+            parallel_client: StubParallelClient::ok("unused").as_ref(),
+        },
+        handle: None,
+        deadline: Instant::now(),
+    }
+    .run();
+    assert!(matches!(event, Event::ToolError(_)));
+    assert_eq!(searcher.timeouts.lock().expect("timeouts").len(), 1);
+}
+
+/// Ensures an issued attempt that exhausts its slice renders the stable
+/// deadline marker in the terminal attempt history.
+#[test]
+fn composite_deadline_attempt_renders_deadline_chip() {
+    /// Dispatcher that intentionally outlives its scheduler slice.
+    struct SlowDispatcher;
+
+    impl ProviderDispatcher for SlowDispatcher {
+        fn call(
+            &self,
+            _provider: WebAdapter,
+            _operation: WebOperation,
+            _search: Option<(&str, u32)>,
+            _url: Option<&str>,
+            _timeout: Duration,
+        ) -> Result<String, String> {
+            thread::sleep(Duration::from_millis(3));
+            Err("late failure".to_owned())
+        }
+    }
+
+    let cancelled = AtomicBool::new(false);
+    let Event::ToolStarted(invoke) = hybrid_search_started("deadline-chip", "query") else {
+        unreachable!();
+    };
+    let event = CompositeCall {
+        invoke,
+        operation: WebOperation::Search,
+        providers: vec![WebAdapter::Exa].into_boxed_slice(),
+        display_args: "query: query".to_owned(),
+        cancelled: &cancelled,
+        dispatcher: &SlowDispatcher,
+        handle: None,
+        deadline: Instant::now() + Duration::from_millis(1),
+    }
+    .run();
+    let Event::ToolError(error) = event else {
+        panic!("expected deadline error");
+    };
+    assert_eq!(error.display.expect("display").info_chips, ["⏱ Exa"]);
+}
+
+/// Ensures cancellation observed after an issued attempt suppresses failover,
+/// discards the response, and retains the current provider in terminal display.
+#[test]
+fn hybrid_cancellation_stops_after_current_attempt() {
+    /// Search stub that deterministically requests cancellation before return.
+    struct CancellingSearcher {
+        /// Shared scheduler cancellation flag.
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl Searcher for CancellingSearcher {
+        fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            self.cancelled.store(true, Ordering::Release);
+            Ok("late success".to_owned())
+        }
+    }
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let Event::ToolStarted(invoke) = hybrid_search_started("cancel-hybrid", "query") else {
+        unreachable!();
+    };
+    let event = CompositeCall {
+        invoke,
+        operation: WebOperation::Search,
+        providers: vec![WebAdapter::Exa, WebAdapter::Parallel].into_boxed_slice(),
+        display_args: "query: query".to_owned(),
+        cancelled: cancelled.as_ref(),
+        dispatcher: &HostedProviderDispatcher {
+            searcher: &CancellingSearcher {
+                cancelled: Arc::clone(&cancelled),
+            },
+            parallel_client: StubParallelClient::ok("must not run").as_ref(),
+        },
+        handle: None,
+        deadline: Instant::now() + REQUEST_TIMEOUT,
+    }
+    .run();
+    let Event::ToolCancelled(cancelled) = event else {
+        panic!("expected cancellation");
+    };
+    assert_eq!(
+        cancelled.display.expect("display").info_chips,
+        vec!["⊘ Exa"]
+    );
+}
+
+/// Ensures the newly exposed Exa fetch adapter accepts Tau's singular URL and
+/// returns canonical Exa fetch provenance.
+#[test]
+fn exa_fetch_adapter_uses_singular_url_and_fetch_provenance() {
+    /// Fetch stub recording the exact singular URL passed by Tau.
+    struct Fetcher {
+        /// Observed URLs in call order.
+        urls: Mutex<Vec<String>>,
+    }
+
+    impl Searcher for Fetcher {
+        fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+            Err("unused".to_owned())
+        }
+
+        fn fetch(&self, url: &str) -> Result<String, String> {
+            self.urls.lock().expect("urls").push(url.to_owned());
+            Ok("page text".to_owned())
+        }
+    }
+
+    let fetcher = Fetcher {
+        urls: Mutex::new(Vec::new()),
+    };
+    let event = dispatch_exa_fetch(
+        ToolStarted {
+            call_id: "exa-fetch".into(),
+            tool_name: ToolName::new(EXA_FETCH_TOOL_NAME),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("url".to_owned()),
+                CborValue::Text("https://example.test/page".to_owned()),
+            )]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent"),
+            originator: tau_proto::PromptOriginator::User,
+        },
+        &fetcher,
+        "fetch: example.test".to_owned(),
+    );
+    let Event::ToolResult(result) = event else {
+        panic!("expected result");
+    };
+    let CborValue::Text(text) = result.result else {
+        panic!("expected text");
+    };
+    assert!(text.contains("adapter=\"exa\" operation=\"fetch\""));
+    assert_eq!(
+        fetcher.urls.lock().expect("urls").as_slice(),
+        ["https://example.test/page"]
+    );
+}
+
+/// Ensures oversized reconstructed attempt histories retain endpoints and
+/// replace the middle with a stable count rather than truncating names.
+#[test]
+fn attempt_chip_compacts_long_histories() {
+    let attempts = (0..20)
+        .map(|index| AttemptRecord {
+            provider: if index % 2 == 0 {
+                WebAdapter::Exa
+            } else {
+                WebAdapter::Parallel
+            },
+            outcome: AttemptOutcome::Failure(FailureCategory::Provider),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempt_chip(&attempts, None), "✗ Exa → … +18 → ✗ Parallel");
+}
+
+/// Ensures a cancellation processed after a success was queued but before the
+/// protocol loop commits it wins arbitration and discards the success terminal.
+#[test]
+fn cancellation_processed_before_publication_replaces_queued_success() {
+    let cancellations = Mutex::new(HashMap::from([(
+        tau_proto::ToolCallId::from("queued-success"),
+        Arc::new(AtomicBool::new(true)),
+    )]));
+    let terminal = tau_client::ToolTerminalOutcome::from(ToolResult {
+        call_id: "queued-success".into(),
+        tool_name: ToolName::new(HYBRID_SEARCH_TOOL_NAME),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("must be discarded".to_owned()),
+        presentation: Default::default(),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(ToolUseState {
+            args: "query: race".to_owned(),
+            info_chips: vec!["✗ Exa → ✓ Parallel".to_owned()],
+            status: ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    let terminal = arbitrate_cancelled_terminal(&cancellations, terminal);
+    let tau_client::ToolTerminalOutcome::Cancelled(cancelled) = terminal else {
+        panic!("cancellation must replace queued success");
+    };
+    let display = cancelled.display.expect("display");
+    assert_eq!(display.status, ToolUseStatus::Warning);
+    assert_eq!(display.status_text, "cancelled");
+    assert_eq!(display.info_chips, vec!["✗ Exa → ⊘ Parallel"]);
 }
 
 /// Ensures web-tool display metadata escapes layout controls and truncates
@@ -557,11 +1440,10 @@ fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
 }
 
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) -> Vec<ToolSpec> {
-    // Startup registers Exa plus Parallel search/fetch. Parallel tools are
-    // disabled by default so roles can opt into them without duplicating the
-    // model-visible `web_search` provided by Exa.
+    // Startup registers enabled hybrid search/fetch plus four disabled explicit
+    // Exa and Parallel provider tools.
     let mut tools = Vec::new();
-    while tools.len() < 3 {
+    while tools.len() < 6 {
         let event = reader.read_event().expect("read").expect("register");
         let Event::ToolRegistrationDeclared(register) = event else {
             panic!("expected ToolRegistrationDeclared, got {event:?}");
@@ -571,16 +1453,16 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) -> Vec<ToolSpe
     tools
 }
 
-/// Ensures startup advertises the default Exa tool and opt-in Parallel tools
-/// without exposing duplicate enabled `web_search` entries.
+/// Ensures startup enables only composite search/fetch while retaining all four
+/// explicit Exa and Parallel provider tools as disabled alternatives.
 #[test]
-fn registers_exa_by_default_and_parallel_tools_disabled() {
+fn registers_hybrid_tools_by_default_and_provider_tools_disabled() {
     let searcher = StubSearcher::ok("unused");
     let parallel = StubParallelClient::ok("unused");
     let (mut reader, _writer) = spawn_extension(searcher, parallel);
 
     let tools = drain_startup(&mut reader);
-    assert_eq!(tools[0].name.as_str(), EXA_TOOL_NAME);
+    assert_eq!(tools[0].name.as_str(), HYBRID_SEARCH_TOOL_NAME);
     assert_eq!(
         tools[0]
             .model_visible_name
@@ -597,25 +1479,31 @@ fn registers_exa_by_default_and_parallel_tools_disabled() {
     );
     assert!(tools[0].enabled_by_default);
 
-    assert_eq!(tools[1].name.as_str(), PARALLEL_SEARCH_TOOL_NAME);
+    assert_eq!(tools[1].name.as_str(), HYBRID_FETCH_TOOL_NAME);
     assert_eq!(
         tools[1]
             .model_visible_name
             .as_ref()
             .map(|name| name.as_str()),
-        Some(MODEL_VISIBLE_SEARCH_TOOL_NAME)
+        Some(MODEL_VISIBLE_FETCH_TOOL_NAME)
     );
-    assert!(!tools[1].enabled_by_default);
+    assert!(tools[1].enabled_by_default);
 
-    assert_eq!(tools[2].name.as_str(), PARALLEL_FETCH_TOOL_NAME);
+    assert_eq!(tools[2].name.as_str(), EXA_TOOL_NAME);
     assert_eq!(
         tools[2]
             .model_visible_name
             .as_ref()
             .map(|name| name.as_str()),
-        Some(MODEL_VISIBLE_FETCH_TOOL_NAME)
+        Some(MODEL_VISIBLE_SEARCH_TOOL_NAME)
     );
-    let fetch_parameters = tools[2].parameters.as_ref().expect("fetch parameters");
+    assert!(!tools[2].enabled_by_default);
+    assert_eq!(tools[3].name.as_str(), EXA_FETCH_TOOL_NAME);
+    assert!(!tools[3].enabled_by_default);
+    assert_eq!(tools[4].name.as_str(), PARALLEL_SEARCH_TOOL_NAME);
+    assert!(!tools[4].enabled_by_default);
+    assert_eq!(tools[5].name.as_str(), PARALLEL_FETCH_TOOL_NAME);
+    let fetch_parameters = tools[5].parameters.as_ref().expect("fetch parameters");
     assert_eq!(
         fetch_parameters["properties"]["url"]["type"],
         serde_json::Value::String("string".to_owned())
@@ -626,7 +1514,7 @@ fn registers_exa_by_default_and_parallel_tools_disabled() {
         fetch_parameters["additionalProperties"],
         serde_json::Value::Bool(true)
     );
-    assert!(!tools[2].enabled_by_default);
+    assert!(!tools[5].enabled_by_default);
 }
 
 /// Ensures an Exa query uses its last duplicate value in initial progress and
@@ -1713,6 +2601,11 @@ fn web_content_projection_uses_exact_closed_attributes_for_all_paths() {
             WebOperation::Fetch,
             "<tau_web_content adapter=\"parallel\" operation=\"fetch\" content_trust=\"external\">provider claim</tau_web_content>",
         ),
+        (
+            WebAdapter::Exa,
+            WebOperation::Fetch,
+            "<tau_web_content adapter=\"exa\" operation=\"fetch\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
     ] {
         assert_eq!(
             project_web_content(adapter, operation, "provider claim").expect("project"),
@@ -1743,6 +2636,7 @@ fn web_content_projection_replaces_only_exact_close_after_normalization() {
 fn web_content_projection_enforces_exact_final_size_boundary() {
     for (adapter, operation, adapter_name) in [
         (WebAdapter::Exa, WebOperation::Search, "exa"),
+        (WebAdapter::Exa, WebOperation::Fetch, "exa"),
         (WebAdapter::Parallel, WebOperation::Search, "parallel"),
         (WebAdapter::Parallel, WebOperation::Fetch, "parallel"),
     ] {
@@ -2239,4 +3133,53 @@ fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
         serde_json::json!(["https://example.com/article"])
     );
     assert!(body["params"]["arguments"].get("url").is_none());
+}
+
+/// Ensures the real Exa fetch client calls `web_fetch_exa` with its required
+/// plural URL wire shape and projects the decoded response.
+#[test]
+fn exa_fetch_client_posts_urls_array() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read line");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_len = value.trim().parse().expect("content length");
+            }
+        }
+        let mut body = vec![0; content_len];
+        reader.read_exact(&mut body).expect("body");
+        let response_body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"page"}]}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        String::from_utf8(body).expect("utf8")
+    });
+
+    let result = HttpExaSearcher::new(endpoint)
+        .fetch("https://example.com/article")
+        .expect("fetch");
+    assert_eq!(result, "page");
+    let body: serde_json::Value =
+        serde_json::from_str(&server.join().expect("join")).expect("json body");
+    assert_eq!(body["method"], "tools/call");
+    assert_eq!(body["params"]["name"], EXA_REMOTE_FETCH_TOOL);
+    assert_eq!(
+        body["params"]["arguments"]["urls"],
+        serde_json::json!(["https://example.com/article"])
+    );
 }

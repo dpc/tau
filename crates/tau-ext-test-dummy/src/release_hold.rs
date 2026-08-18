@@ -281,6 +281,7 @@ impl ReleaseWorker {
                                 call_id: invoke.call_id.clone(),
                                 tool_name: invoke.tool_name.clone(),
                                 tool_type: ToolType::Function,
+                                display: None,
                             }
                             .into(),
                         );

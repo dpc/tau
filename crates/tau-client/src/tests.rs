@@ -341,6 +341,7 @@ impl TauExtension for CorrelatedTerminalReportsExtension {
                 call_id: "wrong-cancelled-call".into(),
                 tool_name: ToolName::new("wrong_cancelled_tool"),
                 tool_type: ToolType::Function,
+                display: None,
             })
         });
     }
@@ -3788,6 +3789,7 @@ fn client_handle_submits_transient_terminal_tool_reports() {
             call_id: "cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         })
         .expect("submit cancellation report");
     handle.shutdown().expect("shutdown");

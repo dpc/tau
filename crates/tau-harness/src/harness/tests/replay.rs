@@ -3181,6 +3181,13 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             call_id: "cancelled-call".into(),
             tool_name: ToolName::new("cancel_me"),
             tool_type: tau_proto::ToolType::Function,
+            display: Some(tau_proto::ToolUseState {
+                args: "query: replay".to_owned(),
+                info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+                status: tau_proto::ToolUseStatus::Warning,
+                status_text: "cancelled".to_owned(),
+                ..Default::default()
+            }),
         }),
     );
 
@@ -3202,7 +3209,14 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     assert!(
         durable_events.iter().any(|event| {
             matches!(event, Event::ToolCancelled(cancelled)
-                if cancelled.call_id.as_str() == "cancelled-call")
+            if cancelled.call_id.as_str() == "cancelled-call"
+                    && cancelled.display == Some(tau_proto::ToolUseState {
+                        args: "query: replay".to_owned(),
+                        info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+                        status: tau_proto::ToolUseStatus::Warning,
+                        status_text: "cancelled".to_owned(),
+                        ..Default::default()
+                    }))
         }),
         "cancellation should be in a durable loaded-agent event log"
     );
@@ -3256,7 +3270,17 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             {
                 got_background_error = true;
             }
-            Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "cancelled-call" => {
+            Event::ToolCancelled(cancelled)
+                if cancelled.call_id.as_str() == "cancelled-call"
+                    && cancelled.display
+                        == Some(tau_proto::ToolUseState {
+                            args: "query: replay".to_owned(),
+                            info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+                            status: tau_proto::ToolUseStatus::Warning,
+                            status_text: "cancelled".to_owned(),
+                            ..Default::default()
+                        }) =>
+            {
                 got_cancelled = true;
             }
             _ => {}

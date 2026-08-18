@@ -6575,6 +6575,7 @@ fn background_cancel_clears_actual_running_call() {
             call_id: "bg-exclusive-cancel-running".into(),
             tool_name: ToolName::new("bg_exclusive_cancel"),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         }),
     )
     .expect("background cancellation accepted");
@@ -7140,6 +7141,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
             call_id: "owner-cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         }),
     )
     .expect("wrong cancellation ignored");
@@ -7271,6 +7273,7 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
                 call_id: "emit-cancelled-call".into(),
                 tool_name: ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             })),
             persist: true,
         })),
@@ -16900,6 +16903,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             call_id: "call-cancel".into(),
             tool_name: ToolName::new("cancel_tool"),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         }),
     );
     let results = h.agents[&cid].head.expect("results head");

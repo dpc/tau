@@ -914,6 +914,7 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
             call_id: "cancel-replaced".into(),
             tool_name: tau_proto::ToolName::new(tool_name),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         })
     };
     harness
@@ -943,6 +944,7 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
                 call_id: "cancel-replaced".into(),
                 tool_name: tau_proto::ToolName::new("forged_canonical"),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             },
         )))),
     );
@@ -958,6 +960,46 @@ fn cancellation_report_replacement_drives_protected_canonical_fact() {
             && report.tool_name.as_str() == "forged_replacement"
             && canonical.tool_name.as_str() == "owned_tool"
     ));
+}
+
+/// A routed cancellation report preserves its complete generic display on the
+/// protected canonical foreground cancellation.
+#[test]
+fn cancellation_report_preserves_display_on_canonical_fact() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("cancel-display", "owned_tool");
+    let display = tau_proto::ToolUseState {
+        args: "query: cancel".to_owned(),
+        info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+        status: tau_proto::ToolUseStatus::Warning,
+        status_text: "cancelled".to_owned(),
+        ..Default::default()
+    };
+    harness
+        .handle_extension_event(
+            "conn-owner",
+            TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                presentation: Default::default(),
+                call_id: "cancel-display".into(),
+                tool_name: tau_proto::ToolName::new("forged"),
+                tool_type: tau_proto::ToolType::Function,
+                display: Some(display.clone()),
+            })),
+        )
+        .expect("commit cancellation");
+
+    assert!(
+        committed_terminal_events(&harness, "cancel-display")
+            .iter()
+            .any(|(source, event)| {
+                source.as_deref() == Some(HARNESS_CONNECTION_ID)
+                    && matches!(
+                        event,
+                        Event::ToolCancelled(cancelled)
+                            if cancelled.tool_name.as_str() == "owned_tool"
+                                && cancelled.display.as_ref() == Some(&display)
+                    )
+            })
+    );
 }
 
 /// Dropping a mutable cancellation report leaves the routed call live.
@@ -976,6 +1018,7 @@ fn dropped_cancellation_report_has_no_downstream_effect() {
                 call_id: "cancel-dropped".into(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             })),
         )
         .expect("park cancellation report");
@@ -1174,6 +1217,13 @@ fn backgrounded_terminal_reports_preserve_background_completion_behavior() {
                 call_id: "background-cancel".into(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
+                display: Some(tau_proto::ToolUseState {
+                    args: "query: cancel".to_owned(),
+                    info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+                    status: tau_proto::ToolUseStatus::Warning,
+                    status_text: "cancelled".to_owned(),
+                    ..Default::default()
+                }),
             }),
             Some("Tool cancelled"),
         ),
@@ -1219,6 +1269,14 @@ fn backgrounded_terminal_reports_preserve_background_completion_behavior() {
                     && matches!(
                         event,
                         Event::ToolBackgroundError(error) if error.message == message
+                            && (message != "Tool cancelled"
+                                || error.display == Some(tau_proto::ToolUseState {
+                                    args: "query: cancel".to_owned(),
+                                    info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+                                    status: tau_proto::ToolUseStatus::Warning,
+                                    status_text: "cancelled".to_owned(),
+                                    ..Default::default()
+                                }))
                     )
             })),
         }
@@ -1395,6 +1453,7 @@ fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
                 call_id: call_id.clone(),
                 tool_name: tau_proto::ToolName::new("owned_tool"),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             })),
         )
         .expect("cancellation report");

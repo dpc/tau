@@ -806,6 +806,7 @@ fn routed_peer_requests_complete_from_terminal_reports() {
                 call_id: call_id.as_str().into(),
                 tool_name: tau_proto::ToolName::new("forged"),
                 tool_type: tau_proto::ToolType::Function,
+                display: None,
             }),
             _ => unreachable!(),
         };

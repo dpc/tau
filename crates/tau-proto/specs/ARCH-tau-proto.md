@@ -148,7 +148,9 @@ Durable tool terminals and transcript `ToolResultItem`s carry serde-defaulted
 `ToolResultPresentation`. `tool_payload` is the extension-submitted default;
 the harness alone stamps `harness_dedup_pointer`, including when retaining
 terminal results through replay or compaction. `ToolCancelled` carries the same
-presentation field for one uniform terminal schema.
+presentation field and an optional complete-replacement `ToolUseState` display,
+so cancellation can retain tool-owned generic presentation through canonical
+publication and replay.
 
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes

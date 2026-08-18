@@ -13,7 +13,7 @@ injection, misleading text, or large payloads before it re-enters model context.
 Every successful result has exactly one extension-owned projection:
 `<tau_web_content adapter="exa|parallel" operation="search|fetch"
 content_trust="external">…</tau_web_content>`. Attribute values are closed:
-Exa supports search, while Parallel supports search and fetch. Attribute order is
+Exa and Parallel support search and fetch. Attribute order is
 `adapter`, `operation`, `content_trust`; no query, requested URL, tool-call id,
 endpoint, MCP id, remote tool name, or extension identifier is repeated.
 Provider-returned titles, URLs, sources, ranks, and similar metadata remain
@@ -49,3 +49,9 @@ Response and diagnostic bounds are specified by
 Provider defaults, configuration aliases, and tool shape are described by
 [the component README](../README.md) and
 [ARCH-tau-ext-websearch](ARCH-tau-ext-websearch.md).
+
+Composite calls return only the first non-empty successful provider projection;
+they do not merge, rank, or deduplicate provider bodies. All-provider errors
+contain only ordered stable adapter/category pairs and are bounded to 1 KiB.
+Compact attempt display uses only closed adapter names and markers, never raw
+errors, endpoints, credentials, queries, or requested URLs.

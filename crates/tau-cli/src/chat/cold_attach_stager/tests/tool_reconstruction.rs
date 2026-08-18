@@ -560,6 +560,7 @@ fn canonical_tool_terminal_matrix_excludes_background_placeholder() {
             call_id: "call".into(),
             tool_name: tau_proto::ToolName::new("fixture"),
             tool_type: tau_proto::ToolType::Function,
+            display: None,
         }),
         Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay {
             call_id: "call".into(),

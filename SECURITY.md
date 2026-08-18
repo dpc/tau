@@ -775,7 +775,7 @@ transport itself adversarial. The boundary summary is recorded in
 [`ARCH-external-message-boundary`](specs/ARCH-external-message-boundary.md).
 
 Successful `tau-ext-websearch` results remain ordinary invocation-correlated
-tool-result strings. The extension places Exa search and Parallel search/fetch
+tool-result strings. The extension places Exa and Parallel search/fetch
 text inside one exact-close-framed `<tau_web_content>` boundary with closed adapter,
 operation, and external-trust labels, and enforces its result bound after
 framing and closure. Adapter identity authenticates neither page authorship nor
@@ -785,6 +785,11 @@ breakout but is not a sandbox or instruction-authority change. See
 [`SPEC-tau-ext-websearch-provider-boundary`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-provider-boundary.md)
 and
 [`SPEC-tau-ext-websearch-runtime-safeguards`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-runtime-safeguards.md).
+Hybrid calls can send the same query or URL to as many as three configured
+hosted providers sequentially, so one call has multiple external recipients and
+each issued attempt can consume quota. Cancellation prevents later attempts,
+but the blocking HTTP transport may retain an already issued request until its
+admission-anchored deadline slice ends.
 
 The Slack bridge requires exact configured conversation/kind/thread policy and
 verified live-human admission. Receive permission creates only Tau-issued

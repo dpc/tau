@@ -722,6 +722,7 @@ fn cancel_call(state: &mut RostraState, call_id: tau_proto::ToolCallId) -> Clien
         call_id: call_id.clone(),
         tool_name,
         tool_type: tau_proto::ToolType::Function,
+        display: None,
     }
     .into();
     state.mandatory_output.report_tool_terminal(outcome)?;

@@ -1745,6 +1745,7 @@ fn cancelled_event(invoke: ToolStarted) -> Event {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: ToolType::Function,
+        display: None,
     })
 }
 

@@ -29,9 +29,9 @@ The provider-owned generic tool display shows the effective bound as compact
 `Nm` arguments, including the configured upper clamp (1,440 minutes by default).
 Argument-free waits retain their
 existing empty argument display. Live progress and retained/replayed result or
-error blocks preserve the same bounded label; cancellation retains the existing
-generic cancellation presentation because that protocol event has no display
-descriptor. The label is static metadata, not a countdown or
+error blocks preserve the same bounded label. Cancellation retains the same
+bounded label in its optional complete-replacement generic display descriptor.
+The label is static metadata, not a countdown or
 elapsed/remaining-time update.
 
 Queueing and waiter registration both execute on the harness event-loop thread.

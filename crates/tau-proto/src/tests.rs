@@ -1053,12 +1053,14 @@ fn representative_events() -> Vec<Event> {
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             tool_type: ToolType::Function,
+            display: None,
         }),
         Event::ToolCancelled(ToolCancelled {
             presentation: Default::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
             tool_type: ToolType::Function,
+            display: None,
         }),
         Event::ToolDelegateProgress(DelegateProgress {
             call_id: "delegate-call".into(),
@@ -4046,6 +4048,13 @@ fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
         call_id: "cancelled-call".into(),
         tool_name: ToolName::new("owned_tool"),
         tool_type: ToolType::Function,
+        display: Some(ToolUseState {
+            args: "query: example".to_owned(),
+            info_chips: vec!["✗ Exa → ⊘ Parallel".to_owned()],
+            status: ToolUseStatus::Warning,
+            status_text: "cancelled".to_owned(),
+            ..Default::default()
+        }),
     };
     let result_display = ToolResultDisplay::from(&result);
     for (event, expected) in [

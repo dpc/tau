@@ -9910,6 +9910,7 @@ impl Harness {
                     call_id,
                     tool_name,
                     tool_type,
+                    display: None,
                 }),
             );
         }
@@ -18602,6 +18603,7 @@ impl Harness {
                 call_id: call_id.clone(),
                 tool_name: target.tool_name,
                 tool_type: target.tool_type,
+                display: None,
             };
             if self.tool_terminal_has_open_durable_owner(cid, &call_id) {
                 foreground_call_ids.push(call_id);
@@ -21637,6 +21639,7 @@ impl Harness {
                 call_id: wait_call_id,
                 tool_name: tool.name,
                 tool_type: tool.tool_type,
+                display: None,
             }),
         );
     }
@@ -31884,7 +31887,7 @@ impl Harness {
             tool_type: cancelled.tool_type,
             message: "Tool cancelled".to_owned(),
             details: None,
-            display: None,
+            display: cancelled.display,
             originator: PromptOriginator::User,
         };
         self.handle_background_tool_error_inner(

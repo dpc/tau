@@ -546,13 +546,15 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   in-flight call.
 - **`tool.cancelled_reported`** *(Tool/Core extension)* — Transient peer
   cancellation observation. It commits before downstream generation, route, and
-  call-state validation.
+   call-state validation.
 - **`tool.cancelled`** *(harness)* — Protected canonical fact that a
   non-backgrounded call was cancelled and its foreground transcript tool round
   is terminal. Backgrounded calls that already emitted a placeholder instead
    derive `tool.background_error`. The canonical event uses the harness source
    and cannot be rewritten or dropped. It carries the same defaulted
-   `ToolResultPresentation` discriminator as result and error terminals.
+   `ToolResultPresentation` discriminator as result and error terminals and an
+   optional complete-replacement generic `ToolUseState` display. Background
+   cancellation preserves that display on its derived background error.
 
 ## Actions
 

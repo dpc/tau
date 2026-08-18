@@ -962,6 +962,7 @@ where
                         call_id: invoke.call_id,
                         tool_name: invoke.tool_name,
                         tool_type: tau_proto::ToolType::Function,
+                        display: None,
                     }
                     .into(),
                 );

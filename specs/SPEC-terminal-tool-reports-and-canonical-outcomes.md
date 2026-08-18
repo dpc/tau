@@ -117,7 +117,10 @@ retain the durable agent-transcript and replay contract. Canonical
 provider terminals without an open transcript owner remain runtime-only and
 gain no replay contract. Canonical
 `tool.cancelled` and background completion facts retain their existing terminal
-semantic persistence. UI replay derives the same result-display DTOs from those
+semantic persistence. An optional cancellation `ToolUseState` is operational
+display metadata with the same complete-replacement semantics as result and
+error display; background cancellation carries it into the derived background
+error. UI replay derives the same result-display DTOs from those
 full canonical facts without exposing raw successful output. No report has
 cold-restart replay behavior, so a report committed immediately before a crash
 may have no canonical successor.

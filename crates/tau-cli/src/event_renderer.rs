@@ -67,6 +67,8 @@ enum TerminalToolOutcome<'a> {
     SuccessResult,
     /// The terminal event reports failure with this canonical message.
     Error { canonical_message: &'a str },
+    /// The terminal event reports cancellation.
+    Cancelled,
 }
 
 /// Makes a producer descriptor's status agree with its canonical terminal
@@ -109,6 +111,10 @@ fn normalize_terminal_tool_use_state(
                     }
                 };
             }
+        }
+        TerminalToolOutcome::Cancelled => {
+            descriptor.status = tau_proto::ToolUseStatus::Warning;
+            descriptor.status_text = "cancelled".to_owned();
         }
     }
     descriptor
@@ -7617,10 +7623,12 @@ impl EventRenderer {
         let Some((prior, known_main_tool)) = self.take_finished_tool_call(call_id, true) else {
             return;
         };
-        let mut display = render_tool_use_state(
-            &cancelled.tool_name,
-            &synthesize_fallback_display(&cancelled.tool_name, Some("cancelled")),
-        );
+        let descriptor = cancelled.display.clone().unwrap_or_else(|| {
+            synthesize_fallback_display(&cancelled.tool_name, Some("cancelled"))
+        });
+        let descriptor =
+            normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::Cancelled);
+        let mut display = render_tool_use_state(&cancelled.tool_name, &descriptor);
         let is_blocker = prior.is_blocker || cancelled.tool_name.as_str() == BLOCKER_TOOL_NAME;
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {

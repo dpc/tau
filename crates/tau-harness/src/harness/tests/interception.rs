@@ -5595,6 +5595,7 @@ fn tool_cancelled_event(call_id: &str) -> Event {
         call_id: call_id.into(),
         tool_name: ToolName::new("test_tool"),
         tool_type: tau_proto::ToolType::Function,
+        display: None,
     })
 }
 

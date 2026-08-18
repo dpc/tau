@@ -212,6 +212,7 @@ impl ToolLifecycleRegistry {
                     call_id: entry.call_id.clone(),
                     tool_name: entry.tool_name.clone(),
                     tool_type: ToolType::Function,
+                    display: None,
                 }))
                 .is_ok()
         {
@@ -312,6 +313,7 @@ impl ToolLifecycle {
                     call_id: self.entry.call_id.clone(),
                     tool_name: self.entry.tool_name.clone(),
                     tool_type: ToolType::Function,
+                    display: None,
                 }))
                 .is_ok()
         {

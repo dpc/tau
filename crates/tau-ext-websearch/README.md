@@ -1,33 +1,34 @@
 # tau-ext-websearch
 
-A Tau extension that registers generic web search tools. The existing Exa-backed
-search remains enabled by default, and Parallel.ai search/fetch tools are
-registered in the same extension but disabled by default for role-level opt-in.
+A Tau extension that registers generic web search and fetch tools. The default
+tools rotate between Exa and Parallel, then fail over sequentially when the
+selected provider fails or returns empty text.
+
 
 ## Tools
 
-- `websearch_exa`, advertised to models as `web_search`, proxies Exa's keyless
-  hosted MCP at <https://mcp.exa.ai/mcp>.
-- `websearch_parallel_search`, advertised to models as `web_search`, proxies the
-  default unauthenticated Parallel Search MCP endpoint at
-  <https://search.parallel.ai/mcp>. This tool is disabled by default to avoid a
-  duplicate model-visible `web_search` unless a role explicitly enables it.
-  JSON-convertible provider-specific arguments are passed through to Parallel in
-  addition to the documented `query` field.
-- `websearch_parallel_fetch`, advertised to models as `web_fetch`, fetches and
-  extracts a page through the same unauthenticated Parallel MCP endpoint. This
-  tool is also disabled by default. JSON-convertible provider-specific arguments
-  are passed through in addition to the documented singular `url` field. Its
-  adapter consumes that field and sends Parallel the required wire shape
-  `urls: [url]`, replacing any provider-specific input field named `urls`.
+- `websearch_hybrid_search` and `websearch_hybrid_fetch` are advertised as
+  `web_search` and `web_fetch` and are enabled by default.
+- `websearch_exa` / `websearch_exa_fetch` and
+  `websearch_parallel_search` / `websearch_parallel_fetch` retain explicit
+  provider paths. They are disabled by default.
+- Exa uses its anonymously accessible hosted MCP at
+  <https://mcp.exa.ai/mcp>. Parallel uses its anonymously accessible Search MCP
+  at <https://search.parallel.ai/mcp>. Both providers supply search and fetch.
 
-No Parallel API key is supported: there is no `api_key` config, and the
+Hybrid search retains Exa's `query` and optional `num_results` input. Parallel
+receives the query and uses its own fixed result budget. Hybrid fetch accepts one
+`url`; both adapters convert it to the provider's `urls` array. Explicit
+Parallel tools retain their provider-specific pass-through arguments.
+
+No Parallel API key is supported yet: there is no `api_key` config, and the
 extension does not send an Authorization header.
+
 
 ## Configuration
 
 The built-in extension is `std-websearch` and is enabled by default. Disable it
-if you'd rather not make outbound HTTP calls:
+to prevent its outbound HTTP calls:
 
 ```json5
 {
@@ -37,7 +38,7 @@ if you'd rather not make outbound HTTP calls:
 }
 ```
 
-Endpoint overrides:
+Configure endpoints and ordered provider membership:
 
 ```json5
 {
@@ -46,62 +47,86 @@ Endpoint overrides:
       config: {
         // Backwards-compatible alias for exa_endpoint.
         endpoint: "https://mcp.exa.ai/mcp?exaApiKey=sk-…",
-        // Or explicitly:
         exa_endpoint: "https://mcp.exa.ai/mcp",
         parallel_endpoint: "https://search.parallel.ai/mcp",
+
+        // Defaults shown. One entry selects explicit single-provider mode.
+        search_providers: ["exa", "parallel"],
+        fetch_providers: ["exa", "parallel"],
       },
     },
   },
 }
 ```
 
+Provider lists must be non-empty and contain no duplicates. Search and fetch
+have independent extension-process cursors. Successful configuration resets
+both cursors to list index zero; cursors are not persisted.
+
 If both `endpoint` and `exa_endpoint` are set, they must have the same value.
 Endpoint values are validated when configuration is applied. They must be HTTPS
-URLs, except that HTTP loopback URLs are accepted for deterministic local tests.
-Endpoint userinfo credentials are rejected, and logs intentionally avoid
-printing raw endpoint URLs because they can contain credentials in userinfo,
-query strings, or fragments. Provider requests do not follow HTTP redirects:
-configure the final endpoint URL directly when a provider publishes a redirect.
+URLs, except that HTTP loopback URLs are accepted for deterministic tests.
+Endpoint userinfo credentials are rejected. Logs do not print raw endpoints
+because query strings or fragments can contain credentials. Provider requests
+do not follow redirects.
 
-## Runtime and security assumptions
 
-The extension makes outbound HTTPS requests to the configured MCP providers and
-treats all returned text and metadata as untrusted external web data. Every
-successful result is an ordinary tool-result string enclosed in
+## Scheduling and failures
+
+An accepted hybrid call advances its operation's cursor once, then tries at most
+three configured providers in circular order. Attempts are sequential and stop
+at the first non-empty success. Provider failures, malformed or oversize
+responses, and trimmed-empty text fail over. Local validation, busy rejection,
+and replay do not advance a cursor or contact a provider.
+
+All attempts share one 45-second deadline. Each attempt receives the remaining
+time divided by the remaining attempts, so unused time carries forward. At most
+eight tool calls run concurrently; additional calls fail immediately as busy.
+There is no cross-call health cache or circuit breaker.
+
+Failover can submit the same query or URL to multiple services. Every issued
+attempt may consume provider quota or incur charges, including failed and empty
+attempts. Tau neither hedges, retries one provider, nor refunds or deduplicates
+provider accounting. Cancellation prevents later attempts, but an already
+issued blocking request may run until its allocated deadline and consume quota.
+
+All-provider errors contain only stable provider/category pairs and are capped
+at 1 KiB. Raw provider errors remain subject to existing bounded endpoint
+redaction before local diagnostics.
+
+
+## Result and UI boundary
+
+Every successful result is an ordinary tool-result string enclosed in
 `<tau_web_content adapter="exa|parallel" operation="search|fetch"
-content_trust="external">…</tau_web_content>`. Tau owns the closed outer
-attributes, makes structural Unicode visible, and replaces exact outer-close
-collisions while preserving all other provider text. The adapter label identifies only the configured
-adaptation path; it does not authenticate a page author, URL, title, rank,
-freshness, or truth. The boundary is defense-in-depth, not a prompt-injection
-sandbox or a grant of instruction authority.
+content_trust="external">…</tau_web_content>`. Tau returns only the first
+successful provider's text; it does not merge or rank provider outputs.
+Provider content and metadata remain untrusted external claims.
 
-The extension caps HTTP error bodies, successful MCP response bodies, decoded
-provider text, and the final framed result so provider responses cannot
-grow without bound. A projected result over 512 KiB fails rather than being
-silently truncated. At most eight searches/fetches run at once; additional calls
-fail fast with a busy tool error so harness control messages are not blocked
-behind network calls.
+The tool header shows the submitted query or only the fetched URL's parsed host.
+It also carries one ordered provider-history chip:
 
-Provider transport diagnostics and JSON-RPC error messages can become
-model-visible `ToolError` text. Before surfacing them, the extension sanitizes
-echoes of the configured endpoint URL, request target, query keys/values,
-fragment, and userinfo, then applies a final model-visible error cap. Oversized
-JSON-RPC error messages are replaced with a compact deterministic error instead
-of echoing provider text. HTTP 429 responses instead produce the generic bounded
-advice `web service rate-limited the request; try again later.` without reading
-or echoing the provider body.
+```text
+… Exa
+✗ Exa → … Parallel
+✗ Exa → ✓ Parallel
+∅ Exa → ✓ Parallel
+⏱ Exa → ✗ Parallel
+✗ Exa → ⊘ Parallel
+```
 
-Terminal tool headers retain a compact display target for every lifecycle state:
-`web_search` shows its submitted `query`, while `web_fetch` shows only the parsed
-host from its submitted `url` (or a fixed hostless-URL marker / safely escaped
-malformed input). This
-presentation metadata comes only from the model tool call, never configured Exa or
-Parallel endpoints, provider diagnostics, metadata, or content. Tau escapes
-controls and structural Unicode visibly and bounds the value at whole escaped-unit
-boundaries, so it cannot inject terminal layout or leave a partial escape.
+Stable markers are `…` in progress, `✓` success, `✗` failure, `∅` empty, `⏱`
+deadline, and `⊘` cancellation. Single-provider mode still shows its provider.
+The chip contains no raw provider error, endpoint, requested URL, or credential.
 
-Tests use local stubs or loopback HTTP servers and do not contact live providers.
+Provider output is bounded before decode and projection. Tau makes structural
+Unicode visible, replaces exact closing-sentinel collisions, and rejects a
+projected result over 512 KiB rather than silently truncating it. This boundary
+prevents sentinel breakout but does not sandbox prompt injection or grant
+content any identity, routing, instruction, authorization, or egress authority.
+
+Tests use local stubs or loopback HTTP servers and never contact live providers.
+
 
 ## Tracing
 

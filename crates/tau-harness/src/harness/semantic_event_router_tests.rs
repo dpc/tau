@@ -503,6 +503,7 @@ fn raw_tool_terminal_events_are_not_persisted() {
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
+        display: None,
     };
 
     for event in [
@@ -585,6 +586,7 @@ fn persist_false_preserves_every_persistence_exception() {
             call_id: "call-1".into(),
             tool_name: ToolName::new("tool"),
             tool_type: ToolType::Function,
+            display: None,
         }),
         Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
             call_id: "call-1".into(),
