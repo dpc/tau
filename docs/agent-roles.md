@@ -45,11 +45,11 @@ A role can also set:
   discoverable and model-loadable before the role is available
 
 System prompt templates receive `agent_id` when Tau dispatches a prompt for a
-concrete agent. Tau's built-in templates render it at the end in an "Agent
-identity" section; custom templates selected with `prompt_override` can place or
-word `{{agent_id}}` however they want. `tau dev print-prompt` and
-`tau dev print-system-prompt` use the stable fake `dev-preview-agent` id so
-role previews show the full template.
+concrete agent. Tau's built-in templates intentionally omit it because agents
+can query authoritative runtime identity with `self_info`; custom templates
+selected with `prompt_override` can still place or word `{{agent_id}}` however
+they want. `tau dev print-prompt` and `tau dev print-system-prompt` use the
+stable fake `dev-preview-agent` input when rendering custom templates.
 
 Templates receive `session.cwd` as the canonical current directory captured when
 the harness started. This is a session-wide startup value. It differs from `cwd`
@@ -395,6 +395,17 @@ Cross-agent compaction remains disabled by default and requires an explicit
 compaction and does not disable the model-callable `compact` tool. The
 cross-agent tool authorizes any other loaded same-session agent; ancestry,
 watching, and messaging are irrelevant to that explicit capability.
+
+## Runtime self information
+
+`self_info({})` is enabled by default and returns the calling agent's
+authoritative runtime metadata as deterministic `key: value` lines. It accepts
+no input fields and reports `agent_id`, `session_id`, `session_dir`, the exact
+prompt-owned `model` and `effort`, `status`, and `status_task_name`. Before the
+first `status` call, it reports `status: unreported` and
+`status_task_name: (none)`. An unavailable session directory is also `(none)`.
+The built-in prompt templates omit agent identity; custom templates retain the
+explicit `agent_id` input.
 
 ## Discovery tool opt-in
 

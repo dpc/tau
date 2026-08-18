@@ -593,10 +593,10 @@ fn publish_pending_agent_discovery(h: &mut Harness, agent_id: &str) {
 /// Regression: startup has no implicit `main` agent. The first interactive
 /// prompt claims the default conversation by minting a durable role-prefixed
 /// hex agent id, publishes that id on `AgentPromptStarted`/`AgentPromptCreated`
-/// for UI/provider routing, and includes the same id in the actual
-/// provider-bound default system prompt so the agent knows its own identity
-/// without relying only on event metadata. It also locks in that the
-/// lightweight lifecycle event immediately precedes the full provider prompt.
+/// for UI/provider routing, and omits the id from the provider-bound built-in
+/// system prompt because `self_info` now owns model-visible discovery. It also
+/// locks in that the lightweight lifecycle event immediately precedes the full
+/// provider prompt.
 #[test]
 fn user_prompt_mints_first_agent_for_empty_startup() {
     let td = TempDir::new().expect("tempdir");
@@ -652,25 +652,16 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
     assert_eq!(prompt_pair.0.model, prompt_pair.1.model);
     assert_eq!(prompt_pair.0.originator, prompt_pair.1.originator);
     assert_eq!(prompt_pair.0.ctx_id, prompt_pair.1.ctx_id);
-    let identity_section = format!("# Agent identity\n\nYour agent id is `{agent_id}`.");
     assert_eq!(prompt.agent_id.as_str(), agent_id);
-    assert!(prompt.system_prompt.trim_end().ends_with(&identity_section));
-    assert_eq!(
-        prompt
-            .system_prompt
-            .lines()
-            .filter(|line| *line == "# Agent identity")
-            .count(),
-        1
-    );
+    assert!(!prompt.system_prompt.contains("# Agent identity"));
+    assert!(!prompt.system_prompt.contains(agent_id));
 
     h.shutdown().expect("shutdown");
 }
 
 /// Regression: `agent_id` is a first-class system prompt template variable, not
 /// a harness-level post-render prefix. A role `prompt_override` can therefore
-/// place the id in custom wording, and the built-in default identity section is
-/// not layered on top of custom templates.
+/// place the id in custom wording even though built-in templates omit it.
 #[test]
 fn prompt_override_template_can_place_agent_id_without_default_duplication() {
     let td = TempDir::new().expect("tempdir");
@@ -775,13 +766,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
         rendered.find("# Tau harness").expect("harness heading") < catalog_offset,
         "the role catalog must follow the harness guidance"
     );
-    assert!(
-        catalog_offset
-            < rendered
-                .find("# Agent identity")
-                .expect("agent identity heading"),
-        "the role catalog must precede the agent identity"
-    );
+    assert!(!rendered.contains("# Agent identity"));
     let catalog_rows = rendered
         .split_once("## Available agent roles for `agent_start`")
         .expect("delegate role heading")
@@ -31684,6 +31669,242 @@ impl crate::InternalToolHandler for RejectingStatusTool {
     }
 }
 
+/// Test-only internal tool that records the harness-owned self snapshot.
+struct RecordingSelfInfoTool(
+    /// Most recent authoritative snapshot observed through the host seam.
+    path_std_sync::Mutex<Option<path_crate_internal_tools::InternalSelfInfo>>,
+);
+
+/// Test handler that attempts to claim the reserved intrinsic name.
+struct ReservedSelfInfoClaim;
+
+impl crate::InternalToolHandler for ReservedSelfInfoClaim {
+    fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
+        vec![
+            shared_test_tool_spec("self_info"),
+            shared_test_tool_spec("must_not_register"),
+        ]
+    }
+
+    fn handles(&self, internal_tool_name: &ToolName) -> bool {
+        internal_tool_name.as_str() == "self_info"
+    }
+}
+
+impl crate::InternalToolHandler for RecordingSelfInfoTool {
+    fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
+        vec![shared_test_tool_spec("record_self_info")]
+    }
+
+    fn handles(&self, internal_tool_name: &ToolName) -> bool {
+        internal_tool_name.as_str() == "record_self_info"
+    }
+
+    fn handle_event(
+        &self,
+        host: &mut crate::InternalToolHost<'_>,
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let Event::ToolStarted(started) = event else {
+            return Ok(());
+        };
+        let Some(owner) = host.agent_owned_internal_started_call(started) else {
+            return Ok(());
+        };
+        let info = host.self_info(&owner).expect("self metadata");
+        *self.0.lock().expect("self-info recorder") = Some(info);
+        host.finish_tool_with_cbor_result(
+            owner.conversation_id(),
+            owner.call().id.clone(),
+            owner.visible_tool_name().clone(),
+            owner.call().tool_type,
+            CborValue::Text("recorded".to_owned()),
+            None,
+        );
+        Ok(())
+    }
+}
+
+/// Self metadata uses the exact prompt-owned model parameters rather than
+/// mutable role selection and exposes the initial unreported status explicitly.
+#[test]
+fn self_info_uses_prompt_authority_and_current_runtime_status() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("start");
+    let recorded = path_std_sync::Arc::new(RecordingSelfInfoTool(path_std_sync::Mutex::new(None)));
+    h.install_internal_tool_handlers(vec![recorded.clone()]);
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("inspect self".to_owned()))
+        .expect("dispatch prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+
+    h.handle_provider_response_finished(provider_tool_response(
+        &prompt,
+        "self-info-call",
+        "record_self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("run self-info call");
+
+    let info = recorded
+        .0
+        .lock()
+        .expect("self-info recorder")
+        .clone()
+        .expect("recorded metadata");
+    assert_eq!(info.agent_id, prompt.agent_id);
+    assert_eq!(info.session_id, prompt.session_id);
+    assert_eq!(info.model, prompt.model);
+    assert_eq!(info.effort, prompt.model_params.effort);
+    assert_eq!(
+        info.session_dir,
+        Some(tau_config::settings::sessions_dir_of(&state).join(prompt.session_id.as_str()))
+    );
+    assert_eq!(
+        info.work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Unreported
+    );
+    assert_eq!(info.work_status.title(), None);
+    h.shutdown().expect("shutdown");
+}
+
+/// The intrinsic production handler derives nondurable storage and the current
+/// status reducer value before publishing its exact seven-line tool result.
+#[test]
+fn self_info_production_dispatch_reports_memory_only_current_status() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness_memory_only(td.path().join("state")).expect("start memory-only");
+    let cid = ensure_test_user_agent(&mut h);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "Inspect runtime identity".to_owned(),
+        )
+        .expect("status"),
+    )
+    .expect("report status");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("inspect self".to_owned()))
+        .expect("dispatch prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_tool_response(
+        &prompt,
+        "production-self-info-call",
+        "self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("run intrinsic self-info");
+
+    let result = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ToolResult(result) if result.call_id.as_str() == "production-self-info-call" => {
+                result.result.as_text().map(ToOwned::to_owned)
+            }
+            _ => None,
+        })
+        .expect("intrinsic self-info result");
+    assert_eq!(
+        result,
+        format!(
+            "agent_id: {}\nsession_id: s1\nsession_dir: (none)\nmodel: {}\neffort: {}\nstatus: working\nstatus_task_name: Inspect runtime identity",
+            prompt.agent_id,
+            prompt.model,
+            prompt.model_params.effort.as_str()
+        )
+    );
+    assert_eq!(result.lines().count(), 7);
+    h.shutdown().expect("shutdown");
+}
+
+/// Supplied handlers cannot replace the intrinsic implementation or smuggle
+/// additional registrations through a handler that claims its reserved name.
+#[test]
+fn self_info_reserved_handler_claim_is_excluded() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.install_internal_tool_handlers(vec![path_std_sync::Arc::new(ReservedSelfInfoClaim)]);
+
+    assert_eq!(h.internal_tool_handlers.len(), 1);
+    assert!(h.internal_tool_handlers[0].handles(&ToolName::new("self_info")));
+    let self_info_specs = h
+        .registry
+        .all_tools()
+        .into_iter()
+        .filter(|tool| tool.name.as_str() == "self_info")
+        .collect::<Vec<_>>();
+    assert_eq!(self_info_specs.len(), 1);
+    assert!(self_info_specs[0].enabled_by_default);
+    assert_eq!(
+        self_info_specs[0].parameters,
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+    );
+    assert!(
+        !h.registry
+            .all_tools()
+            .iter()
+            .any(|tool| { matches!(tool.name.as_str(), "must_not_register") })
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold resume retains the stable agent/session authority while a newly
+/// materialized prompt supplies the exact model and effort for `self_info`.
+#[test]
+fn self_info_after_cold_resume_uses_resumed_identity_and_new_prompt_route() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id = {
+        let mut h = echo_harness(&state).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("seed".to_owned()))
+            .expect("dispatch seed prompt");
+        let prompt = read_nth_prompt_created(&h, 0);
+        let agent_id = prompt.agent_id.clone();
+        h.handle_provider_response_finished(provider_text_response(
+            &prompt.agent_prompt_id,
+            agent_id.clone(),
+            "seed complete",
+        ))
+        .expect("finish seed prompt");
+        h.shutdown().expect("shutdown seed harness");
+        agent_id
+    };
+
+    let mut h = echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+        .expect("resume harness");
+    let recorded = path_std_sync::Arc::new(RecordingSelfInfoTool(path_std_sync::Mutex::new(None)));
+    h.install_internal_tool_handlers(vec![recorded.clone()]);
+    let cid = h.agent_routes[agent_id.as_str()].clone();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("inspect resumed self".to_owned()))
+        .expect("dispatch resumed prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_tool_response(
+        &prompt,
+        "resumed-self-info-call",
+        "record_self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("run resumed self-info call");
+
+    let info = recorded
+        .0
+        .lock()
+        .expect("self-info recorder")
+        .clone()
+        .expect("recorded resumed metadata");
+    assert_eq!(info.agent_id, agent_id);
+    assert_eq!(info.session_id, test_session_id("s1"));
+    assert_eq!(info.model, prompt.model);
+    assert_eq!(info.effort, prompt.model_params.effort);
+    h.shutdown().expect("shutdown resumed harness");
+}
+
 /// The production dispatch boundary records only admitted substantive calls
 /// from a frozen status-capable tool surface.
 #[test]
@@ -37990,7 +38211,7 @@ fn rendered_prompt_without_agents_md_uses_system_wrapper_only() {
     assert_eq!(result.error, None);
     assert!(prompt.contains("<message role=\"system\">"));
     assert!(prompt.contains("DEBUG ROLE PROMPT"));
-    assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
+    assert!(!prompt.contains("Your agent id is"));
     assert!(!prompt.contains("source=\"AGENTS.md\""));
     assert!(!prompt.contains("AGENTS_FILE"));
     assert!(!prompt.contains("# agents.md files"));

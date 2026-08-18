@@ -96,7 +96,7 @@ both endpoints have unloaded.
 
 ## Send to another agent
 
-Start the other agent with `agent_start`. The child starts with fresh transcript context, but inheritable per-agent metadata such as each shell instance's workdir is copied from the parent. Starting it does not set a display name; parent/child topology is tracked separately rather than encoded in a name. The child reports its own user-visible task title through `status`. The child prompt's `agent_id` template variable matches the returned `sub_agent_id`. The `agent_start` tool completes immediately with `self_agent_id` and `sub_agent_id` metadata, while the sub-agent's response text arrives through the `agent_watch` async response-notification path:
+Start the other agent with `agent_start`. The child starts with fresh transcript context, but inheritable per-agent metadata such as each shell instance's workdir is copied from the parent. Starting it does not set a display name; parent/child topology is tracked separately rather than encoded in a name. The child reports its own user-visible task title through `status`. It can discover its authoritative identity and session metadata with `self_info`; custom prompt templates may still place the explicit `agent_id` template input when desired. The `agent_start` tool completes immediately with `self_agent_id` and `sub_agent_id` metadata, while the sub-agent's response text arrives through the `agent_watch` async response-notification path:
 
 ```text
 tau_internal: true

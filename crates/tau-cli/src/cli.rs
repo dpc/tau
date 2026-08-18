@@ -370,8 +370,8 @@ pub enum DevCommand {
 
     /// Print only the rendered system prompt for a role.
     ///
-    /// Uses a stable fake agent id so role previews render agent-scoped
-    /// template sections such as Agent identity.
+    /// Uses a stable fake agent id as the explicit `agent_id` input for custom
+    /// templates; built-in templates intentionally omit agent identity.
     PrintSystemPrompt,
 
     /// Print the effective tool definitions.

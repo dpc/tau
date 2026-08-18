@@ -1203,7 +1203,7 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
             .lines()
             .filter(|line| *line == "# Agent identity")
             .count(),
-        1
+        0
     );
     assert_eq!(
         prompt
@@ -1219,7 +1219,7 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
             .count(),
         0
     );
-    assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
+    assert!(!prompt.contains("Your agent id is"));
 
     server.join().expect("join").expect("daemon clean exit");
 }

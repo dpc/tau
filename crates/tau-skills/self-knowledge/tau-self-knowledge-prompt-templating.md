@@ -64,7 +64,13 @@ Prompt fragments can use:
 - `skills` — prompt-visible skills, with `name`, `description`, and `baseDir`.
 - `agent_context` — extension-published per-agent context, keyed by context name. Each key is an array of contributions with `extension_name` and `value`.
 
-Full system prompt templates additionally receive rendered `prompt_fragments` and `tool_prompt_fragments` arrays. Each item has `name`, `priority`, `content`, and `early`. Tool prompt fragment `content` already includes Tau's automatic ``### `<tool>` instructions`` heading.
+Full system prompt templates additionally receive `agent_id` for a concrete
+agent plus rendered `prompt_fragments` and `tool_prompt_fragments` arrays. Tau's
+built-in templates intentionally omit `agent_id`; custom templates retain it for
+explicit placement, while agents can query current authoritative identity with
+the input-free `self_info({})` tool. Each fragment item has `name`, `priority`,
+`content`, and `early`. Tool prompt fragment `content` already includes Tau's
+automatic ``### `<tool>` instructions`` heading.
 They also receive optional `exact_sentinel_boundary_rule` text whenever selected
 context contains a Tau-stamped payload envelope. Custom templates should render
 that rule once; omitting it replaces Tau's model-visible provenance cue.

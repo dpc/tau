@@ -1221,6 +1221,23 @@ Changes to that predicate, disposition, spawn ordering, or error formatting
 must recheck the Unix raw-entry regressions in `tau-config` secret-source tests
 and the `tau-harness` extension and lifecycle tests.
 
+### Model self-information disclosure
+
+The default-enabled, policy-authorized `self_info` tool exposes the calling
+model agent's agent/session identifiers, exact prompt-owned model and effort,
+call-time work status, and—only in durable mode—the local session path. Its
+seven-line response enters the transcript as an ordinary tool result and is
+therefore persisted with that agent's normal durable history. Configured
+extensions cannot invoke the tool directly; the harness requires a model-owned
+call and correlates it with the invoking prompt-start fact.
+
+Header values use a line-safe byte encoding: printable ASCII remains readable,
+backslash is doubled, and controls, non-ASCII bytes, and invalid path bytes use
+`\xNN`. This prevents model names or local paths from injecting apparent
+headers while preserving exact path bytes. Revisit this disclosure boundary and
+its focused regressions when changing tool policy, prompt/call correlation,
+storage modes, exposed fields, or the header encoding.
+
 Startup, setup inspection, and development-copy paths share the
 4,096-profile-per-instance, 1-MiB-per-profile, and per-instance merged snapshot
 byte limits. They validate the opened descriptor, using nonblocking Unix opens

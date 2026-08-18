@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tau_proto::{
-    CborValue, Event, StartAgentRequest, ToolCallId, ToolError, ToolName, ToolProgress, ToolResult,
-    ToolSpec, ToolUseState,
+    CborValue, Effort, Event, ModelId, SessionAgentWorkStatus, SessionId, StartAgentRequest,
+    ToolCallId, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolUseState,
 };
 
 #[cfg(test)]
@@ -159,6 +159,26 @@ pub struct AgentOwnedInternalToolCall {
     call: AgentToolCall,
     /// Model-visible tool name.
     visible_tool_name: ToolName,
+}
+
+/// Authoritative runtime metadata for the model agent invoking an internal
+/// tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InternalSelfInfo {
+    /// Stable public identity of the calling agent.
+    pub agent_id: tau_proto::AgentId,
+    /// Session that owns the calling agent.
+    pub session_id: SessionId,
+    /// Durable session directory, absent when the session has no persistent
+    /// directory.
+    pub session_dir: Option<PathBuf>,
+    /// Exact provider-qualified model captured for the prompt that made the
+    /// call.
+    pub model: ModelId,
+    /// Exact reasoning effort captured for the prompt that made the call.
+    pub effort: Effort,
+    /// Current canonical harness-owned semantic work status.
+    pub work_status: SessionAgentWorkStatus,
 }
 
 impl AgentOwnedInternalToolCall {
@@ -545,6 +565,46 @@ impl<'a> InternalToolHost<'a> {
         })
     }
 
+    /// Return authoritative self metadata for an agent-owned internal tool
+    /// call.
+    ///
+    /// Returns `None` unless the owner still correlates to its prompt-start
+    /// fact and that fact has captured model parameters. Identity, session,
+    /// model, and effort come from this frozen prompt ownership; work
+    /// status is read at call time from the current loaded-agent reducer.
+    pub(crate) fn self_info(&self, owner: &AgentOwnedInternalToolCall) -> Option<InternalSelfInfo> {
+        let agent = self.harness.agents.get(owner.conversation_id())?;
+        let agent_id = tau_proto::AgentId::parse(agent.agent_id.as_deref()?).ok()?;
+        let prompt_id = self
+            .harness
+            .prompt_tool_call_prompts
+            .get(&owner.call().id)?;
+        let started = self
+            .harness
+            .agent_store
+            .agent(agent_id.as_str())?
+            .prompt_started(prompt_id)?;
+        let model_params = started.model_params?;
+        let session_dir = self.harness.storage_mode.is_durable().then(|| {
+            self.harness
+                .store
+                .sessions_dir()
+                .join(agent.session_id.as_str())
+        });
+        Some(InternalSelfInfo {
+            agent_id,
+            session_id: agent.session_id.clone(),
+            session_dir,
+            model: started.model.clone(),
+            effort: model_params.effort,
+            work_status: SessionAgentWorkStatus::new(
+                agent.work_status.phase(),
+                agent.work_status.title().map(ToOwned::to_owned),
+            )
+            .expect("harness work status is canonical"),
+        })
+    }
+
     /// Dispatch a hidden activating background-completion prompt synchronously.
     #[cfg(test)]
     pub(crate) fn dispatch_test_background_completion(
@@ -879,8 +939,17 @@ impl<'a> InternalToolHost<'a> {
 }
 
 impl Harness {
-    /// Install handlers and register their internal tool specs.
-    pub fn install_internal_tool_handlers(&mut self, handlers: InternalToolHandlers) {
+    /// Install the reserved intrinsic `self_info` handler before all supplied
+    /// handlers, then register every internal tool spec in that order.
+    ///
+    /// `self_info` is enabled by default but remains subject to ordinary
+    /// effective role/tool policy. A supplied handler that claims the reserved
+    /// name is excluded completely, so it cannot register other specs or
+    /// observe committed events.
+    pub fn install_internal_tool_handlers(&mut self, mut handlers: InternalToolHandlers) {
+        let reserved_name = ToolName::new(crate::self_info_tool::SELF_INFO_TOOL_NAME);
+        handlers.retain(|handler| !handler.handles(&reserved_name));
+        handlers.insert(0, crate::self_info_tool::handler());
         self.internal_tool_handlers = handlers;
         let handlers = self.internal_tool_handlers.clone();
         let mut host = InternalToolHost::new(self);

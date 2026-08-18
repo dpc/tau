@@ -255,11 +255,8 @@ fn print_system_prompt_places_delegate_roles_late() {
         "prompt diagnostic must retain late role-catalog placement"
     );
     assert!(
-        catalog_offset
-            < prompt
-                .find("# Agent identity")
-                .expect("agent identity heading"),
-        "prompt diagnostic must retain the catalog before agent identity"
+        !prompt.contains("# Agent identity"),
+        "built-in prompt diagnostic must omit per-agent identity"
     );
     assert!(
         catalog_offset
@@ -272,7 +269,7 @@ fn print_system_prompt_places_delegate_roles_late() {
 
 /// Prompt previews omit a conditionally empty shell fragment regardless of how
 /// the extension is enabled, while retaining CLI precedence and the
-/// deterministic fake id.
+/// built-in identity omission.
 #[test]
 fn print_prompt_omits_conditionally_empty_extension_fragment() {
     let home = TempDir::new().expect("temporary home");
@@ -315,8 +312,8 @@ fn print_prompt_omits_conditionally_empty_extension_fragment() {
     ] {
         assert!(output.status.success(), "{:?}", output.stderr);
         assert!(
-            String::from_utf8_lossy(&output.stdout).contains("dev-preview-agent"),
-            "fake preview identity must remain deterministic"
+            !String::from_utf8_lossy(&output.stdout).contains("dev-preview-agent"),
+            "built-in preview must omit fake agent identity"
         );
     }
     assert_eq!(baseline.stdout, cli_disabled.stdout);

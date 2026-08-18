@@ -792,9 +792,8 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
     assert_eq!(rendered[2]["name"], serde_json::json!("b"));
 }
 
-/// The revived larger system prompt is shipped as a built-in template so
-/// roles can select it with `prompt_override: big` without copying it into
-/// user configuration.
+/// The larger built-in template renders ordinary context without embedding
+/// per-agent identity, which is available through the `self_info` tool.
 #[test]
 fn big_system_prompt_template_is_builtin_and_renders_context() {
     let templates = built_in_system_prompt_templates();
@@ -822,19 +821,11 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
         }),
         RolePromptTemplateContext::for_agent("engineer", &agent_id),
     );
-    let identity_section = format!("# Agent identity\n\nYour agent id is `{agent_id}`.");
-
     assert!(prompt.contains("You are Tau, an autonomous coding agent."));
     assert!(prompt.contains("- test-skill: test skill description (file: <builtin>/SKILL.md)"));
     assert!(prompt.contains("FRAGMENT /tmp/work"));
-    assert!(prompt.trim_end().ends_with(&identity_section));
-    assert_eq!(
-        prompt
-            .lines()
-            .filter(|line| *line == "# Agent identity")
-            .count(),
-        1
-    );
+    assert!(!prompt.contains("# Agent identity"));
+    assert!(!prompt.contains(agent_id.as_str()));
 }
 
 /// Both built-in role templates must classify external-message policy after
