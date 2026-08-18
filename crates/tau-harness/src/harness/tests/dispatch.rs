@@ -16115,6 +16115,34 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             tau_proto::StandaloneCompactionFailureReason::InvalidWindow,
         ),
         (
+            "empty private local narrative",
+            None,
+            None,
+            tau_proto::ProviderStopReason::EndTurn,
+            vec![ContextItem::LocalCompactionNarrative(
+                tau_proto::LocalCompactionNarrativeItem {
+                    narrative: String::new(),
+                },
+            )],
+            tau_proto::StandaloneCompactionFailureReason::InvalidWindow,
+        ),
+        (
+            "multi-item private local narrative",
+            None,
+            None,
+            tau_proto::ProviderStopReason::EndTurn,
+            vec![
+                ContextItem::LocalCompactionNarrative(tau_proto::LocalCompactionNarrativeItem {
+                    narrative: "valid narrative".to_owned(),
+                }),
+                ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                    kind: tau_proto::ReasoningTextKind::Full,
+                    text: "must not persist".to_owned(),
+                }),
+            ],
+            tau_proto::StandaloneCompactionFailureReason::InvalidWindow,
+        ),
+        (
             "invalid provider image",
             None,
             None,
@@ -36452,6 +36480,96 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         h.current_session_state.token_usage.by_model,
         model_request_counts_before
     );
+}
+
+/// A private local-compaction envelope on ordinary inference is rejected before
+/// accounting or durable response mutation, and even deferred terminalization
+/// retains no private body.
+#[test]
+fn ordinary_inference_rejects_private_compaction_output_before_persistence() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("ordinary prompt".to_owned()))
+        .expect("dispatch ordinary prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let usage_before = h.current_session_state.token_usage.clone();
+    let durable_responses_before = loaded_agent_events(&h, "s1")
+        .iter()
+        .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+        .count();
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        output_items: vec![ContextItem::LocalCompactionNarrative(
+            tau_proto::LocalCompactionNarrativeItem {
+                narrative: "must not persist".to_owned(),
+            },
+        )],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: Some(tau_proto::ProviderTokenUsage {
+            model: None,
+            prompt_sent_tokens: 9,
+            prompt_cached_tokens: 3,
+            prompt_cache_read_ceiling_tokens: None,
+            cache: None,
+            response_received_tokens: 2,
+            stats: Default::default(),
+        }),
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("private ordinary output is rejected in band");
+
+    assert_eq!(h.current_session_state.token_usage, usage_before);
+    assert_eq!(
+        loaded_agent_events(&h, "s1")
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        durable_responses_before
+    );
+    assert!(
+        h.agent_store
+            .agent(agent_id.as_str())
+            .expect("tree")
+            .nodes()
+            .iter()
+            .all(|node| !matches!(
+                &node.entry,
+                tau_core::AgentEntry::AssistantResponse { output_items, .. }
+                    if output_items.iter().any(|item| matches!(
+                        item,
+                        ContextItem::LocalCompactionNarrative(_)
+                    ))
+            ))
+    );
+    assert!(
+        h.pending_stale_provider_responses
+            .get(&prompt.agent_prompt_id)
+            .is_none_or(|pending| pending.response.output_items.is_empty())
+    );
+    assert!(event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentPromptTerminated(terminated)
+                if terminated.agent_prompt_id == prompt.agent_prompt_id
+        )
+    }));
 }
 
 /// Standalone terminal classification precedes the ordinary global-round guard,

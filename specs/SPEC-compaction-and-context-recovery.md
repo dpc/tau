@@ -19,10 +19,33 @@ no-tools request serializes typed history as canonical JSON, intentionally omits
 image bytes while retaining image metadata and an explicit loss marker, and
 persists only a bounded validated synthetic user-role checkpoint. Its output may
 contain separately byte-bounded reasoning text, which Tau discards; exactly one
-assistant message in the strict 12-line summary-v1 shape must remain, and every
-other semantic output is rejected. The complete compactor request is never
-persisted, including in provider debug captures. Failures after semantic output
-are terminal and never ambiguously resent.
+nonempty bounded assistant narrative message must remain, and every other
+semantic output is rejected. Before committing that narrative, the harness
+adds a bounded deterministic JSON supplement of the selected durable branch's
+most recent closed tool-result facts: tool name, tool type, and terminal
+success/error/cancelled class only. It excludes tool arguments/results/error
+prose, media bytes, messages, reasoning, opaque provider data, metadata,
+runtime/UI/debug state, and other branches. It admits newest facts first under
+the fixed 32-fact/8-KiB cap then renders the retained facts in chronological
+order with an omitted count. The final one-message checkpoint labels both the
+provider narrative and harness supplement as untrusted historical data.
+The local extension returns its validated narrative in a dedicated private
+`local_compaction_narrative` output envelope. The harness recognizes only that
+typed provenance, rejects empty, oversized, or multi-item envelopes atomically,
+and provider lowering cannot emit the private control item. It derives the
+supplement by walking the transaction's immutable selected cut backward through
+its complete durable ancestry,
+including earlier compaction boundaries; suffix and sibling nodes never
+participate. This full scan ensures recent typed tool statuses survive repeated
+poor summaries. Narrative JSON and tag delimiters are escaped before the
+composite commits inside the exact replacement window, so live use and cold
+replay use identical bytes. Raw narrative is capped at 256 KiB, the supplement
+at 8 KiB, and the complete escaped checkpoint at 2 MiB. Re-review typed
+provenance, selected-cut ancestry, bounds, included/excluded fields, escaping,
+atomic failure, and replay identity whenever this exception changes. The
+complete compactor request is never persisted, including in provider debug
+captures. Failures after semantic output are terminal and never ambiguously
+resent.
 
 ## Recovery authority
 
@@ -301,9 +324,13 @@ middle-truncates at most one boundary message with an explicit token marker.
 Images and audio inside retained messages remain uncharged by this retention
 budget. All other input items are omitted. Invalid output or failed validation
 installs nothing.
-Outside the explicitly scoped ChatGPT-v2 exception, a standalone provider
-request is stateless and its ordered provider output remains the canonical
-replacement window without pruning or reinterpretation.
+Outside the explicitly scoped ChatGPT-v2 and local Chat Completions
+transcript-v1 exceptions, a standalone provider request is stateless and its
+ordered provider output remains the canonical replacement window without
+pruning or reinterpretation. The explicitly opted-in local Chat Completions
+transcript-v1 compactor transforms one bounded assistant narrative into one
+synthetic checkpoint message together with the harness-owned durable-facts
+supplement described above.
 
 Cold agent rehydration restores context usage only from the latest
 model-qualified durable assistant response on the selected branch and never

@@ -2609,7 +2609,7 @@ fn convert_context_item(
         }
         ContextItem::ToolCall(call) => convert_tool_call_item(call, out),
         ContextItem::ToolResult(result) => convert_tool_result_item(result, image_budget, out),
-        ContextItem::ReasoningText(_) => {}
+        ContextItem::ReasoningText(_) | ContextItem::LocalCompactionNarrative(_) => {}
         ContextItem::Reasoning(item) => {
             convert_opaque_provider_item(item, out);
         }

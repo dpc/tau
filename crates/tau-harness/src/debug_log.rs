@@ -796,6 +796,11 @@ fn prompt_created_debug_summary(prompt: &tau_proto::AgentPromptCreated) -> serde
                     .text_bytes
                     .saturating_add(u64::try_from(reasoning.text.len()).unwrap_or(u64::MAX));
             }
+            tau_proto::ContextItem::LocalCompactionNarrative(narrative) => {
+                counts.text_bytes = counts
+                    .text_bytes
+                    .saturating_add(u64::try_from(narrative.narrative.len()).unwrap_or(u64::MAX));
+            }
             tau_proto::ContextItem::ToolCall(_)
             | tau_proto::ContextItem::Reasoning(_)
             | tau_proto::ContextItem::CompactionTrigger

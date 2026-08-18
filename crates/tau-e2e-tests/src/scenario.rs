@@ -84,10 +84,10 @@ pub enum ScenarioActionV2 {
         /// Whether this response reports deterministic nonzero token usage.
         report_usage: bool,
     },
-    /// Return a validated standalone-compaction replacement window.
+    /// Return the private typed narrative output consumed by the harness.
     StandaloneCompaction {
-        /// Exact complete six-section summary returned by the provider.
-        summary: String,
+        /// Exact bounded narrative carried in the private output envelope.
+        narrative: String,
     },
     /// Return one fixed canonical opaque provider compaction item.
     StandaloneOpaqueCompaction,
@@ -134,8 +134,8 @@ pub enum ScenarioActionV2 {
     CompactedText {
         /// Exact latest user text.
         user_text: String,
-        /// Exact summary that must survive in replacement context.
-        summary: String,
+        /// Exact composite checkpoint that must survive in replacement context.
+        checkpoint: String,
         /// Earlier user text that the replacement must remove from context.
         removed_user_text: String,
         /// Complete assistant response.

@@ -801,16 +801,26 @@ context; it never adds model text to the system prompt. Public Responses and
 models without this declaration remain unsupported.
 The model may emit reasoning text before its summary. Tau applies
 `max_output_bytes` separately to the aggregate reasoning text and the assistant
-message, discards the reasoning, and rejects every other output item. The
-assistant message must contain exactly 12 nonempty lines with no blank or extra
-lines: each of the six exact summary-v1 headings on its own line, immediately
-followed by one content line.
+message, discards the reasoning, and rejects every other output item. The final
+assistant message may use any concise nonempty narrative shape. Tau combines it
+with a bounded harness-generated JSON supplement of recent durable tool-result
+facts (tool name/type and success/error/cancelled class), then stores one
+untrusted synthetic historical checkpoint. The supplement never contains tool
+arguments, tool output/error prose, media bytes, reasoning, messages, metadata,
+or runtime/debug/UI state. The harness walks the selected cut's complete
+ancestry through prior compactions, admits the newest 32 facts under an 8-KiB
+serialized cap, and renders retained facts chronologically with an omitted
+count. A dedicated private output envelope distinguishes the local narrative
+from ordinary provider messages; empty, oversized, or multi-item envelopes fail
+atomically, and provider lowering cannot replay the private envelope. Raw
+narrative is capped at 256 KiB, the final escaped checkpoint at 2 MiB, and tag
+delimiters are escaped.
 The context window must match the model field. Input and output limits must be
 positive and fit conservatively within that window; units are bytes, tokens,
 and bytes respectively, with an additional 1,024-token worst-case request and
 chat-template reserve. Known-remote OpenRouter profiles discard this local-only
 declaration. Transcript-v1 deliberately removes image bytes while
-retaining image metadata and a loss marker. Empty, malformed, truncated, or
+retaining image metadata and a loss marker. Empty, unsupported, truncated, or
 over-limit summaries fail the durable transaction without fallback or resend.
 
 `tau-provider-responses` implements the public `/responses` protocol over

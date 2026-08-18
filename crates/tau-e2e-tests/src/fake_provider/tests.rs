@@ -165,7 +165,7 @@ fn standalone_compaction_capability_requires_a_dedicated_action() {
 
     for action in [
         ScenarioActionV2::StandaloneCompaction {
-            summary: "Goal:\nsummary".to_owned(),
+            narrative: "Goal:\nsummary".to_owned(),
         },
         ScenarioActionV2::StandaloneOpaqueCompaction,
         ScenarioActionV2::StandaloneCompactionError {

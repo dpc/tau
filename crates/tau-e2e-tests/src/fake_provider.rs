@@ -97,7 +97,7 @@ impl ScenarioConfig {
                 if scenario.lanes.iter().flat_map(|lane| &lane.actions).any(|action| {
                     matches!(
                         action,
-                            ScenarioActionV2::StandaloneCompaction { summary: _ }
+                            ScenarioActionV2::StandaloneCompaction { narrative: _ }
                             | ScenarioActionV2::StandaloneOpaqueCompaction
                             | ScenarioActionV2::ReactiveOpaqueCompaction {
                                 removed_user_text: _,
@@ -1575,8 +1575,8 @@ impl FakeState {
             | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => {
                 emit_text_response(prompt, handle, response)
             }
-            ScenarioActionV2::StandaloneCompaction { summary } => {
-                emit_text_response(prompt, handle, summary)
+            ScenarioActionV2::StandaloneCompaction { narrative } => {
+                emit_local_compaction_narrative(prompt, handle, narrative)
             }
             ScenarioActionV2::StandaloneOpaqueCompaction => {
                 emit_opaque_compaction_response(prompt, handle)
@@ -2290,7 +2290,7 @@ impl FakeState {
                         .map_err(|message| self.mismatch(cursor, message))?;
                 }
             }
-            ScenarioActionV2::StandaloneCompaction { summary: _ }
+            ScenarioActionV2::StandaloneCompaction { narrative: _ }
             | ScenarioActionV2::StandaloneOpaqueCompaction
             | ScenarioActionV2::StandaloneCompactionError {
                 failure_kind: _,
@@ -2325,18 +2325,16 @@ impl FakeState {
             }
             ScenarioActionV2::CompactedText {
                 user_text: _,
-                summary,
+                checkpoint,
                 removed_user_text,
                 response: _,
             } => {
-                let context = serde_json::to_string(&prompt.context)
-                    .map_err(|error| ClientError::handler(error.to_string()))?;
-                if !context.contains(&summary.replace('\n', "\\n"))
-                    || context.contains(removed_user_text)
+                if !context_has_text(prompt, ContextRole::User, checkpoint)
+                    || context_has_text(prompt, ContextRole::User, removed_user_text)
                 {
                     return Err(self.mismatch(
                         cursor,
-                        "replacement window did not replace prior transcript",
+                        "exact composite checkpoint did not replace prior transcript",
                     ));
                 }
             }
@@ -2739,6 +2737,23 @@ fn emit_text_response(
     )))
 }
 
+/// Publishes the exact typed local narrative envelope that the production
+/// Chat Completions extension gives the harness after output validation.
+fn emit_local_compaction_narrative(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    narrative: String,
+) -> ClientResult<()> {
+    let item = ContextItem::LocalCompactionNarrative(tau_proto::LocalCompactionNarrativeItem {
+        narrative,
+    });
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        vec![item],
+        ProviderStopReason::EndTurn,
+    )))
+}
+
 /// Publishes one replay-safe reasoning-only output-limit terminal.
 fn emit_output_length_reasoning(
     prompt: &tau_proto::AgentPromptCreated,
@@ -3071,7 +3086,7 @@ impl ScenarioActionV2 {
             | Self::ContextOverflow { user_text, .. }
             | Self::CompactedText {
                 user_text,
-                summary: _,
+                checkpoint: _,
                 removed_user_text: _,
                 response: _,
             }
@@ -3102,7 +3117,7 @@ impl ScenarioActionV2 {
             | Self::BarrierParallelDummyTools { user_text, .. }
             | Self::ProviderContextRawMessageCall { user_text, .. } => Some(user_text),
             Self::OutputLengthContinuation { .. }
-            | Self::StandaloneCompaction { summary: _ }
+            | Self::StandaloneCompaction { narrative: _ }
             | Self::StandaloneOpaqueCompaction
             | Self::ReactiveOpaqueCompaction { .. }
             | Self::ReactiveCompactedOpaqueText { .. }
@@ -3127,7 +3142,7 @@ impl ScenarioActionV2 {
     /// explicitly models.
     fn matches_operation(&self, operation: tau_proto::PromptOperation) -> bool {
         match self {
-            Self::StandaloneCompaction { summary: _ }
+            Self::StandaloneCompaction { narrative: _ }
             | Self::StandaloneOpaqueCompaction
             | Self::ReactiveOpaqueCompaction { .. }
             | Self::StandaloneCompactionError {

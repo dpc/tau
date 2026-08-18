@@ -6,6 +6,7 @@ use std::{
 
 use tokio::sync as path_tokio_sync;
 
+use crate::common::LlmError;
 use crate::{attempt_failure as path_crate_attempt_failure, common as path_crate_common};
 
 mod compatibility;
@@ -18,7 +19,24 @@ use tau_proto::{
 };
 
 use super::*;
-use crate::common::LlmError;
+
+/// Private local-compaction envelopes are harness control output and can never
+/// become a Codex Responses input item.
+#[test]
+fn local_compaction_narrative_is_not_provider_lowerable() {
+    let item = ContextItem::LocalCompactionNarrative(tau_proto::LocalCompactionNarrativeItem {
+        narrative: "private narrative".to_owned(),
+    });
+    let mut budget = ImageRequestBudget {
+        supported: false,
+        responses_lite: false,
+        image_bytes: 0,
+        data_url_bytes: 0,
+    };
+    let mut lowered = Vec::new();
+    convert_context_item(&item, true, &mut budget, &mut lowered);
+    assert!(lowered.is_empty());
+}
 
 /// Private Responses terminal usage keeps provider-reported cache writes
 /// separate from cached reads for equivalent-API accounting.

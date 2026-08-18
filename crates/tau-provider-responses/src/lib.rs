@@ -1793,7 +1793,9 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
                 None => Ok(Some(ResponsesInputItem::Json(value))),
             }
         }
-        ContextItem::UnknownProviderItem(_) => Err(Error::UnsupportedOutput),
+        ContextItem::UnknownProviderItem(_) | ContextItem::LocalCompactionNarrative(_) => {
+            Err(Error::UnsupportedOutput)
+        }
         ContextItem::ReasoningText(_) => Ok(None),
         ContextItem::CompactionTrigger | ContextItem::Compaction(_) => {
             Err(Error::UnsupportedOutput)

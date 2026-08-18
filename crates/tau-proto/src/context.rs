@@ -551,6 +551,23 @@ pub struct ReasoningTextItem {
     pub text: String,
 }
 
+/// Private extension-to-harness output carrying one raw, untrusted local
+/// compaction narrative.
+///
+/// The DTO itself does not establish bounds or validity. The harness must
+/// validate and consume this control envelope before persisting a replacement
+/// window.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LocalCompactionNarrativeItem {
+    /// Raw untrusted narrative returned by the local compactor.
+    pub narrative: String,
+}
+
+/// Maximum raw UTF-8 bytes accepted from one local compaction narrative.
+pub const LOCAL_COMPACTION_NARRATIVE_MAX_BYTES: usize = 256 * 1024;
+/// Maximum bytes persisted in one composite local compaction checkpoint.
+pub const LOCAL_COMPACTION_CHECKPOINT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
 /// One item in Tau's prompt/response timeline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
@@ -563,6 +580,8 @@ pub enum ContextItem {
     ToolResult(ToolResultItem),
     /// Displayable reasoning text captured from the provider.
     ReasoningText(ReasoningTextItem),
+    /// Private local-compactor terminal consumed only by the harness.
+    LocalCompactionNarrative(LocalCompactionNarrativeItem),
     /// Provider-specific reasoning item used for backend replay.
     Reasoning(OpaqueProviderItem),
     /// User- or harness-authored request for the provider to compact context.
@@ -645,6 +664,9 @@ fn validate_compaction_window_items(items: &[ContextItem]) -> Result<(), &'stati
             }
             ContextItem::CompactionTrigger => {
                 return Err("replacement window contains a harness compaction trigger");
+            }
+            ContextItem::LocalCompactionNarrative(_) => {
+                return Err("replacement window contains a private local compaction envelope");
             }
             ContextItem::Message(_)
             | ContextItem::ReasoningText(_)

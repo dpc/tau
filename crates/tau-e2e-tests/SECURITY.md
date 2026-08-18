@@ -175,8 +175,11 @@ runtime-semantics claim.
 The standalone-compaction acceptance actions are the fake's sole
 standalone-compaction opt-in: all other scenarios continue publishing that
 capability as false. They accept a nonempty harness-owned compact transcript,
-bounded terminal error or cancellation hold, one bounded replacement summary,
-or one fixed canonical opaque item. One closed reactive sequence additionally
+bounded terminal error or cancellation hold, one dedicated private typed local
+narrative output, or one fixed canonical opaque item. The local action requires
+the exact escaped composite checkpoint, exact empty durable-facts JSON, removed
+source context, byte-identical clean-restart replay, and resumed continuation.
+One closed reactive sequence additionally
 accepts a canonical no-output context-window failure, one correlated compact
 request for a verified pre-cut round, and one replacement/suffix continuation
 that retains the overflowing prompt while excluding that pre-cut round. The

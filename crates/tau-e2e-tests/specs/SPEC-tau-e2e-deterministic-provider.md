@@ -312,13 +312,17 @@ warm-process liveness, not crash-exact cancellation persistence.
 The local-summary-compaction acceptance grammar is equally narrow. Only a V2
 scenario containing one of its dedicated standalone actions causes the fake to
 publish `supports_standalone_compaction`; every other scenario remains opted
-out. The actions accept a harness-owned compact prompt, a bounded complete
-replacement summary, one fixed canonical opaque compaction item, terminal
-provider error, or exact cancellation hold. The opaque action's one following
+out. The actions accept a harness-owned compact prompt, one bounded private
+typed local narrative output, one fixed canonical opaque compaction item,
+terminal provider error, or exact cancellation hold. The opaque action's one following
 ordinary action runs only after a clean daemon restart and requires exactly one
 `ContextItem::Compaction` with the fixed raw provider JSON while the discarded
-user text is absent; the summary action continues to validate replacement text.
-This proves harness transaction, durable replacement, opaque cold replay, and
+user text is absent. The local narrative action emits the same dedicated
+private typed output as the production extension, requires the harness's exact
+escaped composite checkpoint with exact empty durable-facts JSON, stops Boot A,
+then validates byte-identical durable replay, removed source context, and
+ordinary continuation in Boot B. This proves harness transaction, typed-local
+composition, durable replacement, opaque and composite cold replay, and
 continuation semantics through the provider extension seam; it does not expand
 the grammar into a compaction outcome matrix. The Chat Completions adapter's
 private static no-tools wire lowering and transcript-v1 request materialization

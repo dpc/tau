@@ -42,9 +42,21 @@ control.
 Only a model with an explicit `local_summary_compaction` profile may run Tau's
 transcript-v1 summary compactor. The dedicated exact-model request has no tools,
 omits image bytes while retaining typed metadata and an explicit loss marker,
-and is excluded from durable provider debug capture. Only a bounded, validated
-six-section result persists, as untrusted synthetic user-role history. Separately
+and is excluded from durable provider debug capture. It accepts one bounded
+nonempty assistant narrative, discards separately bounded typed reasoning, and
+rejects every other output item. The harness adds its own deterministic durable
+tool-status supplement before the bounded narrative persists as untrusted
+synthetic user-role history. Separately
 byte-bounded reasoning text may accompany that result but is discarded. Other
 semantic output is rejected. Failures after semantic output terminalize without
-resend. Revisit this boundary when changing compactor serialization, capture,
-retries, validation, or eligibility.
+resend. The local extension returns a dedicated private typed narrative
+envelope; the harness rejects empty, oversized, or multi-item envelopes
+atomically, and provider transcript phases remain provider-valid only. The
+harness walks the selected cut's full durable ancestry through prior
+compactions, retains at most 32 newest tool terminal facts under 8 KiB, escapes
+tag delimiters, and excludes arguments, outputs, error prose, media, messages,
+reasoning, opaque data, metadata, UI/runtime/debug state, suffixes, and sibling
+branches. Revisit provenance, ancestry, included/excluded fields, budgeting,
+escaping, atomic failure, capture, retries, validation, and eligibility when
+changing this boundary. Raw narrative is capped at 256 KiB and the complete
+escaped persisted checkpoint at 2 MiB.

@@ -814,6 +814,7 @@ fn approx_context_item_provider_bytes(item: &ContextItem) -> u64 {
                 + 16
         }
         ContextItem::ReasoningText(reasoning) => reasoning.text.len() as u64 + 16,
+        ContextItem::LocalCompactionNarrative(narrative) => narrative.narrative.len() as u64 + 16,
         ContextItem::Reasoning(item)
         | ContextItem::Compaction(item)
         | ContextItem::UnknownProviderItem(item) => item.raw_json.as_ref().map_or_else(
@@ -1913,6 +1914,7 @@ mod tool_policy_tests;
 
 mod agent_context;
 mod agent_watch_provider_deliveries;
+mod compaction_supplement;
 mod context_limit_telemetry;
 mod current_session;
 mod dispatch;
@@ -28950,6 +28952,30 @@ impl Harness {
                 .is_some_and(|operation| {
                     operation.0 == tau_proto::PromptOperation::StandaloneCompaction
                 });
+        let contains_private_compaction_output = response
+            .output_items
+            .iter()
+            .any(|item| matches!(item, ContextItem::LocalCompactionNarrative(_)));
+        if contains_private_compaction_output && !active_compaction_response {
+            self.emit_harness_failure(
+                "rejecting private local-compaction output outside its active standalone transaction",
+            );
+            response.output_items.clear();
+            if standalone_compaction {
+                self.silent_compaction_failure_prompts
+                    .insert(response.agent_prompt_id.clone());
+                self.reject_standalone_compaction(
+                    &cid,
+                    &response,
+                    StandaloneCompactionRejection::InvalidWindow,
+                    source,
+                );
+                self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+            } else {
+                self.terminalize_global_round_rejected_prompt(&cid, &response, source);
+            }
+            return Ok(());
+        }
         if !standalone_compaction
             && raw_response_contains_tool_calls
             && self.agent_has_open_foreground_tool_round(&cid)
@@ -29853,19 +29879,54 @@ impl Harness {
                 StandaloneCompactionRejection::InvalidStop,
             );
         }
-        let Ok(replacement_window) =
-            tau_proto::ValidatedCompactionWindow::new(response.output_items.clone())
-        else {
-            return StandaloneCompactionTerminal::Rejected(
-                StandaloneCompactionRejection::InvalidWindow,
-            );
-        };
+        let replacement_window =
+            match self.harness_supplemented_compaction_window(cid, &response.output_items) {
+                Ok(Some(window)) => window,
+                Ok(None) => {
+                    let Ok(window) =
+                        tau_proto::ValidatedCompactionWindow::new(response.output_items.clone())
+                    else {
+                        return StandaloneCompactionTerminal::Rejected(
+                            StandaloneCompactionRejection::InvalidWindow,
+                        );
+                    };
+                    window
+                }
+                Err(()) => {
+                    return StandaloneCompactionTerminal::Rejected(
+                        StandaloneCompactionRejection::InvalidWindow,
+                    );
+                }
+            };
         if !self.standalone_compaction_boundary_is_valid(cid, response, &replacement_window) {
             return StandaloneCompactionTerminal::Rejected(
                 StandaloneCompactionRejection::InvalidWindow,
             );
         }
         StandaloneCompactionTerminal::Accepted(replacement_window)
+    }
+
+    /// Adds harness-owned durable facts to the local narrative checkpoint.
+    ///
+    /// The supplement derives from the immutable transaction cut, not current
+    /// runtime state, so a concurrent suffix and a cold replay see the same
+    /// selected durable history. Other providers retain their exact output
+    /// window unchanged.
+    fn harness_supplemented_compaction_window(
+        &self,
+        cid: &AgentId,
+        output_items: &[ContextItem],
+    ) -> Result<Option<tau_proto::ValidatedCompactionWindow>, ()> {
+        compaction_supplement::compose(output_items, || {
+            let agent = self.agents.get(cid).ok_or(())?;
+            let cut = match &agent.activation_dispatch {
+                path_crate_agent::ActivationDispatchState::Running { cut, .. } => *cut,
+                _ => return Err(()),
+            };
+            let agent_id = agent.agent_id.as_deref().ok_or(())?;
+            let tree = self.agent_store.agent(agent_id).ok_or(())?;
+            Ok((tree, cut))
+        })
     }
 
     /// Checks the complete core boundary contract without appending it.
