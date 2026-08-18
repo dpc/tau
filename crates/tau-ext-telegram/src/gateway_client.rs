@@ -1,24 +1,29 @@
 //! Gateway-client socket protocol for the Telegram sidecar.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::MAX_GATEWAY_RESPONSE_BYTES;
 #[cfg(test)]
 use crate::gateway_auth::GatewayKeyId;
 use crate::gateway_auth::{
     AuthFields, AuthProof, ClientGeneration, ClientNonce, EXTENSION_INSTANCE, GatewayAuthKey,
     GatewayGeneration, PROTOCOL_VERSION, ServerNonce,
 };
+use crate::{HTTP_TIMEOUT, MAX_GATEWAY_RESPONSE_BYTES};
 
 /// Version of the private gateway socket protocol used by sidecars.
 const SOCKET_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
 /// Maximum time one socket read may delay cancellation or reconfiguration.
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Extra time for local gateway scheduling after its bounded Bot API request.
+const SEND_RESPONSE_SCHEDULING_MARGIN: Duration = Duration::from_secs(5);
+/// Maximum time an outbound Telegram send may wait for its gateway response.
+const SEND_MESSAGE_RESPONSE_TIMEOUT: Duration =
+    Duration::from_secs(HTTP_TIMEOUT.as_secs() + SEND_RESPONSE_SCHEDULING_MARGIN.as_secs());
 /// Maximum time one socket write may delay cancellation or reconfiguration.
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Maximum time one connect attempt may run without supervisor cancellation.
@@ -355,24 +360,32 @@ impl GatewayClient {
         kind: GatewayRequestKind,
         request: GatewayClientRequest,
     ) -> Result<GatewaySocketResponse, GatewayClientError> {
-        self.exchange(GatewayWireRequest {
-            protocol_version: SOCKET_PROTOCOL_VERSION,
-            kind: kind.as_str(),
-            session_id: request.session_id,
-            agent_id: request.agent_id,
-            message: request.message,
-            display_name: request.display_name,
-            report_id: request.report_id,
-            ..GatewayWireRequest::default()
-        })
+        self.exchange(
+            GatewayWireRequest {
+                protocol_version: SOCKET_PROTOCOL_VERSION,
+                kind: kind.as_str(),
+                session_id: request.session_id,
+                agent_id: request.agent_id,
+                message: request.message,
+                display_name: request.display_name,
+                report_id: request.report_id,
+                ..GatewayWireRequest::default()
+            },
+            kind.response_timeout(),
+        )
     }
 
     /// Exchange one request on the authenticated ordered stream.
     fn exchange(
         &self,
         request: GatewayWireRequest<'_>,
+        response_timeout: Duration,
     ) -> Result<GatewaySocketResponse, GatewayClientError> {
-        self.exchange_until(request, Instant::now() + SOCKET_READ_TIMEOUT)
+        let mut guard = self.stream.lock().expect("gateway stream lock");
+        let stream = guard
+            .as_mut()
+            .ok_or_else(|| GatewayClientError::fatal("Telegram gateway socket is not connected"))?;
+        self.exchange_on_stream(request, stream, Instant::now() + response_timeout)
     }
 
     /// Exchange one request before one monotonic absolute deadline.
@@ -385,6 +398,16 @@ impl GatewayClient {
         let stream = guard
             .as_mut()
             .ok_or_else(|| GatewayClientError::fatal("Telegram gateway socket is not connected"))?;
+        self.exchange_on_stream(request, stream, deadline)
+    }
+
+    /// Exchange one request on a locked stream before one absolute deadline.
+    fn exchange_on_stream(
+        &self,
+        request: GatewayWireRequest<'_>,
+        stream: &mut UnixStream,
+        deadline: Instant,
+    ) -> Result<GatewaySocketResponse, GatewayClientError> {
         let request = serde_json::to_string(&request).map_err(|error| {
             GatewayClientError::fatal(format!("encoding Telegram gateway request: {error}"))
         })?;
@@ -464,15 +487,20 @@ fn read_response_until_with_clock(
                     break;
                 }
             }
-            Err(error) => {
-                return Err(GatewayClientError::fatal(format!(
-                    "reading Telegram gateway response: {error}"
-                )));
-            }
+            Err(error) => return Err(response_read_error(error)),
         }
     }
     String::from_utf8(response)
         .map_err(|_| GatewayClientError::fatal("Telegram gateway response is not UTF-8"))
+}
+
+/// Convert one gateway-response read failure into an actionable client error.
+fn response_read_error(error: std::io::Error) -> GatewayClientError {
+    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+        GatewayClientError::fatal("reading Telegram gateway response: timed out")
+    } else {
+        GatewayClientError::fatal(format!("reading Telegram gateway response: {error}"))
+    }
 }
 
 /// Request kind sent to the gateway.
@@ -495,6 +523,20 @@ enum GatewayRequestKind {
 }
 
 impl GatewayRequestKind {
+    /// Return the response timeout applied after this request acquires the
+    /// stream.
+    fn response_timeout(self) -> Duration {
+        match self {
+            Self::SendMessage => SEND_MESSAGE_RESPONSE_TIMEOUT,
+            Self::Heartbeat
+            | Self::RegisterAgent
+            | Self::CompleteReannouncement
+            | Self::UnregisterAgent
+            | Self::AcknowledgeDelivery
+            | Self::Goodbye => SOCKET_READ_TIMEOUT,
+        }
+    }
+
     /// Return the wire name for this request kind.
     fn as_str(self) -> &'static str {
         match self {

@@ -277,3 +277,41 @@ fn response_reader_enforces_one_absolute_deadline_across_bytes() {
     );
     assert_eq!(calls.get(), 2);
 }
+
+/// Outbound sends wait for the gateway's bounded Bot API operation, while
+/// control requests retain their short response timeout after stream access.
+#[test]
+fn send_message_response_timeout_includes_gateway_operation_margin() {
+    assert_eq!(
+        GatewayRequestKind::SendMessage.response_timeout(),
+        SEND_MESSAGE_RESPONSE_TIMEOUT
+    );
+    assert_eq!(
+        SEND_MESSAGE_RESPONSE_TIMEOUT,
+        HTTP_TIMEOUT + SEND_RESPONSE_SCHEDULING_MARGIN
+    );
+    assert_eq!(
+        GatewayRequestKind::Heartbeat.response_timeout(),
+        SOCKET_READ_TIMEOUT
+    );
+    assert_eq!(
+        GatewayRequestKind::RegisterAgent.response_timeout(),
+        SOCKET_READ_TIMEOUT
+    );
+    assert_eq!(
+        GatewayRequestKind::AcknowledgeDelivery.response_timeout(),
+        SOCKET_READ_TIMEOUT
+    );
+}
+
+/// Socket timeout implementations report either timeout kind, but callers need
+/// one actionable diagnostic independent of the platform's errno choice.
+#[test]
+fn response_reader_normalizes_socket_timeout_kinds() {
+    for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut] {
+        assert_eq!(
+            response_read_error(path_std_io::Error::from(kind)).to_string(),
+            "reading Telegram gateway response: timed out"
+        );
+    }
+}
