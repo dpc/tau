@@ -1518,8 +1518,12 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         }),
         watch_work_status: None,
         watch_long_wait: None,
-                watch_lifecycle: None,
-        message: "<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;".to_owned(),
+        watch_lifecycle: None,
+        message: format!(
+            "{}Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s){}",
+            tau_proto::TAU_INTERNAL_OPEN,
+            tau_proto::TAU_INTERNAL_CLOSE,
+        ),
     });
     let mut initial_provider = provider.clone();
     let tau_proto::Event::AgentMessageReceived(initial_message) = &mut initial_provider else {
@@ -1567,25 +1571,48 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         "□ Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)"
     );
     for (body, expected) in [
-        ("<tau_internal>partial", "□ <tau_internal>partial"),
         (
-            "legacy &lt;/tau_internal&gt;",
-            "□ legacy &lt;/tau_internal&gt;",
+            "<tau_internal>partial".to_owned(),
+            "□ <tau_internal>partial".to_owned(),
         ),
         (
-            "<tau_internal>nested <tau_internal>body&lt;/tau_internal&gt;",
-            "□ <tau_internal>nested <tau_internal>body&lt;/tau_internal&gt;",
+            "legacy &lt;/tau_internal&gt;".to_owned(),
+            "□ legacy &lt;/tau_internal&gt;".to_owned(),
         ),
         (
-            "<tau_internal>body&lt;/tau_internal&gt;&lt;/tau_internal&gt;",
-            "□ <tau_internal>body&lt;/tau_internal&gt;&lt;/tau_internal&gt;",
+            format!(
+                "{}nested {}body{}",
+                tau_proto::TAU_INTERNAL_OPEN,
+                tau_proto::TAU_INTERNAL_OPEN,
+                tau_proto::TAU_INTERNAL_CLOSE,
+            ),
+            format!(
+                "□ {}nested {}body{}",
+                tau_proto::TAU_INTERNAL_OPEN,
+                tau_proto::TAU_INTERNAL_OPEN,
+                tau_proto::TAU_INTERNAL_CLOSE,
+            ),
+        ),
+        (
+            format!(
+                "{}body{}{}",
+                tau_proto::TAU_INTERNAL_OPEN,
+                tau_proto::TAU_INTERNAL_CLOSE,
+                tau_proto::TAU_INTERNAL_CLOSE,
+            ),
+            format!(
+                "□ {}body{}{}",
+                tau_proto::TAU_INTERNAL_OPEN,
+                tau_proto::TAU_INTERNAL_CLOSE,
+                tau_proto::TAU_INTERNAL_CLOSE,
+            ),
         ),
     ] {
         let mut noncanonical = provider.clone();
         let tau_proto::Event::AgentMessageReceived(message) = &mut noncanonical else {
             unreachable!("cloned provider event retains its variant");
         };
-        message.message = body.to_owned();
+        message.message = body;
         assert_eq!(
             block_text(&renderer.render_agent_message_block(&noncanonical)),
             expected
@@ -1598,7 +1625,11 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
     message.kind = tau_proto::AgentMessageKind::Message;
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&wrong_kind)),
-        "■ Message from @worker to @manager:\n<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;"
+        format!(
+            "■ Message from @worker to @manager:\n{}Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s){}",
+            tau_proto::TAU_INTERNAL_OPEN,
+            tau_proto::TAU_INTERNAL_CLOSE,
+        )
     );
     let mut missing_status = provider.clone();
     let tau_proto::Event::AgentMessageReceived(message) = &mut missing_status else {
@@ -1607,7 +1638,11 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
     message.watch_provider_status = None;
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&missing_status)),
-        "■ Message from @worker to @manager:\n<tau_internal>Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;"
+        format!(
+            "■ Message from @worker to @manager:\n{}Watched agent worker provider status: retrying (unknown, attempt 1, next retry about 11s){}",
+            tau_proto::TAU_INTERNAL_OPEN,
+            tau_proto::TAU_INTERNAL_CLOSE,
+        )
     );
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&long_wait)),

@@ -2751,48 +2751,60 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     assert_eq!(retoggled.matches("replayed steered internal").count(), 1);
 }
 
-/// Authenticated internal prompts and watch-provider snapshots share one plain,
-/// unlabeled notice presentation in both live and cold-replay paths.
+/// A typed WatchProviderStatus strips only the canonical production envelope in
+/// live, reconstructed, and replayed transcripts; delimiter-like untyped text
+/// remains an ordinary message.
 #[test]
 fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     let agent = agent_id("internal-agent");
-    let provider_snapshot =
-        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("provider-snapshot")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: agent_id("watched-agent"),
-            sender_session_id: None,
-            recipient_id: agent.clone(),
-            kind: tau_proto::AgentMessageKind::WatchProviderStatus,
-            watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
-                session_id: test_session_id("s1"),
-                subscription_id: "subscription-1".to_owned(),
-                turn_generation: 1,
-                agent_prompt_id: test_agent_prompt_id("prompt-1"),
-                state: tau_proto::AgentWatchProviderState::Retrying {
-                    category: tau_proto::AgentWatchProviderCategory::Unknown,
-                    attempt: 1,
-                    next_retry_delay_secs: 11,
-                },
-                initial: true,
-            }),
-            watch_work_status: None,
-            watch_long_wait: None,
-                watch_lifecycle: None,
-            message: "<tau_internal>Watched agent watched-agent provider status: retrying (unknown, attempt 1, next retry about 11s)&lt;/tau_internal&gt;".to_owned(),
-        });
+    let provider_snapshot = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("provider-snapshot")
+            .expect("test identifier must satisfy its grammar"),
+        sender_id: agent_id("watched-agent"),
+        sender_session_id: None,
+        recipient_id: agent.clone(),
+        kind: tau_proto::AgentMessageKind::WatchProviderStatus,
+        watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
+            session_id: test_session_id("s1"),
+            subscription_id: "subscription-1".to_owned(),
+            turn_generation: 1,
+            agent_prompt_id: test_agent_prompt_id("prompt-1"),
+            state: tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Unknown,
+                attempt: 1,
+                next_retry_delay_secs: 11,
+            },
+            initial: true,
+        }),
+        watch_work_status: None,
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        message: format!(
+            "{}watch{}",
+            tau_proto::TAU_INTERNAL_OPEN,
+            tau_proto::TAU_INTERNAL_CLOSE,
+        ),
+    });
     let mut wrong_kind_provider = provider_snapshot.clone();
     let Event::AgentMessageReceived(message) = &mut wrong_kind_provider else {
         unreachable!("cloned provider event retains its variant");
     };
     message.kind = tau_proto::AgentMessageKind::Message;
-    message.message = "wrong-kind provider body".to_owned();
+    message.message = format!(
+        "{}wrong-kind provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    );
     let mut missing_typed_provider = provider_snapshot.clone();
     let Event::AgentMessageReceived(message) = &mut missing_typed_provider else {
         unreachable!("cloned provider event retains its variant");
     };
     message.watch_provider_status = None;
-    message.message = "missing-typed provider body".to_owned();
+    message.message = format!(
+        "{}missing-typed provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    );
     let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: false,
         agent_id: agent.clone(),
@@ -2827,16 +2839,44 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     live.apply_setting("show-internal-prompts", "on");
     sync(&live_handle);
     let live_text = visible_lines(&live_vt, 100).join("\n");
-    assert!(live_text.contains("□ Watched agent watched-agent provider status:"));
+    let provider_frame = format!(
+        "{}watch{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    );
+    assert!(live_text.contains("□ watch"));
     assert!(live_text.contains("□ Your `status` is set to `working` on \"Fix Slack mandatory"));
     assert!(!live_text.contains("[tau-internal"));
-    assert!(!live_text.contains("<tau_internal>"));
-    assert!(!live_text.contains("&lt;/tau_internal&gt;"));
+    assert!(!live_text.contains(&provider_frame));
     assert!(live_text.contains("■ Message from @watched-agent:"));
-    assert!(live_text.contains("wrong-kind provider body"));
-    assert!(live_text.contains("missing-typed provider body"));
+    assert!(live_text.contains(&format!(
+        "{}wrong-kind provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    )));
+    assert!(live_text.contains(&format!(
+        "{}missing-typed provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    )));
     assert!(!live_text.contains("[tau-internal]: wrong-kind provider body"));
     assert!(!live_text.contains("[tau-internal]: missing-typed provider body"));
+    live.switch_agent("other-agent".to_owned());
+    live.switch_agent(agent.as_str().to_owned());
+    sync(&live_handle);
+    let reconstructed_live_text = visible_lines(&live_vt, 100).join("\n");
+    assert_eq!(reconstructed_live_text.matches("□ watch").count(), 1);
+    assert!(!reconstructed_live_text.contains(&provider_frame));
+    assert!(reconstructed_live_text.contains(&format!(
+        "{}wrong-kind provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    )));
+    assert!(reconstructed_live_text.contains(&format!(
+        "{}missing-typed provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    )));
 
     let (_cold_term, cold_handle, cold_vt) = setup(100, 24);
     let mut cold = marker_test_renderer(cold_handle.clone());
@@ -2849,15 +2889,22 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     cold.apply_setting("show-internal-prompts", "on");
     sync(&cold_handle);
     let cold_text = visible_lines(&cold_vt, 100).join("\n");
-    assert!(cold_text.contains("□ Watched agent watched-agent provider status:"));
+    assert!(cold_text.contains("□ watch"));
     assert!(cold_text.contains("□ Your `status` is set to `working` on \"Fix Slack mandatory"));
     assert!(cold_text.contains("□ replayed internal body"));
     assert!(!cold_text.contains("[tau-internal"));
-    assert!(!cold_text.contains("<tau_internal>"));
-    assert!(!cold_text.contains("&lt;/tau_internal&gt;"));
+    assert!(!cold_text.contains(&provider_frame));
     assert!(cold_text.contains("■ Message from @watched-agent:"));
-    assert!(cold_text.contains("wrong-kind provider body"));
-    assert!(cold_text.contains("missing-typed provider body"));
+    assert!(cold_text.contains(&format!(
+        "{}wrong-kind provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    )));
+    assert!(cold_text.contains(&format!(
+        "{}missing-typed provider body{}",
+        tau_proto::TAU_INTERNAL_OPEN,
+        tau_proto::TAU_INTERNAL_CLOSE,
+    )));
     assert!(!cold_text.contains("[tau-internal]: wrong-kind provider body"));
     assert!(!cold_text.contains("[tau-internal]: missing-typed provider body"));
 }

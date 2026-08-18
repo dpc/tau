@@ -58,7 +58,7 @@ compact notice presentation without a textual provenance label or the
 provider-only outer envelope. Live and initial-snapshot notifications use the
 same representation because typed provenance and event state retain that
 distinction. The renderer removes only an exact canonical
-`<tau_internal>...&lt;/tau_internal&gt;` outer frame; partial, nested, nonmatching,
+`<tau_internal>...</tau_internal>` outer frame; partial, nested, nonmatching,
 and legacy text remains verbatim. Replay and live rendering use the same
 projection. See
 [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md) for

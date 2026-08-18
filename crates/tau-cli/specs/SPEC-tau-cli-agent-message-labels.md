@@ -120,7 +120,7 @@ payload as `□` notices in the dedicated italic-by-default
 `system.internal_notice` style. Live and initial-snapshot records have the same
 textual representation; typed event state retains the timing distinction. The
 renderer removes only the exact canonical outer
-`<tau_internal>...&lt;/tau_internal&gt;` frame; nonmatching, partial, nested, and
+`<tau_internal>...</tau_internal>` frame; nonmatching, partial, nested, and
 legacy presentation text remains verbatim. `WatchLongWait`
 records remain `▤` status rows and derive a nonempty summary from their typed
 threshold because their producer body is empty. Both bypass `show-messages` and

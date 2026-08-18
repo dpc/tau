@@ -5383,14 +5383,14 @@ impl EventRenderer {
             return None;
         }
         if message.watch_provider_status.is_some() {
-            const OPEN: &str = "<tau_internal>";
-            const CLOSE: &str = "&lt;/tau_internal&gt;";
-
             let body = message
                 .message
-                .strip_prefix(OPEN)
-                .and_then(|text| text.strip_suffix(CLOSE))
-                .filter(|text| !text.contains(OPEN) && !text.contains(CLOSE))
+                .strip_prefix(tau_proto::TAU_INTERNAL_OPEN)
+                .and_then(|text| text.strip_suffix(tau_proto::TAU_INTERNAL_CLOSE))
+                .filter(|text| {
+                    !text.contains(tau_proto::TAU_INTERNAL_OPEN)
+                        && !text.contains(tau_proto::TAU_INTERNAL_CLOSE)
+                })
                 .unwrap_or(&message.message);
             return Some(body.to_owned());
         }

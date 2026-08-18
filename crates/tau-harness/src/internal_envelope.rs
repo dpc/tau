@@ -1,9 +1,9 @@
 //! Exact-close framing for harness-authored internal model input.
 
 /// Exact opening sentinel for harness-stamped internal prompt payloads.
-pub(crate) const TAU_INTERNAL_OPEN: &str = "<tau_internal>";
+pub(crate) const TAU_INTERNAL_OPEN: &str = tau_proto::TAU_INTERNAL_OPEN;
 /// Exact closing sentinel for harness-stamped internal prompt payloads.
-pub(crate) const TAU_INTERNAL_CLOSE: &str = "</tau_internal>";
+pub(crate) const TAU_INTERNAL_CLOSE: &str = tau_proto::TAU_INTERNAL_CLOSE;
 /// Visible replacement for a closing sentinel collision in an internal body.
 pub(crate) const TAU_INTERNAL_CLOSE_VISIBLE: &str = "&lt;/tau_internal&gt;";
 
