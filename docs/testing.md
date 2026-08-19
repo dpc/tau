@@ -688,11 +688,15 @@ successor terminal, and outer-turn finish as separate durable boundaries. Core
 cold-replay tests must cover plan-without-steer, steer-without-owner,
 owner-without-prompt-start, prompt-start-without-terminal, both values of the
 terminal finish-repair bit, malformed or duplicate lineage, off-branch plans,
-spent budgets, and an earlier completed plan followed by the active outstanding
-plan. The owner and prompt-start cuts must prove that restart does not resend.
+spent budgets, and multiple same-turn runs distinguished by source and successor
+prompt ids. A qualifying selected-branch tool-call response must rearm live and
+cold state at commit; length-truncated calls, empty calls, provider failures,
+tool results, compaction, and off-branch calls must not. The owner and
+prompt-start cuts must prove that restart does not resend.
 
 Harness tests must cover adapter and originator eligibility, exact captured
-model and route use, one continuation per open outer turn, cancellation before
+model and route use, one continuation per consecutive reasoning-only run,
+same-turn rearming after a committed foreground tool round, cancellation before
 and after owner publication, branch loss, intercepted and append-rejected steer
 or owner publication, terminal outcomes, tool-call suppression, and reactive
 compaction. Client and worker tests must prove that incomplete output never

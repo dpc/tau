@@ -168,7 +168,7 @@ impl OuterTurnRuntimeState {
     }
 }
 
-/// Runtime projection of the one-per-outer-turn output-length budget.
+/// Runtime projection of one output-length successor per reasoning-only run.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OutputLengthContinuationState {
     /// This outer turn has not planned a continuation.
@@ -185,7 +185,7 @@ pub(crate) enum OutputLengthContinuationState {
     Active(OutputLengthContinuationDispatch),
     /// The continuation ended while the outer turn remains open.
     Spent {
-        /// Outer turn whose sole continuation budget was consumed.
+        /// Outer turn whose current reasoning-only run consumed its budget.
         outer_turn_id: tau_proto::AgentOuterTurnId,
     },
 }
@@ -454,7 +454,7 @@ pub(crate) struct Agent {
     pub(crate) work_status: WorkStatus,
     /// Typed runtime ownership of the open turn and its write-pending finish.
     pub(crate) outer_turn: OuterTurnRuntimeState,
-    /// Named runtime state for the one output-length continuation budget.
+    /// Named runtime state for the current reasoning-only run's continuation.
     pub(crate) output_length_continuation: OutputLengthContinuationState,
     /// Whether the current turn was caused only by lifecycle notifications.
     pub(crate) lifecycle_notification_only_turn: bool,

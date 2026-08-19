@@ -295,7 +295,8 @@ commands, secrets, failure text, or disabled extension catalog. Extension
 ## Output-length successor
 
 An eligible reasoning-only `Length` response reserves exactly one new prompt id
-inside the active outer turn. Durable order is:
+for the current consecutive reasoning-only run inside the active outer turn.
+Durable order is:
 
 `provider.response_finished(continuation_planned)` →
 `agent.prompt_steered(output_length_continuation)` →
@@ -306,11 +307,22 @@ Only each fact's write-complete callback may create the next fact. The internal
 steer is a user-role internal instruction with harness-internal submission
 source, a trusted span covering the full UTF-8 text, and exactly:
 
-`The prior model response reached its output-token limit before producing an answer or tool request. Continue the same task from the retained reasoning. Do not repeat prior work.`
+`The prior response reached the output-token limit before producing an answer or tool request. Stop extending the analysis and take the next concrete step.`
+
+New successors and replay accept only this exact text.
 
 It grants no model, route, branch, tool, or compaction authority. The successor
 uses the captured provider-qualified model and activation cut. Branch movement,
 cancellation, or a missing logical model route cannot redirect the reservation.
+
+A successful canonical selected-branch ordinary inference response rearms the
+spent budget at response commit when it has stop `tool_calls` or the accepted
+`end_turn`-with-calls shape and at least one canonical tool call. Dispatch and
+execution outcome do not affect that boundary. Length-truncated calls,
+empty-call stops, tool results, prompt counts, compaction, and off-branch
+responses do not rearm it. Multiple plans may occur in one outer turn; each
+keeps `ordinal=1, limit=1` and its source and successor prompt ids identify its
+lineage. Replay derives the latest run from these existing durable facts.
 
 A context-rejected reserved successor carries recovery disposition only. The
 exact successful reactive-compaction descendant keeps the same output-length

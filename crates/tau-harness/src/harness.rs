@@ -9172,6 +9172,21 @@ impl Harness {
             }
         }
         if let Event::ProviderResponseFinished(response) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
+            && self
+                .agent_store
+                .agent(response.agent_id.as_str())
+                .is_some_and(|tree| {
+                    tree.output_length_response_rearms_budget(&response.agent_prompt_id)
+                })
+            && let Some(agent) = self.agents.get_mut(&cid)
+            && agent.output_length_continuation.outer_turn_id() == agent.outer_turn.owned_id()
+        {
+            agent.output_length_continuation =
+                path_crate_agent::OutputLengthContinuationState::None;
+        }
+        if let Event::ProviderResponseFinished(response) = event
             && matches!(
                 response.output_length_disposition,
                 tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -9377,6 +9392,7 @@ impl Harness {
         {
             self.reconcile_agent_context_usage_for_selected_branch(&cid);
             self.resolve_materialized_message_wakes(&cid);
+            self.reproject_idle_output_length_budget(&cid);
             let dormant_repair = self
                 .agent_store
                 .agent(moved.agent_id.as_str())
@@ -9400,6 +9416,42 @@ impl Harness {
             self.drain_publish_idle_dispatches();
             self.try_advance_queue();
         }
+    }
+
+    /// Synchronize idle continuation budget state after selected ancestry
+    /// moves.
+    ///
+    /// Planned, owner-pending, and active lineage states retain their exact
+    /// publication or terminal authority and are reconciled by their dedicated
+    /// repair paths instead.
+    fn reproject_idle_output_length_budget(&mut self, cid: &AgentId) {
+        let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.clone())
+        else {
+            return;
+        };
+        let projected = self
+            .agent_store
+            .agent(agent_id.as_str())
+            .and_then(tau_core::AgentTree::output_length_budget_spent_outer_turn);
+        let Some(agent) = self.agents.get_mut(cid) else {
+            return;
+        };
+        if !matches!(
+            agent.output_length_continuation,
+            path_crate_agent::OutputLengthContinuationState::None
+                | path_crate_agent::OutputLengthContinuationState::Spent { .. }
+        ) {
+            return;
+        }
+        agent.output_length_continuation = projected.map_or(
+            path_crate_agent::OutputLengthContinuationState::None,
+            |outer_turn_id| path_crate_agent::OutputLengthContinuationState::Spent {
+                outer_turn_id,
+            },
+        );
     }
 
     fn finish_manual_compaction_tool_with_error(
@@ -31059,7 +31111,7 @@ impl Harness {
         }
     }
 
-    /// Derive the single replay-safe output-length continuation plan.
+    /// Derive the current reasoning-only run's replay-safe continuation plan.
     fn derive_output_length_continuation(
         &mut self,
         cid: &AgentId,

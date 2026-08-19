@@ -458,12 +458,35 @@ struct InferenceDispatchFold {
     provider_attempt: Option<tau_proto::ProviderAttempt>,
     /// Canonical provider stop reason retained for cold terminal projection.
     provider_stop_reason: Option<tau_proto::ProviderStopReason>,
+    /// Whether this ordinary response opened a foreground tool round and
+    /// therefore rearms output-length recovery.
+    rearms_output_length: bool,
     /// Transcript node containing this dispatch's planned length response.
     output_length_plan_node: Option<NodeId>,
     /// Exact trusted steer node that claimed this dispatch's plan.
     output_length_steer_node: Option<NodeId>,
     /// Transcript node containing this dispatch's terminal response.
     response_node: Option<NodeId>,
+}
+
+/// Derives the durable action boundary that starts a new reasoning-only run.
+fn output_length_response_rearms_budget(
+    checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    response: &tau_proto::ProviderResponseFinished,
+) -> bool {
+    checkpoint.transaction_id.is_none()
+        && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
+        && response.originator.is_user()
+        && response.error.is_none()
+        && response.failure_kind.is_none()
+        && matches!(
+            response.stop_reason,
+            tau_proto::ProviderStopReason::ToolCalls | tau_proto::ProviderStopReason::EndTurn
+        )
+        && response
+            .output_items
+            .iter()
+            .any(|item| matches!(item, ContextItem::ToolCall(_)))
 }
 
 /// Selected-branch repair state for one durable output-length continuation.
@@ -1681,6 +1704,8 @@ impl AgentTree {
                 && let Some(dispatch) = self.inference_dispatches.get_mut(&response.agent_prompt_id)
             {
                 dispatch.response_node = Some(node_id);
+                dispatch.rearms_output_length =
+                    output_length_response_rearms_budget(&dispatch.checkpoint, response);
             }
             match event {
                 Event::ProviderResponseFinished(response)
@@ -1876,6 +1901,7 @@ impl AgentTree {
                         output_length_disposition: tau_proto::OutputLengthDisposition::None,
                         provider_attempt: None,
                         provider_stop_reason: None,
+                        rearms_output_length: false,
                         output_length_plan_node: None,
                         output_length_steer_node: None,
                         response_node: None,
@@ -3154,26 +3180,60 @@ impl AgentTree {
         })
     }
 
-    /// Returns the active selected-branch turn whose one output-length budget
-    /// has already been spent, including after its owner or terminal committed.
+    /// Returns the active selected-branch turn whose current reasoning-only run
+    /// has already spent its output-length continuation.
     #[must_use]
     pub fn output_length_budget_spent_outer_turn(&self) -> Option<tau_proto::AgentOuterTurnId> {
         let active = self.active_outer_turn.as_ref()?;
-        self.inference_dispatch_order
-            .iter()
-            .rev()
-            .find_map(|prompt_id| {
-                let dispatch = self.inference_dispatches.get(prompt_id)?;
-                matches!(
-                    &dispatch.output_length_disposition,
-                    tau_proto::OutputLengthDisposition::ContinuationPlanned {
-                        outer_turn_id,
-                        ordinal: 1,
-                        limit: 1,
-                        ..
-                    } if outer_turn_id == active
-                )
-                .then(|| active.clone())
+        let selected_head = self
+            .head
+            .map(tau_proto::AgentHead::Node)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        for prompt_id in self.inference_dispatch_order.iter().rev() {
+            let Some(dispatch) = self.inference_dispatches.get(prompt_id) else {
+                continue;
+            };
+            let selected = dispatch.response_node.is_some_and(|response_node| {
+                self.is_ancestor_head(tau_proto::AgentHead::Node(response_node), selected_head)
+            });
+            if !selected {
+                continue;
+            }
+            if dispatch.rearms_output_length {
+                return None;
+            }
+            if matches!(
+                &dispatch.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                    outer_turn_id,
+                    ordinal: 1,
+                    limit: 1,
+                    ..
+                } if outer_turn_id == active
+            ) {
+                return Some(active.clone());
+            }
+        }
+        None
+    }
+
+    /// Returns whether this committed selected-branch response durably rearms
+    /// output-length recovery for its current reasoning-only run.
+    #[must_use]
+    pub fn output_length_response_rearms_budget(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        let Some(dispatch) = self.inference_dispatches.get(prompt_id) else {
+            return false;
+        };
+        let selected_head = self
+            .head
+            .map(tau_proto::AgentHead::Node)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        dispatch.rearms_output_length
+            && dispatch.response_node.is_some_and(|response_node| {
+                self.is_ancestor_head(tau_proto::AgentHead::Node(response_node), selected_head)
             })
     }
 
@@ -3533,8 +3593,9 @@ impl AgentTree {
         if steered.internal_kind != Some(tau_proto::InternalPromptKind::OutputLengthContinuation) {
             return Ok(());
         }
-        let exact_span = u32::try_from(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION.len())
-            .ok()
+        let exact_span = (steered.text == tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION)
+            .then_some(tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION)
+            .and_then(|instruction| u32::try_from(instruction.len()).ok())
             .map(|end| vec![tau_proto::TrustedInternalSpan { start: 0, end }]);
         if self
             .active_output_length_plan()
@@ -3543,7 +3604,7 @@ impl AgentTree {
             || !steered.inference_activation
             || steered.message_class != tau_proto::PromptMessageClass::Internal
             || steered.submission_source != tau_proto::PromptSubmissionSource::HarnessInternal
-            || steered.text != tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+            || exact_span.is_none()
             || Some(&steered.trusted_internal_spans) != exact_span.as_ref()
             || steered.self_compaction_terminal.is_some()
             || steered.ctx_id.is_some()
@@ -3941,15 +4002,7 @@ impl AgentTree {
                         .get(outer_turn_id)
                         .is_some_and(|turn| !turn.finished)
                     && self.active_outer_turn.as_ref() == Some(outer_turn_id)
-                    && !self.inference_dispatches.values().any(|dispatch| {
-                        matches!(
-                            &dispatch.output_length_disposition,
-                            tau_proto::OutputLengthDisposition::ContinuationPlanned {
-                                outer_turn_id: planned_turn,
-                                ..
-                            } if planned_turn == outer_turn_id
-                        )
-                    })
+                    && self.output_length_budget_spent_outer_turn().is_none()
                     && !self
                         .inference_dispatches
                         .contains_key(successor_agent_prompt_id);

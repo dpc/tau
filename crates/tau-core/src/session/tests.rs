@@ -1192,6 +1192,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 provider_attempt: None,
                 provider_stop_reason: Some(tau_proto::ProviderStopReason::Error),
+                rearms_output_length: false,
                 output_length_plan_node: None,
                 output_length_steer_node: None,
                 response_node: None,
@@ -4160,6 +4161,118 @@ fn output_length_recovery_projects_exact_live_plan() {
             ..
         }) if successor_agent_prompt_id == fixture.owner().agent_prompt_id
     ));
+}
+
+/// Only the approved exact continuation instruction may claim a durable plan;
+/// otherwise replay must reject modified bytes.
+#[test]
+fn output_length_recovery_accepts_new_exact_steer_only() {
+    let fixture = output_length_recovery_fixture();
+    let tree = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::Plan),
+    )
+    .expect("planned cut");
+    let mut steer = output_length_steer(fixture.agent_id().clone());
+    tree.validate_event(&Event::AgentPromptSteered(steer.clone()))
+        .expect("new exact steer");
+
+    steer.text.push('!');
+    steer.trusted_internal_spans[0].end =
+        u32::try_from(steer.text.len()).expect("bounded malformed instruction");
+    assert!(
+        tree.validate_event(&Event::AgentPromptSteered(steer))
+            .is_err()
+    );
+}
+
+/// Only a successful ordinary canonical tool-call response may rearm the
+/// output-length budget; nearby terminal shapes remain negative boundaries.
+#[test]
+fn output_length_rearm_boundary_rejects_non_action_responses() {
+    let fixture = output_length_recovery_fixture();
+    let checkpoint = fixture.source_dispatch_record();
+    let Event::AgentInferenceDispatchStarted(checkpoint) = checkpoint.event else {
+        unreachable!("fixture source dispatch");
+    };
+    let mut response = fixture.source_response();
+    response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+    response.output_items = vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
+        call_id: "rearm-call".into(),
+        name: tau_proto::ToolName::new("step"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: ciborium::Value::Map(Vec::new()),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    assert!(super::output_length_response_rearms_budget(
+        &checkpoint,
+        &response
+    ));
+    let mut end_turn_with_call = response.clone();
+    end_turn_with_call.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    assert!(super::output_length_response_rearms_budget(
+        &checkpoint,
+        &end_turn_with_call
+    ));
+
+    let mut empty_stop = response.clone();
+    empty_stop.output_items.clear();
+    assert!(!super::output_length_response_rearms_budget(
+        &checkpoint,
+        &empty_stop
+    ));
+    let mut truncated_call = response.clone();
+    truncated_call.stop_reason = tau_proto::ProviderStopReason::Length;
+    assert!(!super::output_length_response_rearms_budget(
+        &checkpoint,
+        &truncated_call
+    ));
+    let mut failed = response.clone();
+    failed.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+    assert!(!super::output_length_response_rearms_budget(
+        &checkpoint,
+        &failed
+    ));
+    let mut compact_checkpoint = checkpoint.clone();
+    compact_checkpoint.transaction_id =
+        Some(tau_proto::CompactionTransactionId::parse("ct-rearm").expect("transaction id"));
+    assert!(!super::output_length_response_rearms_budget(
+        &compact_checkpoint,
+        &response
+    ));
+
+    let mut tree = AgentTree::try_from_events(
+        fixture.agent_id().clone(),
+        fixture.through(OutputLengthFixturePhase::Terminal),
+    )
+    .expect("spent selected lineage");
+    let mut off_branch_checkpoint = checkpoint;
+    off_branch_checkpoint.agent_prompt_id =
+        tau_proto::AgentPromptId::parse("ap-off-branch-action").expect("prompt id");
+    tree.inference_dispatch_order
+        .push(off_branch_checkpoint.agent_prompt_id.clone());
+    tree.inference_dispatches.insert(
+        off_branch_checkpoint.agent_prompt_id.clone(),
+        InferenceDispatchFold {
+            checkpoint: off_branch_checkpoint,
+            fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+            head_move_generation: tree.head_move_generation,
+            finished: true,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            provider_attempt: Some(tau_proto::ProviderAttempt::ONE),
+            provider_stop_reason: Some(tau_proto::ProviderStopReason::ToolCalls),
+            rearms_output_length: true,
+            output_length_plan_node: None,
+            output_length_steer_node: None,
+            response_node: Some(NodeId::new(999)),
+        },
+    );
+    assert_eq!(
+        tree.output_length_budget_spent_outer_turn(),
+        Some(fixture.outer_turn_started().outer_turn_id)
+    );
 }
 
 /// Cold plan and steer cuts project only their exact missing fact, while owner

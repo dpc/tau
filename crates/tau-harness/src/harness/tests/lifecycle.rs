@@ -11564,6 +11564,212 @@ fn output_length_continuation_delivers_exactly_one_captured_successor() {
     h.shutdown().expect("shutdown");
 }
 
+/// A committed tool round must start a new reasoning-only run, allowing one
+/// later same-turn successor and preserving that spent state on cold replay.
+#[test]
+fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("start");
+    let tool_frames = connect_test_tool(&mut h, "length-rearm-tool");
+    h.registry.register(
+        &crate::test_connection_id("length-rearm-tool"),
+        staged_tool_spec("length_rearm_step"),
+    );
+    h.submit_user_prompt(test_session_id("s1"), "take two steps".to_owned())
+        .expect("submit");
+
+    let source = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(reasoning_only_length_response(&source, 3))
+        .expect("first length");
+    let first_successor = read_nth_prompt_created(&h, 1);
+    let cid = h
+        .agent_id_for_prompt(&first_successor.agent_prompt_id)
+        .expect("runtime agent");
+    let spent_head = h.agents[&cid].head.expect("pre-action selected head");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: first_successor.agent_prompt_id.clone(),
+        agent_id: first_successor.agent_id.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "length-rearm-call".into(),
+            name: ToolName::new("length_rearm_step"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        provider_attempt: Default::default(),
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("committed tool response");
+    assert!(sink_has_tool_invoke(&tool_frames, "length-rearm-call"));
+    assert_eq!(
+        h.pending_tool_providers
+            .get("length-rearm-call")
+            .map(tau_proto::ConnectionId::as_str),
+        Some("length-rearm-tool")
+    );
+    assert_eq!(
+        h.agents[&cid].output_length_continuation,
+        OutputLengthContinuationState::None
+    );
+    let rearmed_head = h.agents[&cid].head.expect("action response head");
+    h.agents.get_mut(&cid).expect("runtime agent").head = Some(spent_head);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: source.agent_id.clone(),
+            head: tau_proto::AgentHead::Node(spent_head),
+        }),
+    );
+    assert!(matches!(
+        &h.agents[&cid].output_length_continuation,
+        OutputLengthContinuationState::Spent { outer_turn_id }
+            if outer_turn_id == &tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id)
+    ));
+    h.agents.get_mut(&cid).expect("runtime agent").head = Some(rearmed_head);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: source.agent_id.clone(),
+            head: tau_proto::AgentHead::Node(rearmed_head),
+        }),
+    );
+    assert_eq!(
+        h.agents[&cid].output_length_continuation,
+        OutputLengthContinuationState::None
+    );
+
+    let Event::ToolResultReported(result) =
+        test_tool_result("length-rearm-call", "length_rearm_step")
+    else {
+        unreachable!("test result helper");
+    };
+    h.handle_extension_tool_result(&crate::test_connection_id("length-rearm-tool"), result);
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        3,
+        "{:#?}",
+        event_log_events(&h)
+    );
+    let later = read_nth_prompt_created(&h, 2);
+    h.handle_provider_response_finished(reasoning_only_length_response(&later, 5))
+        .expect("later length");
+    let second_successor = read_nth_prompt_created(&h, 3);
+
+    let records = h
+        .agent_store
+        .agent_events(source.agent_id.as_str())
+        .expect("durable events");
+    let plans = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if matches!(
+                    response.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                ) =>
+            {
+                Some(response)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 2);
+    let plan_fields = plans
+        .iter()
+        .map(|response| {
+            let tau_proto::OutputLengthDisposition::ContinuationPlanned {
+                outer_turn_id,
+                successor_agent_prompt_id,
+                ordinal,
+                limit,
+            } = &response.output_length_disposition
+            else {
+                unreachable!("filtered plans");
+            };
+            (
+                outer_turn_id,
+                &response.agent_prompt_id,
+                successor_agent_prompt_id,
+                ordinal,
+                limit,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plan_fields[0].0, plan_fields[1].0);
+    assert_ne!(plan_fields[0].1, plan_fields[1].1);
+    assert_eq!(plan_fields[0].2, &first_successor.agent_prompt_id);
+    assert_eq!(plan_fields[1].2, &second_successor.agent_prompt_id);
+    assert_eq!((*plan_fields[0].3, *plan_fields[0].4), (1, 1));
+    assert_eq!((*plan_fields[1].3, *plan_fields[1].4), (1, 1));
+    let steers = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSteered(steer)
+                if steer.internal_kind
+                    == Some(tau_proto::InternalPromptKind::OutputLengthContinuation) =>
+            {
+                Some(steer)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(steers.len(), 2);
+    assert!(steers.iter().all(|steer| {
+        steer.text == tau_proto::OUTPUT_LENGTH_CONTINUATION_INSTRUCTION
+            && !steer.text.contains("<tau_internal>")
+            && steer.submission_source == tau_proto::PromptSubmissionSource::HarnessInternal
+            && steer.message_class == tau_proto::PromptMessageClass::Internal
+            && steer.trusted_internal_spans
+                == vec![tau_proto::TrustedInternalSpan {
+                    start: 0,
+                    end: u32::try_from(steer.text.len()).expect("bounded instruction"),
+                }]
+    }));
+
+    let cold = tau_core::AgentTree::try_from_events(source.agent_id.clone(), &records)
+        .expect("cold replay accepts two same-turn plans");
+    assert_eq!(
+        cold.output_length_budget_spent_outer_turn(),
+        Some(plan_fields[1].0.clone())
+    );
+    h.handle_provider_response_finished(super::dispatch::provider_text_response(
+        &second_successor.agent_prompt_id,
+        second_successor.agent_id,
+        "finished after two runs",
+    ))
+    .expect("second successor answer");
+    let finished_records = h
+        .agent_store
+        .agent_events(source.agent_id.as_str())
+        .expect("finished durable events");
+    assert_eq!(
+        finished_records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentOuterTurnFinished(_)))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A persisted fourth-attempt successor Length restores one initial
 /// TerminalIncomplete notification for a cold late watcher without replaying
 /// the response as live activity.

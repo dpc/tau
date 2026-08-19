@@ -960,8 +960,13 @@ the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 
 `provider.response_finished.output_length_disposition` is also harness-authored
 and defaults to `none`. An eligible reasoning-only `length` terminal may carry
-one `continuation_planned` reservation; its successor checkpoint carries the
-matching `output_length_continuation` owner and remains in the same outer turn.
+one `continuation_planned` reservation for its current consecutive
+reasoning-only run; its successor checkpoint carries the matching
+`output_length_continuation` owner and remains in the same outer turn. A
+committed successful selected-branch ordinary response with an accepted
+canonical tool-call round rearms the budget, so later runs in that outer turn
+may carry another plan with the same fixed ordinal and limit but different
+source and successor prompt ids.
 The successor response carries `continuation_terminal`. Every `length` terminal
 is semantically incomplete. Watch projection uses category `output_length` and
 sticky state `terminal_incomplete`; late subscribers see that state, while final

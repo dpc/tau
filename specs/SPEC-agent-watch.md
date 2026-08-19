@@ -195,8 +195,10 @@ isolated activation. Initial and
 redundant structured snapshots have no wake and no provider block. Replay
 retains canonical facts without waking or refanout.
 Output-token-limit terminals use provider category `output_length`. An eligible
-first reasoning-only terminal remains nonterminal while its one continuation is
-owed. Every exhausted or ineligible limit publishes
+first reasoning-only terminal in the current consecutive reasoning-only run
+remains nonterminal while its one continuation is owed. A committed
+selected-branch ordinary tool-call response starts a new run. Every exhausted
+or ineligible limit publishes
 `terminal_incomplete { category: output_length, attempt }`; this state is sticky
 for that provider prompt and remains the late-subscriber snapshot. It never
 publishes assistant-final content, completes a delegated worker, or causes a

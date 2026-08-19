@@ -113,8 +113,13 @@ is retained but never executed and never activates a synthetic-error follow-up.
 The planned canonical response owns the continuation. Its commit completion
 appends the exact harness-internal output-length steer; that steer owns the
 matching inference checkpoint, and the checkpoint retains the captured model,
-route-independent model identity, branch cut, and original outer turn. A second
-plan in one outer turn is invalid. The successor terminal carries
+route-independent model identity, branch cut, and original outer turn. The
+fixed `ordinal=1, limit=1` budget applies to one consecutive reasoning-only run.
+A successful selected-branch ordinary inference response with a `tool_calls`
+stop, or the accepted `end_turn`-with-calls shape, and at least one canonical
+tool call rearms the budget when the response commits. A later run in the same
+outer turn may therefore own another plan, distinguished by its source and
+successor prompt ids. The successor terminal carries
 `ContinuationTerminal` and an explicit `outer_turn_finish_owed` repair bit.
 Each response retains separate provider usage, effective rates, and cost; totals
 sum every accepted response once.

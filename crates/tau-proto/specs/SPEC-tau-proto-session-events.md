@@ -35,7 +35,10 @@ restore both ordinary node heads and the root cursor.
 
 `provider.response_finished.output_length_disposition` is a defaulted,
 harness-authored durable disposition. `continuation_planned` carries the outer
-turn, pre-minted successor prompt, and the fixed `ordinal=1, limit=1`.
+turn, pre-minted successor prompt, and the fixed `ordinal=1, limit=1` for one
+consecutive reasoning-only run. Multiple plans may share an outer turn after a
+committed selected-branch tool-call response rearms the budget; source and
+successor prompt ids distinguish those lineages.
 `continuation_terminal` carries the outer turn, source prompt, fixed ordinal,
 completed/incomplete/failed/cancelled outcome, and the explicit
 `outer_turn_finish_owed` crash-repair authority.

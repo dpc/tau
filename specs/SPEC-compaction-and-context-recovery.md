@@ -390,7 +390,10 @@ Compaction output never creates output-length eligibility, and a `Length`
 terminal never masquerades as context overflow. If the reserved successor
 receives the existing eligible no-output context-window rejection, reactive
 compaction may run under its existing one-shot rules, but the outer turn's
-output-length budget remains spent. A later `Length` is terminal incomplete.
+output-length budget remains spent until a successful selected-branch ordinary
+inference response commits an accepted foreground tool round. Compaction,
+prompt counts, tool results, and off-branch responses do not rearm it; a later
+`Length` before that action boundary is terminal incomplete.
 When the reserved successor is context-rejected, its canonical response carries
 only `recovery_disposition`; it does not also claim an output-length terminal.
 The exact inference checkpoint owned by the successful reactive-compaction
