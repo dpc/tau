@@ -11,6 +11,9 @@ provider_cache_refresh:
   max_idle_seconds: 300
 # Persistent supervised extensions receive Tau state recursively read-only.
 tau_state_access: read_only
+aliases:
+  providers: {}
+  models: {}
 extensions: {}
 tool_policy:
   rules:

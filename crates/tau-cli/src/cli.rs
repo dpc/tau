@@ -53,6 +53,20 @@ pub struct HarnessArgs {
         require_equals = true
     )]
     pub harness_config: Vec<tau_config::settings::HarnessConfigCliOverride>,
+
+    /// Override one provider alias for this harness startup.
+    ///
+    /// `TAU_PROVIDER_ALIASES` supplies a JSON object of lower-precedence
+    /// environment overrides.
+    #[arg(long = "provider-alias", value_name = "FROM=TO")]
+    pub provider_alias: Vec<tau_config::settings::ProviderAliasCliOverride>,
+
+    /// Override one exact model-name alias for this harness startup.
+    ///
+    /// `TAU_MODEL_ALIASES` supplies a JSON object of lower-precedence
+    /// environment overrides.
+    #[arg(long = "model-alias", value_name = "FROM=TO")]
+    pub model_alias: Vec<tau_config::settings::ModelAliasCliOverride>,
 }
 
 #[derive(Args)]

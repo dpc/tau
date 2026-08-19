@@ -133,6 +133,57 @@ The same global fragment path is available to one-shot harness config overrides,
 for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", priority:
 65, text: "Follow the run policy." }]'`.
 
+## Provider and model aliases
+
+Use startup-only aliases when roles should keep stable names while a profile,
+environment variable, or one launch selects a different provider account or
+exact model:
+
+```yaml
+aliases:
+  providers:
+    subscription: codex-work
+  models:
+    current: gpt-5.5
+agents:
+  model: subscription/current
+```
+
+Tau resolves this to `codex-work/gpt-5.5` after all role and profile merging.
+Aliases may chain; an identity mapping such as `subscription: subscription`
+stops resolution and restores the literal name. Other cycles fail startup.
+Model aliases match the entire suffix after the first `/`, so
+`openrouter/sonnet` can map `sonnet` to `anthropic/claude-sonnet-4`.
+
+Profiles may override either map. For one launch, JSON-object environment
+variables apply after config (`TAU_PROVIDER_ALIASES='{"subscription":"codex-work"}'`
+and `TAU_MODEL_ALIASES='{"current":"gpt-5.5"}'`), then repeatable
+`--provider-alias subscription=codex-personal` and
+`--model-alias current=gpt-5.6` flags apply last.
+
+For example, a profile can switch the stable account name without duplicating
+role definitions:
+
+```yaml
+profiles:
+  personal:
+    aliases:
+      providers:
+        subscription: codex-personal
+  work:
+    aliases:
+      providers:
+        subscription: codex-work
+```
+
+`tau --profile work` then resolves every static `subscription/...` role model
+through the `codex-work` provider profile.
+
+Aliases affect only static role configuration at harness startup. Interactive
+`:model`, runtime `:role ... model`, protocol model overrides, persisted events,
+and an already-running attached daemon use canonical model IDs and do not
+resolve aliases.
+
 ## Configuration profiles
 
 Use `profiles` for named, opt-in role adjustments without replacing normal base

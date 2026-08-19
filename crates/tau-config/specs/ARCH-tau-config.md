@@ -27,8 +27,12 @@ overrides.
 - User `cli.yaml` / `harness.yaml` are layered above built-ins.
 - Sorted `*.yaml` / `*.yml` files from `cli.d/` and `harness.d/` are layered in
   lexical order above the base user file.
-- `--harness-config KEY=VALUE` overrides are the highest-precedence harness
-  config layers and must preserve command-line order.
+- `--harness-config KEY=VALUE` overrides are the highest-precedence generic
+  harness config layers and must preserve command-line order.
+- `aliases.providers` and `aliases.models` are keyed startup-only maps.
+  `TAU_PROVIDER_ALIASES` and `TAU_MODEL_ALIASES` are JSON objects layered after
+  file/profile/generic config, and repeatable `--provider-alias FROM=TO` /
+  `--model-alias FROM=TO` operations apply last with later operations winning.
 - Selected `profiles.<name>` patches load after built-in/user/drop-in files and
   before `--harness-config` layers. `--profile <name[,name...]>` wins over
   `TAU_PROFILE`; selected names apply left-to-right, including duplicates. ASCII
@@ -172,6 +176,12 @@ array replacement:
   allow-list.
 - Disabled roles are removed only after all file, drop-in, and CLI layers have
   been merged.
+- After role merging, provider aliases rewrite only the provider component and
+  model aliases rewrite only the exact complete model-name suffix of every
+  effective configured `ModelId`. Resolution is recursive and case-sensitive;
+  identity edges terminate, while any other cycle (including an unused cycle)
+  fails startup. The resulting `HarnessSettings` contains only canonical model
+  IDs and does not retain alias maps.
 - `inter_session_receiver` and `inter_session_auto_start` are ordinary scalar
   role fields. Group defaults and role overrides can grant them across any
   number of groups. Auto-start without effective receiver capability is invalid.
@@ -183,7 +193,8 @@ array replacement:
 ## Selectable configuration profiles
 
 `profiles` is a raw configuration-only map, not part of effective
-`HarnessSettings`. A selected profile supports the global `tau_state_access`
+`HarnessSettings`. A selected profile supports startup-only provider/model
+aliases, the global `tau_state_access`
 default, `agents.default_role`, agent provider defaults, agent/global role
 metadata, role groups and roles, plus `extensions.<name>.enable` and arbitrary
 `extensions.<name>.config` for a built-in or base-configured extension.

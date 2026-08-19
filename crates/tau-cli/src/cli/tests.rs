@@ -77,6 +77,8 @@ fn targeted_startup_keeps_root_option_placement() {
         "-r=engineer",
         "--profile=focused",
         "--harness-config=agents.default_role=engineer",
+        "--provider-alias=current=codex-work",
+        "--model-alias=current=gpt-5.5",
         "--enable-role=engineer",
         "--disable-role=engineer",
         "--disable-roles-all",
@@ -88,6 +90,43 @@ fn targeted_startup_keeps_root_option_placement() {
         assert!(
             Cli::try_parse_from(["tau", "resume", option]).is_err(),
             "{option} must remain root-only"
+        );
+    }
+}
+
+/// Dedicated alias flags parse as typed, repeatable root startup options and
+/// preserve provider dots plus model-name slashes.
+#[test]
+fn provider_and_model_alias_flags_are_typed_and_repeatable() {
+    let parsed = Cli::parse_from([
+        "tau",
+        "--provider-alias",
+        "current=codex.work",
+        "--provider-alias",
+        "current=codex-personal",
+        "--model-alias",
+        "fast=org/qwen-fast",
+    ]);
+
+    assert_eq!(parsed.harness.provider_alias.len(), 2);
+    assert_eq!(
+        parsed.harness.provider_alias[0].to.to_string(),
+        "codex.work"
+    );
+    assert_eq!(
+        parsed.harness.model_alias[0].to.to_string(),
+        "org/qwen-fast"
+    );
+    for invalid in [
+        ["tau", "--provider-alias", "missing"],
+        ["tau", "--provider-alias", "=target"],
+        ["tau", "--provider-alias", "name="],
+        ["tau", "--provider-alias", "bad/name=target"],
+        ["tau", "--model-alias", "name="],
+    ] {
+        assert!(
+            Cli::try_parse_from(invalid).is_err(),
+            "{invalid:?} must fail"
         );
     }
 }

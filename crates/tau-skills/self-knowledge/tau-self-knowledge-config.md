@@ -46,6 +46,21 @@ Tau follows the XDG directory layout on Linux:
 
 Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
 
+## Provider and model aliases
+
+`harness.yaml` and selected profiles may define startup-only
+`aliases.providers` and `aliases.models` maps. Provider aliases rewrite the
+provider before the first `/`; model aliases rewrite the exact complete suffix.
+Tau resolves chains after effective role merging, accepts identity mappings as
+literal-name resets, rejects other cycles, and passes only canonical model IDs
+into the running harness.
+
+`TAU_PROVIDER_ALIASES` and `TAU_MODEL_ALIASES` contain JSON objects and override
+config for one process. Repeatable `--provider-alias FROM=TO` and
+`--model-alias FROM=TO` flags apply after those environment maps; the last flag
+for a name wins. Attach, provider administration, runtime `:model` / `:role`
+editing, protocol overrides, and persisted events do not resolve aliases.
+
 ## Configuration profiles
 
 `harness.yaml` can define named `profiles` patches for roles and supported

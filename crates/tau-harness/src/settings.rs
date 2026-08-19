@@ -728,10 +728,26 @@ fn role_cli_overrides_from_env() -> Result<Vec<RoleCliOverride>, Box<dyn std::er
 
 fn harness_config_overrides_from_env()
 -> Result<Vec<HarnessConfigCliOverride>, Box<dyn std::error::Error>> {
-    parse_startup_override_transport(
-        HARNESS_CONFIG_CLI_OVERRIDES_ENV,
+    harness_config_overrides_from_sources(
         std::env::var_os(HARNESS_CONFIG_CLI_OVERRIDES_ENV),
+        tau_config::settings::ModelReferenceAliasSources {
+            provider_environment: std::env::var_os(tau_config::settings::TAU_PROVIDER_ALIASES_ENV),
+            model_environment: std::env::var_os(tau_config::settings::TAU_MODEL_ALIASES_ENV),
+            ..Default::default()
+        },
     )
+}
+
+/// Combines private generic transport with public aliases in their required
+/// precedence order for direct harness-component execution.
+fn harness_config_overrides_from_sources(
+    private_overrides: Option<std::ffi::OsString>,
+    alias_sources: tau_config::settings::ModelReferenceAliasSources<'_>,
+) -> Result<Vec<HarnessConfigCliOverride>, Box<dyn std::error::Error>> {
+    let mut overrides =
+        parse_startup_override_transport(HARNESS_CONFIG_CLI_OVERRIDES_ENV, private_overrides)?;
+    overrides.extend(tau_config::settings::model_reference_alias_config_overrides(alias_sources)?);
+    Ok(overrides)
 }
 
 /// Parse one harness-owned JSON startup transport without treating malformed

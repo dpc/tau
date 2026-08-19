@@ -418,6 +418,41 @@ fn reject_harness_config_overrides(
     )))
 }
 
+/// Tracks which public startup-only alias inputs the invocation supplied.
+#[derive(Clone, Copy, Default)]
+struct ModelReferenceAliasInputPresence {
+    /// Whether `--provider-alias` was supplied.
+    provider_flag: bool,
+    /// Whether `--model-alias` was supplied.
+    model_flag: bool,
+    /// Whether `TAU_PROVIDER_ALIASES` was present.
+    provider_environment: bool,
+    /// Whether `TAU_MODEL_ALIASES` was present.
+    model_environment: bool,
+}
+
+/// Rejects startup-only alias sources without misreporting them as generic
+/// `--harness-config` input.
+fn reject_model_reference_alias_inputs(
+    presence: ModelReferenceAliasInputPresence,
+    command: &str,
+) -> Result<(), CliError> {
+    let source = if presence.provider_flag {
+        "--provider-alias"
+    } else if presence.model_flag {
+        "--model-alias"
+    } else if presence.provider_environment {
+        tau_config::settings::TAU_PROVIDER_ALIASES_ENV
+    } else if presence.model_environment {
+        tau_config::settings::TAU_MODEL_ALIASES_ENV
+    } else {
+        return Ok(());
+    };
+    Err(CliError::Participant(format!(
+        "{source} can only be used when starting a new harness instance; `{command}` cannot apply it to an existing or absent harness"
+    )))
+}
+
 fn validate_agent_trace_mode(
     format: cli::AgentTraceFormat,
     mode: cli::AgentTraceMode,
@@ -670,6 +705,18 @@ fn consumes_harness_settings(command: &DispatchCommand) -> bool {
     }
 }
 
+/// Returns whether a dispatch path must reject all public alias inputs even if
+/// another internal validation path happens to inspect harness settings.
+fn rejects_model_reference_alias_inputs(command: &DispatchCommand) -> bool {
+    !consumes_harness_settings(command)
+        || matches!(
+            command,
+            DispatchCommand::Other(cli::Command::Dev {
+                command: cli::DevCommand::DumpInitialPrompt { .. }
+            })
+        )
+}
+
 pub struct Component {
     /// Name accepted by the `tau component <name>` dispatcher.
     pub name: &'static str,
@@ -696,7 +743,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
     let run = || -> Result<(), CliError> {
         let role_cli_overrides = parse_role_cli_overrides(std::env::args_os());
         let extension_cli_overrides = parse_extension_cli_overrides(std::env::args_os());
-        let harness_config_overrides = parse_harness_config_cli_overrides(std::env::args_os())
+        let mut harness_config_overrides = parse_harness_config_cli_overrides(std::env::args_os())
             .map_err(CliError::Participant)?;
         let cli::Cli {
             version,
@@ -704,7 +751,17 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             run,
             command,
         } = cli::Cli::parse();
+        let provider_alias_environment =
+            std::env::var_os(tau_config::settings::TAU_PROVIDER_ALIASES_ENV);
+        let model_alias_environment = std::env::var_os(tau_config::settings::TAU_MODEL_ALIASES_ENV);
+        let alias_input_presence = ModelReferenceAliasInputPresence {
+            provider_flag: !harness.provider_alias.is_empty(),
+            model_flag: !harness.model_alias.is_empty(),
+            provider_environment: provider_alias_environment.is_some(),
+            model_environment: model_alias_environment.is_some(),
+        };
         if version {
+            reject_model_reference_alias_inputs(alias_input_presence, "version")?;
             println!("{}", version_label());
             return Ok(());
         }
@@ -728,6 +785,48 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 mode: StartupMode::New,
             },
         };
+        let direct_harness_component = matches!(
+            &command,
+            DispatchCommand::Other(cli::Command::Component { name, .. }) if name == "harness"
+        );
+        let dump_initial_prompt = matches!(
+            &command,
+            DispatchCommand::Other(cli::Command::Dev {
+                command: cli::DevCommand::DumpInitialPrompt { .. }
+            })
+        );
+        if rejects_model_reference_alias_inputs(&command) || direct_harness_component {
+            reject_model_reference_alias_inputs(
+                ModelReferenceAliasInputPresence {
+                    provider_environment: !direct_harness_component
+                        && alias_input_presence.provider_environment,
+                    model_environment: !direct_harness_component
+                        && alias_input_presence.model_environment,
+                    ..alias_input_presence
+                },
+                if direct_harness_component {
+                    "component harness"
+                } else if dump_initial_prompt {
+                    "dev dump-initial-prompt"
+                } else {
+                    "this command"
+                },
+            )?;
+        }
+        let alias_config_overrides = tau_config::settings::model_reference_alias_config_overrides(
+            tau_config::settings::ModelReferenceAliasSources {
+                provider_environment: (!direct_harness_component)
+                    .then_some(provider_alias_environment)
+                    .flatten(),
+                model_environment: (!direct_harness_component)
+                    .then_some(model_alias_environment)
+                    .flatten(),
+                provider_cli: &harness.provider_alias,
+                model_cli: &harness.model_alias,
+            },
+        )
+        .map_err(|error| CliError::Participant(error.to_string()))?;
+        harness_config_overrides.extend(alias_config_overrides);
         if let DispatchCommand::Startup {
             args,
             mode: StartupMode::Attach(_),

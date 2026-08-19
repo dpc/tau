@@ -32,6 +32,7 @@ use super::chat::{
     redacted_prompt_history_line, retarget_prompt_draft_snapshot, role_cycling_enabled,
     should_send_draft_snapshot,
 };
+use super::cli::{Command as CliCommand, DevCommand};
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 use super::tool_render::format_context_token_count;
 use super::{CliError, cli as path_super_cli, transcript_markers};
@@ -915,6 +916,61 @@ fn harness_config_overrides_reject_attach_only_paths() {
     let err = super::reject_harness_config_overrides(&overrides, "attach")
         .expect_err("attach cannot apply overrides");
     assert!(err.to_string().contains("starting a new harness instance"));
+}
+
+/// Alias rejection preserves the exact dedicated flag or environment source
+/// instead of misdiagnosing it as a generic harness-config override.
+#[test]
+fn alias_inputs_reject_non_startup_commands_with_source_identity() {
+    let cases = [
+        ((true, false, false, false), "--provider-alias"),
+        ((false, true, false, false), "--model-alias"),
+        (
+            (false, false, true, false),
+            tau_config::settings::TAU_PROVIDER_ALIASES_ENV,
+        ),
+        (
+            (false, false, false, true),
+            tau_config::settings::TAU_MODEL_ALIASES_ENV,
+        ),
+    ];
+    for ((provider_flag, model_flag, provider_env, model_env), expected) in cases {
+        let error = super::reject_model_reference_alias_inputs(
+            super::ModelReferenceAliasInputPresence {
+                provider_flag,
+                model_flag,
+                provider_environment: provider_env,
+                model_environment: model_env,
+            },
+            "attach",
+        )
+        .expect_err("non-startup command must reject alias input");
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(!error.to_string().contains("--harness-config"), "{error}");
+    }
+}
+
+/// The dump-initial-prompt dispatch is an internal validation path, not a
+/// startup consumer, so dedicated aliases must be rejected before generic
+/// override folding can erase their source identity.
+#[test]
+fn dump_initial_prompt_dispatch_rejects_alias_inputs() {
+    let command = super::DispatchCommand::Other(CliCommand::Dev {
+        command: DevCommand::DumpInitialPrompt {
+            out: "prompt.txt".into(),
+            message: "hello".to_owned(),
+        },
+    });
+    assert!(super::rejects_model_reference_alias_inputs(&command));
+    let error = super::reject_model_reference_alias_inputs(
+        super::ModelReferenceAliasInputPresence {
+            model_flag: true,
+            ..Default::default()
+        },
+        "dev dump-initial-prompt",
+    )
+    .expect_err("dump path must reject aliases");
+    assert!(error.to_string().contains("--model-alias"), "{error}");
 }
 
 /// The legacy `--config` flag must not be silently ignored because that makes

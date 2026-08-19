@@ -318,6 +318,17 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
     assert!(without_override.get_envs().any(|(key, value)| {
         key == tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV && value.is_none()
     }));
+    for variable in [
+        tau_config::settings::TAU_PROVIDER_ALIASES_ENV,
+        tau_config::settings::TAU_MODEL_ALIASES_ENV,
+    ] {
+        assert!(
+            with_override
+                .get_envs()
+                .any(|(key, value)| key == variable && value.is_none()),
+            "spawned daemon must not re-read inherited {variable}"
+        );
+    }
 }
 
 /// Ensures an ordered CLI profile selection reaches the daemon unchanged and an

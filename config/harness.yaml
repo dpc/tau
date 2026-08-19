@@ -2,6 +2,14 @@
 # runtime. Harness config owns role defaults and extension settings.
 # Use `:model <provider>/<model>` to switch the selected agent model and
 # `:role ...` to edit persisted role overrides.
+#
+# Optional startup-only aliases rewrite the provider and exact model suffix of
+# configured role models. They do not apply to interactive commands.
+# aliases:
+#   providers:
+#     subscription: codex-work
+#   models:
+#     current: gpt-5.4
 
 # Agent settings, role defaults, and role groups live under `agents:`.
 #

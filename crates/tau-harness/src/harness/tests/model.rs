@@ -1329,6 +1329,87 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     );
 }
 
+/// Startup aliases must disappear before provider routing and publications,
+/// while a later runtime role edit with the same text remains a literal
+/// canonical-only input and follows the normal unavailable-model diagnostic.
+#[test]
+fn startup_alias_routes_canonically_but_runtime_model_input_is_not_resolved() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("create config");
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+aliases:
+  providers:
+    subscription: canonical
+  models:
+    current: published
+agents:
+  model: subscription/current
+"#,
+    )
+    .expect("write aliased role config");
+    let dirs = path_tau_config_settings::TauDirs {
+        config_dir: Some(config_dir),
+        state_dir: Some(state_dir.clone()),
+    };
+    let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start aliased harness");
+    let role = h.selected_role.clone();
+    let canonical: ModelId = "canonical/published".parse().expect("canonical model");
+    assert_eq!(h.available_roles[&role].model.as_ref(), Some(&canonical));
+
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![provider_model(canonical.clone(), 128_000)],
+        })),
+    )
+    .expect("publish only canonical target");
+    assert_eq!(h.selected_model.as_ref(), Some(&canonical));
+    h.publish_current_model_state();
+    let mut sequence = path_crate_event_log::EventLogSeq::new(0);
+    let mut published = Vec::new();
+    while let Some(entry) = h.event_log.get_next_from(sequence) {
+        sequence = entry.seq.next();
+        if let Event::HarnessRoleSelected(selected) = entry.event {
+            published.push(selected.model);
+        }
+    }
+    assert!(published.iter().flatten().all(|model| model == &canonical));
+
+    let literal_runtime: ModelId = "subscription/current"
+        .parse()
+        .expect("literal runtime model");
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role: role.clone(),
+        action: tau_proto::UiRoleUpdateAction::SetModel {
+            model: Some(literal_runtime.clone()),
+        },
+    })
+    .expect("apply literal runtime role edit");
+    assert_eq!(
+        h.available_roles[&role].model.as_ref(),
+        Some(&literal_runtime)
+    );
+    assert!(h.selected_model.is_none());
+    assert_eq!(
+        h.submit_user_prompt(
+            "s1".parse::<tau_proto::SessionId>().expect("session id"),
+            "hello".to_owned(),
+        )
+        .expect("submit unavailable literal runtime model"),
+        PromptSubmission::Queued,
+    );
+    assert!(
+        find_info(&h, &format!("role `{role}` has no available model")).is_some(),
+        "runtime alias-shaped input must follow canonical unavailable-model behavior"
+    );
+}
+
 /// Provider metadata must replace config compat data once a provider-owned
 /// model is selected, otherwise the UI loses context-window and knob choices.
 #[test]

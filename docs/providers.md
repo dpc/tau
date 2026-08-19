@@ -728,6 +728,13 @@ infers a unique source or accepts `--config`/`--state`. ChatGPT rows whose OAuth
 credential is absent or expired include the exact `tau provider login` command
 needed to repair that profile.
 
+Harness `aliases.providers` entries only rewrite the provider component of
+static configured role models. For example, `subscription: codex-work` makes
+`subscription/gpt-5.5` route as `codex-work/gpt-5.5`; it does not rename, copy,
+load, or redirect provider profile files, credentials, extension instances, or
+`tau provider` command arguments. The canonical target profile must still exist,
+authenticate, and publish the selected model.
+
 `tau provider login <profile>` hydrates or refreshes an existing profile without
 changing its config- or state-owned settings. It publishes only the host-local
 typed Secret record, revalidates the exact profile source and bytes before the

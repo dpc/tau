@@ -614,6 +614,8 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         "LISTEN_PID",
         "LISTEN_FDS_FIRST_FD",
         "LISTEN_FDNAMES",
+        tau_config::settings::TAU_PROVIDER_ALIASES_ENV,
+        tau_config::settings::TAU_MODEL_ALIASES_ENV,
     ] {
         cmd.env_remove(key);
     }

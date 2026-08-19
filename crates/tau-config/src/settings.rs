@@ -18,7 +18,7 @@ use indexmap::IndexMap;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ModelId, ModelTag, PromptContent, PromptPriority, ProviderName, ToolName, ToolTag,
+    ModelId, ModelName, ModelTag, PromptContent, PromptPriority, ProviderName, ToolName, ToolTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -880,6 +880,10 @@ struct HarnessSettingsWire {
     tool_policy: ToolPolicy,
     /// Agent defaults and role groups.
     agents: AgentsSettings,
+    /// Startup-only provider/model reference aliases. The loader resolves these
+    /// after role replay and does not retain them in [`HarnessSettings`].
+    #[serde(default, rename = "aliases")]
+    _aliases: ModelReferenceAliases,
     /// Named, opt-in patches. The loader consumes these before returning the
     /// effective settings, so they never enter [`HarnessSettings`].
     #[serde(default, rename = "profiles")]
@@ -1190,6 +1194,24 @@ struct HarnessRoleOverrides {
     agents: HarnessAgentRoleOverrides,
 }
 
+/// Startup-only aliases for the two components of configured model references.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ModelReferenceAliases {
+    /// Exact provider-name aliases.
+    providers: BTreeMap<ProviderName, ProviderName>,
+    /// Exact model-name suffix aliases.
+    models: BTreeMap<ModelName, ModelName>,
+}
+
+/// Narrow extraction view used to discard aliases before runtime settings.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct HarnessAliasesWire {
+    /// Effective startup-only aliases.
+    aliases: ModelReferenceAliases,
+}
+
 /// Raw, selected-profile patches kept separate from effective harness settings.
 ///
 /// Profiles deliberately expose only the startup default role, role metadata,
@@ -1204,6 +1226,8 @@ struct HarnessProfile {
     tau_state_access: Option<TauStateAccess>,
     /// Agent defaults, role groups, and per-role patches.
     agents: HarnessProfileAgentOverrides,
+    /// Startup-only provider/model aliases changed by this profile.
+    aliases: ModelReferenceAliases,
     /// Enablement and extension-owned config patches for normally resolved
     /// extensions, including built-ins.
     extensions: BTreeMap<String, HarnessProfileExtension>,
@@ -2165,6 +2189,147 @@ pub struct HarnessConfigCliOverride {
     pub raw_value: String,
 }
 
+/// Public environment variable containing a JSON object of provider aliases.
+pub const TAU_PROVIDER_ALIASES_ENV: &str = "TAU_PROVIDER_ALIASES";
+/// Public environment variable containing a JSON object of model-name aliases.
+pub const TAU_MODEL_ALIASES_ENV: &str = "TAU_MODEL_ALIASES";
+
+/// One typed `--provider-alias FROM=TO` startup override.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderAliasCliOverride {
+    /// Alias name used in configured model references.
+    pub from: ProviderName,
+    /// Provider name substituted at startup.
+    pub to: ProviderName,
+}
+
+impl FromStr for ProviderAliasCliOverride {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (from, to) = parse_alias_assignment(value)?;
+        Ok(Self {
+            from: from
+                .parse()
+                .map_err(|error| format!("invalid provider alias name: {error}"))?,
+            to: to
+                .parse()
+                .map_err(|error| format!("invalid provider alias target: {error}"))?,
+        })
+    }
+}
+
+/// One typed `--model-alias FROM=TO` startup override.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelAliasCliOverride {
+    /// Exact model-name suffix used in configured model references.
+    pub from: ModelName,
+    /// Exact model-name suffix substituted at startup.
+    pub to: ModelName,
+}
+
+impl FromStr for ModelAliasCliOverride {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (from, to) = parse_alias_assignment(value)?;
+        Ok(Self {
+            from: from
+                .parse()
+                .map_err(|error| format!("invalid model alias name: {error}"))?,
+            to: to
+                .parse()
+                .map_err(|error| format!("invalid model alias target: {error}"))?,
+        })
+    }
+}
+
+/// Environment and dedicated CLI sources for startup-only model references.
+#[derive(Default)]
+pub struct ModelReferenceAliasSources<'a> {
+    /// Public provider-alias JSON environment value.
+    pub provider_environment: Option<OsString>,
+    /// Public model-alias JSON environment value.
+    pub model_environment: Option<OsString>,
+    /// Ordered dedicated provider CLI operations.
+    pub provider_cli: &'a [ProviderAliasCliOverride],
+    /// Ordered dedicated model CLI operations.
+    pub model_cli: &'a [ModelAliasCliOverride],
+}
+
+/// Splits a dedicated alias operation at its first equals sign without
+/// trimming provider-meaningful or model-meaningful bytes.
+fn parse_alias_assignment(value: &str) -> Result<(&str, &str), String> {
+    let Some((from, to)) = value.split_once('=') else {
+        return Err("expected FROM=TO".to_owned());
+    };
+    if from.is_empty() {
+        return Err("alias name must not be empty".to_owned());
+    }
+    if to.is_empty() {
+        return Err("alias target must not be empty".to_owned());
+    }
+    Ok((from, to))
+}
+
+/// Converts public environment alias maps and dedicated CLI operations into
+/// final generic config layers. Environment maps apply first; repeated CLI
+/// operations then replace matching keys in command-line order.
+pub fn model_reference_alias_config_overrides(
+    sources: ModelReferenceAliasSources<'_>,
+) -> Result<Vec<HarnessConfigCliOverride>, SettingsError> {
+    let mut providers = parse_alias_environment::<ProviderName>(
+        TAU_PROVIDER_ALIASES_ENV,
+        sources.provider_environment,
+    )?;
+    let mut models =
+        parse_alias_environment::<ModelName>(TAU_MODEL_ALIASES_ENV, sources.model_environment)?;
+    for override_ in sources.provider_cli {
+        providers.insert(override_.from.clone(), override_.to.clone());
+    }
+    for override_ in sources.model_cli {
+        models.insert(override_.from.clone(), override_.to.clone());
+    }
+    let mut overrides = Vec::new();
+    if !providers.is_empty() {
+        overrides.push(HarnessConfigCliOverride {
+            key: "aliases.providers".to_owned(),
+            raw_value: serde_json::to_string(&providers)
+                .expect("provider alias maps always serialize"),
+        });
+    }
+    if !models.is_empty() {
+        overrides.push(HarnessConfigCliOverride {
+            key: "aliases.models".to_owned(),
+            raw_value: serde_json::to_string(&models).expect("model alias maps always serialize"),
+        });
+    }
+    Ok(overrides)
+}
+
+/// Parses one public alias environment variable as a strict JSON object.
+fn parse_alias_environment<T>(
+    variable: &'static str,
+    value: Option<OsString>,
+) -> Result<BTreeMap<T, T>, SettingsError>
+where
+    T: Ord + for<'de> Deserialize<'de>,
+{
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let value = value.into_string().map_err(|_| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "{variable} must contain valid UTF-8 JSON"
+        )))
+    })?;
+    serde_json::from_str(&value).map_err(|error| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "{variable} must be a JSON object of alias names to targets: {error}"
+        )))
+    })
+}
+
 impl FromStr for HarnessConfigCliOverride {
     type Err = String;
 
@@ -2576,6 +2741,16 @@ pub enum SettingsError {
     /// A `--harness-config KEY=VALUE` override had invalid syntax, YAML, or
     /// conflicting legacy/canonical key spellings.
     InvalidHarnessConfigCliOverride(String),
+    /// A startup-only provider alias graph contains a closed cycle.
+    ProviderAliasCycle {
+        /// Closed cycle path, with the first provider repeated at the end.
+        path: Vec<ProviderName>,
+    },
+    /// A startup-only model alias graph contains a closed cycle.
+    ModelAliasCycle {
+        /// Closed cycle path, with the first model name repeated at the end.
+        path: Vec<ModelName>,
+    },
 }
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2606,6 +2781,22 @@ impl fmt::Display for SettingsError {
             Self::InvalidHarnessConfigCliOverride(message) => {
                 write!(f, "invalid harness config CLI override: {message}")
             }
+            Self::ProviderAliasCycle { path } => write!(
+                f,
+                "provider alias cycle: {}",
+                path.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
+            Self::ModelAliasCycle { path } => write!(
+                f,
+                "model alias cycle: {}",
+                path.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
         }
     }
 }
@@ -2619,7 +2810,9 @@ impl std::error::Error for SettingsError {
             | Self::UnknownRoleCliOverride(_)
             | Self::UnknownProfile(_)
             | Self::UnknownProfileExtension { .. }
-            | Self::InvalidHarnessConfigCliOverride(_) => None,
+            | Self::InvalidHarnessConfigCliOverride(_)
+            | Self::ProviderAliasCycle { .. }
+            | Self::ModelAliasCycle { .. } => None,
         }
     }
 }
@@ -3113,6 +3306,13 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
         Some(selection) => load_harness_profile_layers(dirs, selection)?,
         None => Vec::new(),
     };
+    let aliases: HarnessAliasesWire = load_yaml_layered_with_builtin_and_harness_overrides(
+        BUILT_IN_HARNESS_YAML,
+        dirs.config_dir.as_deref(),
+        "harness",
+        &profiles,
+        harness_config_overrides,
+    )?;
     let mut settings: HarnessSettings = load_yaml_layered_with_builtin_and_harness_overrides(
         BUILT_IN_HARNESS_YAML,
         dirs.config_dir.as_deref(),
@@ -3178,7 +3378,70 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     settings.context_size_alerts = role_settings.context_size_alerts;
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
+    resolve_model_references(&mut settings, &aliases.aliases)?;
     Ok(settings)
+}
+
+/// Resolves every effective static role model and validates the complete alias
+/// graphs, including entries that no role currently uses.
+fn resolve_model_references(
+    settings: &mut HarnessSettings,
+    aliases: &ModelReferenceAliases,
+) -> Result<(), SettingsError> {
+    validate_alias_graph(&aliases.providers)
+        .map_err(|path| SettingsError::ProviderAliasCycle { path })?;
+    validate_alias_graph(&aliases.models)
+        .map_err(|path| SettingsError::ModelAliasCycle { path })?;
+    for role in settings.roles.values_mut() {
+        let Some(model) = role.model.take() else {
+            continue;
+        };
+        role.model = Some(ModelId::new(
+            resolve_alias(&aliases.providers, &model.provider),
+            resolve_alias(&aliases.models, &model.model),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates one complete alias graph so unused cycles cannot remain latent.
+fn validate_alias_graph<T>(aliases: &BTreeMap<T, T>) -> Result<(), Vec<T>>
+where
+    T: Clone + Ord,
+{
+    for start in aliases.keys() {
+        let mut path = Vec::new();
+        let mut current = start;
+        while let Some(next) = aliases.get(current) {
+            if next == current {
+                break;
+            }
+            if let Some(position) = path.iter().position(|seen| seen == current) {
+                let mut cycle = path[position..].to_vec();
+                cycle.push(current.clone());
+                return Err(cycle);
+            }
+            path.push(current.clone());
+            current = next;
+        }
+    }
+    Ok(())
+}
+
+/// Follows one already-validated alias chain, treating an identity edge as an
+/// explicit terminal reset.
+fn resolve_alias<T>(aliases: &BTreeMap<T, T>, start: &T) -> T
+where
+    T: Clone + Ord,
+{
+    let mut current = start;
+    while let Some(next) = aliases.get(current) {
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current.clone()
 }
 
 // Legacy harness aliases are accepted for user compatibility, but every alias
@@ -3467,6 +3730,14 @@ fn profile_config_source(
             })?,
         );
     }
+    values.insert(
+        "aliases".to_owned(),
+        serde_json::to_value(&profile.aliases).map_err(|error| {
+            SettingsError::Config(config::ConfigError::Message(format!(
+                "failed to serialize selected profile aliases: {error}"
+            )))
+        })?,
+    );
     values.insert(
         "extensions".to_owned(),
         serde_json::Value::Object(extensions),

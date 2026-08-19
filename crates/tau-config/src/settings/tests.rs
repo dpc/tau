@@ -6,6 +6,231 @@ use tempfile::TempDir;
 use super::*;
 use crate::settings as path_crate_settings;
 
+/// Provider and model aliases resolve independently after agent/group/role
+/// replay, including exact model suffixes that themselves contain slashes.
+#[test]
+fn model_reference_aliases_resolve_final_effective_role_models() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+aliases:
+  providers:
+    current: preferred
+    preferred: codex-work
+  models:
+    fast: vendor/qwen-fast
+agents:
+  model: current/fast
+  role_groups:
+    alias-test:
+      model: current/fast
+      roles:
+        inherited: {}
+        exact:
+          model: current/vendor/qwen-fast
+        case-sensitive:
+          model: current/Fast
+        no-prefix:
+          model: current/fastest
+"#,
+    )
+    .expect("write alias config");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("resolve aliases");
+    assert_eq!(
+        settings.roles["inherited"]
+            .model
+            .as_ref()
+            .map(ToString::to_string),
+        Some("codex-work/vendor/qwen-fast".to_owned())
+    );
+    assert_eq!(
+        settings.roles["exact"]
+            .model
+            .as_ref()
+            .map(ToString::to_string),
+        Some("codex-work/vendor/qwen-fast".to_owned())
+    );
+    assert_eq!(
+        settings.roles["case-sensitive"]
+            .model
+            .as_ref()
+            .map(ToString::to_string),
+        Some("codex-work/Fast".to_owned())
+    );
+    assert_eq!(
+        settings.roles["no-prefix"]
+            .model
+            .as_ref()
+            .map(ToString::to_string),
+        Some("codex-work/fastest".to_owned())
+    );
+}
+
+/// Selected profiles can retarget lower-layer model references, while a final
+/// dedicated-style config layer remains the highest-precedence alias value.
+#[test]
+fn profile_and_final_alias_layers_retarget_lower_model_references() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+aliases:
+  providers:
+    subscription: personal
+agents:
+  model: subscription/gpt
+profiles:
+  work:
+    aliases:
+      providers:
+        subscription: work
+"#,
+    )
+    .expect("write profile aliases");
+    let profile = profile_selection("work");
+    let cli = [
+        HarnessConfigCliOverride::from_str("aliases.providers={subscription: emergency}")
+            .expect("final alias override"),
+    ];
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &cli,
+    )
+    .expect("load layered aliases");
+    assert!(settings.roles.values().all(|role| {
+        role.model
+            .as_ref()
+            .is_none_or(|model| model.provider == "emergency")
+    }));
+}
+
+/// Identity mappings terminate alias chains, while every non-identity cycle is
+/// rejected even when no configured role refers to it.
+#[test]
+fn alias_graphs_accept_identity_resets_and_reject_unused_cycles() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "aliases:\n  providers:\n    literal: target\nagents:\n  model: literal/model\n",
+    )
+    .expect("write lower alias");
+    let reset = [
+        HarnessConfigCliOverride::from_str("aliases.providers={literal: literal}")
+            .expect("identity override"),
+    ];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        None,
+        &[],
+        &reset,
+    )
+    .expect("identity is terminal");
+    assert!(settings.roles.values().all(|role| {
+        role.model
+            .as_ref()
+            .is_none_or(|model| model.provider == "literal")
+    }));
+
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "aliases:\n  models:\n    a: b\n    b: a\n",
+    )
+    .expect("write cycle");
+    let error =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("unused cycle must fail");
+    assert_eq!(error.to_string(), "model alias cycle: a -> b -> a");
+}
+
+/// Environment aliases use strict JSON objects, and later repeated CLI
+/// operations replace matching environment entries without path interpretation.
+#[test]
+fn alias_environment_and_cli_operations_have_typed_last_wins_precedence() {
+    let provider_cli = [
+        "current=second".parse().expect("first provider override"),
+        "current=final.name"
+            .parse()
+            .expect("last provider override"),
+    ];
+    let model_cli = ["fast=org/qwen".parse().expect("model override")];
+    let overrides = model_reference_alias_config_overrides(ModelReferenceAliasSources {
+        provider_environment: Some(r#"{"current":"environment"}"#.into()),
+        model_environment: Some(r#"{"other":"model"}"#.into()),
+        provider_cli: &provider_cli,
+        model_cli: &model_cli,
+    })
+    .expect("parse alias sources");
+
+    assert_eq!(overrides.len(), 2);
+    assert!(overrides[0].raw_value.contains(r#""current":"final.name""#));
+    assert!(overrides[1].raw_value.contains(r#""fast":"org/qwen""#));
+    assert!(
+        model_reference_alias_config_overrides(ModelReferenceAliasSources {
+            provider_environment: Some("current=bad".into()),
+            ..Default::default()
+        })
+        .expect_err("non-JSON environment must fail")
+        .to_string()
+        .contains(TAU_PROVIDER_ALIASES_ENV)
+    );
+}
+
+/// Alias targets need not be currently published, and a later cold load uses
+/// the newly configured canonical target without retaining prior provenance.
+#[test]
+fn alias_targets_are_syntax_only_and_cold_reloads_use_current_mapping() {
+    let td = TempDir::new().expect("tempdir");
+    let write_target = |target: &str| {
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!(
+                "aliases:\n  providers:\n    current: {target}\nagents:\n  model: current/unknown\n"
+            ),
+        )
+        .expect("write alias target");
+    };
+    write_target("not-published-one");
+    let first =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("accept unknown target");
+    write_target("not-published-two");
+    let second =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("reload changed target");
+    assert!(first.roles.values().all(|role| {
+        role.model
+            .as_ref()
+            .is_none_or(|model| model.provider == "not-published-one")
+    }));
+    assert!(second.roles.values().all(|role| {
+        role.model
+            .as_ref()
+            .is_none_or(|model| model.provider == "not-published-two")
+    }));
+}
+
+/// Provider grammar and nonempty model names fail during config loading with
+/// their alias namespace visible instead of becoming unresolved runtime names.
+#[test]
+fn alias_config_rejects_invalid_provider_and_empty_model_names() {
+    for (yaml, expected) in [
+        (
+            "aliases:\n  providers:\n    bad/name: target\n",
+            "provider name",
+        ),
+        ("aliases:\n  models:\n    \"\": target\n", "model name"),
+        ("aliases:\n  models:\n    source: \"\"\n", "model name"),
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(td.path().join("harness.yaml"), yaml).expect("write invalid alias");
+        let error = load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect_err("invalid alias name must fail");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
 /// Proves portable and mutable provider helpers use the same instance-qualified
 /// shape beneath their distinct TauDirs roots.
 #[test]

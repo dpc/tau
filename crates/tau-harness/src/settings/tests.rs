@@ -1424,3 +1424,55 @@ fn resolve_extensions_required_empty_command_remains_fatal() {
         matches!(error, ResolveExtensionsError::EmptyCommand(name) if name == "required-empty")
     );
 }
+
+/// Public alias environment layers after the private generic transport for
+/// direct harness execution, matching the parent CLI's effective precedence.
+#[test]
+fn alias_environment_follows_private_generic_daemon_transport() {
+    let private = vec![HarnessConfigCliOverride {
+        key: "aliases.providers".to_owned(),
+        raw_value: r#"{"current":"generic"}"#.to_owned(),
+    }];
+    let overrides = harness_config_overrides_from_sources(
+        Some(
+            serde_json::to_string(&private)
+                .expect("serialize transport")
+                .into(),
+        ),
+        path_tau_config_settings::ModelReferenceAliasSources {
+            provider_environment: Some(r#"{"current":"environment"}"#.into()),
+            ..Default::default()
+        },
+    )
+    .expect("parse combined startup inputs");
+    assert_eq!(overrides.len(), 2);
+    assert_eq!(overrides[0].raw_value, r#"{"current":"generic"}"#);
+    assert!(
+        overrides[1]
+            .raw_value
+            .contains(r#""current":"environment""#)
+    );
+
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents:\n  model: current/model\n",
+    )
+    .expect("write aliased role model");
+    let settings =
+        path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
+            &path_tau_config_settings::TauDirs {
+                config_dir: Some(td.path().to_path_buf()),
+                state_dir: Some(td.path().join("state")),
+            },
+            None,
+            &[],
+            &overrides,
+        )
+        .expect("load receiver-effective settings");
+    assert!(settings.roles.values().all(|role| {
+        role.model
+            .as_ref()
+            .is_none_or(|model| model.provider == "environment")
+    }));
+}
