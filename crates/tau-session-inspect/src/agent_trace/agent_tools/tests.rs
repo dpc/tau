@@ -193,6 +193,7 @@ fn declaration(agent: &str, byte: u8, seq: u64, call_id: &str) -> Fact {
         seq,
         seq + 1,
         Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
             agent_prompt_id: format!("prompt-{call_id}")
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),

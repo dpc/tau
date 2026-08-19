@@ -247,6 +247,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   harness-authored boundaries for one non-overlapping accepted activation. They
   carry the stable turn id and session attribution; the start also identifies the
   initiating transcript occurrence and the finish records its terminal disposition.
+  A finish may reference the terminal-owned automatic-compaction decision that it
+  makes runnable.
 - **`agent.state`** — Transient live runtime snapshot for one agent. Carries
   `agent_id` plus `idle`/`running` state so UIs can show work in progress
   without treating it as transcript history.
@@ -956,7 +958,14 @@ the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 
 ### Reactive context recovery fields
 
-`agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `automatic_threshold` identifies proactive role/model threshold work, while `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.
+`agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `automatic_threshold` identifies deferred proactive role/model threshold work, `automatic_policy` uniquely claims a terminal-owned eager decision, and `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.
+
+`provider.response_finished.automatic_compaction_decision` and the corresponding
+field on a harness-authored canceled `agent.prompt_terminated` are optional
+harness authority. They carry one coalesced eager action identity, outer-turn
+identity, resolved model, and effective threshold. A response's assistant node,
+or a cancellation terminal's parent, is the cut. The matching outer-turn finish
+repeats the action identity before a protected standalone start may claim it.
 
 `provider.response_finished.output_length_disposition` is also harness-authored
 and defaults to `none`. An eligible reasoning-only `length` terminal may carry

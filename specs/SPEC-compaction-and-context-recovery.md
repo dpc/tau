@@ -376,6 +376,28 @@ projected tokens. Threshold-fired standalone compaction persists
 `automatic_threshold`; only explicit UI compaction retains the legacy/default
 `manual` trigger.
 
+Named automatic-compaction policies are harness-scheduled standalone policies.
+`before_inference` policies retain the deferred runtime behavior above.
+`outer_turn_finished` policies that match the logical terminal status coalesce
+into one `automatic_compaction_decision` on the final canonical
+`provider.response_finished`, or on the harness-authored canceled
+`agent.prompt_terminated` when no provider response exists. The decision persists
+one transaction identity, outer-turn identity, resolved model, and lowest matching
+resolved threshold; its rule names and general work-status state remain
+runtime-only. A response's assistant node supplies its exact cut; a canceled
+prompt termination uses its durable parent because it appends no transcript node.
+The matching `agent.outer_turn_finished`
+references and makes the decision runnable, and exactly one
+`agent.standalone_compaction_started` with `automatic_policy` claims it.
+
+Replay repairs terminal decision -> outer-turn finish -> protected start without
+reconstructing work status. A rejected append retains the same authority. A
+selected sibling before start durably closes the decision as `stale_branch`
+without provider work; descendant input remains suffix data. Eager authority,
+an active transaction, and a blocked transaction suppress deferred fallback.
+Reactive context-overflow authority and an inline compaction boundary suppress
+eager decision creation at that terminal.
+
 Named context-size alerts are advisory and independent of automatic compaction.
 They use provider-reported input-token usage from successful completed ordinary
 inference that did not itself install an inline compaction boundary. Failed and

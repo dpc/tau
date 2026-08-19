@@ -414,6 +414,11 @@ pub struct AgentTree {
     compaction_transactions: HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>,
     /// Durable insertion order for deterministic recovery projection.
     compaction_transaction_order: Vec<tau_proto::CompactionTransactionId>,
+    /// Terminal-owned eager decisions keyed by eventual transaction id.
+    automatic_compaction_decisions:
+        HashMap<tau_proto::CompactionTransactionId, AutomaticCompactionDecisionFold>,
+    /// Durable decision insertion order for deterministic recovery.
+    automatic_compaction_decision_order: Vec<tau_proto::CompactionTransactionId>,
     /// Durable model-requested compactions, including requests not started yet.
     manual_compaction_requests:
         HashMap<tau_proto::CompactionRequestId, ManualCompactionRequestFold>,
@@ -440,6 +445,8 @@ struct OuterTurnFold {
     finished: bool,
     /// Harness runtime that authored the start.
     runtime_id: tau_proto::AccountingRuntimeId,
+    /// Initial inference prompt that opened the turn.
+    agent_prompt_id: tau_proto::AgentPromptId,
 }
 
 /// Folded state for one durable inference checkpoint.
@@ -591,6 +598,16 @@ struct CompactionTransactionFold {
     inference_finished: bool,
 }
 
+/// Terminal-owned eager automatic-compaction authority.
+#[derive(Clone, Debug, PartialEq)]
+struct AutomaticCompactionDecisionFold {
+    decision: tau_proto::AutomaticCompactionDecision,
+    cut: tau_proto::AgentHead,
+    finish_committed: bool,
+    claimed: bool,
+    closed: bool,
+}
+
 /// Exactly one terminal compact outcome.
 #[derive(Clone, Debug, PartialEq)]
 enum CompactionTransactionOutcome {
@@ -655,6 +672,15 @@ pub enum ManualCompactionOutcome {
 /// Durable standalone-compaction state reconstructed by the core fold.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StandaloneCompactionRecovery {
+    /// A terminal-owned eager decision is durable but has not started.
+    AwaitingAutomaticStart {
+        /// Bounded terminal-owned authority.
+        decision: tau_proto::AutomaticCompactionDecision,
+        /// Exact canonical terminal node selected as the compact cut.
+        cut: tau_proto::AgentHead,
+        /// Whether the matching outer-turn finish has committed.
+        finish_committed: bool,
+    },
     /// A start has no terminal outcome and must be repaired as interrupted.
     Interrupted(tau_proto::AgentStandaloneCompactionStarted),
     /// A terminal failure retains an explicit recovery obligation.
@@ -713,6 +739,19 @@ impl AgentTree {
     /// projection, following `SPEC-compaction-and-context-recovery`.
     #[must_use]
     pub fn standalone_compaction_recovery(&self) -> Option<StandaloneCompactionRecovery> {
+        if let Some(decision) = self
+            .automatic_compaction_decision_order
+            .iter()
+            .rev()
+            .filter_map(|id| self.automatic_compaction_decisions.get(id))
+            .find(|decision| !decision.claimed && !decision.closed)
+        {
+            return Some(StandaloneCompactionRecovery::AwaitingAutomaticStart {
+                decision: decision.decision.clone(),
+                cut: decision.cut,
+                finish_committed: decision.finish_committed,
+            });
+        }
         let id = self.compaction_transaction_order.last()?;
         let transaction = self.compaction_transactions.get(id)?;
         match (&transaction.outcome, &transaction.checkpoint) {
@@ -1407,6 +1446,8 @@ impl AgentTree {
             background_completed_tool_calls: HashSet::new(),
             compaction_transactions: HashMap::new(),
             compaction_transaction_order: Vec::new(),
+            automatic_compaction_decisions: HashMap::new(),
+            automatic_compaction_decision_order: Vec::new(),
             manual_compaction_requests: HashMap::new(),
             manual_compaction_request_order: Vec::new(),
             self_compaction_deliveries: HashMap::new(),
@@ -1695,11 +1736,53 @@ impl AgentTree {
             .retained_provider_image_bytes
             .saturating_add(durable_event_provider_image_bytes(event));
         self.apply_compaction_control_event(event, fold_semantics);
+        if let Event::AgentPromptTerminated(terminated) = event
+            && let Some(decision) = &terminated.automatic_compaction_decision
+        {
+            self.automatic_compaction_decision_order
+                .push(decision.transaction_id.clone());
+            self.automatic_compaction_decisions.insert(
+                decision.transaction_id.clone(),
+                AutomaticCompactionDecisionFold {
+                    decision: decision.clone(),
+                    cut: resolved_parent
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    finish_committed: false,
+                    claimed: false,
+                    closed: false,
+                },
+            );
+        }
         if self.apply_side_state_event(event) {
             return None;
         }
+        let automatic_terminal_node = matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.automatic_compaction_decision.is_some()
+        )
+        .then(|| NodeId::new(u64::try_from(self.nodes.len()).expect("agent node count fits u64")));
         let node = self.apply_transcript_event(resolved_parent, event, durable_event_seq);
         if let Some(node_id) = node {
+            if let Event::ProviderResponseFinished(response) = event
+                && let Some(decision) = &response.automatic_compaction_decision
+            {
+                self.automatic_compaction_decision_order
+                    .push(decision.transaction_id.clone());
+                self.automatic_compaction_decisions.insert(
+                    decision.transaction_id.clone(),
+                    AutomaticCompactionDecisionFold {
+                        decision: decision.clone(),
+                        cut: tau_proto::AgentHead::Node(
+                            automatic_terminal_node
+                                .expect("decision response appends its assistant node first"),
+                        ),
+                        finish_committed: false,
+                        claimed: false,
+                        closed: false,
+                    },
+                );
+            }
             if let Event::ProviderResponseFinished(response) = event
                 && let Some(dispatch) = self.inference_dispatches.get_mut(&response.agent_prompt_id)
             {
@@ -1863,6 +1946,12 @@ impl AgentTree {
                         inference_finished: false,
                     },
                 );
+                if let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
+                    &started.trigger
+                    && let Some(decision) = self.automatic_compaction_decisions.get_mut(decision_id)
+                {
+                    decision.claimed = true;
+                }
                 if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                     request_id, ..
                 } = &started.trigger
@@ -1877,6 +1966,11 @@ impl AgentTree {
                 {
                     transaction.outcome =
                         Some(CompactionTransactionOutcome::Failed(failed.clone()));
+                } else if let Some(decision) = self
+                    .automatic_compaction_decisions
+                    .get_mut(&failed.transaction_id)
+                {
+                    decision.closed = true;
                 }
             }
             Event::AgentCompacted(compacted) => {
@@ -1961,6 +2055,7 @@ impl AgentTree {
                         session_id: started.session_id.clone(),
                         finished: false,
                         runtime_id: started.runtime_id.clone(),
+                        agent_prompt_id: started.agent_prompt_id.clone(),
                     },
                 );
                 self.active_outer_turn = Some(started.outer_turn_id.clone());
@@ -1968,6 +2063,11 @@ impl AgentTree {
             Event::AgentOuterTurnFinished(finished) => {
                 if let Some(turn) = self.outer_turns.get_mut(&finished.outer_turn_id) {
                     turn.finished = true;
+                }
+                if let Some(id) = &finished.automatic_compaction_decision
+                    && let Some(decision) = self.automatic_compaction_decisions.get_mut(id)
+                {
+                    decision.finish_committed = true;
                 }
                 self.active_outer_turn = None;
             }
@@ -2656,7 +2756,16 @@ impl AgentTree {
                     (Some(active), Some(fold))
                         if active == &turn.outer_turn_id
                             && fold.session_id == turn.session_id
-                            && !fold.finished =>
+                            && !fold.finished
+                            && self
+                                .automatic_compaction_decisions
+                                .values()
+                                .find(|decision| {
+                                    !decision.finish_committed
+                                        && decision.decision.outer_turn_id == turn.outer_turn_id
+                                })
+                                .map(|decision| &decision.decision.transaction_id)
+                                == turn.automatic_compaction_decision.as_ref() =>
                     {
                         Ok(())
                     }
@@ -2791,7 +2900,7 @@ impl AgentTree {
                 Some(self.validate_inference_checkpoint(started))
             }
             Event::AgentPromptTerminated(terminated) if terminated.agent_id == self.agent_id => {
-                Some(Ok(()))
+                Some(self.validate_prompt_terminated(head, terminated))
             }
             Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Some(
                 tau_proto::validate_compaction_window(&compacted.replacement_window)
@@ -2835,6 +2944,19 @@ impl AgentTree {
         {
             return Err(AgentEventValidationError::new(
                 "duplicate standalone compaction transaction id",
+            ));
+        }
+        if self
+            .automatic_compaction_decisions
+            .contains_key(&started.transaction_id)
+            && !matches!(
+                &started.trigger,
+                tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id }
+                    if decision_id == &started.transaction_id
+            )
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone compaction transaction id is reserved by an automatic decision",
             ));
         }
         if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
@@ -2917,6 +3039,32 @@ impl AgentTree {
             {
                 return Err(AgentEventValidationError::new(
                     "reactive compaction does not uniquely match its planned inference recovery",
+                ));
+            }
+        }
+        if let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
+            &started.trigger
+        {
+            let Some(decision) = self.automatic_compaction_decisions.get(decision_id) else {
+                return Err(AgentEventValidationError::new(
+                    "automatic compaction references unknown terminal decision",
+                ));
+            };
+            if decision.claimed
+                || decision.closed
+                || !decision.finish_committed
+                || started.transaction_id != *decision_id
+                || started.cut != decision.cut
+                || started.model != decision.decision.model
+                || started.resume_through
+                    != (self.head != decision.cut.as_option()).then_some(
+                        self.head
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    )
+                || started.supersedes.is_some()
+            {
+                return Err(AgentEventValidationError::new(
+                    "automatic compaction does not uniquely claim its terminal decision",
                 ));
             }
         }
@@ -3640,14 +3788,30 @@ impl AgentTree {
         &self,
         failed: &tau_proto::AgentStandaloneCompactionFailed,
     ) -> Result<(), AgentEventValidationError> {
-        let transaction = self
-            .compaction_transactions
-            .get(&failed.transaction_id)
-            .ok_or_else(|| {
+        let Some(transaction) = self.compaction_transactions.get(&failed.transaction_id) else {
+            let valid_stale_closure = self
+                .automatic_compaction_decisions
+                .get(&failed.transaction_id)
+                .is_some_and(|decision| {
+                    decision.finish_committed
+                        && !decision.claimed
+                        && !decision.closed
+                        && !self.is_ancestor_head(
+                            decision.cut,
+                            self.head
+                                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                        )
+                        && failed.reason
+                            == tau_proto::StandaloneCompactionFailureReason::StaleBranch
+                        && failed.cut == decision.cut
+                        && failed.resume_through.is_none()
+                });
+            return valid_stale_closure.then_some(()).ok_or_else(|| {
                 AgentEventValidationError::new(
-                    "standalone compaction failure references unknown transaction",
+                    "standalone compaction failure references unknown transaction or invalid eager closure",
                 )
-            })?;
+            });
+        };
         if transaction.outcome.is_some()
             || transaction.started.cut != failed.cut
             || transaction.started.resume_through != failed.resume_through
@@ -3928,6 +4092,62 @@ impl AgentTree {
         &self,
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
+        if let Some(decision) = &response.automatic_compaction_decision {
+            let valid =
+                decision.threshold > 0
+                    && !self
+                        .automatic_compaction_decisions
+                        .contains_key(&decision.transaction_id)
+                    && !self
+                        .compaction_transactions
+                        .contains_key(&decision.transaction_id)
+                    && !self
+                        .automatic_compaction_decisions
+                        .values()
+                        .any(|existing| {
+                            existing.decision.outer_turn_id == decision.outer_turn_id
+                                && !existing.claimed
+                                && !existing.closed
+                        })
+                    && self.active_outer_turn.as_ref() == Some(&decision.outer_turn_id)
+                    && self
+                        .inference_dispatches
+                        .get(&response.agent_prompt_id)
+                        .is_some_and(|dispatch| {
+                            !dispatch.finished
+                                && dispatch.checkpoint.operation
+                                    == Some(tau_proto::PromptOperation::Inference)
+                                && dispatch.checkpoint.model.as_ref() == Some(&decision.model)
+                                && (self.outer_turns.get(&decision.outer_turn_id).is_some_and(
+                                    |turn| turn.agent_prompt_id == response.agent_prompt_id,
+                                ) || dispatch
+                                    .checkpoint
+                                    .output_length_continuation
+                                    .as_ref()
+                                    .is_some_and(|owner| {
+                                        owner.outer_turn_id == decision.outer_turn_id
+                                    }))
+                        })
+                    && self.pending_tool_rounds.is_empty()
+                    && self
+                        .provider_response_tool_call_order(&response.output_items)
+                        .is_empty()
+                    && response.stop_reason != tau_proto::ProviderStopReason::ToolCalls
+                    && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
+                    && !matches!(
+                        response.output_length_disposition,
+                        tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                    )
+                    && !response
+                        .output_items
+                        .iter()
+                        .any(|item| matches!(item, ContextItem::Compaction(_)));
+            if !valid {
+                return Err(AgentEventValidationError::new(
+                    "automatic compaction decision is not owned by this canonical terminal",
+                ));
+            }
+        }
         // Context recovery and output-length dispositions are mutually
         // exclusive on one response: a context-rejected reserved successor
         // carries recovery authority only, and an output-length terminal never
@@ -4170,6 +4390,46 @@ impl AgentTree {
             ));
         }
         Ok(())
+    }
+
+    fn validate_prompt_terminated(
+        &self,
+        _head: Option<NodeId>,
+        terminated: &tau_proto::AgentPromptTerminated,
+    ) -> Result<(), AgentEventValidationError> {
+        let Some(decision) = &terminated.automatic_compaction_decision else {
+            return Ok(());
+        };
+        let valid = terminated.reason == tau_proto::AgentPromptTerminationReason::Canceled
+            && decision.threshold > 0
+            && !self
+                .automatic_compaction_decisions
+                .contains_key(&decision.transaction_id)
+            && !self
+                .compaction_transactions
+                .contains_key(&decision.transaction_id)
+            && self.active_outer_turn.as_ref() == Some(&decision.outer_turn_id)
+            && self.pending_tool_rounds.is_empty()
+            && self
+                .outer_turns
+                .get(&decision.outer_turn_id)
+                .is_some_and(|turn| turn.agent_prompt_id == terminated.agent_prompt_id)
+            && self
+                .inference_dispatches
+                .get(&terminated.agent_prompt_id)
+                .is_some_and(|dispatch| {
+                    !dispatch.finished
+                        && dispatch.checkpoint.operation
+                            == Some(tau_proto::PromptOperation::Inference)
+                        && dispatch.checkpoint.model.as_ref() == Some(&decision.model)
+                });
+        if valid {
+            Ok(())
+        } else {
+            Err(AgentEventValidationError::new(
+                "automatic compaction decision is not owned by this prompt termination",
+            ))
+        }
     }
 
     fn validate_head_moved(&self, moved: &AgentHeadMoved) -> Result<(), AgentEventValidationError> {

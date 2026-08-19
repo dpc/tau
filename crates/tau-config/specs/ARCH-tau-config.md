@@ -154,7 +154,8 @@ array replacement:
 - Role sources retain their normal order (built-ins, files/drop-ins, selected
   profile stack, then ordered `--harness-config` layers) within each scope. After
   collecting them, `agents` defaults (`enable`, `visible`, `model`, `effort`, `verbosity`,
-  `thinking_summary`, `service_tier`, and `compaction`) apply to every role,
+  `thinking_summary`, `service_tier`, `compaction`, `inference_compaction`, and
+  named `compactions`) apply to every role,
   then role-group defaults, then per-role overrides. `agents.enable` defaults
   to true, as does `agents.visible`. A narrow role patch
   therefore remains effective over a broader group/default patch from a later
@@ -169,6 +170,14 @@ array replacement:
   through role-group defaults to role overrides. Each inherited alert can
   therefore be customized or disabled without repeating its threshold and
   message.
+- Named `compactions` likewise merge field-by-field. Absent fields inherit,
+  `when: null` resets to `before_inference` with any status,
+  `when.statuses: null` clears the restriction, and a nonempty status list
+  replaces it. Empty status lists and new rules without a threshold are invalid.
+  Legacy config `compaction` is a replace-all edit that normalizes into
+  `inference_compaction` plus `compactions.default`. The legacy interactive CLI
+  threshold command is intentionally different: it updates `default` while
+  preserving named siblings.
 - Patch fields distinguish absent, explicit `null`, and concrete values. `null`
   clears nullable/scalar fields; replacement lists can be cleared with `[]`.
   `tools` is a nullable replacement list: `tools: null` clears an inherited

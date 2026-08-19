@@ -1821,6 +1821,8 @@ fn role_details_prefer_structured_fields_over_description_text() {
         description: "free-form text, not parsed as settings".to_owned(),
         role_description: None,
         details: Some(tau_proto::HarnessRoleDetails {
+            inference_compaction: None,
+            compactions: Vec::new(),
             model: Some("provider/model".into()),
             params: tau_proto::ModelParams {
                 effort: tau_proto::Effort::High,
@@ -1839,6 +1841,31 @@ fn role_details_prefer_structured_fields_over_description_text() {
     assert_eq!(
         details.completion_description(false),
         "provider/model e=high v=low ts=concise st=fast"
+    );
+}
+
+/// `:role` shows the two independent compaction domains even though it omits
+/// verbose tool-policy details.
+#[test]
+fn role_completion_shows_divergent_compaction_policies_without_tool_details() {
+    let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
+        name: "deferred".to_owned(),
+        description: String::new(),
+        role_description: None,
+        details: Some(tau_proto::HarnessRoleDetails {
+            model: Some("provider/model".parse().expect("qualified model id")),
+            inference_compaction: Some("disabled".to_owned()),
+            compactions: vec![
+                "eager=160000@outer_turn_finished[done]".to_owned(),
+                "fallback=provider_default@before_inference[*]".to_owned(),
+            ],
+            ..tau_proto::HarnessRoleDetails::default()
+        }),
+    });
+
+    assert_eq!(
+        details.completion_description(false),
+        "provider/model e=off v=low ts=off inference-compaction=disabled compactions=eager=160000@outer_turn_finished[done],fallback=provider_default@before_inference[*]"
     );
 }
 

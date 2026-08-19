@@ -383,6 +383,12 @@ pub struct HarnessRoleDetails {
     /// Internal tools disabled for this role.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disable_tools: Vec<ToolName>,
+    /// Effective singular provider-inline/reactive compaction policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_compaction: Option<String>,
+    /// Stable summaries of effective named standalone policies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compactions: Vec<String>,
 }
 
 impl HarnessRoleDetails {
@@ -2735,6 +2741,10 @@ pub struct AgentOuterTurnFinished {
     pub outer_turn_id: AgentOuterTurnId,
     /// Terminal outcome selected at the actual running-to-idle transition.
     pub disposition: AgentOuterTurnDisposition,
+    /// Terminal-owned automatic-compaction decision made runnable by this
+    /// finish, when one was selected at the canonical response boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_compaction_decision: Option<CompactionTransactionId>,
 }
 
 /// Content-free durable fact recording one accepted visible user interaction.
@@ -4401,6 +4411,11 @@ pub enum StandaloneCompactionTrigger {
     /// Automatic compaction after the local context projection reached the
     /// configured role/model threshold.
     AutomaticThreshold,
+    /// Eager automatic compaction claiming terminal-owned durable authority.
+    AutomaticPolicy {
+        /// Decision and transaction identity carried by the canonical terminal.
+        decision_id: CompactionTransactionId,
+    },
     /// Explicit compaction requested by a model-callable harness tool.
     ManualAgentTool {
         /// Durable request uniquely claimed by this transaction.
@@ -5079,6 +5094,10 @@ pub struct AgentPromptTerminated {
     /// Who asked for this prompt.
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// Harness-authored eager automatic-compaction authority selected while
+    /// terminalizing this prompt without a provider response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_compaction_decision: Option<AutomaticCompactionDecision>,
 }
 
 /// Stage at which an accepted initial prompt failed.
@@ -5679,6 +5698,11 @@ pub struct ProviderResponseFinished {
     /// This is independent of an output-length continuation ordinal.
     #[serde(default, skip_serializing_if = "ProviderAttempt::is_one")]
     pub provider_attempt: ProviderAttempt,
+    /// Harness-authored automatic-compaction authority selected at this exact
+    /// canonical terminal boundary. Provider reports may carry an untrusted
+    /// value, which the terminal pipeline clears and rederives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_compaction_decision: Option<AutomaticCompactionDecision>,
     /// Echo of [`AgentPromptCreated::originator`]. The provider must
     /// copy this from the prompt; the harness routes the response
     /// based on it.
@@ -5734,6 +5758,23 @@ pub struct ProviderResponseFinished {
     /// collapsing `cached_tokens` to the static system+tools baseline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ws_pool_delta: Option<WsPoolDelta>,
+}
+
+/// Bounded durable authority for one coalesced eager automatic compaction.
+///
+/// A canonical response's resulting assistant node, or a canceled prompt
+/// terminal's durable parent, supplies the immutable cut. Rule labels and the
+/// agent's general work-status state are deliberately not durable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AutomaticCompactionDecision {
+    /// Identity later claimed by the matching standalone transaction.
+    pub transaction_id: CompactionTransactionId,
+    /// Outer turn whose finish makes this decision runnable.
+    pub outer_turn_id: AgentOuterTurnId,
+    /// Provider-qualified model resolved while finalizing the terminal.
+    pub model: ModelId,
+    /// Lowest resolved threshold among all matching named policies.
+    pub threshold: u64,
 }
 
 /// Per-turn delta of the provider's Codex WebSocket pool counters. The

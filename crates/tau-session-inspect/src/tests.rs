@@ -224,6 +224,7 @@ fn try_append_trace_provider_terminal(
         None,
         tau_core::AgentEventParent::InheritHead,
         Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
             agent_prompt_id: prompt_id
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
@@ -271,6 +272,7 @@ fn append_background_tool_calls(
             agent_id.as_str(),
             None,
             Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 agent_prompt_id: "prompt-background"
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),

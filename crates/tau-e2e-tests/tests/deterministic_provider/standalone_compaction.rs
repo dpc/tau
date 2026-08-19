@@ -214,6 +214,77 @@ fn deterministic_opaque_standalone_compaction_replays_after_clean_restart()
     Ok(())
 }
 
+/// A role without the status tool infers Done at its settled outer finish and
+/// immediately runs one named eager policy without another user activation.
+#[test]
+fn deterministic_outer_finish_policy_infers_done_and_compacts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DeterministicFixture::new_v2(
+        "deterministic_outer_finish_policy_infers_done_and_compacts",
+        &ScenarioV2::new(
+            "outer-finish-policy",
+            vec![ScenarioLaneV2 {
+                ctx_id: "outer-finish-lane".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::TextWithUsage {
+                        user_text: "finish and compact".to_owned(),
+                        response: "finished work".to_owned(),
+                    },
+                    ScenarioActionV2::StandaloneOpaqueCompaction,
+                ],
+            }],
+        ),
+        FAKE_PROVIDER,
+    )?;
+    let config_path = fixture.config_dir().join("harness.yaml");
+    let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    let main = config["agents"]["role_groups"]["e2e"]["roles"]["deterministic-e2e"]
+        .as_object_mut()
+        .ok_or("missing main role")?;
+    main.insert(
+        "inference_compaction".to_owned(),
+        serde_json::Value::String("disabled".to_owned()),
+    );
+    main.insert(
+        "compactions".to_owned(),
+        serde_json::json!({
+            "finish": {
+                "threshold": 1000,
+                "enable": true,
+                "when": {
+                    "at": "outer_turn_finished",
+                    "statuses": ["done"]
+                }
+            }
+        }),
+    );
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+
+    let socket = fixture.socket_path("outer-finish-policy");
+    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent(&mut peer, "outer-finish-lane", "finish and compact")?;
+    let finished = recv_until_finished(&mut peer)?;
+    assert_assistant(&finished.output_items, "finished work");
+    assert!(finished.automatic_compaction_decision.is_some());
+    let started = recv_until_compaction_started(&mut peer)?;
+    assert!(matches!(
+        started.trigger,
+        StandaloneCompactionTrigger::AutomaticPolicy { ref decision_id }
+            if Some(decision_id)
+                == finished
+                    .automatic_compaction_decision
+                    .as_ref()
+                    .map(|decision| &decision.transaction_id)
+    ));
+    let _compact_prompt = recv_until_compaction_prompt(&mut peer)?;
+    let _compacted = recv_until_compacted(&mut peer)?;
+    disconnect_ui(&mut peer)?;
+    server.finish()?;
+    fixture.assert_consumed()?;
+    Ok(())
+}
+
 /// Proves an explicitly opted-in deterministic model completes the real
 /// standalone transaction: the fake receives its tool-free request, the
 /// harness durably replaces the transcript, and the next user turn sees only

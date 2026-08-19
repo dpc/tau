@@ -536,6 +536,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_STANDALONE_COMPACTION_STARTED,
     EventName::AGENT_STANDALONE_COMPACTION_FAILED,
     EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+    EventName::AGENT_PROMPT_TERMINATED,
     EventName::AGENT_COMPACTED,
     // Session lifecycle facts drive extension/context-provider setup and
     // teardown. Dropping one can wedge startup or leave stale per-session state.
@@ -737,6 +738,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentPromptStarted(_)
             | Event::AgentPromptFailed(_)
             | Event::AgentPromptRejected(_)
+            | Event::AgentPromptTerminated(_)
             | Event::AgentOuterTurnStarted(_)
             | Event::AgentOuterTurnFinished(_)
             | Event::ProviderResponseFinished(_)

@@ -216,6 +216,7 @@ fn live_lifecycle_after_terminal_during_attach_is_discarded() {
 /// Builds one provider response containing the transcript-owned tool call.
 fn tool_call_response(call_id: &str) -> Event {
     Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         agent_prompt_id: "prompt-1".parse().expect("valid prompt id"),

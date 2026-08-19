@@ -5637,3 +5637,514 @@ fn tau_runtime_socket_access_requires_an_explicit_component_opt_out() {
         Some(TauRuntimeSocketAccess::Legacy)
     );
 }
+
+/// Named compaction policies must preserve their lifecycle and status selector
+/// instead of lowering it into the singular provider threshold.
+#[test]
+fn agent_role_deserializes_named_and_inference_compaction_independently() {
+    let role: AgentRole = serde_yaml_ng::from_str(
+        r#"
+inference_compaction: disabled
+compactions:
+  eager:
+    threshold: 160000
+    when:
+      at: outer_turn_finished
+      statuses: [done, blocked]
+  fallback:
+    threshold: provider_default
+"#,
+    )
+    .expect("valid role");
+    assert_eq!(role.inference_compaction, Some(RoleCompaction::Disabled));
+    assert_eq!(role.compactions.len(), 2);
+    assert_eq!(
+        role.compactions["eager"].when,
+        ContextPolicyWhen {
+            at: ContextPolicyPoint::OuterTurnFinished,
+            statuses: Some(vec![
+                tau_proto::AgentWorkStatusPhase::Done,
+                tau_proto::AgentWorkStatusPhase::Blocked,
+            ]),
+        }
+    );
+    assert_eq!(
+        role.compactions["fallback"].when,
+        ContextPolicyWhen::default()
+    );
+}
+
+/// An empty status set is almost certainly a configuration error; users must
+/// use null or omission to express an unrestricted policy.
+#[test]
+fn context_policy_rejects_empty_status_set() {
+    let error =
+        serde_yaml_ng::from_str::<ContextPolicyWhen>("at: before_inference\nstatuses: []\n")
+            .expect_err("empty status list must fail");
+    assert!(error.to_string().contains("nonempty list"));
+}
+
+/// Alerts retain their historical after-response/any selector when no `when`
+/// block is configured.
+#[test]
+fn context_size_alert_default_selector_preserves_existing_behavior() {
+    let alert: ContextSizeAlert =
+        serde_yaml_ng::from_str("threshold: 100\nmessage: compact soon\n").expect("valid alert");
+    assert_eq!(alert.when, context_size_alert_when_default());
+}
+
+/// Ensures legacy compaction replaces inherited named rules and seeds both the
+/// standalone and provider-inline successors during layered role resolution.
+#[test]
+fn legacy_compaction_normalizes_both_successors_and_replaces_named_rules() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  compactions:
+    eager:
+      threshold: 160000
+      when:
+        at: outer_turn_finished
+        statuses: [done]
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          compaction: { threshold: 80000 }
+"#,
+    )
+    .expect("write config");
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load settings");
+    let reviewer = &settings.roles["reviewer"];
+    assert_eq!(
+        reviewer.inference_compaction,
+        Some(RoleCompaction::Threshold(80_000))
+    );
+    assert_eq!(reviewer.compactions.len(), 1);
+    assert_eq!(
+        reviewer.compactions["default"].threshold,
+        CompactionPolicyThreshold::Tokens(80_000)
+    );
+    assert_eq!(
+        reviewer.compactions["default"].when,
+        ContextPolicyWhen::default()
+    );
+}
+
+/// Ensures a role can inherit one named rule's timing and reset only its status
+/// matcher without accidentally resetting the threshold or lifecycle point.
+#[test]
+fn named_compaction_layers_when_fields_and_null_resets() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  compactions:
+    eager:
+      threshold: 160000
+      when:
+        at: outer_turn_finished
+        statuses: [done]
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          compactions:
+            eager:
+              threshold: 180000
+              when:
+                statuses: null
+"#,
+    )
+    .expect("write config");
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load settings");
+    assert_eq!(
+        settings.roles["reviewer"].compactions["eager"],
+        CompactionPolicy {
+            threshold: CompactionPolicyThreshold::Tokens(180_000),
+            enable: true,
+            when: ContextPolicyWhen {
+                at: ContextPolicyPoint::OuterTurnFinished,
+                statuses: None,
+            },
+        }
+    );
+}
+
+/// Ensures same-source legacy and successor settings fail instead of selecting
+/// an arbitrary merge order.
+#[test]
+fn compaction_rejects_ambiguous_legacy_and_successor_settings() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents:\n  compaction: disabled\n  inference_compaction: disabled\n",
+    )
+    .expect("write config");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("ambiguous source must fail");
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
+/// Explicit successor null restores provider-default instead of exposing the
+/// lower legacy field to runtime fallback.
+#[test]
+fn inference_compaction_null_overrides_lower_legacy_policy() {
+    let mut role = AgentRole::default();
+    role.apply_legacy_compaction(Some(RoleCompaction::Disabled));
+    role.apply_patch(&AgentRolePatch {
+        inference_compaction: Some(None),
+        ..AgentRolePatch::default()
+    });
+    assert_eq!(
+        role.inference_compaction,
+        Some(RoleCompaction::ProviderDefault)
+    );
+}
+
+/// Effective serialization is canonical: legacy input becomes successor fields
+/// and can round-trip without triggering same-layer ambiguity.
+#[test]
+fn legacy_compaction_effective_serialization_is_canonical_and_round_trips() {
+    let mut role = AgentRole::default();
+    role.apply_legacy_compaction(Some(RoleCompaction::Threshold(80_000)));
+    let yaml = serde_yaml_ng::to_string(&role).expect("serialize effective role");
+    assert!(!yaml.lines().any(|line| line.starts_with("compaction:")));
+    assert!(yaml.contains("inference_compaction:"));
+    assert!(yaml.contains("compactions:"));
+    let reparsed: AgentRole = serde_yaml_ng::from_str(&yaml).expect("round-trip role");
+    assert_eq!(reparsed.inference_compaction, role.inference_compaction);
+    assert_eq!(reparsed.compactions, role.compactions);
+}
+
+/// The new singular field follows the established direct-serde camelCase alias.
+#[test]
+fn inference_compaction_accepts_camel_case_alias() {
+    let role: AgentRole =
+        serde_yaml_ng::from_str("inferenceCompaction: disabled\n").expect("camel alias");
+    assert_eq!(role.inference_compaction, Some(RoleCompaction::Disabled));
+}
+
+/// File normalization rejects duplicate canonical/camel spellings and dotted
+/// CLI normalization selects the canonical successor key.
+#[test]
+fn inference_compaction_alias_normalization_is_consistent() {
+    assert_eq!(
+        normalize_harness_config_override_key(
+            "agents.role_groups.demo.roles.worker.inferenceCompaction"
+        ),
+        "agents.role_groups.demo.roles.worker.inference_compaction"
+    );
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents:\n  inference_compaction: disabled\n  inferenceCompaction: provider_default\n",
+    )
+    .expect("write duplicates");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("duplicate aliases must fail");
+    let error = error.to_string();
+    assert!(
+        error.contains("both legacy key") || error.contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Legacy disabled removes inherited named rules, while legacy null restores
+/// the default rule and provider-default inference policy.
+#[test]
+fn legacy_disabled_and_null_have_replace_all_semantics() {
+    let mut role = AgentRole::default();
+    role.compactions.insert(
+        "eager".to_owned(),
+        CompactionPolicy {
+            threshold: CompactionPolicyThreshold::Tokens(20_000),
+            enable: true,
+            when: ContextPolicyWhen::default(),
+        },
+    );
+    role.apply_legacy_compaction(Some(RoleCompaction::Disabled));
+    assert!(role.compactions.is_empty());
+    assert_eq!(role.inference_compaction, Some(RoleCompaction::Disabled));
+    role.apply_legacy_compaction(None);
+    assert_eq!(
+        role.inference_compaction,
+        Some(RoleCompaction::ProviderDefault)
+    );
+    assert_eq!(
+        role.compactions["default"].threshold,
+        CompactionPolicyThreshold::ProviderDefault
+    );
+}
+
+/// Legacy values retain replace-all semantics when they arrive from a later
+/// profile source, including explicit null restoring both shipped defaults.
+#[test]
+fn legacy_compaction_replace_all_crosses_profile_source_boundaries() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  compactions:
+    inherited:
+      threshold: 40000
+profiles:
+  disabled:
+    agents:
+      compaction: disabled
+  reset:
+    agents:
+      compaction: null
+"#,
+    )
+    .expect("write layered config");
+
+    let disabled = profile_selection("disabled");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&disabled),
+        &[],
+        &[],
+    )
+    .expect("load disabled profile");
+    assert!(settings.roles.values().all(|role| {
+        role.inference_compaction == Some(RoleCompaction::Disabled) && role.compactions.is_empty()
+    }));
+
+    let reset = profile_selection("reset");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&reset),
+        &[],
+        &[],
+    )
+    .expect("load reset profile");
+    assert!(settings.roles.values().all(|role| {
+        role.inference_compaction == Some(RoleCompaction::ProviderDefault)
+            && role.compactions.len() == 1
+            && role.compactions["default"].threshold == CompactionPolicyThreshold::ProviderDefault
+    }));
+}
+
+/// Successor fields layer independently across sources: null clears the lower
+/// legacy inference setting, while named fields merge and nested selector
+/// fields reset or replace independently.
+#[test]
+fn successor_compaction_fields_merge_across_profile_sources() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  inference_compaction: disabled
+  compactions:
+    eager:
+      threshold: 40000
+      enable: false
+      when:
+        at: outer_turn_finished
+        statuses: [done, blocked]
+    reset:
+      threshold: 50000
+      when:
+        at: outer_turn_finished
+        statuses: [done]
+    any:
+      threshold: 60000
+      when:
+        at: outer_turn_finished
+        statuses: [done]
+    dormant:
+      threshold: 65000
+profiles:
+  selected:
+    agents:
+      inferenceCompaction: null
+      compactions:
+        eager:
+          enable: true
+          when:
+            at: null
+            statuses: [working]
+        dormant:
+          enable: false
+        reset:
+          when: null
+        any:
+          when:
+            statuses: null
+        camel:
+          threshold: 70000
+          when:
+            at: outerTurnFinished
+"#,
+    )
+    .expect("write layered config");
+    let selected = profile_selection("selected");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&selected),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+
+    for role in settings.roles.values() {
+        assert_eq!(
+            role.inference_compaction,
+            Some(RoleCompaction::ProviderDefault)
+        );
+        assert_eq!(
+            role.compactions["eager"],
+            CompactionPolicy {
+                threshold: CompactionPolicyThreshold::Tokens(40_000),
+                enable: true,
+                when: ContextPolicyWhen {
+                    at: ContextPolicyPoint::BeforeInference,
+                    statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Working]),
+                },
+            }
+        );
+        assert!(!role.compactions["dormant"].enable);
+        assert_eq!(role.compactions["reset"].when, ContextPolicyWhen::default());
+        assert_eq!(
+            role.compactions["any"].when,
+            ContextPolicyWhen {
+                at: ContextPolicyPoint::OuterTurnFinished,
+                statuses: None,
+            }
+        );
+        assert_eq!(
+            role.compactions["camel"].when.at,
+            ContextPolicyPoint::OuterTurnFinished
+        );
+    }
+}
+
+/// Global camel-case aliases obey the same source precedence for profile,
+/// dotted CLI, and whole-map CLI layers instead of surviving beside canonical
+/// keys.
+#[test]
+fn compaction_aliases_normalize_at_each_global_source_boundary() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  inference_compaction: disabled
+profiles:
+  selected:
+    agents:
+      inferenceCompaction: { threshold: 40000 }
+"#,
+    )
+    .expect("write layered config");
+    let selected = profile_selection("selected");
+    let dotted =
+        [
+            HarnessConfigCliOverride::from_str("agents.inferenceCompaction=provider_default")
+                .expect("dotted override"),
+        ];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&selected),
+        &[],
+        &dotted,
+    )
+    .expect("load dotted override");
+    assert!(
+        settings
+            .roles
+            .values()
+            .all(|role| { role.inference_compaction == Some(RoleCompaction::ProviderDefault) })
+    );
+
+    let map =
+        [
+            HarnessConfigCliOverride::from_str("agents={inferenceCompaction: {threshold: 60000}}")
+                .expect("map override"),
+        ];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&selected),
+        &[],
+        &map,
+    )
+    .expect("load map override");
+    assert!(
+        settings
+            .roles
+            .values()
+            .all(|role| { role.inference_compaction == Some(RoleCompaction::Threshold(60_000)) })
+    );
+}
+
+/// Group and role camel-case aliases override lower canonical spellings at the
+/// same logical scope after profile layering.
+#[test]
+fn compaction_aliases_normalize_at_group_and_role_source_boundaries() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    custom:
+      inference_compaction: disabled
+      roles:
+        grouped: {}
+        worker:
+          inference_compaction: disabled
+profiles:
+  selected:
+    agents:
+      role_groups:
+        custom:
+          inferenceCompaction: { threshold: 50000 }
+          roles:
+            worker:
+              inferenceCompaction: { threshold: 70000 }
+"#,
+    )
+    .expect("write layered config");
+    let selected = profile_selection("selected");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&selected),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(
+        settings.roles["grouped"].inference_compaction,
+        Some(RoleCompaction::Threshold(50_000))
+    );
+    assert_eq!(
+        settings.roles["worker"].inference_compaction,
+        Some(RoleCompaction::Threshold(70_000))
+    );
+}
+
+/// Disabling a rule does not make an incomplete, source-introduced named entry
+/// valid because a later layer may re-enable it.
+#[test]
+fn disabled_compaction_without_inherited_threshold_fails_closed() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "agents:\n  compactions:\n    dormant:\n      enable: false\n",
+    )
+    .expect("write incomplete config");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("disabled incomplete rule must fail");
+    assert!(
+        error.to_string().contains("requires a threshold"),
+        "unexpected error: {error}"
+    );
+}

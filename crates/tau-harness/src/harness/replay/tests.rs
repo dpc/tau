@@ -157,6 +157,7 @@ fn late_subscriber_replays_only_completed_context_shell_fact() {
 #[test]
 fn late_subscriber_excludes_durable_prompt_termination() {
     let event = Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_id: crate::parse_agent_id("worker"),
         agent_prompt_id: tau_proto::AgentPromptId::parse("ap-terminated").expect("prompt id"),
         reason: tau_proto::AgentPromptTerminationReason::Stale,

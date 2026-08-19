@@ -310,6 +310,7 @@ fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
 
 fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
     Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -445,6 +446,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
         checkpoint("ap-first"),
         prompt("ap-first", tau_proto::PromptOperation::Inference),
         Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+            automatic_compaction_decision: None,
             agent_id: AgentId::parse("target").expect("agent id"),
             agent_prompt_id: "ap-first"
                 .parse()

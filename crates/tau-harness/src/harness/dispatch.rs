@@ -195,6 +195,7 @@ impl Harness {
             self.publish_for_agent(
                 agent_id,
                 tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                    automatic_compaction_decision: None,
                     agent_id: crate::parse_agent_id(&durable_agent_id),
                     agent_prompt_id: uncertain_prompt_id,
                     reason: tau_proto::AgentPromptTerminationReason::Stale,

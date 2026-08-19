@@ -15,7 +15,11 @@ configuration. `--profile focused,review` applies only `profiles.focused` then
 - `verbosity`: `low`, `medium`, or `high`
 - `thinking_summary`: `off`, `auto`, `concise`, or `detailed`
 - `service_tier`: `fast` or `flex`
-- `compaction`: automatic compaction policy: `provider_default`, `disabled`, or `{ threshold: 200000 }`; the harness schedules standalone compaction for models that publish it, while legacy models may use inline provider context management
+- `inference_compaction`: singular provider-inline and reactive-overflow policy:
+  `provider_default`, `disabled`, or `{ threshold: 200000 }`
+- `compactions`: named harness-scheduled standalone policies; each selects a
+  threshold plus an optional lifecycle/status condition
+- `compaction`: legacy shorthand normalized into both domains above
 
 For `effort`, `verbosity`, and `thinking_summary`, use `increase` or
 `decrease` to adjust an inherited value by one level, or `increase:<amount>` /
@@ -247,6 +251,9 @@ agents:
   context_size_alerts:
     compact-soon:
       threshold: 160000
+      when:
+        at: after_response
+        statuses: [working, waiting]
   role_groups:
     engineer:
       roles:
@@ -256,12 +263,42 @@ agents:
               enable: false
 ```
 
+Named automatic-compaction policies use the same broad-to-specific named merge:
+
+```yaml
+agents:
+  role_groups:
+    engineer:
+      roles:
+        main:
+          inference_compaction: disabled
+          compactions:
+            eager:
+              threshold: 160000
+              when:
+                at: outer_turn_finished
+                statuses: [done]
+            fallback:
+              threshold: provider_default
+              when:
+                at: before_inference
+```
+
+Matching policies at one lifecycle point OR together and produce one
+standalone compaction using the lowest resolved matching threshold. Omitted
+`statuses` means any status; an empty list is invalid. If the frozen prompt did
+not expose the `status` tool, Tau treats an open turn as `working` and its
+settled finish as `done` for policy matching only.
+
 When completed inference reports input usage strictly above the threshold, Tau
 queues the message as an internal prompt after the current response and any tool
 calls. When it reaches the agent, the UI history shows
 `□ <configured message>` in the dedicated internal-notice style at that delivery
 point, including after late attach or resume. Failed and compaction responses do
 not fire alerts.
+Alerts may instead select `outer_turn_finished`; a matching successful final
+queues a fresh internal-prompt turn after the durable finish. Automatic
+compaction at that point remains idle and non-activating.
 During one running Tau daemon, each alert fires once until usage falls back to
 or below its threshold or context accounting resets. Alert crossing and
 queued-delivery state is advisory runtime state and is not reconstructed after
@@ -358,7 +395,7 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
 }
 ```
 
-Missing provider/model fields use `agents` defaults first, then group defaults, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When `compaction` is omitted, Tau uses the model's published standalone threshold when available, otherwise it asks an inline-capable provider to use its model-specific default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing provider/model fields use `agents` defaults first, then group defaults, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When the successor fields are omitted, `inference_compaction` uses the provider default and the built-in named `compactions.default` policy uses the model's published standalone threshold. Legacy `compaction` input sets both domains at its source layer, but later successor fields can override them independently. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Global harness policy is configured under `tool_policy`. Set `default_shell_tool_style` to `codex`, `edit`, or `replace` to choose the apply-patch, line-coordinate, or exact-text implementation. Missing, null, or whitespace-only values select exact-text `replace` except for ChatGPT/Codex models, which select `apply_patch`. Both non-Codex implementations are provider-visible as `edit`; their internal/configuration names remain distinct, so a role that enables both fails prompt construction with a duplicate visible name. Rules under `tool_policy.rules` are keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:workdir`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:read:image`, `shell:exec:shell_command`, `shell:workdir`, and `shell:lock`; image-producing tools remain independently gated by the exact provider route modalities. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
@@ -442,8 +479,9 @@ disable_tool_groups: [compaction]
 
 Cross-agent compaction remains disabled by default and requires an explicit
 `enable_tool_groups: [cross_agent_compaction]` or
-`enable_tools: [agent_compact]`. `RoleCompaction::Disabled` controls automatic
-compaction and does not disable the model-callable `compact` tool. The
+`enable_tools: [agent_compact]`. `inference_compaction: disabled` disables only
+provider-inline compaction and reactive-overflow recovery; named `compactions`
+remain independent. Neither setting disables the model-callable `compact` tool. The
 cross-agent tool authorizes any other loaded same-session agent; ancestry,
 watching, and messaging are irrelevant to that explicit capability.
 

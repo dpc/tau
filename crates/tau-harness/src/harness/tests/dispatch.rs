@@ -460,6 +460,7 @@ fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: 
     harness.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -3077,6 +3078,7 @@ pub(super) fn provider_text_response(
     text: &str,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -3112,6 +3114,7 @@ fn provider_repetition_response(
     agent_id: tau_proto::AgentId,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -3442,6 +3445,7 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -3699,6 +3703,7 @@ pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (Te
     h.prompt_agents.insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -3789,6 +3794,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -3925,6 +3931,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -4034,6 +4041,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
     h.prompt_agents.insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -4499,6 +4507,7 @@ fn side_agent_error_response_propagates_error_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -4603,6 +4612,7 @@ fn side_agent_output_length_never_completes_successfully() {
             })
             .expect("side prompt id");
         h.handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             agent_prompt_id: side_spid,
             agent_id: tau_proto::AgentId::parse("side").expect("agent id"),
             output_items,
@@ -5430,6 +5440,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -5573,6 +5584,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         .insert("registered-not-snapshot".into(), spid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -5676,6 +5688,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         .unregister_connection(&crate::test_connection_id("conn-strict-old-tool"));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -5772,6 +5785,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6011,6 +6025,7 @@ fn provider_tool_response(
     arguments: CborValue,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6276,6 +6291,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6380,6 +6396,7 @@ fn background_error_clears_actual_running_call() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6496,6 +6513,7 @@ fn background_cancel_clears_actual_running_call() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6639,6 +6657,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6754,6 +6773,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -6876,6 +6896,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -7284,6 +7305,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
         "conn-wrong",
         TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -7376,6 +7398,7 @@ fn cancel_publishes_tool_cancel_request() {
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -7525,6 +7548,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     h.prompt_estimated_cost_rates
         .insert(spid.clone(), tau_proto::ESTIMATED_API_COST_FALLBACK);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&target_agent_id),
@@ -7813,6 +7837,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     let bg_call_id: ToolCallId = "live-bg-sibling".into();
     let fg_call_id: ToolCallId = "live-fg-sibling".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -7989,6 +8014,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -8074,6 +8100,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "live-builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -8346,6 +8373,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         .count();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_prompt_id: spid.clone(),
         agent_id: crate::parse_agent_id(&target_agent_id),
@@ -9118,6 +9146,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         ),
     ]);
     let response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -9285,6 +9314,7 @@ fn exact_text_edit_alias_preserves_canonical_and_extension_lifecycle_names() {
     let dispatch_response =
         |h: &mut Harness, prompt_id: AgentPromptId, call_id: &str, arguments: CborValue| {
             h.handle_provider_response_finished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -9461,6 +9491,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         ])
     };
     let response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -9901,6 +9932,7 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
         h.publish_for_agent(
             &cid,
             Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                automatic_compaction_decision: None,
                 agent_id: checkpoint.agent_id,
                 agent_prompt_id: checkpoint.agent_prompt_id,
                 reason: tau_proto::AgentPromptTerminationReason::Stale,
@@ -10087,6 +10119,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         ),
     ]);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10262,6 +10295,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
         .expect("submit");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10321,6 +10355,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10391,6 +10426,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10480,6 +10516,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     let spid1 = prompt1.agent_prompt_id.clone();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10548,6 +10585,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10597,6 +10635,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let prompt2 = read_nth_prompt_created(&h, 1);
     let spid2 = prompt2.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10670,6 +10709,7 @@ fn model_switch_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10752,6 +10792,7 @@ fn params_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10832,6 +10873,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -10926,6 +10968,7 @@ fn tools_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -11018,6 +11061,7 @@ fn stable_params_preserve_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -11089,6 +11133,7 @@ fn missing_response_id_leaves_chain_unset() {
     let spid1 = prompt1.agent_prompt_id.clone();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -11171,6 +11216,7 @@ fn queued_prompt_extends_completed_first_prompt() {
     assert_eq!(second, PromptSubmission::Queued);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -11810,6 +11856,7 @@ fn resume_wakes_once_after_v1_response_or_durable_terminal_fallback() {
                 )),
                 Closer::Terminal(reason) => {
                     Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+                        automatic_compaction_decision: None,
                         agent_id: agent_id.clone(),
                         agent_prompt_id: owner.clone(),
                         reason,
@@ -12147,6 +12194,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
     assert!(notice_pos < user_pos);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -12299,6 +12347,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
     .expect("submit first resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -12371,6 +12420,7 @@ fn resumed_completed_background_result_preserves_exact_wait_correlation() {
     .expect("submit resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -12769,6 +12819,10 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
             threshold: 100,
             enable: true,
             message: "compact soon".to_owned(),
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                statuses: None,
+            },
         },
     );
     role.context_size_alerts.insert(
@@ -12777,6 +12831,10 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
             threshold: 200,
             enable: true,
             message: "compact now".to_owned(),
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                statuses: None,
+            },
         },
     );
     role.context_size_alerts.insert(
@@ -12785,6 +12843,10 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
             threshold: 1,
             enable: false,
             message: "must not appear".to_owned(),
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                statuses: None,
+            },
         },
     );
     let alerts = role.context_size_alerts.clone();
@@ -12836,6 +12898,10 @@ fn finished_response_injects_crossed_context_size_alert() {
                 threshold: 100,
                 enable: true,
                 message: "compact after this task".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
             },
         );
 
@@ -12915,6 +12981,10 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
                 threshold: 100,
                 enable: true,
                 message: "original role alert".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
             },
         );
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
@@ -12928,6 +12998,10 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
             threshold: 1,
             enable: true,
             message: "replacement role alert".to_owned(),
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                statuses: None,
+            },
         },
     );
     h.available_roles
@@ -12976,6 +13050,10 @@ fn failed_response_does_not_inject_context_size_alert() {
                 threshold: 100,
                 enable: true,
                 message: "must not continue".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
             },
         );
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("work".to_owned()))
@@ -13022,6 +13100,10 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
                 threshold: 100,
                 enable: true,
                 message: "stale compact advice".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
             },
         );
     h.agents
@@ -13078,6 +13160,10 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
                 threshold: 100,
                 enable: true,
                 message: message.to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
             },
         );
     }
@@ -13149,6 +13235,10 @@ fn context_size_alert_waits_for_tool_round_completion() {
                 threshold: 100,
                 enable: true,
                 message: "compact after tools".to_owned(),
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                    statuses: None,
+                },
             },
         );
     h.set_agent_turn_state(
@@ -13961,6 +14051,7 @@ fn manual_standalone_compact_installs_one_boundary() {
     assert_eq!(started.model, prompt.model);
     assert_eq!(started.operation, prompt.operation);
     let response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -14029,6 +14120,7 @@ pub(super) fn context_overflow_response(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -14059,6 +14151,7 @@ fn standalone_compaction_success_response(
     summary: &str,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -14554,6 +14647,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         }),
     );
     let planned = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -14701,6 +14795,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
     append_seed_agent_event(
         &mut store,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -14963,6 +15058,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -15855,6 +15951,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let compact = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -16179,6 +16276,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         };
 
         h.handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -16309,6 +16407,7 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
     ));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -16406,6 +16505,7 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         let compact = read_nth_prompt_created(&h, 0);
         compact_prompt_id = compact.agent_prompt_id.clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -16471,6 +16571,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             .expect("start automatic compaction");
         let compact = read_nth_prompt_created(&h, 0);
         h.handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -16626,6 +16727,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
 
     let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -16847,6 +16949,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -17088,6 +17191,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -18403,6 +18507,369 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
     );
 }
 
+/// Matching eager policies coalesce on the canonical terminal, the outer finish
+/// references that authority, and one idle standalone transaction claims it.
+#[test]
+fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let role = h
+        .available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role");
+    for name in ["eager-high", "eager-low"] {
+        role.compactions.insert(
+            name.to_owned(),
+            tau_config::settings::CompactionPolicy {
+                threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(
+                    if name == "eager-low" { 100 } else { 200 },
+                ),
+                enable: true,
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                    statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                },
+            },
+        );
+    }
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(tau_proto::AgentWorkStatusPhase::Done, "finished".to_owned())
+            .expect("valid status"),
+    )
+    .expect("report status");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish".to_owned()))
+        .expect("dispatch inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .compactions
+        .clear();
+    let mut response =
+        provider_text_response(&inference.agent_prompt_id, inference.agent_id, "done");
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: None,
+        prompt_sent_tokens: 250,
+        prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
+        cache: None,
+        response_received_tokens: 1,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("finish inference");
+
+    let events = event_log_events(&h);
+    let decision = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderResponseFinished(response) => {
+                response.automatic_compaction_decision.clone()
+            }
+            _ => None,
+        })
+        .expect("terminal decision");
+    assert_eq!(
+        decision.threshold, 100,
+        "matching policies coalesce to minimum"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentOuterTurnFinished(finish)
+            if finish.automatic_compaction_decision.as_ref()
+                == Some(&decision.transaction_id)
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        &started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::AutomaticPolicy {
+                            decision_id
+                        } if decision_id == &decision.transaction_id
+                    )
+            ))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Frozen status availability selects explicit phases, while a settled
+/// no-status turn infers Done and an accepted unresolved Working final becomes
+/// Unknown.
+#[test]
+fn outer_finish_policy_status_matrix_is_closed_and_policy_only() {
+    use tau_proto::AgentWorkStatusPhase::{Blocked, Done, Unknown, Unreported, Waiting, Working};
+
+    assert_eq!(
+        Harness::finalizing_outer_turn_policy_status(false, Working),
+        Done
+    );
+    for phase in [Done, Waiting, Blocked, Unknown, Unreported] {
+        assert_eq!(
+            Harness::finalizing_outer_turn_policy_status(true, phase),
+            phase
+        );
+    }
+    assert_eq!(
+        Harness::finalizing_outer_turn_policy_status(true, Working),
+        Unknown
+    );
+}
+
+/// Cancellation without a provider response uses the frozen prompt policy and
+/// projection, persists its terminal-owned decision, and starts after finish.
+#[test]
+fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .compactions
+        .insert(
+            "cancel".to_owned(),
+            tau_config::settings::CompactionPolicy {
+                threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(1),
+                enable: true,
+                when: tau_config::settings::ContextPolicyWhen {
+                    at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                    statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                },
+            },
+        );
+    {
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(100);
+        agent.context_usage_model = Some("test/model".into());
+        agent.context_usage_head = agent.head;
+    }
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("cancel me".to_owned()))
+        .expect("dispatch");
+    h.finalize_canceled_in_flight_prompt(&cid);
+
+    let events = event_log_events(&h);
+    let decision = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentPromptTerminated(terminated) => {
+                terminated.automatic_compaction_decision.clone()
+            }
+            _ => None,
+        })
+        .expect("termination decision");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.transaction_id == decision.transaction_id
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// The legacy CLI threshold remains a compound edit: it updates inline/reactive
+/// policy and the named default without erasing siblings or default selectors.
+#[test]
+fn legacy_role_threshold_update_preserves_named_compaction_siblings() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let role_name = h.selected_role.clone();
+    let role = h
+        .available_roles
+        .get_mut(&role_name)
+        .expect("selected role");
+    role.compactions.insert(
+        "default".to_owned(),
+        tau_config::settings::CompactionPolicy {
+            threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(90_000),
+            enable: false,
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+            },
+        },
+    );
+    role.compactions.insert(
+        "eager".to_owned(),
+        tau_config::settings::CompactionPolicy {
+            threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(160_000),
+            enable: true,
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+            },
+        },
+    );
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role: role_name.clone(),
+        action: tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
+            compaction_threshold: Some(120_000),
+        },
+    })
+    .expect("update threshold");
+
+    let role = &h.available_roles[&role_name];
+    assert_eq!(
+        role.inference_compaction,
+        Some(tau_config::settings::RoleCompaction::Threshold(120_000))
+    );
+    assert_eq!(
+        role.compactions["default"].threshold,
+        path_tau_config_settings::CompactionPolicyThreshold::Tokens(120_000)
+    );
+    assert_eq!(
+        role.compactions["default"].when,
+        tau_config::settings::ContextPolicyWhen {
+            at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+            statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+        }
+    );
+    assert!(role.compactions["default"].enable);
+    assert!(role.compactions.contains_key("eager"));
+    h.shutdown().expect("shutdown");
+}
+
+/// Outer-finish notices consume the exact terminal candidate, ignore live-role
+/// rewrites, and preserve one-shot hysteresis while usage remains high.
+#[test]
+fn outer_finish_alert_uses_terminal_snapshot_and_retains_hysteresis() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-alert-finish").expect("prompt");
+    let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
+    let alert = tau_config::settings::ContextSizeAlert {
+        threshold: 100,
+        enable: true,
+        message: "captured finish alert".to_owned(),
+        when: tau_config::settings::ContextPolicyWhen {
+            at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+            statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+        },
+    };
+    let arm = |agent: &mut Agent| {
+        agent.context_input_tokens = Some(200);
+        agent.terminal_status_was_available = false;
+        agent.terminal_notice_eligible = true;
+        agent.terminal_notice_outer_turn_id = Some(outer_turn_id.clone());
+        agent
+            .terminal_context_size_alerts
+            .insert("captured".to_owned(), alert.clone());
+    };
+    arm(h.agents.get_mut(&cid).expect("agent"));
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("role")
+        .context_size_alerts
+        .clear();
+    h.queue_outer_turn_finished_context_size_alerts(&cid, &outer_turn_id);
+    assert_eq!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.is_context_size_alert())
+            .count(),
+        1
+    );
+    arm(h.agents.get_mut(&cid).expect("agent"));
+    h.queue_outer_turn_finished_context_size_alerts(&cid, &outer_turn_id);
+    assert_eq!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.is_context_size_alert())
+            .count(),
+        1,
+        "high usage must not refire the same alert"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// An exact current prompt snapshot without status must not inherit stale
+/// status availability from a prior terminal.
+#[test]
+fn after_response_alert_prefers_frozen_status_absence_over_stale_terminal_state() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-no-status").expect("prompt");
+    h.prompt_tool_specs.insert(prompt_id.clone(), Vec::new());
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .terminal_status_was_available = true;
+    let alerts = path_std_collections::BTreeMap::from([(
+        "working".to_owned(),
+        tau_config::settings::ContextSizeAlert {
+            threshold: 100,
+            enable: true,
+            message: "working-only".to_owned(),
+            when: tau_config::settings::ContextPolicyWhen {
+                at: path_tau_config_settings::ContextPolicyPoint::AfterResponse,
+                statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Working]),
+            },
+        },
+    )]);
+    h.queue_crossed_context_size_alerts_for_prompt(&cid, &prompt_id, Some(200), &alerts);
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_context_size_alert)
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Eager threshold growth uses the canonical transcript-entry projection, not
+/// raw output-item JSON that omits the assistant-entry envelope.
+#[test]
+fn eager_terminal_growth_uses_canonical_entry_projection_at_boundary() {
+    let output_items = vec![ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: "boundary".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    })];
+    let raw = serde_json::to_vec(&output_items)
+        .expect("serialize output")
+        .len() as u64;
+    let canonical = path_crate_harness::context_limit_telemetry::projected_transcript_entry_tokens(
+        &tau_core::AgentEntry::AssistantResponse {
+            provider_response_id: None,
+            backend: None,
+            output_items,
+            usage: None,
+        },
+    )
+    .expect("canonical projection");
+    assert!(
+        canonical > raw,
+        "a threshold between raw and canonical growth owns this regression"
+    );
+}
+
 fn strict_fake_compact_response(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> Result<ProviderResponseFinished, String> {
@@ -18443,6 +18910,7 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -18994,6 +19462,7 @@ fn provider_compact_call(
     call_id: &ToolCallId,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -19445,6 +19914,7 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
     h.prompt_agents.insert(prompt_id.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -19554,6 +20024,7 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         .insert(prompt_id.clone(), caller_cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -20447,6 +20918,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -21159,6 +21631,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -22968,6 +23441,7 @@ fn start_background_tool_and_finish_placeholder_turn(
     seed_agent_thinking(h, cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -25242,6 +25716,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -25332,6 +25807,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -26517,6 +26993,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -26618,6 +27095,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -26680,6 +27158,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     assert!(serialized.contains("please include this"));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -26848,6 +27327,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -26993,6 +27473,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27157,6 +27638,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     let main_prompt = read_nth_prompt_created(&h, 0);
     let main_spid = main_prompt.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27287,6 +27769,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27511,6 +27994,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27579,6 +28063,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27716,6 +28201,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27757,6 +28243,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -27844,6 +28331,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side follow-up prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -28228,6 +28716,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -28270,6 +28759,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         .expect("side prompt id");
     let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -28433,6 +28923,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -28682,6 +29173,7 @@ fn backgrounded_tool_progress_is_not_published() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -29145,6 +29637,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -29255,6 +29748,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -29370,6 +29864,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     );
     let delegate_args = CborValue::Map(Vec::new());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -29475,6 +29970,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         .expect("prompt B");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -29508,6 +30004,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     })
     .expect("side response A");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -30964,6 +31461,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         },
     );
     let terminal = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -31335,6 +31833,10 @@ fn working_final_gate_uses_bounded_escape() {
             h.agents[&cid].turn_state,
             AgentTurnState::AgentThinking { .. }
         ));
+        assert!(
+            !h.agents[&cid].terminal_notice_eligible,
+            "challenged final must not arm an outer-finish notice"
+        );
     }
     let final_prompt_id = match &h.agents[&cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
@@ -31617,6 +32119,7 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
     h.prompt_agents.insert(prompt_id.clone(), cid.clone());
     let response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -32535,6 +33038,7 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
         .expect("model metadata")
         .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
     let response = |model: tau_proto::ModelId| tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         usage: Some(tau_proto::ProviderTokenUsage {
             model: Some(model),
@@ -32890,6 +33394,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -32959,6 +33464,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33033,6 +33539,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         })
         .expect("nested side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33197,6 +33704,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33260,6 +33768,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33391,6 +33900,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33456,6 +33966,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33590,6 +34101,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33653,6 +34165,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("top prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -33786,6 +34299,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     }
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -35340,6 +35854,7 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     );
     assert!(h.agents.contains_key(&cid));
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -36786,6 +37301,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
             None,
             parent,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -36829,6 +37345,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
         .count();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -36920,6 +37437,7 @@ fn ordinary_inference_rejects_private_compaction_output_before_persistence() {
         .count();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -37057,6 +37575,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
             None,
             parent,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -37103,6 +37622,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         .filter(|event| matches!(event, Event::HarnessAgentContextUsageChanged(_)))
         .count();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

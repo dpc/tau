@@ -5415,6 +5415,7 @@ fn simple_finished(
     text: impl Into<String>,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -6386,6 +6387,7 @@ where
         CompactOutcome::Finished(output_items) => {
             writer.write_message(&HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                    automatic_compaction_decision: None,
                     estimated_api_cost_rates: None,
                     estimated_api_cost_increment: None,
 
@@ -6900,6 +6902,7 @@ fn finish_stream<W: Write>(
     let provider_response_id = state.response_id().map(str::to_owned);
     let output_items = state.into_output_items();
     let finished = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -6988,6 +6991,7 @@ fn finish_error<W: Write>(
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 

@@ -67,7 +67,7 @@ struct ProviderQuotaTombstone {
 use self::context_limit_telemetry::{
     MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, TranscriptGrowth,
     context_limit_observation, context_projection_reserve, projected_input_tokens,
-    transcript_growth,
+    projected_transcript_entry_tokens, transcript_growth,
 };
 use crate::agent::{
     ActivationDispatchState, Agent, AgentTurnState, FinalStatusChallenge, FinalStatusInput,
@@ -2799,6 +2799,12 @@ pub struct Harness {
     /// a mid-flight role switch cannot change response-time alert policy.
     prompt_context_size_alerts:
         HashMap<AgentPromptId, BTreeMap<String, tau_config::settings::ContextSizeAlert>>,
+    /// Effective named automatic-compaction policies frozen with each provider
+    /// prompt so later role changes cannot rewrite terminal behavior.
+    prompt_compaction_policies:
+        HashMap<AgentPromptId, BTreeMap<String, tau_config::settings::CompactionPolicy>>,
+    /// Captured proactive projection paired with `prompt_compaction_policies`.
+    prompt_compaction_projected_tokens: HashMap<AgentPromptId, Option<u64>>,
     /// Prompts for which streaming exposed semantic output, making automatic
     /// no-output recovery unsafe.
     prompt_semantic_output: HashSet<AgentPromptId>,
@@ -3060,6 +3066,7 @@ where
                     .unwrap_or_default();
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                        automatic_compaction_decision: None,
                         estimated_api_cost_rates: None,
                         estimated_api_cost_increment: None,
 
@@ -3143,6 +3150,7 @@ where
 
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                        automatic_compaction_decision: None,
                         estimated_api_cost_rates: None,
                         estimated_api_cost_increment: None,
 
@@ -3586,6 +3594,8 @@ impl Harness {
             prompt_estimated_cost_rates: HashMap::new(),
             prompt_context_limits: HashMap::new(),
             prompt_context_size_alerts: HashMap::new(),
+            prompt_compaction_policies: HashMap::new(),
+            prompt_compaction_projected_tokens: HashMap::new(),
             prompt_semantic_output: HashSet::new(),
             pending_stale_provider_responses: HashMap::new(),
             pending_replay_prompt_activation_occurrences: HashMap::new(),
@@ -5755,6 +5765,9 @@ impl Harness {
         self.prompt_operations.remove(agent_prompt_id);
         self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_context_size_alerts.remove(agent_prompt_id);
+        self.prompt_compaction_policies.remove(agent_prompt_id);
+        self.prompt_compaction_projected_tokens
+            .remove(agent_prompt_id);
         self.prompt_estimated_cost_rates.remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
         if let Some(model) = self.prompt_models.remove(agent_prompt_id) {
@@ -6263,6 +6276,7 @@ impl Harness {
         self.publish_for_agent(
             cid,
             Event::AgentPromptTerminated(AgentPromptTerminated {
+                automatic_compaction_decision: None,
                 agent_id: crate::parse_agent_id(&durable_agent_id),
                 agent_prompt_id,
                 reason: AgentPromptTerminationReason::Stale,
@@ -6473,6 +6487,7 @@ impl Harness {
                     let _ = self.bus.publish_from(source, frame);
                 }
                 self.rollback_rejected_activation_successor(&event);
+                self.clear_rejected_eager_compaction_start(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
                 self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
                 if !matches!(
@@ -7426,6 +7441,34 @@ impl Harness {
             .insert(cid, completion);
     }
 
+    /// Releases runtime de-duplication after semantic persistence rejects an
+    /// eager start. The durable decision remains authoritative for a later
+    /// distinct progress-triggered retry.
+    fn clear_rejected_eager_compaction_start(&mut self, event: &Event) {
+        let (agent_id, decision_id) = match event {
+            Event::AgentStandaloneCompactionStarted(started) => {
+                let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
+                    &started.trigger
+                else {
+                    return;
+                };
+                (&started.agent_id, decision_id)
+            }
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.reason == tau_proto::StandaloneCompactionFailureReason::StaleBranch =>
+            {
+                (&failed.agent_id, &failed.transaction_id)
+            }
+            _ => return,
+        };
+        if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            && let Some(agent) = self.agents.get_mut(&cid)
+            && agent.pending_automatic_compaction_start.as_ref() == Some(decision_id)
+        {
+            agent.pending_automatic_compaction_start = None;
+        }
+    }
+
     /// Republish one retained completion envelope only on its owning branch.
     fn retry_pending_agent_publish_completion(&mut self, cid: &AgentId) {
         let Some(completion) = self.pending_agent_publish_completions.remove(cid) else {
@@ -7785,6 +7828,7 @@ impl Harness {
                     .expect("dormant terminal owner carries continuation");
                 (
                     Event::ProviderResponseFinished(ProviderResponseFinished {
+                        automatic_compaction_decision: None,
                         agent_prompt_id: owner.agent_prompt_id,
                         agent_id: agent_id.clone(),
                         output_items: Vec::new(),
@@ -7828,6 +7872,7 @@ impl Harness {
                 }
                 (
                     Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                        automatic_compaction_decision: None,
                         agent_id: agent_id.clone(),
                         session_id: self.current_session_id.clone(),
                         outer_turn_id,
@@ -7875,6 +7920,7 @@ impl Harness {
             agent.outer_turn =
                 path_crate_agent::OuterTurnRuntimeState::FinishInFlight(outer_turn_id.clone());
             Some(tau_proto::AgentOuterTurnFinished {
+                automatic_compaction_decision: agent.pending_automatic_compaction_decision.clone(),
                 agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
                 session_id: agent.session_id.clone(),
                 outer_turn_id,
@@ -8619,6 +8665,22 @@ impl Harness {
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
         self.react_to_committed_tool_terminal(source, event, append_outcome);
+        if let Event::ProviderResponseFinished(response) = event
+            && let Some(decision) = &response.automatic_compaction_decision
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
+            && let Some(agent) = self.agents.get_mut(&cid)
+        {
+            agent.pending_automatic_compaction_decision = Some(decision.transaction_id.clone());
+        }
+        if let Event::AgentPromptTerminated(terminated) = event
+            && let Some(decision) = &terminated.automatic_compaction_decision
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(terminated.agent_id.as_str()))
+            && let Some(agent) = self.agents.get_mut(&cid)
+        {
+            agent.pending_automatic_compaction_decision = Some(decision.transaction_id.clone());
+        }
         if let Event::AgentOuterTurnFinished(finished) = event
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(finished.agent_id.as_str()))
@@ -8626,12 +8688,40 @@ impl Harness {
             && agent.outer_turn.owned_id() == Some(&finished.outer_turn_id)
         {
             agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::None;
+            agent.pending_automatic_compaction_decision = None;
             if agent.output_length_continuation.outer_turn_id() == Some(&finished.outer_turn_id) {
                 agent.output_length_continuation =
                     path_crate_agent::OutputLengthContinuationState::None;
             }
         }
+        if let Event::AgentOuterTurnFinished(finished) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(finished.agent_id.as_str()))
+        {
+            self.queue_outer_turn_finished_context_size_alerts(&cid, &finished.outer_turn_id);
+            let eager = self
+                .agent_store
+                .agent(finished.agent_id.as_str())
+                .and_then(tau_core::AgentTree::standalone_compaction_recovery);
+            if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
+                decision,
+                cut,
+                finish_committed: true,
+            }) = eager
+            {
+                self.start_eager_automatic_compaction(&cid, decision, cut);
+            }
+        }
         if let Event::AgentStandaloneCompactionStarted(started) = event {
+            if let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
+                &started.trigger
+                && let Some(cid) =
+                    self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+                && let Some(agent) = self.agents.get_mut(&cid)
+                && agent.pending_automatic_compaction_start.as_ref() == Some(decision_id)
+            {
+                agent.pending_automatic_compaction_start = None;
+            }
             if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                 request_id,
                 caller_agent_id,
@@ -8762,6 +8852,15 @@ impl Harness {
                     );
                 }
             }
+        }
+        if let Event::AgentStandaloneCompactionFailed(failed) = event
+            && failed.reason == tau_proto::StandaloneCompactionFailureReason::StaleBranch
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
+            && let Some(agent) = self.agents.get_mut(&cid)
+            && agent.pending_automatic_compaction_start.as_ref() == Some(&failed.transaction_id)
+        {
+            agent.pending_automatic_compaction_start = None;
         }
         if let Event::AgentManualCompactionRequestFailed(failed) = event
             && let Some(pending) = self
@@ -9263,6 +9362,10 @@ impl Harness {
             self.prompt_context_limits
                 .remove(&terminated.agent_prompt_id);
             self.prompt_context_size_alerts
+                .remove(&terminated.agent_prompt_id);
+            self.prompt_compaction_policies
+                .remove(&terminated.agent_prompt_id);
+            self.prompt_compaction_projected_tokens
                 .remove(&terminated.agent_prompt_id);
             self.prompt_semantic_output
                 .remove(&terminated.agent_prompt_id);
@@ -14253,6 +14356,7 @@ impl Harness {
                 | Event::AgentCacheRefreshCancelRequested(_)
                 | Event::AgentPromptFailed(_)
                 | Event::AgentPromptRejected(_)
+                | Event::AgentPromptTerminated(_)
         ) {
             // Canonical provider execution facts and pre-materialization prompt
             // terminals are harness-authored. Configured providers publish only
@@ -18449,7 +18553,37 @@ impl Harness {
                 }
                 return;
             }
+            let status_was_available =
+                self.prompt_tool_specs
+                    .get(&canceled_prompt_id)
+                    .is_some_and(|specs| {
+                        specs
+                            .iter()
+                            .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+                    });
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent.terminal_status_was_available = status_was_available;
+                agent.terminal_notice_eligible = false;
+            }
+            let automatic_compaction_decision = self
+                .prompt_models
+                .get(&canceled_prompt_id)
+                .cloned()
+                .and_then(|model| {
+                    let projected = self
+                        .prompt_compaction_projected_tokens
+                        .get(&canceled_prompt_id)
+                        .copied()
+                        .flatten();
+                    let policies = self
+                        .prompt_compaction_policies
+                        .get(&canceled_prompt_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.eager_automatic_compaction_decision(cid, model, projected, &policies)
+                });
             let response = ProviderResponseFinished {
+                automatic_compaction_decision,
                 agent_prompt_id: canceled_prompt_id.clone(),
                 agent_id: self
                     .target_agent_id_for_agent(cid)
@@ -18497,11 +18631,41 @@ impl Harness {
             self.publish_finished_response_for_agent(cid, None, &response, completion, false);
             return;
         }
-        self.publish_prompt_terminated(
+        let status_was_available =
+            self.prompt_tool_specs
+                .get(&canceled_prompt_id)
+                .is_some_and(|specs| {
+                    specs
+                        .iter()
+                        .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+                });
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.terminal_status_was_available = status_was_available;
+            agent.terminal_notice_eligible = false;
+        }
+        let cancellation_decision = self
+            .prompt_models
+            .get(&canceled_prompt_id)
+            .cloned()
+            .and_then(|model| {
+                let projected = self
+                    .prompt_compaction_projected_tokens
+                    .get(&canceled_prompt_id)
+                    .copied()
+                    .flatten();
+                let policies = self
+                    .prompt_compaction_policies
+                    .get(&canceled_prompt_id)
+                    .cloned()
+                    .unwrap_or_default();
+                self.eager_automatic_compaction_decision(cid, model, projected, &policies)
+            });
+        self.publish_prompt_terminated_with_decision(
             session_id,
             canceled_prompt_id.clone(),
             AgentPromptTerminationReason::Canceled,
             originator,
+            cancellation_decision,
         );
         if marked_owner {
             return;
@@ -18510,6 +18674,9 @@ impl Harness {
         self.prompt_operations.remove(&canceled_prompt_id);
         self.prompt_context_limits.remove(&canceled_prompt_id);
         self.prompt_context_size_alerts.remove(&canceled_prompt_id);
+        self.prompt_compaction_policies.remove(&canceled_prompt_id);
+        self.prompt_compaction_projected_tokens
+            .remove(&canceled_prompt_id);
         self.prompt_semantic_output.remove(&canceled_prompt_id);
         self.fail_pending_initial_prompts(
             cid,
@@ -18948,6 +19115,8 @@ impl Harness {
             self.prompt_operations.remove(&spid);
             self.prompt_context_limits.remove(&spid);
             self.prompt_context_size_alerts.remove(&spid);
+            self.prompt_compaction_policies.remove(&spid);
+            self.prompt_compaction_projected_tokens.remove(&spid);
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
@@ -19194,6 +19363,7 @@ impl Harness {
                     self.publish_for_agent(
                         &cid,
                         Event::AgentPromptTerminated(AgentPromptTerminated {
+                            automatic_compaction_decision: None,
                             agent_id,
                             agent_prompt_id: prompt_id,
                             reason: AgentPromptTerminationReason::Stale,
@@ -20453,7 +20623,31 @@ impl Harness {
         reason: AgentPromptTerminationReason,
         originator: PromptOriginator,
     ) {
-        self.publish_prompt_terminated_from(session_id, agent_prompt_id, reason, originator, None);
+        self.publish_prompt_terminated_with_decision(
+            session_id,
+            agent_prompt_id,
+            reason,
+            originator,
+            None,
+        );
+    }
+
+    fn publish_prompt_terminated_with_decision(
+        &mut self,
+        _session_id: SessionId,
+        agent_prompt_id: AgentPromptId,
+        reason: AgentPromptTerminationReason,
+        originator: PromptOriginator,
+        automatic_compaction_decision: Option<tau_proto::AutomaticCompactionDecision>,
+    ) {
+        self.publish_prompt_terminated_from(
+            _session_id,
+            agent_prompt_id,
+            reason,
+            originator,
+            automatic_compaction_decision,
+            None,
+        );
     }
 
     fn publish_prompt_terminated_from(
@@ -20462,6 +20656,7 @@ impl Harness {
         agent_prompt_id: AgentPromptId,
         reason: AgentPromptTerminationReason,
         originator: PromptOriginator,
+        automatic_compaction_decision: Option<tau_proto::AutomaticCompactionDecision>,
         source: Option<&tau_proto::ConnectionId>,
     ) {
         let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
@@ -20472,6 +20667,7 @@ impl Harness {
                 .expect("agent has durable id"),
         );
         let event = Event::AgentPromptTerminated(AgentPromptTerminated {
+            automatic_compaction_decision,
             agent_id,
             agent_prompt_id,
             reason,
@@ -22273,7 +22469,7 @@ impl Harness {
         let role_compaction = self
             .available_roles
             .get(&role_name)
-            .and_then(|role| role.compaction)
+            .and_then(|role| role.inference_compaction.or(role.compaction))
             .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         match role_compaction {
             path_tau_config_settings::RoleCompaction::ProviderDefault => {
@@ -22382,6 +22578,211 @@ impl Harness {
         committed_activation: bool,
         activation_cut: Option<tau_proto::AgentHead>,
     ) -> bool {
+        let owed = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery);
+        if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
+            decision,
+            cut,
+            finish_committed: true,
+        }) = owed.clone()
+        {
+            self.start_eager_automatic_compaction(cid, decision, cut);
+            return true;
+        }
+        if matches!(
+            owed,
+            Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart { .. })
+        ) {
+            return true;
+        }
+        self.schedule_standalone_auto_compaction_at(
+            cid,
+            committed_activation,
+            activation_cut,
+            path_tau_config_settings::ContextPolicyPoint::BeforeInference,
+        )
+    }
+
+    /// Resolve one coalesced eager decision at the final canonical terminal
+    /// boundary. The returned identity is persisted on that terminal.
+    fn eager_automatic_compaction_decision(
+        &mut self,
+        cid: &AgentId,
+        model: ModelId,
+        projected_tokens: Option<u64>,
+        policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
+    ) -> Option<tau_proto::AutomaticCompactionDecision> {
+        let conv = self.agents.get(cid)?;
+        let projected_tokens = projected_tokens?;
+        if conv
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery)
+            .is_some()
+        {
+            return None;
+        }
+        let info = self.provider_model_info.get(&model)?;
+        if !info.supports_standalone_compaction {
+            return None;
+        }
+        let logical_status = Self::finalizing_outer_turn_policy_status(
+            conv.terminal_status_was_available,
+            conv.work_status.phase(),
+        );
+        let matches = policies
+            .iter()
+            .filter(|(_, policy)| {
+                policy.enable
+                    && policy.when.at
+                        == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished
+                    && policy
+                        .when
+                        .statuses
+                        .as_ref()
+                        .is_none_or(|statuses| statuses.contains(&logical_status))
+            })
+            .filter_map(|(name, policy)| {
+                let threshold = match policy.threshold {
+                    path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
+                        info.standalone_compaction_threshold
+                    }
+                    path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
+                        Some(tokens)
+                    }
+                }?;
+                (threshold <= projected_tokens).then_some((name.as_str(), threshold))
+            })
+            .collect::<Vec<_>>();
+        let threshold = matches.iter().map(|(_, threshold)| *threshold).min()?;
+        let matched_names = matches
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(",");
+        tracing::debug!(
+            target: "tau_harness",
+            agent = %cid,
+            policies = %matched_names,
+            threshold,
+            "coalesced outer-turn-finished automatic compaction policies"
+        );
+        let outer_turn_id = conv.outer_turn.owned_id().cloned()?;
+        let transaction_id =
+            tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
+                .expect("generated compaction transaction id is valid");
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+        }
+        Some(tau_proto::AutomaticCompactionDecision {
+            transaction_id,
+            outer_turn_id,
+            model,
+            threshold,
+        })
+    }
+
+    /// Derive the policy-only status at a settled terminal without mutating the
+    /// runtime work-status projection.
+    fn finalizing_outer_turn_policy_status(
+        status_was_available: bool,
+        phase: tau_proto::AgentWorkStatusPhase,
+    ) -> tau_proto::AgentWorkStatusPhase {
+        if !status_was_available {
+            return tau_proto::AgentWorkStatusPhase::Done;
+        }
+        if phase == tau_proto::AgentWorkStatusPhase::Working {
+            // An accepted settled final invalidates an unresolved Working epoch
+            // immediately after this canonical terminal commits.
+            tau_proto::AgentWorkStatusPhase::Unknown
+        } else {
+            phase
+        }
+    }
+
+    /// Claim one finished terminal-owned eager decision with the existing
+    /// protected standalone start protocol.
+    fn start_eager_automatic_compaction(
+        &mut self,
+        cid: &AgentId,
+        decision: tau_proto::AutomaticCompactionDecision,
+        cut: tau_proto::AgentHead,
+    ) -> bool {
+        let Some(conv) = self.agents.get(cid) else {
+            return false;
+        };
+        if conv.pending_automatic_compaction_start.as_ref() == Some(&decision.transaction_id) {
+            return true;
+        }
+        let Some(agent_id) = conv.agent_id.clone() else {
+            return false;
+        };
+        let selected = conv
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        if self
+            .agent_store
+            .agent(&agent_id)
+            .is_some_and(|tree| !tree.is_ancestor_head(cut, selected))
+        {
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
+            }
+            self.publish_for_agent(
+                cid,
+                Event::AgentStandaloneCompactionFailed(
+                    tau_proto::AgentStandaloneCompactionFailed {
+                        agent_id: crate::parse_agent_id(&agent_id),
+                        transaction_id: decision.transaction_id,
+                        cut,
+                        reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                        resume_through: None,
+                    },
+                ),
+            );
+            return true;
+        }
+        let compact_prompt_id =
+            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
+                .expect("known-safe AgentPromptId must be valid");
+        let originator = conv.originator.clone();
+        let resume_through = (selected != cut).then_some(selected);
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+            agent.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
+        }
+        self.publish_for_agent(
+            cid,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: crate::parse_agent_id(&agent_id),
+                transaction_id: decision.transaction_id.clone(),
+                compact_prompt_id,
+                cut,
+                resume_through,
+                model: decision.model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::AutomaticPolicy {
+                    decision_id: decision.transaction_id,
+                },
+            }),
+        );
+        true
+    }
+
+    fn schedule_standalone_auto_compaction_at(
+        &mut self,
+        cid: &AgentId,
+        committed_activation: bool,
+        activation_cut: Option<tau_proto::AgentHead>,
+        point: path_tau_config_settings::ContextPolicyPoint,
+    ) -> bool {
         let Some(conv) = self.agents.get(cid) else {
             return false;
         };
@@ -22404,18 +22805,61 @@ impl Harness {
             return false;
         }
         let role_name = self.role_name_for_agent_id(cid);
-        let role_policy = self
-            .available_roles
-            .get(&role_name)
-            .and_then(|role| role.compaction)
-            .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
-        let threshold = match role_policy {
-            path_tau_config_settings::RoleCompaction::ProviderDefault => {
-                info.standalone_compaction_threshold
-            }
-            path_tau_config_settings::RoleCompaction::Threshold(threshold) => Some(threshold),
-            path_tau_config_settings::RoleCompaction::Disabled => None,
+        let role = self.available_roles.get(&role_name);
+        let status_available =
+            if point == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished {
+                conv.terminal_status_was_available
+            } else {
+                self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model))
+                    .iter()
+                    .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+            };
+        let logical_status = if status_available {
+            conv.work_status.phase()
+        } else if point == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished {
+            tau_proto::AgentWorkStatusPhase::Done
+        } else {
+            tau_proto::AgentWorkStatusPhase::Working
         };
+        let threshold = role.and_then(|role| {
+            if role.compactions.is_empty() {
+                if point != path_tau_config_settings::ContextPolicyPoint::BeforeInference {
+                    return None;
+                }
+                return match role
+                    .compaction
+                    .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
+                {
+                    path_tau_config_settings::RoleCompaction::ProviderDefault => {
+                        info.standalone_compaction_threshold
+                    }
+                    path_tau_config_settings::RoleCompaction::Threshold(threshold) => {
+                        Some(threshold)
+                    }
+                    path_tau_config_settings::RoleCompaction::Disabled => None,
+                };
+            }
+            role.compactions
+                .values()
+                .filter(|policy| {
+                    policy.enable
+                        && policy.when.at == point
+                        && policy
+                            .when
+                            .statuses
+                            .as_ref()
+                            .is_none_or(|statuses| statuses.contains(&logical_status))
+                })
+                .filter_map(|policy| match policy.threshold {
+                    path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
+                        info.standalone_compaction_threshold
+                    }
+                    path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
+                        Some(tokens)
+                    }
+                })
+                .min()
+        });
         if !matches!(
             conv.activation_dispatch,
             crate::agent::ActivationDispatchState::None
@@ -22644,12 +23088,37 @@ impl Harness {
             tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
                 compaction_threshold,
             } => {
-                next_role.compaction = Some(match compaction_threshold {
+                let inference = match compaction_threshold {
                     Some(threshold) => {
                         path_tau_config_settings::RoleCompaction::Threshold(threshold)
                     }
                     None => path_tau_config_settings::RoleCompaction::ProviderDefault,
-                });
+                };
+                next_role.compaction = Some(inference);
+                next_role.inference_compaction = Some(inference);
+                let threshold = match inference {
+                    path_tau_config_settings::RoleCompaction::Threshold(tokens) => {
+                        path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens)
+                    }
+                    path_tau_config_settings::RoleCompaction::ProviderDefault => {
+                        path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault
+                    }
+                    path_tau_config_settings::RoleCompaction::Disabled => {
+                        unreachable!("legacy UI command never selects disabled")
+                    }
+                };
+                next_role
+                    .compactions
+                    .entry("default".to_owned())
+                    .and_modify(|policy| {
+                        policy.threshold = threshold;
+                        policy.enable = true;
+                    })
+                    .or_insert(path_tau_config_settings::CompactionPolicy {
+                        threshold,
+                        enable: true,
+                        when: Default::default(),
+                    });
             }
             tau_proto::UiRoleUpdateAction::SetTools { tools } => {
                 next_role.tools = tools;
@@ -23468,6 +23937,8 @@ impl Harness {
             self.prompt_operations.remove(spid);
             self.prompt_context_limits.remove(spid);
             self.prompt_context_size_alerts.remove(spid);
+            self.prompt_compaction_policies.remove(spid);
+            self.prompt_compaction_projected_tokens.remove(spid);
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -23727,6 +24198,8 @@ impl Harness {
         self.prompt_estimated_cost_rates.clear();
         self.prompt_context_limits.clear();
         self.prompt_context_size_alerts.clear();
+        self.prompt_compaction_policies.clear();
+        self.prompt_compaction_projected_tokens.clear();
         self.prompt_semantic_output.clear();
         self.pending_stale_provider_responses.clear();
         self.pending_replay_prompt_activation_occurrences.clear();
@@ -25002,6 +25475,9 @@ impl Harness {
                 agent.outer_turn =
                     path_crate_agent::OuterTurnRuntimeState::FinishInFlight(outer_turn_id.clone());
                 Some(tau_proto::AgentOuterTurnFinished {
+                    automatic_compaction_decision: agent
+                        .pending_automatic_compaction_decision
+                        .clone(),
                     agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
                     session_id: agent.session_id.clone(),
                     outer_turn_id,
@@ -25053,6 +25529,10 @@ impl Harness {
         if let Some(turn_id) = restored_turn {
             if let Some(agent) = self.agents.get_mut(cid) {
                 agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn_id);
+                agent.terminal_status_was_available = false;
+                agent.terminal_notice_eligible = false;
+                agent.terminal_notice_outer_turn_id = None;
+                agent.terminal_context_size_alerts.clear();
             }
             return;
         }
@@ -25069,6 +25549,10 @@ impl Harness {
             let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
             agent.outer_turn =
                 path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
+            agent.terminal_status_was_available = false;
+            agent.terminal_notice_eligible = false;
+            agent.terminal_notice_outer_turn_id = None;
+            agent.terminal_context_size_alerts.clear();
             Some(tau_proto::AgentOuterTurnStarted {
                 agent_id: durable_agent_id,
                 session_id: agent.session_id.clone(),
@@ -25162,6 +25646,7 @@ impl Harness {
                     cid,
                     None,
                     Event::AgentPromptTerminated(AgentPromptTerminated {
+                        automatic_compaction_decision: None,
                         agent_id,
                         agent_prompt_id: prompt_id,
                         reason: AgentPromptTerminationReason::Canceled,
@@ -25802,6 +26287,22 @@ impl Harness {
                 .entry(agent_id.clone())
                 .or_insert(navigation_mode);
             match restored_compaction.clone() {
+                Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
+                    ref decision,
+                    finish_committed,
+                    ..
+                }) => {
+                    if let Some(conv) = self.agents.get_mut(&cid) {
+                        conv.pending_automatic_compaction_decision =
+                            Some(decision.transaction_id.clone());
+                        if !finish_committed {
+                            conv.outer_turn =
+                                path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
+                                    decision.outer_turn_id.clone(),
+                                );
+                        }
+                    }
+                }
                 Some(tau_core::StandaloneCompactionRecovery::Blocked {
                     failed,
                     compact_prompt_id,
@@ -26001,7 +26502,10 @@ impl Harness {
             }
             let derive_activations = !matches!(
                 restored_compaction,
-                Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. })
+                Some(
+                    tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. }
+                        | tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart { .. }
+                )
             );
             let replay_message_wakes = self.derive_replay_message_wakes(agent_id.as_str());
             let replay_prompt_activations =
@@ -26047,6 +26551,7 @@ impl Harness {
                 self.pending_replay_uncertain_stale.insert(
                     cid.clone(),
                     AgentPromptTerminated {
+                        automatic_compaction_decision: None,
                         agent_id: agent_id.clone(),
                         agent_prompt_id: checkpoint.agent_prompt_id,
                         reason: AgentPromptTerminationReason::Stale,
@@ -26055,6 +26560,27 @@ impl Harness {
                 );
             }
             self.session_loaded_agents.insert(agent_id.clone());
+            if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
+                decision,
+                cut,
+                finish_committed,
+            }) = restored_compaction.clone()
+            {
+                if finish_committed {
+                    self.start_eager_automatic_compaction(&cid, decision, cut);
+                } else {
+                    self.publish_for_agent(
+                        &cid,
+                        Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                            automatic_compaction_decision: Some(decision.transaction_id.clone()),
+                            agent_id: agent_id.clone(),
+                            session_id: self.current_session_id.clone(),
+                            outer_turn_id: decision.outer_turn_id,
+                            disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                        }),
+                    );
+                }
+            }
             let finish_repair = self
                 .agent_store
                 .agent(agent_id.as_str())
@@ -26070,6 +26596,7 @@ impl Harness {
                 self.publish_for_agent(
                     &cid,
                     Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                        automatic_compaction_decision: None,
                         agent_id: agent_id.clone(),
                         session_id: self.current_session_id.clone(),
                         outer_turn_id,
@@ -27508,6 +28035,7 @@ impl Harness {
             ctx_id: None,
         };
         let response = ProviderResponseFinished {
+            automatic_compaction_decision: None,
             agent_prompt_id: continuation.plan.agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
             output_items: Vec::new(),
@@ -27647,6 +28175,7 @@ impl Harness {
                         }
                     });
                 Event::ProviderResponseFinished(ProviderResponseFinished {
+                    automatic_compaction_decision: None,
                     estimated_api_cost_rates: None,
                     estimated_api_cost_increment: None,
 
@@ -27737,6 +28266,7 @@ impl Harness {
                 self.local_route_failure_prompts
                     .insert(agent_prompt_id.clone());
                 Event::ProviderResponseFinished(ProviderResponseFinished {
+                    automatic_compaction_decision: None,
                     estimated_api_cost_rates: None,
                     estimated_api_cost_increment: None,
 
@@ -27993,6 +28523,10 @@ impl Harness {
         self.prompt_models
             .insert(agent_prompt_id.clone(), model.clone());
         let context_limit_snapshot = self.prompt_context_limit_snapshot(cid, &model, operation);
+        self.prompt_compaction_projected_tokens.insert(
+            agent_prompt_id.clone(),
+            context_limit_snapshot.projected_input_tokens,
+        );
         self.prompt_context_limits
             .insert(agent_prompt_id.clone(), context_limit_snapshot);
         let role_name = self.role_name_for_agent_id(cid);
@@ -28003,6 +28537,13 @@ impl Harness {
             .unwrap_or_default();
         self.prompt_context_size_alerts
             .insert(agent_prompt_id.clone(), context_size_alerts);
+        let compactions = self
+            .available_roles
+            .get(&role_name)
+            .map(|role| role.compactions.clone())
+            .unwrap_or_default();
+        self.prompt_compaction_policies
+            .insert(agent_prompt_id.clone(), compactions);
         self.prompt_operations.insert(
             agent_prompt_id.clone(),
             (
@@ -28961,6 +29502,7 @@ impl Harness {
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
         response.output_length_disposition = tau_proto::OutputLengthDisposition::None;
         response.provider_attempt = tau_proto::ProviderAttempt::ONE;
+        response.automatic_compaction_decision = None;
         response.context_limit_telemetry = None;
         response.estimated_api_cost_rates = None;
         response.estimated_api_cost_increment = None;
@@ -29125,6 +29667,7 @@ impl Harness {
             .map_or(1, |attempt| attempt.saturating_add(1));
         response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
             .expect("terminal attempt is one-based");
+        let terminal_model = self.prompt_models.get(&response.agent_prompt_id).cloned();
         self.attach_context_limit_telemetry(&mut response);
         let response_contains_compaction = response
             .output_items
@@ -29166,6 +29709,33 @@ impl Harness {
             })
             .flatten()
             .unwrap_or_default();
+        let compaction_policies = self
+            .prompt_compaction_policies
+            .remove(&response.agent_prompt_id)
+            .unwrap_or_default();
+        let projected_prompt_tokens = self
+            .prompt_compaction_projected_tokens
+            .remove(&response.agent_prompt_id)
+            .flatten();
+        let projected_prompt_tokens = projected_prompt_tokens.or_else(|| {
+            input_tokens.and_then(|tokens| {
+                terminal_model
+                    .as_ref()
+                    .and_then(|model| self.provider_model_info.get(model))
+                    .map(|info| {
+                        tokens.saturating_add(context_projection_reserve(info.context_window))
+                    })
+            })
+        });
+        let projected_terminal_tokens = projected_prompt_tokens.and_then(|tokens| {
+            projected_transcript_entry_tokens(&tau_core::AgentEntry::AssistantResponse {
+                provider_response_id: response.provider_response_id.clone(),
+                backend: response.backend.clone(),
+                output_items: response.output_items.clone(),
+                usage: response.usage.clone(),
+            })
+            .map(|growth| tokens.saturating_add(growth))
+        });
         if (!standalone_compaction || standalone_success)
             && self.try_plan_reactive_context_recovery(&cid, &mut response, source)
         {
@@ -29303,6 +29873,17 @@ impl Harness {
         let final_status_gate = (!requested_tool_calls)
             .then(|| self.apply_final_status_response_gate(&cid, &response))
             .flatten();
+        if !requested_tool_calls
+            && !matches!(
+                final_status_gate,
+                Some(path_crate_agent::FinalStatusDecision::Challenge(_))
+            )
+            && let Some(agent) = self.agents.get_mut(&cid)
+        {
+            agent.terminal_notice_eligible = successful;
+            agent.terminal_notice_outer_turn_id = agent.outer_turn.owned_id().cloned();
+            agent.terminal_context_size_alerts = context_size_alerts.clone();
+        }
         let final_status_challenged = matches!(
             final_status_gate,
             Some(path_crate_agent::FinalStatusDecision::Challenge(_))
@@ -29314,6 +29895,30 @@ impl Harness {
             } = &mut response.output_length_disposition
         {
             *outer_turn_finish_owed = false;
+        }
+        let eager_decision_eligible = !final_status_challenged
+            && !requested_tool_calls
+            && !response_contains_compaction
+            && response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
+            && !matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+            );
+        if eager_decision_eligible {
+            response.automatic_compaction_decision = response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.model.clone())
+                .or(terminal_model)
+                .and_then(|model| {
+                    self.eager_automatic_compaction_decision(
+                        &cid,
+                        model,
+                        projected_terminal_tokens,
+                        &compaction_policies,
+                    )
+                });
         }
         let final_status_gated = final_status_gate.is_some();
         let completion = match final_status_gate {
@@ -29350,6 +29955,30 @@ impl Harness {
                 })
             }
             None => None,
+        };
+        let eager_terminal_owned = response.automatic_compaction_decision.is_some();
+        let completion = if eager_terminal_owned && completion.is_none() {
+            Some(AgentPublishCompletion::GatedFinal {
+                batch_parent: self
+                    .agents
+                    .get(&cid)
+                    .and_then(|agent| agent.head)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                disposition: GatedFinalDisposition::Accept {
+                    terminal: Box::new(CommittedGatedFinal {
+                        response: response.clone(),
+                        response_contains_compaction,
+                        input_tokens,
+                        context_size_alerts: context_size_alerts.clone(),
+                        is_non_tool_ext_query,
+                        source: source.cloned(),
+                        tool_effect: CommittedOutputLengthToolEffect::None,
+                    }),
+                },
+                retry_event: None,
+            })
+        } else {
+            completion
         };
         let completion = if matches!(
             response.output_length_disposition,
@@ -29422,6 +30051,7 @@ impl Harness {
             self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         }
         if final_status_gated
+            || eager_terminal_owned
             || matches!(
                 response.output_length_disposition,
                 tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
@@ -29433,7 +30063,12 @@ impl Harness {
         if response_contains_compaction {
             self.clear_agent_context_usage(&cid);
         } else if successful {
-            self.queue_crossed_context_size_alerts(&cid, input_tokens, &context_size_alerts);
+            self.queue_crossed_context_size_alerts_for_prompt(
+                &cid,
+                &response.agent_prompt_id,
+                input_tokens,
+                &context_size_alerts,
+            );
         }
         if self.handle_finished_response_side_conversation(
             &cid,
@@ -29495,7 +30130,7 @@ impl Harness {
         let role_compaction = self
             .available_roles
             .get(&self.role_name_for_agent_id(cid))
-            .and_then(|role| role.compaction)
+            .and_then(|role| role.inference_compaction.or(role.compaction))
             .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         let (compaction_threshold, compaction_policy) = match role_compaction {
             path_tau_config_settings::RoleCompaction::Threshold(value) => (
@@ -29657,7 +30292,7 @@ impl Harness {
         if self
             .available_roles
             .get(&role_name)
-            .and_then(|role| role.compaction)
+            .and_then(|role| role.inference_compaction.or(role.compaction))
             == Some(path_tau_config_settings::RoleCompaction::Disabled)
         {
             return false;
@@ -29742,7 +30377,7 @@ impl Harness {
             let policy_allows = self
                 .available_roles
                 .get(&self.role_name_for_agent_id(&cid))
-                .and_then(|role| role.compaction)
+                .and_then(|role| role.inference_compaction.or(role.compaction))
                 != Some(path_tau_config_settings::RoleCompaction::Disabled);
             let branch_matches = checkpoint.activation_cut.is_some()
                 && self
@@ -30183,6 +30818,10 @@ impl Harness {
             .drop_prompt(&response.agent_prompt_id);
         self.prompt_context_size_alerts
             .remove(&response.agent_prompt_id);
+        self.prompt_compaction_policies
+            .remove(&response.agent_prompt_id);
+        self.prompt_compaction_projected_tokens
+            .remove(&response.agent_prompt_id);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         self.emit_info_important(&format!(
@@ -30226,6 +30865,9 @@ impl Harness {
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_context_size_alerts.remove(agent_prompt_id);
+        self.prompt_compaction_policies.remove(agent_prompt_id);
+        self.prompt_compaction_projected_tokens
+            .remove(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);
@@ -30268,6 +30910,7 @@ impl Harness {
                 response.agent_prompt_id.clone(),
                 AgentPromptTerminationReason::Canceled,
                 originator,
+                None,
                 source,
             );
         }
@@ -30357,31 +31000,122 @@ impl Harness {
     /// Queue each enabled named context-size alert once while usage remains
     /// above its threshold. Alerts ride the current tool round or dispatch
     /// after the finished turn through the ordinary internal-prompt queue.
+    #[cfg(test)]
     fn queue_crossed_context_size_alerts(
         &mut self,
         cid: &AgentId,
         input_tokens: Option<u64>,
         alerts: &BTreeMap<String, tau_config::settings::ContextSizeAlert>,
     ) {
+        let prompt_id =
+            tau_proto::AgentPromptId::parse("ap-test-alert").expect("known-safe test prompt id");
+        self.queue_crossed_context_size_alerts_for_prompt(cid, &prompt_id, input_tokens, alerts);
+    }
+
+    fn queue_crossed_context_size_alerts_for_prompt(
+        &mut self,
+        cid: &AgentId,
+        agent_prompt_id: &AgentPromptId,
+        input_tokens: Option<u64>,
+        alerts: &BTreeMap<String, tau_config::settings::ContextSizeAlert>,
+    ) {
         let Some(input_tokens) = input_tokens else {
             return;
         };
+        let status_available = self.prompt_tool_specs.get(agent_prompt_id).map_or_else(
+            || {
+                self.agents
+                    .get(cid)
+                    .is_some_and(|agent| agent.terminal_status_was_available)
+            },
+            |specs| {
+                specs
+                    .iter()
+                    .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+            },
+        );
+        let logical_status =
+            self.agents
+                .get(cid)
+                .map_or(tau_proto::AgentWorkStatusPhase::Working, |agent| {
+                    if status_available {
+                        agent.work_status.phase()
+                    } else {
+                        tau_proto::AgentWorkStatusPhase::Working
+                    }
+                });
         let Some(agent) = self.agents.get_mut(cid) else {
             return;
         };
         agent.fired_context_size_alerts.retain(|name| {
-            alerts
-                .get(name)
-                .is_some_and(|alert| alert.enable && input_tokens > alert.threshold)
+            alerts.get(name).is_some_and(|alert| {
+                alert.enable
+                    && matches!(
+                        alert.when.at,
+                        path_tau_config_settings::ContextPolicyPoint::AfterResponse
+                            | path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished
+                    )
+                    && input_tokens > alert.threshold
+            })
         });
         for (name, alert) in alerts {
             if alert.enable
+                && alert.when.at == path_tau_config_settings::ContextPolicyPoint::AfterResponse
+                && alert
+                    .when
+                    .statuses
+                    .as_ref()
+                    .is_none_or(|statuses| statuses.contains(&logical_status))
                 && input_tokens > alert.threshold
                 && agent.fired_context_size_alerts.insert(name.clone())
             {
                 agent
                     .pending_prompts
                     .push_back(PendingPrompt::context_size_alert(alert.message.clone()));
+            }
+        }
+    }
+
+    /// Queues successful-response notices whose lifecycle selector owns the
+    /// just-committed outer-turn finish.
+    fn queue_outer_turn_finished_context_size_alerts(
+        &mut self,
+        cid: &AgentId,
+        outer_turn_id: &tau_proto::AgentOuterTurnId,
+    ) {
+        let Some(agent) = self.agents.get_mut(cid) else {
+            return;
+        };
+        if !agent.terminal_notice_eligible
+            || agent.terminal_notice_outer_turn_id.as_ref() != Some(outer_turn_id)
+        {
+            return;
+        }
+        let alerts = std::mem::take(&mut agent.terminal_context_size_alerts);
+        agent.terminal_notice_eligible = false;
+        agent.terminal_notice_outer_turn_id = None;
+        let Some(input_tokens) = agent.context_input_tokens else {
+            return;
+        };
+        let logical_status = if agent.terminal_status_was_available {
+            agent.work_status.phase()
+        } else {
+            tau_proto::AgentWorkStatusPhase::Done
+        };
+        for (name, alert) in alerts {
+            if alert.enable
+                && alert.when.at == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished
+                && alert
+                    .when
+                    .statuses
+                    .as_ref()
+                    .is_none_or(|statuses| statuses.contains(&logical_status))
+                && input_tokens > alert.threshold
+                && agent.fired_context_size_alerts.insert(name)
+            {
+                agent
+                    .pending_prompts
+                    .push_back(PendingPrompt::context_size_alert(alert.message));
             }
         }
     }
@@ -30453,6 +31187,7 @@ impl Harness {
                 response.agent_prompt_id.clone(),
                 AgentPromptTerminationReason::Stale,
                 originator,
+                None,
                 source,
             );
         }
@@ -31393,6 +32128,9 @@ impl Harness {
                     .iter()
                     .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
             });
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.terminal_status_was_available = status_was_available;
+        }
         self.agents
             .get(cid)?
             .work_status
@@ -31431,7 +32169,12 @@ impl Harness {
         if response_contains_compaction {
             self.clear_agent_context_usage(cid);
         } else if successful {
-            self.queue_crossed_context_size_alerts(cid, input_tokens, &context_size_alerts);
+            self.queue_crossed_context_size_alerts_for_prompt(
+                cid,
+                &response.agent_prompt_id,
+                input_tokens,
+                &context_size_alerts,
+            );
         }
         let assistant_text = assistant_text_from_output_items(&response.output_items);
         let notify_watchers = !matches!(

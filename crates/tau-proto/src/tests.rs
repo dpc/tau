@@ -1410,6 +1410,7 @@ fn representative_events() -> Vec<Event> {
             ctx_id: None,
         }),
         Event::AgentPromptTerminated(AgentPromptTerminated {
+            automatic_compaction_decision: None,
             agent_id: agent_id("engineer_abcd1234"),
             agent_prompt_id: test_agent_prompt_id("sp-stale"),
             reason: AgentPromptTerminationReason::Stale,
@@ -1496,6 +1497,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -1821,6 +1823,8 @@ fn representative_events() -> Vec<Event> {
                 description: "Engineer".to_owned(),
                 role_description: Some("Writes code".to_owned()),
                 details: Some(HarnessRoleDetails {
+                    inference_compaction: None,
+                    compactions: Vec::new(),
                     model: Some("openai/gpt-4.1".parse().expect("model id")),
                     ..Default::default()
                 }),
@@ -4117,6 +4121,7 @@ fn execution_events_use_provider_wire_family() {
         ),
         (
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
@@ -4177,6 +4182,7 @@ fn provider_execution_reports_use_distinct_transient_wires() {
         ),
         (
             Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
@@ -4514,6 +4520,8 @@ fn harness_role_info_role_description_is_optional_and_round_trips() {
         description: "model=openai/gpt-4.1, effort=xhigh".to_owned(),
         role_description: Some("Deep investigation mode".to_owned()),
         details: Some(HarnessRoleDetails {
+            inference_compaction: None,
+            compactions: Vec::new(),
             model: Some("openai/gpt-4.1".into()),
             params: ModelParams {
                 effort: Effort::High,
@@ -4909,6 +4917,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             message: "no provider models".to_owned(),
         }),
         Event::AgentPromptTerminated(AgentPromptTerminated {
+            automatic_compaction_decision: None,
             agent_id: agent_id("worker"),
             agent_prompt_id: test_agent_prompt_id("sp-stale"),
             reason: AgentPromptTerminationReason::Stale,
@@ -5800,6 +5809,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
     );
 
     let mut value = serde_json::to_value(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -6149,6 +6159,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     );
 
     let mut response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -6248,6 +6259,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         planned_event
     );
     let none_event = Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         recovery_disposition: ContextRecoveryDisposition::None,
         output_length_disposition: OutputLengthDisposition::None,
         ..response

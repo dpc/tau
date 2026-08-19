@@ -132,9 +132,20 @@ it.
 `agent.outer_turn_started` and `agent.outer_turn_finished` are durable,
 harness-authored activation boundaries. Their stable ids, session attribution,
 initiating durable occurrence, and terminal disposition are accounting authority;
-replay never infers a missing finish except for an output-length continuation
-terminal whose validated `outer_turn_finish_owed=true` fact explicitly authorizes
-one matching settled finish repair.
+replay never infers a missing finish except when a validated output-length
+continuation terminal with `outer_turn_finish_owed=true` or a terminal-owned
+automatic-compaction decision explicitly authorizes one matching settled finish
+repair.
+
+A canonical `provider.response_finished`, or a harness-authored canceled
+`agent.prompt_terminated` when no provider response exists, may carry one
+`automatic_compaction_decision`. Its bounded transaction id, outer-turn id,
+resolved model, and threshold are durable authority; rule names and work-status
+state are not. A response's assistant node supplies the cut; a canceled
+termination uses its durable parent because it appends no transcript node. The
+matching outer-turn finish must reference the decision before a standalone start
+with `automatic_policy` can claim the same identity. Replay repairs an owed finish
+and start exactly once.
 
 An output-length plan whose branch becomes dormant may append its exact reserved
 steer, successor owner, pre-start failure, and owed finish under explicit parents

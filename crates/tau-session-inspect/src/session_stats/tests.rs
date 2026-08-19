@@ -128,6 +128,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         record(
             3,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 agent_prompt_id: prompt_id,
                 agent_id: agent_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -173,6 +174,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         record(
             4,
             Event::AgentOuterTurnFinished(AgentOuterTurnFinished {
+                automatic_compaction_decision: None,
                 agent_id,
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 outer_turn_id: test_agent_outer_turn_id("ot-ap-engineer_0-0"),
@@ -332,6 +334,7 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
                     rates: Option<tau_proto::EstimatedApiCostRates>,
                     cost: Option<EstimatedApiCost>| {
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             agent_prompt_id: id
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),

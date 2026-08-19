@@ -209,6 +209,7 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
             tau_proto::Emit {
                 event: Box::new(Event::ProviderResponseFinishedReported(
                     ProviderResponseFinished {
+                        automatic_compaction_decision: None,
                         estimated_api_cost_rates: None,
                         estimated_api_cost_increment: None,
 

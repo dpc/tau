@@ -995,6 +995,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         crate::test_connection_id("provider"),
     );
     let response = tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -1228,6 +1229,7 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         )
         .expect("subscribe observer");
     let response = tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

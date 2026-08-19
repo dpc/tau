@@ -8,6 +8,7 @@ use super::*;
 #[test]
 fn debug_response_producer_submits_typed_compressed_capture_job() {
     let response = tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-test").expect("prompt id"),

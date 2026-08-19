@@ -940,6 +940,14 @@ struct AgentsSettings {
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(default, deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    #[serde(
+        default,
+        alias = "inferenceCompaction",
+        deserialize_with = "present_option"
+    )]
+    inference_compaction: Option<Option<RoleCompaction>>,
+    #[serde(default)]
+    compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Agent-global alert patches applied before group and role settings.
     #[serde(default, alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
@@ -1277,6 +1285,16 @@ struct HarnessProfileAgentOverrides {
     /// Default compaction patch.
     #[serde(default, deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    /// Default provider-inline compaction patch.
+    #[serde(
+        default,
+        alias = "inferenceCompaction",
+        deserialize_with = "present_option"
+    )]
+    inference_compaction: Option<Option<RoleCompaction>>,
+    /// Default named standalone compaction patches.
+    #[serde(default)]
+    compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Global named context-size alert patches.
     #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
@@ -1296,6 +1314,8 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
             thinking_summary: profile.thinking_summary,
             service_tier: profile.service_tier,
             compaction: profile.compaction,
+            inference_compaction: profile.inference_compaction,
+            compactions: profile.compactions,
             context_size_alerts: profile.context_size_alerts,
         }
     }
@@ -1365,6 +1385,14 @@ struct HarnessAgentRoleOverrides {
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(default, deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    #[serde(
+        default,
+        alias = "inferenceCompaction",
+        deserialize_with = "present_option"
+    )]
+    inference_compaction: Option<Option<RoleCompaction>>,
+    #[serde(default)]
+    compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Agent-global alert patches replayed through domain-specific role
     /// merging.
     #[serde(alias = "contextSizeAlerts")]
@@ -1383,6 +1411,8 @@ impl AgentsSettings {
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
             compaction: self.compaction,
+            inference_compaction: self.inference_compaction,
+            compactions: self.compactions.clone(),
             ..AgentRolePatch::default()
         }
     }
@@ -1400,6 +1430,8 @@ impl HarnessAgentRoleOverrides {
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
             compaction: self.compaction,
+            inference_compaction: self.inference_compaction,
+            compactions: self.compactions.clone(),
             ..AgentRolePatch::default()
         }
     }
@@ -1484,6 +1516,9 @@ struct RawRoleGroup {
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    #[serde(alias = "inferenceCompaction", deserialize_with = "present_option")]
+    inference_compaction: Option<Option<RoleCompaction>>,
+    compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Group-default alert patches applied to every member role.
     #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
@@ -1659,6 +1694,9 @@ struct AgentRolePatch {
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
     compaction: Option<Option<RoleCompaction>>,
+    #[serde(alias = "inferenceCompaction", deserialize_with = "present_option")]
+    inference_compaction: Option<Option<RoleCompaction>>,
+    compactions: BTreeMap<String, CompactionPolicyPatch>,
     /// Role-specific alert patches applied after group defaults.
     #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
@@ -1684,6 +1722,23 @@ struct AgentRolePatch {
     required_skills: Option<Vec<tau_proto::SkillName>>,
 }
 
+impl AgentRolePatch {
+    /// Rejects a source that mixes the legacy compound setting with either
+    /// successor setting, whose meaning would otherwise be order-dependent.
+    fn validate_compaction_input(&self, path: &str) -> Result<(), SettingsError> {
+        if self.compaction.is_some()
+            && (self.inference_compaction.is_some() || !self.compactions.is_empty())
+        {
+            return Err(SettingsError::Config(config::ConfigError::Message(
+                format!(
+                    "{path}: legacy `compaction` cannot be combined with `inference_compaction` or `compactions` in one source layer"
+                ),
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl RawRoleGroup {
     fn defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
@@ -1699,6 +1754,8 @@ impl RawRoleGroup {
             thinking_summary: self.thinking_summary,
             service_tier: self.service_tier,
             compaction: self.compaction,
+            inference_compaction: self.inference_compaction,
+            compactions: self.compactions.clone(),
             context_size_alerts: self.context_size_alerts.clone(),
             prompt_fragments: self.prompt_fragments.clone(),
             prompt_override: self.prompt_override.clone(),
@@ -1972,6 +2029,35 @@ impl HarnessSettings {
                     return Err(SettingsError::Config(config::ConfigError::Message(
                         format!(
                             "role `{role_name}` context-size alert `{alert_name}` message must not be empty"
+                        ),
+                    )));
+                }
+                if !matches!(
+                    alert.when.at,
+                    ContextPolicyPoint::AfterResponse | ContextPolicyPoint::OuterTurnFinished
+                ) {
+                    return Err(SettingsError::Config(config::ConfigError::Message(
+                        format!(
+                            "role `{role_name}` context-size alert `{alert_name}` only supports after_response or outer_turn_finished"
+                        ),
+                    )));
+                }
+            }
+            for (policy_name, policy) in &role.compactions {
+                if matches!(policy.threshold, CompactionPolicyThreshold::Tokens(0)) {
+                    return Err(SettingsError::Config(config::ConfigError::Message(
+                        format!(
+                            "role `{role_name}` compaction policy `{policy_name}` requires a threshold"
+                        ),
+                    )));
+                }
+                if !matches!(
+                    policy.when.at,
+                    ContextPolicyPoint::BeforeInference | ContextPolicyPoint::OuterTurnFinished
+                ) {
+                    return Err(SettingsError::Config(config::ConfigError::Message(
+                        format!(
+                            "role `{role_name}` compaction policy `{policy_name}` only supports before_inference or outer_turn_finished"
                         ),
                     )));
                 }
@@ -2409,8 +2495,14 @@ pub struct AgentRole {
     /// Automatic provider-side compaction policy for this role. Missing values
     /// inherit from lower-precedence role settings; effective roles default to
     /// [`RoleCompaction::ProviderDefault`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing, default)]
     pub compaction: Option<RoleCompaction>,
+    /// Singular provider-inline and reactive-overflow compaction policy.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "inferenceCompaction")]
+    pub inference_compaction: Option<RoleCompaction>,
+    /// Named harness-scheduled standalone compaction policies.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub compactions: BTreeMap<String, CompactionPolicy>,
     /// Named internal prompts injected after provider-reported context usage
     /// exceeds each enabled alert's token threshold.
     #[serde(
@@ -2493,6 +2585,199 @@ pub enum RoleCompaction {
     Threshold(u64),
 }
 
+/// Lifecycle point at which a context policy is evaluated.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPolicyPoint {
+    /// Immediately after a successful ordinary provider response.
+    AfterResponse,
+    /// At the existing safe checkpoint immediately before ordinary inference.
+    #[default]
+    BeforeInference,
+    /// After the durable outer-turn finish has committed.
+    #[serde(alias = "outerTurnFinished")]
+    OuterTurnFinished,
+}
+
+/// Shared lifecycle and logical-status selector for context policies.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContextPolicyWhen {
+    /// Lifecycle point at which this policy is evaluated.
+    pub at: ContextPolicyPoint,
+    /// Logical work phases accepted by the policy; `None` accepts every phase.
+    #[serde(deserialize_with = "deserialize_optional_nonempty_statuses")]
+    pub statuses: Option<Vec<tau_proto::AgentWorkStatusPhase>>,
+}
+
+impl Default for ContextPolicyWhen {
+    fn default() -> Self {
+        Self {
+            at: ContextPolicyPoint::BeforeInference,
+            statuses: None,
+        }
+    }
+}
+
+fn deserialize_optional_nonempty_statuses<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<tau_proto::AgentWorkStatusPhase>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let statuses = Option::<Vec<tau_proto::AgentWorkStatusPhase>>::deserialize(deserializer)?;
+    if statuses.as_ref().is_some_and(Vec::is_empty) {
+        return Err(D::Error::custom(
+            "context policy statuses must be null or a nonempty list",
+        ));
+    }
+    Ok(statuses)
+}
+
+/// Threshold used by one harness-scheduled standalone compaction policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionPolicyThreshold {
+    /// Resolve the provider-published standalone threshold for the selected
+    /// model.
+    ProviderDefault,
+    /// Compact at this explicit positive token count.
+    Tokens(u64),
+}
+
+impl Serialize for CompactionPolicyThreshold {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::ProviderDefault => serializer.serialize_str("provider_default"),
+            Self::Tokens(tokens) => serializer.serialize_u64(*tokens),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactionPolicyThreshold {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Tokens(u64),
+            Name(String),
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Tokens(0) => Err(D::Error::custom(
+                "compaction policy threshold must be positive",
+            )),
+            Wire::Tokens(tokens) => Ok(Self::Tokens(tokens)),
+            Wire::Name(name) if name == "provider_default" || name == "providerDefault" => {
+                Ok(Self::ProviderDefault)
+            }
+            Wire::Name(name) => Err(D::Error::custom(format!(
+                "unknown compaction policy threshold `{name}`"
+            ))),
+        }
+    }
+}
+
+/// One effective named harness-scheduled standalone compaction policy.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionPolicy {
+    /// Token threshold for this policy.
+    pub threshold: CompactionPolicyThreshold,
+    /// Whether this policy participates in evaluation.
+    #[serde(default = "context_size_alert_enabled_default")]
+    pub enable: bool,
+    /// Lifecycle and logical-status selector.
+    #[serde(default)]
+    pub when: ContextPolicyWhen,
+}
+
+impl CompactionPolicy {
+    /// Creates an incomplete merge value that must acquire a threshold before
+    /// it can become effective configuration.
+    fn merge_seed() -> Self {
+        Self {
+            threshold: CompactionPolicyThreshold::Tokens(0),
+            enable: true,
+            when: ContextPolicyWhen::default(),
+        }
+    }
+}
+
+/// Presence-aware patch for one named standalone compaction policy.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompactionPolicyPatch {
+    /// Replacement threshold when this layer specifies one.
+    threshold: Option<CompactionPolicyThreshold>,
+    /// Replacement enablement when this layer specifies one.
+    enable: Option<bool>,
+    /// Nested condition patch; null resets the complete condition.
+    #[serde(deserialize_with = "present_option")]
+    when: Option<Option<ContextPolicyWhenPatch>>,
+}
+
+impl CompactionPolicyPatch {
+    /// Applies all fields present in this layer to an effective merge value.
+    fn apply_to(&self, policy: &mut CompactionPolicy) {
+        if let Some(threshold) = self.threshold {
+            policy.threshold = threshold;
+        }
+        if let Some(enable) = self.enable {
+            policy.enable = enable;
+        }
+        if let Some(when) = &self.when {
+            match when {
+                Some(patch) => patch.apply_to(&mut policy.when, ContextPolicyWhen::default()),
+                None => policy.when = ContextPolicyWhen::default(),
+            }
+        }
+    }
+}
+
+/// Presence-aware patch for a context-policy condition.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ContextPolicyWhenPatch {
+    /// Replacement point; null restores the action-specific default point.
+    #[serde(deserialize_with = "present_option")]
+    at: Option<Option<ContextPolicyPoint>>,
+    /// Replacement status matcher; null accepts every phase.
+    #[serde(deserialize_with = "present_optional_nonempty_statuses")]
+    statuses: Option<Option<Vec<tau_proto::AgentWorkStatusPhase>>>,
+}
+
+impl ContextPolicyWhenPatch {
+    /// Applies fields from this patch, resolving reset values from `default`.
+    fn apply_to(&self, when: &mut ContextPolicyWhen, default: ContextPolicyWhen) {
+        if let Some(at) = self.at {
+            when.at = at.unwrap_or(default.at);
+        }
+        if let Some(statuses) = &self.statuses {
+            when.statuses.clone_from(statuses);
+        }
+    }
+}
+
+fn present_optional_nonempty_statuses<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Vec<tau_proto::AgentWorkStatusPhase>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let statuses = Option::<Vec<tau_proto::AgentWorkStatusPhase>>::deserialize(deserializer)?;
+    if statuses.as_ref().is_some_and(Vec::is_empty) {
+        return Err(D::Error::custom(
+            "context policy statuses must be null or a nonempty list",
+        ));
+    }
+    Ok(Some(statuses))
+}
+
 /// Effective configuration for one named context-size alert.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2509,6 +2794,9 @@ pub struct ContextSizeAlert {
         deserialize_with = "deserialize_nonempty_context_size_alert_message"
     )]
     pub message: String,
+    /// Lifecycle and logical-status selector.
+    #[serde(default = "context_size_alert_when_default")]
+    pub when: ContextPolicyWhen,
 }
 
 impl ContextSizeAlert {
@@ -2519,7 +2807,15 @@ impl ContextSizeAlert {
             threshold: 0,
             enable: true,
             message: context_size_alert_message_default(),
+            when: context_size_alert_when_default(),
         }
+    }
+}
+
+fn context_size_alert_when_default() -> ContextPolicyWhen {
+    ContextPolicyWhen {
+        at: ContextPolicyPoint::AfterResponse,
+        statuses: None,
     }
 }
 
@@ -2571,6 +2867,9 @@ struct ContextSizeAlertPatch {
     enable: Option<bool>,
     /// Replacement prompt message when the current layer specifies one.
     message: Option<String>,
+    /// Nested condition patch; null resets this alert to after-response/any.
+    #[serde(deserialize_with = "present_option")]
+    when: Option<Option<ContextPolicyWhenPatch>>,
 }
 
 impl ContextSizeAlertPatch {
@@ -2585,6 +2884,24 @@ impl ContextSizeAlertPatch {
         if let Some(message) = &self.message {
             alert.message.clone_from(message);
         }
+        if let Some(when) = &self.when {
+            match when {
+                Some(patch) => patch.apply_to(&mut alert.when, context_size_alert_when_default()),
+                None => alert.when = context_size_alert_when_default(),
+            }
+        }
+    }
+}
+
+fn apply_compaction_policy_patches(
+    policies: &mut BTreeMap<String, CompactionPolicy>,
+    patches: &BTreeMap<String, CompactionPolicyPatch>,
+) {
+    for (name, patch) in patches {
+        let policy = policies
+            .entry(name.clone())
+            .or_insert_with(CompactionPolicy::merge_seed);
+        patch.apply_to(policy);
     }
 }
 
@@ -2601,6 +2918,33 @@ fn apply_context_size_alert_patches(
 }
 
 impl AgentRole {
+    /// Normalizes one legacy singular policy into its standalone and inference
+    /// successors while retaining the legacy field for compatibility callers.
+    fn apply_legacy_compaction(&mut self, legacy: Option<RoleCompaction>) {
+        self.compaction = legacy;
+        let normalized = legacy.unwrap_or(RoleCompaction::ProviderDefault);
+        self.inference_compaction = Some(normalized);
+        self.compactions.clear();
+        if normalized != RoleCompaction::Disabled {
+            self.compactions.insert(
+                "default".to_owned(),
+                CompactionPolicy {
+                    threshold: match normalized {
+                        RoleCompaction::ProviderDefault => {
+                            CompactionPolicyThreshold::ProviderDefault
+                        }
+                        RoleCompaction::Disabled => unreachable!("disabled policy is not inserted"),
+                        RoleCompaction::Threshold(tokens) => {
+                            CompactionPolicyThreshold::Tokens(tokens)
+                        }
+                    },
+                    enable: true,
+                    when: ContextPolicyWhen::default(),
+                },
+            );
+        }
+    }
+
     fn apply_patch(&mut self, patch: &AgentRolePatch) {
         if let Some(enable) = patch.enable {
             self.enable = enable;
@@ -2643,9 +2987,13 @@ impl AgentRole {
         if let Some(service_tier) = patch.service_tier {
             self.service_tier = service_tier;
         }
-        if let Some(compaction) = patch.compaction {
-            self.compaction = compaction;
+        if let Some(legacy_compaction) = patch.compaction {
+            self.apply_legacy_compaction(legacy_compaction);
         }
+        if let Some(compaction) = patch.inference_compaction {
+            self.inference_compaction = Some(compaction.unwrap_or(RoleCompaction::ProviderDefault));
+        }
+        apply_compaction_policy_patches(&mut self.compactions, &patch.compactions);
         apply_context_size_alert_patches(&mut self.context_size_alerts, &patch.context_size_alerts);
         if let Some(prompt_fragments) = &patch.prompt_fragments {
             for prompt_fragment in prompt_fragments {
@@ -3344,6 +3692,9 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
         agents: profile.agents.into(),
     }));
     role_layers.extend(harness_role_cli_override_layers(harness_config_overrides)?);
+    for layer in &role_layers {
+        validate_role_layer_compaction_inputs(layer)?;
+    }
 
     let mut effective_agent_defaults = AgentRole {
         enable: Some(true),
@@ -3444,6 +3795,26 @@ where
     current.clone()
 }
 
+fn validate_role_layer_compaction_inputs(
+    layer: &HarnessRoleOverrides,
+) -> Result<(), SettingsError> {
+    layer
+        .agents
+        .role_defaults()
+        .validate_compaction_input("agents")?;
+    for (group_name, group) in &layer.agents.role_groups {
+        group
+            .defaults()
+            .validate_compaction_input(&format!("agents.role_groups.{group_name}"))?;
+        for (role_name, patch) in &group.roles {
+            patch.validate_compaction_input(&format!(
+                "agents.role_groups.{group_name}.roles.{role_name}"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 // Legacy harness aliases are accepted for user compatibility, but every alias
 // must be handled in all three places that can see user-authored keys:
 // serde aliases on patch structs, JSON layer normalization below, and dotted
@@ -3494,6 +3865,13 @@ fn normalize_role_config_keys(
     )?;
     normalize_alias_key(map, "thinkingSummary", "thinking_summary", source, path)?;
     normalize_alias_key(map, "serviceTier", "service_tier", source, path)?;
+    normalize_alias_key(
+        map,
+        "inferenceCompaction",
+        "inference_compaction",
+        source,
+        path,
+    )?;
     normalize_alias_key(map, "promptFragments", "prompt_fragments", source, path)?;
     normalize_alias_key(map, "promptOverride", "prompt_override", source, path)?;
     normalize_alias_key(map, "disableToolTags", "disable_tool_tags", source, path)?;
@@ -3516,7 +3894,35 @@ fn normalize_role_config_keys(
         source,
         path,
     )?;
+    normalize_context_policy_value(map.get_mut("when"));
+    if let Some(serde_json::Value::Object(policies)) = map.get_mut("compactions") {
+        for policy in policies.values_mut() {
+            if let serde_json::Value::Object(policy) = policy {
+                normalize_context_policy_value(policy.get_mut("when"));
+            }
+        }
+    }
+    if let Some(serde_json::Value::Object(alerts)) = map.get_mut("context_size_alerts") {
+        for alert in alerts.values_mut() {
+            if let serde_json::Value::Object(alert) = alert {
+                normalize_context_policy_value(alert.get_mut("when"));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Canonicalizes the one supported camel-case lifecycle value before layering.
+fn normalize_context_policy_value(value: Option<&mut serde_json::Value>) {
+    let Some(serde_json::Value::Object(when)) = value else {
+        return;
+    };
+    if when.get("at") == Some(&serde_json::Value::String("outerTurnFinished".to_owned())) {
+        when.insert(
+            "at".to_owned(),
+            serde_json::Value::String("outer_turn_finished".to_owned()),
+        );
+    }
 }
 
 fn normalize_tool_policy_config_keys(
@@ -3631,6 +4037,27 @@ fn normalize_harness_config_value(
             source,
             "agents",
         )?;
+        normalize_alias_key(
+            agents,
+            "inferenceCompaction",
+            "inference_compaction",
+            source,
+            "agents",
+        )?;
+        if let Some(serde_json::Value::Object(policies)) = agents.get_mut("compactions") {
+            for policy in policies.values_mut() {
+                if let serde_json::Value::Object(policy) = policy {
+                    normalize_context_policy_value(policy.get_mut("when"));
+                }
+            }
+        }
+        if let Some(serde_json::Value::Object(alerts)) = agents.get_mut("context_size_alerts") {
+            for alert in alerts.values_mut() {
+                if let serde_json::Value::Object(alert) = alert {
+                    normalize_context_policy_value(alert.get_mut("when"));
+                }
+            }
+        }
         normalize_alias_key(
             agents,
             "thinkingSummary",
@@ -3973,6 +4400,7 @@ fn canonical_agents_key(key: &str) -> &str {
         "contextSizeAlerts" => "context_size_alerts",
         "thinkingSummary" => "thinking_summary",
         "serviceTier" => "service_tier",
+        "inferenceCompaction" => "inference_compaction",
         _ => key,
     }
 }
@@ -3984,6 +4412,7 @@ fn canonical_role_key(key: &str) -> &str {
         "interSessionAutoStart" => "inter_session_auto_start",
         "thinkingSummary" => "thinking_summary",
         "serviceTier" => "service_tier",
+        "inferenceCompaction" => "inference_compaction",
         "promptFragments" => "prompt_fragments",
         "promptOverride" => "prompt_override",
         "enableToolGroups" => "enable_tool_groups",

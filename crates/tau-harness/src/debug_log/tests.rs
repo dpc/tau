@@ -279,6 +279,7 @@ fn published_line_preserves_enriched_token_usage() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
     let event = Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -848,6 +849,7 @@ fn provider_debug_captures_are_not_logged() {
 #[test]
 fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
     let mut event = Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 

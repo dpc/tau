@@ -1550,6 +1550,20 @@ impl FakeState {
                 }
                 handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
             }
+            ScenarioActionV2::TextWithUsage { response, .. } => {
+                let mut finished = finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                );
+                finished.usage = Some(tau_proto::ProviderTokenUsage {
+                    prompt_sent_tokens: 2_000,
+                    prompt_cached_tokens: 0,
+                    response_received_tokens: 1,
+                    ..Default::default()
+                });
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
+            }
             ScenarioActionV2::Text { response, .. }
             | ScenarioActionV2::CompactedText { response, .. }
             | ScenarioActionV2::CompactedOpaqueText { response, .. }
@@ -3040,6 +3054,7 @@ fn finished(
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -3082,6 +3097,7 @@ impl ScenarioActionV2 {
     fn binding_user_text(&self) -> Option<&str> {
         match self {
             Self::Text { user_text, .. }
+            | Self::TextWithUsage { user_text, .. }
             | Self::OutputLengthReasoning { user_text, .. }
             | Self::ContextOverflow { user_text, .. }
             | Self::CompactedText {

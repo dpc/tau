@@ -155,17 +155,24 @@ a fixed harness-authored reason: first occurrence queues the pivot, recurrence
 after that pivot stops automatic continuation. Provider error text is displayed
 but is not trusted as model-visible guard instruction.
 
-Named context-size alerts compare a successful finished ordinary inference's
+Named context-size alerts compare a successful, accepted ordinary inference's
 provider-reported input-token usage with each enabled effective role threshold.
 The effective alert map is prompt-owned, so a role change during inference cannot
 alter response-time policy. Usage must strictly exceed the threshold. Failed,
 canceled, stale, duplicate, reactive-recovery, standalone-compaction, and
-inline-compacting responses do not create alert work. Each crossed alert queues
-its configured text as an internal prompt after the current response; tool calls
-finish before the prompt continues the turn. When delivery commits, the existing
+inline-compacting responses do not create alert work.
+
+An `after_response` alert queues its configured text after the response and, when
+tool calls are present, after those calls finish; delivery continues the current
+turn. An `outer_turn_finished` alert is evaluated against the accepted terminal
+response and logical finishing status, then wakes a fresh internal-prompt turn
+only after the current outer turn commits its finish. It never makes cancellation,
+error, challenged-response, or other non-response finishes notice-eligible. When
+either delivery commits, the existing
 `agent.prompt_submitted` or `agent.prompt_steered` fact carries
 `internal_kind=context_size_alert`. Within one daemon lifetime,
-an alert fires once while usage remains above its threshold and becomes eligible
+an alert at either lifecycle point fires once while usage remains above its
+threshold and becomes eligible
 again after usage falls to or below the threshold or context accounting resets.
 An accounting reset also removes any still-queued alert prompts so a compaction
 cannot be followed by stale advice from the old usage climb.

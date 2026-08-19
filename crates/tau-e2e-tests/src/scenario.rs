@@ -62,6 +62,13 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response.
         response: String,
     },
+    /// Complete normally with assistant text and fixed nonzero token usage.
+    TextWithUsage {
+        /// Exact latest user text.
+        user_text: String,
+        /// Complete assistant response.
+        response: String,
+    },
     /// Reach the output limit with one replay-safe full reasoning item and no
     /// assistant message or tool call.
     OutputLengthReasoning {

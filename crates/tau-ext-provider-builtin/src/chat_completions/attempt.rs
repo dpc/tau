@@ -379,6 +379,7 @@ fn finished(
     usage: Option<tau_proto::ProviderTokenUsage>,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 

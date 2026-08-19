@@ -90,6 +90,7 @@ fn prompt_started(id: &str) -> Event {
 
 fn prompt_terminated(id: &str) -> Event {
     Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_id: AgentId::parse("agent-test").expect("agent id"),
         agent_prompt_id: id
             .parse::<tau_proto::AgentPromptId>()

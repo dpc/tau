@@ -120,6 +120,7 @@ fn run_output_length_restart_cut(
             .filter(|record| matches!(
                 record.event,
                 Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                    automatic_compaction_decision: None,
                     output_length_disposition:
                         tau_proto::OutputLengthDisposition::ContinuationPlanned { .. },
                     ..

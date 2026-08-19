@@ -42,6 +42,7 @@ fn native_message(text: &str) -> Vec<ContextItem> {
 
 fn response(agent_id: &AgentId, ordinal: usize, calls: Vec<ToolCallItem>) -> Event {
     Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         agent_prompt_id: format!("prompt-{ordinal}")

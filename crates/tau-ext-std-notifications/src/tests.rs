@@ -432,6 +432,7 @@ fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
 
 fn agent_prompt_terminated(agent_id: &str, agent_prompt_id: &str) -> Event {
     Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         agent_prompt_id: agent_prompt_id
             .parse::<tau_proto::AgentPromptId>()
@@ -467,6 +468,7 @@ fn assistant_finished_response_for_agent(
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -505,6 +507,7 @@ fn tool_call_finished_response(
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 

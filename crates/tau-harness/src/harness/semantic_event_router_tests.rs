@@ -16,6 +16,7 @@ use crate::parse_agent_id;
 #[test]
 fn prompt_termination_persists_only_when_explicitly_required() {
     let event = Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_id: parse_agent_id("terminated-agent"),
         agent_prompt_id: tau_proto::AgentPromptId::parse("ap-terminated").expect("prompt id"),
         reason: tau_proto::AgentPromptTerminationReason::Canceled,
@@ -295,6 +296,7 @@ fn provider_execution_reports_never_enter_semantic_history() {
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 

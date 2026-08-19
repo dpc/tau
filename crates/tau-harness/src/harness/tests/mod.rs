@@ -1562,6 +1562,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
@@ -1620,6 +1621,7 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
         )])),
     };
     let mut response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 

@@ -341,6 +341,7 @@ fn assistant_finished(
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -384,6 +385,7 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
 
     assert!(
         !output.capture_finished(&ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -562,6 +564,7 @@ fn one_shot_output_falls_back_to_latest_streaming_text() {
 
     assert!(
         output.capture_finished(&ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -601,6 +604,7 @@ fn one_shot_output_status_clear_resets_streaming_fallback() {
 
     assert!(
         output.capture_finished(&ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -701,12 +705,14 @@ fn one_shot_streaming_fallback_uses_destination_policy_and_existing_framing() {
     let mut output = OneShotOutput::default();
     output.capture_update(&user_update("sp-tool", "", Some(HOSTILE_TEXT)));
     assert!(!output.capture_finished(&ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_items: Vec::new(),
         stop_reason: ProviderStopReason::ToolCalls,
         ..assistant_finished("sp-tool", "", ProviderStopReason::ToolCalls)
     }));
     output.capture_update(&user_update("sp-final", HOSTILE_TEXT, Some(HOSTILE_TEXT)));
     assert!(output.capture_finished(&ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_items: Vec::new(),
         ..assistant_finished("sp-final", "", ProviderStopReason::EndTurn)
     }));

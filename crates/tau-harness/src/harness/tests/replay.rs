@@ -1,5 +1,7 @@
 use std::fs as path_std_fs;
 
+use tau_config::settings::ContextPolicyPoint;
+
 use super::dispatch::provider_text_response;
 use super::*;
 use crate::agent as path_crate_agent;
@@ -1576,6 +1578,7 @@ fn provider_response_contains_text(finished: &ProviderResponseFinished, needle: 
 
 fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -1881,6 +1884,7 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 agent_prompt_id: format!("sp-{agent_id}")
                     .parse::<tau_proto::AgentPromptId>()
@@ -2924,6 +2928,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     h.publish_event(
         None,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -3071,6 +3076,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         h.publish_for_agent(
             &cid,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                automatic_compaction_decision: None,
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
@@ -3333,6 +3339,7 @@ fn resumed_harness_replays_persisted_session_history() {
             .expect("first prompt agent id")
             .clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
@@ -3421,6 +3428,10 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
                     threshold: 100,
                     enable: true,
                     message: alert_text.to_owned(),
+                    when: tau_config::settings::ContextPolicyWhen {
+                        at: ContextPolicyPoint::AfterResponse,
+                        statuses: None,
+                    },
                 },
             );
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish work".to_owned()))
@@ -3459,6 +3470,10 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
                     threshold: 200,
                     enable: true,
                     message: steered_alert_text.to_owned(),
+                    when: tau_config::settings::ContextPolicyWhen {
+                        at: ContextPolicyPoint::AfterResponse,
+                        statuses: None,
+                    },
                 },
             );
         h.set_agent_turn_state(
@@ -3580,6 +3595,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
 
     let spid1 = h.send_prompt_to_agent("s1");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,

@@ -4,7 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tau_config::settings::{AgentRole, HarnessSettings};
+use tau_config::settings::{
+    AgentRole, CompactionPolicyThreshold, ContextPolicyPoint, HarnessSettings, RoleCompaction,
+};
 use tau_proto::{ModelId, ModelParams, ProviderModelInfo};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -396,12 +398,61 @@ pub(crate) fn role_infos(
                     disable_tools: role
                         .map(|role| role.disable_tools.clone())
                         .unwrap_or_default(),
+                    inference_compaction: role.and_then(|role| {
+                        role.inference_compaction
+                            .or(role.compaction)
+                            .map(format_role_compaction)
+                    }),
+                    compactions: role
+                        .map(|role| {
+                            role.compactions
+                                .iter()
+                                .map(|(name, policy)| {
+                                    let point = match policy.when.at {
+                                        ContextPolicyPoint::AfterResponse => "after_response",
+                                        ContextPolicyPoint::BeforeInference => "before_inference",
+                                        ContextPolicyPoint::OuterTurnFinished => {
+                                            "outer_turn_finished"
+                                        }
+                                    };
+                                    let statuses = policy.when.statuses.as_ref().map_or_else(
+                                        || "any".to_owned(),
+                                        |statuses| {
+                                            statuses
+                                                .iter()
+                                                .map(|status| format!("{status:?}").to_lowercase())
+                                                .collect::<Vec<_>>()
+                                                .join("+")
+                                        },
+                                    );
+                                    format!(
+                                        "{name}={}@{point}[{statuses}]{}",
+                                        match policy.threshold {
+                                            CompactionPolicyThreshold::ProviderDefault =>
+                                                "provider_default".to_owned(),
+                                            CompactionPolicyThreshold::Tokens(tokens) =>
+                                                tokens.to_string(),
+                                        },
+                                        if policy.enable { "" } else { ":disabled" }
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 }),
             }
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+fn format_role_compaction(value: tau_config::settings::RoleCompaction) -> String {
+    match value {
+        RoleCompaction::ProviderDefault => "provider_default".to_owned(),
+        RoleCompaction::Disabled => "disabled".to_owned(),
+        RoleCompaction::Threshold(tokens) => tokens.to_string(),
+    }
 }
 
 /// Returns the effort levels published for `model` by its provider.

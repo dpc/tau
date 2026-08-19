@@ -989,6 +989,8 @@ struct RoleCompletionDetails {
     disable_tool_groups: Option<String>,
     enable_tools: Option<String>,
     disable_tools: Option<String>,
+    inference_compaction: Option<String>,
+    compactions: Option<String>,
     role_description: Option<String>,
 }
 
@@ -1026,6 +1028,8 @@ impl RoleCompletionDetails {
                 .then(|| join_names(&details.enable_tools)),
             disable_tools: (!details.disable_tools.is_empty())
                 .then(|| join_names(&details.disable_tools)),
+            inference_compaction: details.inference_compaction.clone(),
+            compactions: (!details.compactions.is_empty()).then(|| details.compactions.join(",")),
             role_description: None,
         }
     }
@@ -1042,6 +1046,8 @@ impl RoleCompletionDetails {
             disable_tool_groups: None,
             enable_tools: None,
             disable_tools: None,
+            inference_compaction: None,
+            compactions: None,
             role_description: None,
         };
 
@@ -1064,6 +1070,10 @@ impl RoleCompletionDetails {
                 "disable-tool-groups" => details.disable_tool_groups = Some(value.to_owned()),
                 "enable-tools" => details.enable_tools = Some(value.to_owned()),
                 "disable-tools" => details.disable_tools = Some(value.to_owned()),
+                "inference-compaction" => {
+                    details.inference_compaction = Some(value.to_owned());
+                }
+                "compactions" => details.compactions = Some(value.to_owned()),
                 _ => {}
             }
         }
@@ -1087,6 +1097,12 @@ impl RoleCompletionDetails {
         }
         if let Some(service_tier) = self.service_tier.as_deref() {
             parts.push(format!("st={service_tier}"));
+        }
+        if let Some(inference_compaction) = self.inference_compaction.as_deref() {
+            parts.push(format!("inference-compaction={inference_compaction}"));
+        }
+        if let Some(compactions) = self.compactions.as_deref() {
+            parts.push(format!("compactions={compactions}"));
         }
         if include_tool_details {
             if let Some(tools) = self.tools.as_deref() {
@@ -1144,6 +1160,12 @@ impl RoleCompletionDetails {
                 .to_owned(),
             "enable-tools" => self.enable_tools.as_deref().unwrap_or("unset").to_owned(),
             "disable-tools" => self.disable_tools.as_deref().unwrap_or("unset").to_owned(),
+            "inference-compaction" => self
+                .inference_compaction
+                .as_deref()
+                .unwrap_or("unset")
+                .to_owned(),
+            "compactions" => self.compactions.as_deref().unwrap_or("unset").to_owned(),
             _ => "unset".to_owned(),
         }
     }
@@ -1196,6 +1218,8 @@ fn empty_role_completion_details() -> RoleCompletionDetails {
         disable_tool_groups: None,
         enable_tools: None,
         disable_tools: None,
+        inference_compaction: None,
+        compactions: None,
         role_description: None,
     }
 }

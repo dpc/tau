@@ -546,6 +546,7 @@ fn finished(
     provider_response_id: Option<String>,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         agent_prompt_id: agent_prompt_id.clone(),

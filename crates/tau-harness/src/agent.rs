@@ -14,7 +14,7 @@
 mod loop_guard;
 mod work_status;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::{AgentPersistenceMode, NodeId};
@@ -452,6 +452,21 @@ pub(crate) struct Agent {
     pub(crate) turn_generation: u64,
     /// Runtime-only semantic progress reported through the status tool.
     pub(crate) work_status: WorkStatus,
+    /// Whether the final canonical prompt of the current outer turn exposed
+    /// status.
+    pub(crate) terminal_status_was_available: bool,
+    /// Whether the accepted terminal may create an outer-finish notice.
+    pub(crate) terminal_notice_eligible: bool,
+    /// Exact outer turn owning the current runtime-only notice candidate.
+    pub(crate) terminal_notice_outer_turn_id: Option<tau_proto::AgentOuterTurnId>,
+    /// Alert policy frozen with the final accepted prompt of that turn.
+    pub(crate) terminal_context_size_alerts:
+        BTreeMap<String, tau_config::settings::ContextSizeAlert>,
+    /// Durable eager decision committed by the current turn's terminal and owed
+    /// by its outer-turn finish.
+    pub(crate) pending_automatic_compaction_decision: Option<tau_proto::CompactionTransactionId>,
+    /// Protected eager start currently waiting on interception or persistence.
+    pub(crate) pending_automatic_compaction_start: Option<tau_proto::CompactionTransactionId>,
     /// Typed runtime ownership of the open turn and its write-pending finish.
     pub(crate) outer_turn: OuterTurnRuntimeState,
     /// Named runtime state for the current reasoning-only run's continuation.
@@ -893,6 +908,12 @@ impl Agent {
             published_runtime_state: tau_proto::AgentRuntimeState::Idle,
             turn_generation: 0,
             work_status: WorkStatus::default(),
+            terminal_status_was_available: false,
+            terminal_notice_eligible: false,
+            terminal_notice_outer_turn_id: None,
+            terminal_context_size_alerts: BTreeMap::new(),
+            pending_automatic_compaction_decision: None,
+            pending_automatic_compaction_start: None,
             outer_turn: OuterTurnRuntimeState::None,
             output_length_continuation: OutputLengthContinuationState::None,
             lifecycle_notification_only_turn: false,

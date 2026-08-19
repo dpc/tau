@@ -2357,6 +2357,7 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     );
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator,
@@ -3415,6 +3416,7 @@ fn finished_response(
         ProviderStopReason::EndTurn
     };
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
@@ -4077,6 +4079,7 @@ fn finished_response_with_usage(
     text: &str,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        automatic_compaction_decision: None,
         agent_id: agent_id(agent_id_value),
         usage: Some(tau_proto::ProviderTokenUsage {
             prompt_sent_tokens,
@@ -6341,6 +6344,7 @@ fn hidden_agent_activity_keeps_global_in_progress() {
         ..agent_prompt_created("worker-sp", "s1")
     }));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: tau_proto::ExtensionName::parse("core-subagents")
@@ -6375,6 +6379,7 @@ fn switched_agent_shows_its_tool_usage() {
         query_id: "q-worker".to_owned(),
     };
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator: originator.clone(),
@@ -6749,6 +6754,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
         },
     ));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator,
@@ -6794,6 +6800,7 @@ fn agent_switch_preserves_separate_transcripts() {
         ..agent_prompt_created("worker-sp", "s1")
     }));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         agent_id: agent_id("worker-1"),
         originator,
@@ -8953,6 +8960,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     // and should render immediately before the context chip. Quota remains
     // final, while side-conversation calls stay rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -9311,6 +9319,7 @@ fn prompt_termination_clears_live_response_and_activity() {
     // publishes this terminal lifecycle fact instead of leaving the UI's live
     // response block and Ctrl-D guard stuck forever.
     renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_prompt_id: test_agent_prompt_id("sp-stale"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         reason: AgentPromptTerminationReason::Stale,
@@ -10016,6 +10025,8 @@ fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
             description: "unused structured details".to_owned(),
             role_description: Some("production implementation".to_owned()),
             details: Some(tau_proto::HarnessRoleDetails {
+                inference_compaction: None,
+                compactions: Vec::new(),
                 model: Some("provider/model".into()),
                 params: tau_proto::ModelParams {
                     effort: Effort::High,
@@ -11307,6 +11318,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         standalone_compaction_prompt_started("ap-cancelled-self"),
     ));
     renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_id: agent_id("main"),
         agent_prompt_id: test_agent_prompt_id("ap-cancelled-self"),
         reason: AgentPromptTerminationReason::Canceled,
@@ -11541,6 +11553,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
         standalone_compaction_prompt_started("ap-terminated"),
     ));
     renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        automatic_compaction_decision: None,
         agent_id: agent_id("main"),
         agent_prompt_id: test_agent_prompt_id("ap-terminated"),
         reason: AgentPromptTerminationReason::Canceled,
@@ -12306,6 +12319,7 @@ fn watched_agent_response_finished_keeps_status_row() {
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -12511,6 +12525,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     assert!(eventually_screen_contains(&vt, 100, "❓✨ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -12589,6 +12604,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     assert!(eventually_screen_contains(&vt, 100, "❓✨ @engineer_1",));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -12645,6 +12661,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         },
     ));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
