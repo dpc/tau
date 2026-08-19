@@ -183,8 +183,9 @@ One closed reactive sequence additionally
 accepts a canonical no-output context-window failure, one correlated compact
 request for a verified pre-cut round, and one replacement/suffix continuation
 that retains the overflowing prompt while excluding that pre-cut round. The
-production Chat Completions adapter, not this generic provider seam, owns
-static no-tools wire lowering and transcript-v1 request materialization.
+shared `tau-provider` policy owns transcript-v1 request materialization. The
+Chat Completions adapter owns its static no-tools wire lowering, while
+provider-builtin owns public Responses fallback dispatch and validation.
 
 The output-length acceptance is one separate closed two-action, sole-lane
 scenario. It emits one full-reasoning `Length` response with fixed synthetic

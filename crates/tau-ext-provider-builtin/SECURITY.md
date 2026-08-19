@@ -174,24 +174,28 @@ cleared from generic live/debug projections; canonical provider transcript handl
 retains its existing policy. See
 [SPEC-provider-execution-reports-and-canonical-facts](../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 
-## Local Chat Completions summary compaction
+## Tau-owned summary compaction fallback
 
-Standalone summary compaction is available only through an exact model's
-explicit `local_summary_compaction` declaration with a matching context window
-and bounded input/output limits. The provider runtime never persists the full
+Standalone summary compaction is available by default for Chat Completions,
+OpenRouter, and public Responses models using context-derived bounded limits
+and a proactive threshold. An exact model may fully override those limits with
+`local_summary_compaction`. Provider-native ChatGPT/Codex compaction remains
+preferred. The provider runtime never persists the full
 compactor request, including debug capture, and never retries after semantic
-output. It discards separately bounded typed reasoning and accepts only one
-nonempty bounded assistant narrative; every other semantic output is rejected.
+output. It discards separately bounded typed reasoning and, on public Responses,
+its paired opaque replay twin. It accepts only one nonempty bounded assistant
+narrative; every other semantic output is rejected.
 The harness, rather than the provider, adds a bounded durable tool-status
 supplement before that narrative becomes an explicitly
 untrusted user-role historical checkpoint. The validator separately byte-bounds
-and discards reasoning text and rejects every other output item. Re-review
+and discards reasoning text plus that public Responses replay twin, and rejects
+every other output item. Re-review
 locality, typed private narrative-envelope provenance, the 256-KiB raw narrative
 and 2-MiB final checkpoint caps, 32-fact/8-KiB supplement budgeting,
 selected-cut ancestry (including traversal through earlier compactions),
 included and excluded fields, tag-delimiter escaping, atomic rejection,
 capture, and terminalization whenever this profile or dispatch path changes.
-Known-remote OpenRouter conversion strips the local-only declaration.
+OpenRouter and public Responses use the same bounded fallback contract.
 Provider settings contain no credentials. The extension reads typed version-zero
 OAuth and API-key records only through its configured-instance Secret RPC,
 reloads them at prompt time, and persists OAuth rotation with generation

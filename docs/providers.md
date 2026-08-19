@@ -777,9 +777,10 @@ Configure snapshot.
 Keyless setup writes only the explicit portable profile. It does not create an
 empty or dummy API-key record.
 
-Generic Chat Completions models do not support standalone compaction. A local
-model can opt in to Tau summary compaction by declaring its context window plus
-an explicit `local_summary_compaction` object:
+Tau enables its summary compaction fallback for every Chat Completions,
+OpenRouter, and public Responses model. It derives conservative request,
+output, and proactive-compaction limits from the model's context window. An
+optional `local_summary_compaction` object fully overrides those defaults:
 
 ```json
 {
@@ -795,10 +796,10 @@ an explicit `local_summary_compaction` object:
 }
 ```
 
-Tau then sends one dedicated no-tools Chat Completions request to that exact
-model. It commits only a validated summary as untrusted synthetic historical
-context; it never adds model text to the system prompt. Public Responses and
-models without this declaration remain unsupported.
+Tau sends one dedicated no-tools request through that exact model's configured
+backend. It commits only a validated summary as untrusted synthetic historical
+context; it never adds model text to the system prompt. ChatGPT/Codex models
+continue to prefer their provider-native inline or standalone compaction.
 The model may emit reasoning text before its summary. Tau applies
 `max_output_bytes` separately to the aggregate reasoning text and the assistant
 message, discards the reasoning, and rejects every other output item. The final
@@ -815,13 +816,15 @@ from ordinary provider messages; empty, oversized, or multi-item envelopes fail
 atomically, and provider lowering cannot replay the private envelope. Raw
 narrative is capped at 256 KiB, the final escaped checkpoint at 2 MiB, and tag
 delimiters are escaped.
-The context window must match the model field. Input and output limits must be
-positive and fit conservatively within that window; units are bytes, tokens,
-and bytes respectively, with an additional 1,024-token worst-case request and
-chat-template reserve. Known-remote OpenRouter profiles discard this local-only
-declaration. Transcript-v1 deliberately removes image bytes while
-retaining image metadata and a loss marker. Empty, unsupported, truncated, or
-over-limit summaries fail the durable transaction without fallback or resend.
+Context windows below 1,316 tokens cannot fit even the minimum bounded request
+and therefore do not publish the fallback. For an override, the context window
+must match the model field. Input and output limits must be positive and fit
+conservatively within that window; `max_input_bytes` must be at least 256. Units are
+bytes, tokens, and bytes respectively, with an additional 1,024-token worst-case
+request and chat-template reserve. Transcript-v1 deliberately removes image
+bytes while retaining image metadata and a loss marker. Empty, unsupported,
+truncated, or over-limit summaries fail the durable transaction without fallback
+or resend.
 
 `tau-provider-responses` implements the public `/responses` protocol over
 API-key HTTP/SSE or WebSocket for the `responses` profile. The

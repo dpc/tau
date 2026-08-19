@@ -409,13 +409,13 @@ matching current provider cooldown generation and wakes same-profile peers with
 stable anti-herd jitter. Errors, cancellation, stale successes, and best-effort
 quota display updates do not clear inference cooldowns.
 
-## Local summary compaction
+## Tau-owned summary compaction fallback
 
-Generic Chat Completions and public Responses models do not advertise standalone
-compaction. An explicitly local Chat Completions model can opt in with
-`local_summary_compaction`, the `local_transcript_v1` profile, a context window
-matching the model, and conservative input-byte/output-token/output-byte limits.
-Tau uses the exact model for one no-tools request, intentionally omits image
+Chat Completions, OpenRouter, and public Responses models advertise standalone
+summary compaction by default with conservative context-derived limits and a
+proactive threshold. `local_summary_compaction` remains an optional full
+per-model override using `local_transcript_v1` and a context window matching the
+model. Tau uses the exact model and backend for one no-tools request, intentionally omits image
 bytes with a loss marker, persists no full request, and accepts one bounded
 free-form final narrative while discarding separately bounded typed reasoning.
 The harness adds a deterministic bounded supplement of durable tool terminal

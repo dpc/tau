@@ -6,6 +6,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::ModelName;
+use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
 
 /// Default context window advertised by configured compatible models.
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -61,9 +62,9 @@ pub struct ChatCompletionsModel {
     /// Whether this model may produce multiple Function calls in one turn.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
-    /// Optional Tau-owned summary compactor configuration.
+    /// Optional full override for Tau-owned summary compaction limits.
     ///
-    /// Absence keeps standalone compaction unsupported for this model.
+    /// Absence derives conservative defaults from the model context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_summary_compaction: Option<LocalSummaryCompactionConfig>,
     /// Optional operator-declared runtime cache contract for this exact model.
@@ -113,7 +114,7 @@ pub enum LocalSummaryCompactionSerializationProfile {
 
 impl LocalSummaryCompactionConfig {
     /// Convert this serialized profile into validated provider request limits.
-    fn validated_for(
+    pub(crate) fn validated_for(
         self,
         model_context_window: u64,
     ) -> Option<tau_provider_chat_completions::LocalSummaryCompactionConfig> {
@@ -124,6 +125,17 @@ impl LocalSummaryCompactionConfig {
             self.max_output_tokens,
             self.max_output_bytes,
         )
+    }
+}
+
+/// Resolve an optional profile override or derive conservative defaults.
+fn resolved_local_summary_compaction(
+    override_config: Option<LocalSummaryCompactionConfig>,
+    context_window: u64,
+) -> Option<SummaryCompactionConfig> {
+    match override_config {
+        Some(config) => config.validated_for(context_window),
+        None => SummaryCompactionConfig::default_for(context_window),
     }
 }
 
@@ -442,6 +454,7 @@ mod sampling;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use attempt::validate_resolved_narrative_output;
 pub(super) use attempt::{PromptAttemptOutcome, models_for_provider, run_prompt_attempt};
 pub(super) use openrouter::fetch_openrouter_models;
 pub use openrouter::{OpenRouterDiscoveryError, OpenRouterProfile};

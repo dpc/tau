@@ -13,14 +13,20 @@ data-URL request bounds. A compacted replacement may summarize an old image
 away like any other input fact. This behavior is confirmed by
 [GATE-typed-image-tool-results](GATE-typed-image-tool-results.md).
 
-The explicitly opted-in local Chat Completions summary compactor is the narrow
-transcript-v1 exception to byte-identical provider conversion. Its dedicated
+The default Tau-owned summary fallback for Chat Completions, OpenRouter, and
+public Responses models is the narrow transcript-v1 exception to byte-identical
+provider conversion. Provider-native ChatGPT/Codex compaction remains preferred.
+The fallback derives conservative limits and a proactive threshold from the
+model context window; an explicit `local_summary_compaction` profile fully
+overrides those defaults. Its dedicated
 no-tools request serializes typed history as canonical JSON, intentionally omits
 image bytes while retaining image metadata and an explicit loss marker, and
 persists only a bounded validated synthetic user-role checkpoint. Its output may
 contain separately byte-bounded reasoning text, which Tau discards; exactly one
 nonempty bounded assistant narrative message must remain, and every other
-semantic output is rejected. Before committing that narrative, the harness
+semantic output is rejected. Public Responses also discards the opaque
+provider-replay twin paired with that bounded reasoning text; it cannot enter
+the narrative or durable checkpoint. Before committing that narrative, the harness
 adds a bounded deterministic JSON supplement of the selected durable branch's
 most recent closed tool-result facts: tool name, tool type, and terminal
 success/error/cancelled class only. It excludes tool arguments/results/error
@@ -324,10 +330,10 @@ middle-truncates at most one boundary message with an explicit token marker.
 Images and audio inside retained messages remain uncharged by this retention
 budget. All other input items are omitted. Invalid output or failed validation
 installs nothing.
-Outside the explicitly scoped ChatGPT-v2 and local Chat Completions
+Outside the explicitly scoped ChatGPT-v2 and Tau-owned summary
 transcript-v1 exceptions, a standalone provider request is stateless and its
 ordered provider output remains the canonical replacement window without
-pruning or reinterpretation. The explicitly opted-in local Chat Completions
+pruning or reinterpretation. The default Tau-owned summary
 transcript-v1 compactor transforms one bounded assistant narrative into one
 synthetic checkpoint message together with the harness-owned durable-facts
 supplement described above.

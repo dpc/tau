@@ -104,12 +104,11 @@ impl OpenRouterProfile {
                 .iter()
                 .cloned()
                 .map(|mut model| {
-                    // OpenRouter is a known remote route; the explicit local
-                    // compactor assertion and cache contract have no authority
-                    // on this profile. The selected upstream may vary. A
+                    // OpenRouter is a known remote route; the explicit cache
+                    // contract has no authority on this profile because the
+                    // selected upstream may vary. A
                     // model-level compatibility override retains unrelated
                     // controls but cannot alter the telemetry-only cache route.
-                    model.local_summary_compaction = None;
                     model.cache_contract = None;
                     if let Some(compat) = model.compat.as_mut() {
                         compat.stream_options = true;

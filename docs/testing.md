@@ -449,10 +449,12 @@ Provider-split acceptance is intentionally layered. Compatibility fixtures in
 `tau-ext-provider-builtin` freeze existing serialized profile kinds plus the
 generic Responses profile, durable old
 session replay, model/routing publication, and successful event ordering. The
-Chat Completions crate owns HTTP/SSE request, cancellation, typed-error, Function
-tool, raw-argument, semantic-replay, and transport-byte tests; the extension owns
-OpenRouter discovery, capability/default/explicit-false publication, sampling,
-events, and scheduler integration. The public Responses crate owns generic
+shared `tau-provider` crate owns summary-compaction materialization and limit
+tests. The Chat Completions crate owns HTTP/SSE request, cancellation,
+typed-error, Function tool, raw-argument, semantic-replay, transport-byte, and
+summary wire-lowering tests; the extension owns OpenRouter discovery,
+capability/default publication, public Responses fallback dispatch and
+validation, sampling, events, and scheduler integration. The public Responses crate owns generic
 `/responses` HTTP/SSE and WebSocket protocol coverage, transport selection
 without fallback, full-replay retry semantics, no-`[DONE]` completion, typed
 full replay, and Function-call raw-argument preservation. Its bounded loopback

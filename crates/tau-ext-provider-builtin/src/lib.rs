@@ -1651,6 +1651,7 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
                     context_window: 128_000,
                     tags: Vec::new(),
                     supports_parallel_tool_calls: true,
+                    local_summary_compaction: None,
                     cache_contract: None,
                     est_uncached_input_cost_1m_usd: None,
                     est_cached_input_cost_1m_usd: None,

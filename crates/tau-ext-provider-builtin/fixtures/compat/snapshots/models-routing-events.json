@@ -762,7 +762,7 @@
       ],
       "supports_compaction": false,
       "supports_parallel_tool_calls": true,
-      "supports_standalone_compaction": false,
+      "supports_standalone_compaction": true,
       "tags": [
         "provider:local",
         "shell:local"
@@ -772,7 +772,8 @@
       ],
       "verbosities": [
         "medium"
-      ]
+      ],
+      "standalone_compaction_threshold": 6944
     },
     {
       "context_window": 131072,
@@ -791,7 +792,7 @@
       ],
       "supports_compaction": false,
       "supports_parallel_tool_calls": true,
-      "supports_standalone_compaction": false,
+      "supports_standalone_compaction": true,
       "tags": [
         "route:openrouter"
       ],
@@ -800,7 +801,8 @@
       ],
       "verbosities": [
         "medium"
-      ]
+      ],
+      "standalone_compaction_threshold": 31488
     }
   ],
   "routes": [

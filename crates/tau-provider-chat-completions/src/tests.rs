@@ -1065,12 +1065,13 @@ fn local_summary_compaction_builds_dedicated_bounded_request() {
             },
         ));
     let mut config = resolved_provider(&provider());
-    config.local_summary_compaction = Some(LocalSummaryCompactionConfig {
-        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
-        max_input_bytes: NonZeroU64::new(4096).expect("positive"),
-        max_output_tokens: NonZeroU32::new(321).expect("positive"),
-        max_output_bytes: NonZeroU64::new(2048).expect("positive"),
-    });
+    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
+        NonZeroU64::new(8192).expect("positive"),
+        8192,
+        NonZeroU64::new(4096).expect("positive"),
+        NonZeroU32::new(321).expect("positive"),
+        NonZeroU64::new(2048).expect("positive"),
+    );
 
     let request = try_build_request(&config, &provider().models[0], &created)
         .expect("enabled summary request");
@@ -1120,12 +1121,13 @@ fn local_summary_compaction_rejects_oversized_input_without_truncation() {
     let mut created = prompt();
     created.operation = tau_proto::PromptOperation::StandaloneCompaction;
     let mut config = resolved_provider(&provider());
-    config.local_summary_compaction = Some(LocalSummaryCompactionConfig {
-        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
-        max_input_bytes: NonZeroU64::new(1).expect("positive"),
-        max_output_tokens: NonZeroU32::new(1).expect("positive"),
-        max_output_bytes: NonZeroU64::new(1).expect("positive"),
-    });
+    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
+        NonZeroU64::new(8192).expect("positive"),
+        8192,
+        NonZeroU64::new(1).expect("positive"),
+        NonZeroU32::new(1).expect("positive"),
+        NonZeroU64::new(1).expect("positive"),
+    );
 
     assert!(matches!(
         try_build_request(&config, &provider().models[0], &created),
@@ -1189,7 +1191,7 @@ fn local_summary_compaction_enforces_complete_context_budget_boundary() {
 #[test]
 fn local_summary_compaction_rejects_output_bytes_above_harness_narrative_cap() {
     let context = NonZeroU64::new(1_000_000).expect("positive");
-    let input = NonZeroU64::new(1).expect("positive");
+    let input = NonZeroU64::new(256).expect("positive");
     let output_tokens = NonZeroU32::new(1).expect("positive");
     let exact =
         NonZeroU64::new(tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64).expect("positive");

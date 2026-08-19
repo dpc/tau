@@ -1,5 +1,7 @@
 //! Extension policy adapter for one finite Chat Completions attempt.
 
+use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
+
 use super::sampling::ResponseSampler;
 use super::{ChatCompletionsModel, ChatCompletionsProvider};
 
@@ -40,11 +42,16 @@ pub fn models_for_provider(
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
-                supports_standalone_compaction: model
-                    .local_summary_compaction
-                    .and_then(|config| config.validated_for(model.context_window))
-                    .is_some(),
-                standalone_compaction_threshold: None,
+                supports_standalone_compaction: super::resolved_local_summary_compaction(
+                    model.local_summary_compaction,
+                    model.context_window,
+                )
+                .is_some(),
+                standalone_compaction_threshold: super::resolved_local_summary_compaction(
+                    model.local_summary_compaction,
+                    model.context_window,
+                )
+                .map(SummaryCompactionConfig::proactive_threshold),
                 cache_policy: model.cache_contract.map(|contract| {
                     contract
                         .runtime_policy()
@@ -81,9 +88,10 @@ pub fn run_prompt_attempt<W: std::io::Write>(
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: provider.max_output_tokens,
-        local_summary_compaction: model
-            .local_summary_compaction
-            .and_then(|config| config.validated_for(model.context_window)),
+        local_summary_compaction: super::resolved_local_summary_compaction(
+            model.local_summary_compaction,
+            model.context_window,
+        ),
         extra_body: provider.extra_body.clone(),
         compat: lower_compat(compat),
     };
@@ -125,11 +133,13 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                         progress: tau_provider_chat_completions::SemanticProgress::Parsed,
                     };
                 }
-                match validate_narrative_output(
+                match validate_resolved_narrative_output(
                     success.output_items,
-                    model
-                        .local_summary_compaction
-                        .expect("standalone compaction is dispatched only for an opted-in model"),
+                    super::resolved_local_summary_compaction(
+                        model.local_summary_compaction,
+                        model.context_window,
+                    )
+                    .expect("standalone compaction is dispatched only for a supported model"),
                 ) {
                     Ok(output) => success.output_items = vec![output],
                     Err(error) => {
@@ -269,9 +279,9 @@ fn lower_compat(
     }
 }
 
-fn validate_narrative_output(
+pub(crate) fn validate_resolved_narrative_output(
     items: Vec<tau_proto::ContextItem>,
-    config: super::LocalSummaryCompactionConfig,
+    config: SummaryCompactionConfig,
 ) -> Result<tau_proto::ContextItem, String> {
     let mut message = None;
     let mut reasoning_bytes = 0_u64;
@@ -284,7 +294,7 @@ fn validate_narrative_output(
                     .ok_or_else(|| {
                         "summary compactor reasoning exceeds its byte limit".to_owned()
                     })?;
-                if config.max_output_bytes.get() < reasoning_bytes {
+                if config.max_output_bytes() < reasoning_bytes {
                     return Err("summary compactor reasoning exceeds its byte limit".to_owned());
                 }
             }
@@ -306,7 +316,7 @@ fn validate_narrative_output(
         })
         .collect::<String>();
     if text.trim().is_empty()
-        || u64::try_from(text.len()).unwrap_or(u64::MAX) > config.max_output_bytes.get()
+        || u64::try_from(text.len()).unwrap_or(u64::MAX) > config.max_output_bytes()
     {
         return Err("summary compactor output is empty or exceeds its byte limit".to_owned());
     }
@@ -317,6 +327,19 @@ fn validate_narrative_output(
     Ok(tau_proto::ContextItem::LocalCompactionNarrative(
         tau_proto::LocalCompactionNarrativeItem { narrative: text },
     ))
+}
+
+#[cfg(test)]
+fn validate_narrative_output(
+    items: Vec<tau_proto::ContextItem>,
+    config: super::LocalSummaryCompactionConfig,
+) -> Result<tau_proto::ContextItem, String> {
+    validate_resolved_narrative_output(
+        items,
+        config
+            .validated_for(config.context_window_tokens.get())
+            .expect("test compaction config is valid"),
+    )
 }
 
 /// Extension-owned interpretation of one backend attempt.

@@ -324,9 +324,10 @@ then validates byte-identical durable replay, removed source context, and
 ordinary continuation in Boot B. This proves harness transaction, typed-local
 composition, durable replacement, opaque and composite cold replay, and
 continuation semantics through the provider extension seam; it does not expand
-the grammar into a compaction outcome matrix. The Chat Completions adapter's
-private static no-tools wire lowering and transcript-v1 request materialization
-stay covered at its production boundary.
+the grammar into a compaction outcome matrix. Shared `tau-provider` tests own
+transcript-v1 materialization and limits, the Chat Completions adapter owns its
+private static no-tools wire lowering, and provider-builtin tests own public
+Responses fallback dispatch and validation.
 
 This boundary validates extension supervision, CBOR lifecycle, model routing,
 prompt assembly, provider-event validation, one real tool continuation, typed

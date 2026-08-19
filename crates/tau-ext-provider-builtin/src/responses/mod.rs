@@ -15,6 +15,7 @@ pub use prompt_cache::{
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName};
+use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
 
 use self::sampling::ResponsesResponseSampler;
 use crate::OpenAiPromptCacheKey;
@@ -80,6 +81,9 @@ pub struct ResponsesModel {
     /// Whether the model may issue several Function calls in one response.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
+    /// Optional full override for Tau-owned summary compaction limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_summary_compaction: Option<super::chat_completions::LocalSummaryCompactionConfig>,
     /// Optional operator-declared runtime cache contract for this exact model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_contract: Option<crate::ProviderCacheContract>,
@@ -230,8 +234,9 @@ pub fn models_for_provider(
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
-                supports_standalone_compaction: false,
-                standalone_compaction_threshold: None,
+                supports_standalone_compaction: resolved_summary_config(model).is_some(),
+                standalone_compaction_threshold: resolved_summary_config(model)
+                    .map(SummaryCompactionConfig::proactive_threshold),
                 cache_policy: model.cache_contract.map(|contract| {
                     contract
                         .runtime_policy()
@@ -260,29 +265,54 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> PromptAttemptOutcome {
+    let summary_config = resolved_summary_config(model);
+    let compact_prompt = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
+        let Some(config) = summary_config else {
+            return invalid_compaction(
+                agent_prompt_id,
+                prompt,
+                provider,
+                "model context window is too small for summary compaction",
+            );
+        };
+        match materialize_summary_prompt(prompt, config) {
+            Ok(compact) => Some(compact),
+            Err(error) => return invalid_compaction(agent_prompt_id, prompt, provider, error),
+        }
+    } else {
+        None
+    };
+    let effective_prompt = compact_prompt.as_ref().unwrap_or(prompt);
     let compat = model.compat.unwrap_or(provider.compat);
     let config = tau_provider_responses::AttemptConfig {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
-        max_output_tokens: provider.max_output_tokens,
+        max_output_tokens: attempt_output_tokens(
+            provider.max_output_tokens,
+            summary_config,
+            compact_prompt.is_some(),
+        ),
         transport: provider.transport,
-        prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
-            OpenAiPromptCacheKey::Agent => match cache.policy {
-                OpenAiPromptCachePolicy::Legacy { retention } => {
-                    tau_provider_responses::PromptCachePolicy::Legacy(match retention {
-                        crate::OpenAiPromptCacheRetention::InMemory => {
-                            tau_provider_responses::PromptCacheRetention::InMemory
-                        }
-                        crate::OpenAiPromptCacheRetention::Hours24 => {
-                            tau_provider_responses::PromptCacheRetention::Hours24
-                        }
-                    })
-                }
-                OpenAiPromptCachePolicy::Explicit { .. } => {
-                    tau_provider_responses::PromptCachePolicy::Explicit
-                }
-            },
-        }),
+        prompt_cache: use_prompt_cache(compact_prompt.is_some())
+            .then_some(compat.openai_prompt_cache)
+            .flatten()
+            .map(|cache| match cache.key {
+                OpenAiPromptCacheKey::Agent => match cache.policy {
+                    OpenAiPromptCachePolicy::Legacy { retention } => {
+                        tau_provider_responses::PromptCachePolicy::Legacy(match retention {
+                            crate::OpenAiPromptCacheRetention::InMemory => {
+                                tau_provider_responses::PromptCacheRetention::InMemory
+                            }
+                            crate::OpenAiPromptCacheRetention::Hours24 => {
+                                tau_provider_responses::PromptCacheRetention::Hours24
+                            }
+                        })
+                    }
+                    OpenAiPromptCachePolicy::Explicit { .. } => {
+                        tau_provider_responses::PromptCachePolicy::Explicit
+                    }
+                },
+            }),
     };
     let model = tau_provider_responses::AttemptModel {
         id: model.id.clone(),
@@ -291,7 +321,7 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     let outcome =
         forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
             tau_provider_responses::run_attempt_with_debug(
-                prompt,
+                effective_prompt,
                 &config,
                 &model,
                 debug_provider_requests,
@@ -301,7 +331,24 @@ pub fn run_prompt_attempt<W: std::io::Write>(
             )
         });
     match outcome {
-        tau_provider_responses::AttemptOutcome::Completed(success) => {
+        tau_provider_responses::AttemptOutcome::Completed(mut success) => {
+            if let Some(config) = summary_config.filter(|_| compact_prompt.is_some()) {
+                if success.stop_reason != tau_proto::ProviderStopReason::EndTurn {
+                    return invalid_compaction(
+                        agent_prompt_id,
+                        prompt,
+                        provider,
+                        "summary compactor did not complete its output",
+                    );
+                }
+                success.output_items =
+                    match validate_responses_narrative_output(success.output_items, config) {
+                        Ok(output) => vec![output],
+                        Err(error) => {
+                            return invalid_compaction(agent_prompt_id, prompt, provider, &error);
+                        }
+                    };
+            }
             sampler.latest_items = success.progress_items;
             sampler.latest_bytes = success.response_bytes_received;
             sampler.flush(agent_prompt_id, prompt, writer);
@@ -318,6 +365,14 @@ pub fn run_prompt_attempt<W: std::io::Write>(
             )))
         }
         tau_provider_responses::AttemptOutcome::Retryable { decision, progress } => {
+            if summary_retry_is_terminal(compact_prompt.is_some(), &progress) {
+                return invalid_compaction(
+                    agent_prompt_id,
+                    prompt,
+                    provider,
+                    "summary compactor failed after semantic output",
+                );
+            }
             PromptAttemptOutcome::Retry { decision, progress }
         }
         tau_provider_responses::AttemptOutcome::Canceled { progress } => {
@@ -339,6 +394,103 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                 progress: failure.progress,
             }
         }
+    }
+}
+
+fn summary_retry_is_terminal(
+    is_compaction: bool,
+    progress: &tau_provider_responses::AttemptProgress,
+) -> bool {
+    is_compaction && progress.has_timed_semantic_output
+}
+
+fn attempt_output_tokens(
+    ordinary: u32,
+    summary: Option<SummaryCompactionConfig>,
+    is_compaction: bool,
+) -> u32 {
+    summary
+        .filter(|_| is_compaction)
+        .map_or(ordinary, SummaryCompactionConfig::max_output_tokens)
+}
+
+fn use_prompt_cache(is_compaction: bool) -> bool {
+    !is_compaction
+}
+
+fn materialize_summary_prompt(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: SummaryCompactionConfig,
+) -> Result<tau_proto::AgentPromptCreated, &'static str> {
+    let (instruction, input) =
+        tau_provider::local_summary_compaction::request_parts(&prompt.context, config)?;
+    let mut compact = prompt.clone();
+    compact.system_prompt = instruction.to_owned();
+    compact.context = tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                    role: tau_proto::ContextRole::User,
+                    content: vec![tau_proto::ContentPart::Text { text: input }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            },
+        )],
+    };
+    compact.tools.clear();
+    compact.tools_ref = None;
+    compact.tool_choice = tau_proto::ToolChoice::None;
+    Ok(compact)
+}
+
+fn resolved_summary_config(model: &ResponsesModel) -> Option<SummaryCompactionConfig> {
+    match model.local_summary_compaction {
+        Some(config) => config.validated_for(model.context_window),
+        None => SummaryCompactionConfig::default_for(model.context_window),
+    }
+}
+
+fn validate_responses_narrative_output(
+    items: Vec<tau_proto::ContextItem>,
+    config: SummaryCompactionConfig,
+) -> Result<tau_proto::ContextItem, String> {
+    // Public Responses represents one reasoning stream twice: visible bounded
+    // reasoning text and an opaque provider replay item. The summary validator
+    // bounds and discards the text; discard its replay-only twin before applying
+    // the shared one-message semantic contract.
+    super::chat_completions::validate_resolved_narrative_output(
+        items
+            .into_iter()
+            .filter(|item| !matches!(item, tau_proto::ContextItem::Reasoning(_)))
+            .collect(),
+        config,
+    )
+}
+
+fn invalid_compaction(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    message: &str,
+) -> PromptAttemptOutcome {
+    PromptAttemptOutcome::Terminal {
+        finished: Box::new(finished(
+            agent_prompt_id,
+            prompt,
+            provider,
+            Vec::new(),
+            tau_proto::ProviderStopReason::Error,
+            Some(message.to_owned()),
+            Some(tau_proto::ProviderFailureKind::RequestRejected),
+            None,
+            None,
+        )),
+        progress: tau_provider_responses::AttemptProgress {
+            output_items: Vec::new(),
+            response_bytes_received: 0,
+            has_timed_semantic_output: false,
+        },
     }
 }
 

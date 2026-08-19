@@ -39,8 +39,10 @@ control.
 
 ## Local summary compactor boundary
 
-Only a model with an explicit `local_summary_compaction` profile may run Tau's
-transcript-v1 summary compactor. The dedicated exact-model request has no tools,
+The built-in provider supplies conservative context-derived transcript-v1
+summary limits for every viable model; an explicit `local_summary_compaction`
+profile fully overrides them. This low-level adapter uses only the resolved
+optional limits it receives. The dedicated exact-model request has no tools,
 omits image bytes while retaining typed metadata and an explicit loss marker,
 and is excluded from durable provider debug capture. It accepts one bounded
 nonempty assistant narrative, discards separately bounded typed reasoning, and

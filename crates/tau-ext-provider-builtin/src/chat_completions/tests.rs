@@ -205,10 +205,10 @@ fn parallel_capability_defaults_true_and_is_omitted() {
     assert!(value.get("supports_parallel_tool_calls").is_none());
 }
 
-/// Ensures generic compatible models remain unsupported while a fully declared
-/// per-model summary profile opts in only that exact model.
+/// Ensures generic compatible models receive default summary compaction while
+/// a fully declared per-model profile overrides its limits.
 #[test]
-fn local_summary_compaction_requires_explicit_model_profile() {
+fn local_summary_compaction_defaults_without_model_profile() {
     let disabled: ChatCompletionsModel =
         serde_json::from_value(serde_json::json!({"id": "disabled"})).expect("disabled model");
     let enabled: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
@@ -229,8 +229,13 @@ fn local_summary_compaction_requires_explicit_model_profile() {
     };
 
     let published = models_for_provider(&tau_proto::ProviderName::new("local"), &provider);
-    assert!(!published[0].supports_standalone_compaction);
+    assert!(published[0].supports_standalone_compaction);
     assert!(published[1].supports_standalone_compaction);
+    assert!(
+        published
+            .iter()
+            .all(|model| model.standalone_compaction_threshold.is_some())
+    );
     assert!(published.iter().all(|model| !model.supports_compaction));
 
     let mut incompatible = provider.models[1].clone();
@@ -283,10 +288,10 @@ fn local_summary_compaction_profile_rejects_unknown_fields() {
     assert!(zero.is_err(), "zero limits must fail profile decoding");
 }
 
-/// Ensures the known-remote OpenRouter route cannot inherit a model's local
-/// compactor assertion.
+/// Ensures OpenRouter models retain explicit summary overrides and publish
+/// standalone compaction like other Chat Completions routes.
 #[test]
-fn openrouter_suppresses_local_summary_compaction() {
+fn openrouter_enables_local_summary_compaction() {
     let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
         "id": "remote",
         "context_window": 8192,
@@ -305,9 +310,9 @@ fn openrouter_suppresses_local_summary_compaction() {
     };
     let provider = profile.to_chat_completions();
 
-    assert!(provider.models[0].local_summary_compaction.is_none());
+    assert!(provider.models[0].local_summary_compaction.is_some());
     assert!(
-        !models_for_provider(&tau_proto::ProviderName::new("openrouter"), &provider)[0]
+        models_for_provider(&tau_proto::ProviderName::new("openrouter"), &provider)[0]
             .supports_standalone_compaction
     );
 }

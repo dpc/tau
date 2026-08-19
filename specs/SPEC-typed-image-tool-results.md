@@ -58,8 +58,8 @@ Debug and TRACE projections that serialize a prompt as JSON recursively clear
 image buffers, including prompt contexts and compaction replacement windows.
 The built-in provider's ordinary TRACE record instead emits only fixed
 content-free structural metadata and does not serialize prompt content.
-The explicitly opted-in local Chat Completions transcript-v1 summary compactor
-also clears image bytes in its dedicated provider request while retaining typed
+The Tau-owned transcript-v1 summary fallback for Chat Completions, OpenRouter,
+and public Responses also clears image bytes in its dedicated provider request while retaining typed
 metadata and an explicit loss marker. Normal inference and all other directed
 provider paths retain canonical bytes.
 

@@ -6,6 +6,7 @@
 //! assistant output.
 
 pub mod debug_capture_writer;
+pub mod local_summary_compaction;
 pub mod outbound_network;
 pub mod repetition_guard;
 pub mod retry_policy;
