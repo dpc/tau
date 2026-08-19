@@ -80,6 +80,18 @@ never projecting the blocker's title, description, answer, reason, or other
 payload fields, including in full tool-display mode. An absent or malformed
 action fails closed to the identity, lifecycle status, and duration only.
 
+Self-`compact` is the narrow lifecycle exception to generic tool-row
+projection. When a durable accepted request proves the caller and target are
+the same agent, its visible tool is `compact`, and its request/call correlation
+matches the standalone start's request, caller, call, prompt, and transaction,
+the CLI repaints that existing generic tool row with the private compaction
+lifecycle. The background tool terminal retains ownership of the final generic
+result. Missing, late, or contradictory correlation fails open to independent
+rows; it never merges a different self request, an `agent_compact` request, or
+another standalone compaction. The presentation-only correlation moves with the
+owning detached transcript so a reconstructed late tool start can adopt its
+known lifecycle state during attach.
+
 Prompt completion may read the local filesystem and query `git` for tracked and
 unignored files. These operations should stay bounded and best-effort: failures
 or quota/size limits should disable the completion source or surface a local

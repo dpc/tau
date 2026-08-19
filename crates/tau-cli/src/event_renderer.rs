@@ -5,6 +5,7 @@
 //! Provider delta ordering and accumulation follow
 //! `SPEC-tau-cli-provider-stream-rendering`.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, atomic as path_std_sync_atomic};
@@ -475,6 +476,9 @@ pub(crate) struct EventRenderer {
     /// selected agent.
     standalone_compaction_transactions:
         HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
+    /// Exact self-`compact` calls that share their row with a standalone
+    /// compaction lifecycle.
+    self_compaction_tools: HashMap<String, SelfCompactionTool>,
     /// Visible watched-agent status-row blocks keyed by watched agent id.
     watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Shared current visible agent mirror for prompt submission.
@@ -756,6 +760,8 @@ struct AgentUiState {
     /// Standalone-compaction transactions owned by this transcript snapshot.
     standalone_compaction_transactions:
         HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
+    /// Exact self-`compact` calls owned by this transcript snapshot.
+    self_compaction_tools: HashMap<String, SelfCompactionTool>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     queued_user_blocks: VecDeque<QueuedUserBlock>,
     submitted_prompt_ctx_ids: VecDeque<String>,
@@ -1381,6 +1387,19 @@ struct ToolCallState {
     is_sub_agent: bool,
 }
 
+/// Presentation correlation retained for one self-compaction tool call.
+#[derive(Clone)]
+struct SelfCompactionTool {
+    /// Durable accepted request that owns this exact call.
+    request_id: tau_proto::CompactionRequestId,
+    /// Private provider prompt once the request has started a transaction.
+    compact_prompt_id: Option<tau_proto::AgentPromptId>,
+    /// Durable transaction that claimed the accepted request.
+    transaction_id: Option<tau_proto::CompactionTransactionId>,
+    /// Latest lifecycle status to apply if the tool row arrives late on attach.
+    status: Option<(CompactionStatus, String)>,
+}
+
 /// In-flight state for a user `!`/`!!` shell block.
 struct ShellBlockState {
     block_id: tau_cli_term::BlockId,
@@ -1842,6 +1861,7 @@ impl EventRenderer {
             terminal_agent_prompts: HashSet::new(),
             finished_provider_prompts: HashSet::new(),
             standalone_compaction_transactions: HashMap::new(),
+            self_compaction_tools: HashMap::new(),
             watched_agent_blocks: HashMap::new(),
             current_agent_state: path_std_sync::Arc::new(path_std_sync::Mutex::new(None)),
             draft_retargeter: None,
@@ -2602,6 +2622,7 @@ impl EventRenderer {
             standalone_compaction_transactions: std::mem::take(
                 &mut self.standalone_compaction_transactions,
             ),
+            self_compaction_tools: std::mem::take(&mut self.self_compaction_tools),
             last_user_block: self.last_user_block.take(),
             queued_user_blocks: std::mem::take(&mut self.queued_user_blocks),
             submitted_prompt_ctx_ids: std::mem::take(&mut self.submitted_prompt_ctx_ids),
@@ -2656,6 +2677,7 @@ impl EventRenderer {
         }
         self.prompts = state.prompts;
         self.standalone_compaction_transactions = state.standalone_compaction_transactions;
+        self.self_compaction_tools = state.self_compaction_tools;
         self.last_user_block = state.last_user_block;
         self.queued_user_blocks = state.queued_user_blocks;
         self.submitted_prompt_ctx_ids = state.submitted_prompt_ctx_ids;
@@ -3496,6 +3518,7 @@ impl EventRenderer {
         self.agents_ui_state.clear();
         self.prompts.clear();
         self.standalone_compaction_transactions.clear();
+        self.self_compaction_tools.clear();
         self.last_user_block = None;
         self.queued_user_blocks.clear();
         self.submitted_prompt_ctx_ids.clear();
@@ -5187,6 +5210,9 @@ impl EventRenderer {
             Event::AgentManualCompactionRequested(requested) => {
                 EventAgentIdResolution::Agent(requested.target_agent_id.to_string())
             }
+            Event::AgentManualCompactionRequestFailed(failed) => {
+                EventAgentIdResolution::Agent(failed.target_agent_id.to_string())
+            }
             Event::AgentStandaloneCompactionStarted(started) => {
                 EventAgentIdResolution::Agent(started.agent_id.to_string())
             }
@@ -6236,6 +6262,143 @@ impl EventRenderer {
         self.handle_agent_prompt_started(&prompt.into());
     }
 
+    /// Records an accepted self-`compact` request only when its immutable
+    /// caller, target, and tool identity prove that it owns one tool row.
+    fn register_self_compaction_tool(
+        &mut self,
+        requested: &tau_proto::AgentManualCompactionRequested,
+    ) {
+        if requested.caller_agent_id != requested.target_agent_id
+            || !matches!(
+                requested.initiating_tool_name,
+                tau_proto::ManualCompactionTool::Compact
+            )
+            || requested.visible_tool_name.as_str() != "compact"
+        {
+            return;
+        }
+        let call_id = requested.initiating_tool_call_id.to_string();
+        if self
+            .tool_agents
+            .get(call_id.as_str())
+            .is_some_and(|owner| owner != requested.caller_agent_id.as_str())
+        {
+            return;
+        }
+        match self.self_compaction_tools.entry(call_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(SelfCompactionTool {
+                    request_id: requested.request_id.clone(),
+                    compact_prompt_id: None,
+                    transaction_id: None,
+                    status: None,
+                });
+            }
+            Entry::Occupied(entry) if entry.get().request_id == requested.request_id => {}
+            Entry::Occupied(_) => {}
+        }
+    }
+
+    /// Associates a standalone start with its exact accepted self-compaction
+    /// call. Missing or contradictory correlation deliberately leaves both
+    /// presentation paths independent.
+    fn associate_self_compaction_start(
+        &mut self,
+        started: &tau_proto::AgentStandaloneCompactionStarted,
+    ) -> Option<String> {
+        let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id,
+            caller_agent_id,
+            initiating_tool_call_id,
+        } = &started.trigger
+        else {
+            return None;
+        };
+        if started.agent_id != *caller_agent_id {
+            return None;
+        }
+        let call_id = initiating_tool_call_id.to_string();
+        let tool = self.self_compaction_tools.get_mut(call_id.as_str())?;
+        if tool.request_id != *request_id
+            || tool
+                .compact_prompt_id
+                .as_ref()
+                .is_some_and(|prompt_id| prompt_id != &started.compact_prompt_id)
+            || tool
+                .transaction_id
+                .as_ref()
+                .is_some_and(|transaction_id| transaction_id != &started.transaction_id)
+        {
+            return None;
+        }
+        tool.compact_prompt_id = Some(started.compact_prompt_id.clone());
+        tool.transaction_id = Some(started.transaction_id.clone());
+        Some(call_id)
+    }
+
+    /// Finds the one exact self-compaction call that owns a private provider
+    /// prompt. This intentionally does not infer a match from timing or names.
+    fn self_compaction_tool_for_prompt(&self, prompt_id: &str) -> Option<String> {
+        self.self_compaction_tools
+            .iter()
+            .find_map(|(call_id, tool)| {
+                tool.compact_prompt_id
+                    .as_ref()
+                    .is_some_and(|known_prompt_id| known_prompt_id.as_str() == prompt_id)
+                    .then(|| call_id.clone())
+            })
+    }
+
+    /// Repaints the existing generic tool row with self-compaction lifecycle
+    /// state. A late reconstructed tool start receives the retained status.
+    fn update_self_compaction_tool_status(
+        &mut self,
+        call_id: &str,
+        status: CompactionStatus,
+        status_text: impl Into<String>,
+    ) {
+        let status_text = status_text.into();
+        let Some(tool) = self.self_compaction_tools.get_mut(call_id) else {
+            return;
+        };
+        tool.status = Some((status, status_text.clone()));
+
+        let Some(state) = self.tool_calls.get(call_id) else {
+            return;
+        };
+        if state.is_sub_agent {
+            return;
+        }
+        let Some(block_id) = state.block_id else {
+            return;
+        };
+        let mut display = render_tool_use_state(
+            "compact",
+            &tau_proto::ToolUseState {
+                status: match status {
+                    CompactionStatus::Failure => tau_proto::ToolUseStatus::Error,
+                    CompactionStatus::Success => tau_proto::ToolUseStatus::Success,
+                    CompactionStatus::Progress => tau_proto::ToolUseStatus::InProgress,
+                },
+                status_text,
+                ..Default::default()
+            },
+        );
+        if let Some(duration) = Self::live_tool_duration(state) {
+            Self::upsert_tool_duration_suffix(
+                &mut display,
+                duration,
+                state.effective_shell_timeout,
+            );
+        }
+        let block = self.render_tool_history_block(&display);
+        self.handle.set_block(block_id, block);
+        if let Some(state) = self.tool_calls.get_mut(call_id) {
+            state.live_display = Some(display);
+        }
+        self.handle.redraw();
+    }
+
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
         if let Some(ctx_id) = prompt.ctx_id.as_ref()
             && let Some(index) = self
@@ -6269,6 +6432,16 @@ impl EventRenderer {
             self.clear_standalone_compaction_output(prompt.agent_prompt_id.as_str());
             if had_visible_output && prompt.originator.is_user() {
                 self.set_editor_current_response(None);
+            }
+            if let Some(call_id) =
+                self.self_compaction_tool_for_prompt(prompt.agent_prompt_id.as_str())
+            {
+                self.update_self_compaction_tool_status(
+                    &call_id,
+                    CompactionStatus::Progress,
+                    "Compacting…",
+                );
+                return;
             }
             self.update_live_compaction_block(
                 prompt.agent_prompt_id.as_str(),
@@ -6351,6 +6524,14 @@ impl EventRenderer {
         prompt_id: &str,
         terminal: Option<(&str, CompactionStatus)>,
     ) -> bool {
+        let terminal = if let Some(call_id) = self.self_compaction_tool_for_prompt(prompt_id) {
+            if let Some((text, status)) = terminal {
+                self.update_self_compaction_tool_status(&call_id, status, text);
+            }
+            None
+        } else {
+            terminal
+        };
         let Some(state) = self.prompts.remove(prompt_id) else {
             self.standalone_compaction_transactions
                 .retain(|_, mapped_prompt_id| mapped_prompt_id.as_str() != prompt_id);
@@ -7206,6 +7387,13 @@ impl EventRenderer {
         state.recorded_started_at = Some(recorded_at);
         if let Some(timer) = &self.tool_timer {
             timer.tool_started(started.call_id.as_str());
+        }
+        if let Some((status, status_text)) = self
+            .self_compaction_tools
+            .get(started.call_id.as_str())
+            .and_then(|tool| tool.status.clone())
+        {
+            self.update_self_compaction_tool_status(started.call_id.as_str(), status, status_text);
         }
     }
 
@@ -8309,6 +8497,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentManualCompactionRequested(requested) => {
+                self.register_self_compaction_tool(requested);
                 let notice = tau_proto::HarnessNotice::new(
                     tau_proto::notice_kind::HARNESS_NOTICE,
                     format!(
@@ -8325,6 +8514,23 @@ impl EventRenderer {
                 }
                 true
             }
+            Event::AgentManualCompactionRequestFailed(failed) => {
+                let call_id = self
+                    .self_compaction_tools
+                    .iter()
+                    .find_map(|(call_id, tool)| {
+                        (tool.request_id == failed.request_id && tool.compact_prompt_id.is_none())
+                            .then(|| call_id.clone())
+                    });
+                if let Some(call_id) = call_id {
+                    self.update_self_compaction_tool_status(
+                        &call_id,
+                        CompactionStatus::Failure,
+                        "rejected",
+                    );
+                }
+                true
+            }
             Event::AgentStandaloneCompactionStarted(started) => {
                 if matches!(
                     started.operation,
@@ -8334,6 +8540,13 @@ impl EventRenderer {
                         started.transaction_id.clone(),
                         started.compact_prompt_id.clone(),
                     );
+                    if let Some(call_id) = self.associate_self_compaction_start(started) {
+                        self.update_self_compaction_tool_status(
+                            &call_id,
+                            CompactionStatus::Progress,
+                            "Compacting…",
+                        );
+                    }
                 }
                 true
             }

@@ -1867,6 +1867,40 @@ fn standalone_compaction_prompt_started(agent_prompt_id: &str) -> tau_proto::Age
     }
 }
 
+fn self_compaction_requested(request_id: &str, call_id: &str) -> AgentManualCompactionRequested {
+    AgentManualCompactionRequested {
+        request_id: tau_proto::CompactionRequestId::parse(request_id)
+            .expect("known-safe request id"),
+        caller_agent_id: agent_id("main"),
+        target_agent_id: agent_id("main"),
+        initiating_agent_prompt_id: test_agent_prompt_id("ap-main-request"),
+        initiating_tool_call_id: call_id.into(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
+        visible_tool_name: tau_proto::ToolName::new("compact"),
+        requested_target_head: tau_proto::AgentHead::Root,
+        target_generation: 0,
+        model: "test/model".parse().expect("model id"),
+        resume_inference: true,
+    }
+}
+
+fn self_compaction_started(
+    request_id: &str,
+    call_id: &str,
+    transaction_id: &str,
+    agent_prompt_id: &str,
+) -> AgentStandaloneCompactionStarted {
+    AgentStandaloneCompactionStarted {
+        trigger: tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id: tau_proto::CompactionRequestId::parse(request_id)
+                .expect("known-safe request id"),
+            caller_agent_id: agent_id("main"),
+            initiating_tool_call_id: call_id.into(),
+        },
+        ..standalone_compaction_started(transaction_id, agent_prompt_id)
+    }
+}
+
 /// Builds a fresh bound danger snapshot for selected-agent quota wiring tests.
 fn danger_quota_event(model: &tau_proto::ModelId) -> Event {
     let now = super::event_renderer::unix_time_millis();
@@ -11094,6 +11128,269 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
 
     assert!(!vt.screen_contains(80, "compact"));
     assert!(!vt.screen_contains(80, "manual compaction requested"));
+}
+
+/// A self-`compact` call and its private standalone transaction must share one
+/// evolving tool row, while the generic background terminal still owns its
+/// final result.
+#[test]
+fn self_compaction_reuses_its_tool_row_through_background_completion() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.apply_setting("show-tools", "compact");
+    let mut tool_start = tool_started("call-self", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut tool_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&tool_start);
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-self", "call-self"),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        self_compaction_started("cr-self", "call-self", "ct-self", "ap-self"),
+    ));
+    renderer.handle(&Event::AgentPromptStarted(
+        standalone_compaction_prompt_started("ap-self"),
+    ));
+    sync(&handle);
+
+    let progress = vt.screen_text(100).join("\n");
+    assert!(progress.contains("Compacting…"), "{progress}");
+    assert_eq!(progress.matches("Compacting…").count(), 1, "{progress}");
+
+    renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        agent_id: agent_id("main"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-self")
+                .expect("known-safe transaction id"),
+        ),
+        cut: Some(tau_proto::AgentHead::Root),
+        suffix_end: Some(tau_proto::AgentHead::Root),
+        compact_prompt_id: Some(test_agent_prompt_id("ap-self")),
+        model: Some("test/model".parse().expect("model id")),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: Vec::new(),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "complete"));
+
+    renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
+        call_id: "call-self".into(),
+        tool_name: tau_proto::ToolName::new("compact"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Null,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    let completed = vt.screen_text(100).join("\n");
+    assert!(completed.contains("ok"), "{completed}");
+    assert!(!completed.contains("complete"), "{completed}");
+    assert!(!completed.contains("Compacting…"), "{completed}");
+}
+
+/// Correlation must survive attach-style ordering where a standalone lifecycle
+/// arrives before the reconstructed generic tool start.
+#[test]
+fn late_self_compaction_tool_start_adopts_retained_lifecycle_status() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.apply_setting("show-tools", "compact");
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-late", "call-late"),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        self_compaction_started("cr-late", "call-late", "ct-late", "ap-late"),
+    ));
+    let mut tool_start = tool_started("call-late", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut tool_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&tool_start);
+    sync(&handle);
+
+    let text = vt.screen_text(100).join("\n");
+    assert!(text.contains("Compacting…"), "{text}");
+    assert_eq!(text.matches("Compacting…").count(), 1, "{text}");
+}
+
+/// A self-compaction failure and a pre-start rejection update their owning
+/// generic rows instead of creating standalone lifecycle rows.
+#[test]
+fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.apply_setting("show-tools", "compact");
+
+    let mut failed_start = tool_started("call-failed", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut failed_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&failed_start);
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-failed", "call-failed"),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        self_compaction_started(
+            "cr-failed",
+            "call-failed",
+            "ct-failed-self",
+            "ap-failed-self",
+        ),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionFailed(
+        AgentStandaloneCompactionFailed {
+            agent_id: agent_id("main"),
+            transaction_id: tau_proto::CompactionTransactionId::parse("ct-failed-self")
+                .expect("known-safe transaction id"),
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: None,
+        },
+    ));
+
+    let mut rejected_start = tool_started("call-rejected", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut rejected_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&rejected_start);
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-rejected", "call-rejected"),
+    ));
+    renderer.handle(&Event::AgentManualCompactionRequestFailed(
+        tau_proto::AgentManualCompactionRequestFailed {
+            request_id: tau_proto::CompactionRequestId::parse("cr-rejected")
+                .expect("known-safe request id"),
+            target_agent_id: agent_id("main"),
+            reason: tau_proto::ManualCompactionRequestFailureReason::Unsupported,
+        },
+    ));
+
+    let mut cancelled_start = tool_started("call-cancelled", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut cancelled_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&cancelled_start);
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-cancelled", "call-cancelled"),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        self_compaction_started(
+            "cr-cancelled",
+            "call-cancelled",
+            "ct-cancelled-self",
+            "ap-cancelled-self",
+        ),
+    ));
+    renderer.handle(&Event::AgentPromptStarted(
+        standalone_compaction_prompt_started("ap-cancelled-self"),
+    ));
+    renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        agent_id: agent_id("main"),
+        agent_prompt_id: test_agent_prompt_id("ap-cancelled-self"),
+        reason: AgentPromptTerminationReason::Canceled,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    let text = vt.screen_text(100).join("\n");
+    assert_eq!(text.matches("err: failed").count(), 1, "{text}");
+    assert_eq!(text.matches("err: rejected").count(), 1, "{text}");
+    assert_eq!(text.matches("err: stopped").count(), 1, "{text}");
+    assert!(!text.contains("compact complete"), "{text}");
+}
+
+/// A pre-start rejection must return to the target's detached transcript so
+/// the selected agent cannot steal its self-compaction correlation.
+#[test]
+fn hidden_self_compaction_rejection_updates_its_target_row() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("manager".to_owned());
+    renderer.apply_setting("show-tools", "compact");
+
+    let mut tool_start = tool_started("call-hidden-rejected", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut tool_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&tool_start);
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-hidden-rejected", "call-hidden-rejected"),
+    ));
+    renderer.handle(&Event::AgentManualCompactionRequestFailed(
+        tau_proto::AgentManualCompactionRequestFailed {
+            request_id: tau_proto::CompactionRequestId::parse("cr-hidden-rejected")
+                .expect("known-safe request id"),
+            target_agent_id: agent_id("main"),
+            reason: tau_proto::ManualCompactionRequestFailureReason::Unsupported,
+        },
+    ));
+
+    renderer.switch_agent("main".to_owned());
+    sync(&handle);
+    let text = vt.screen_text(100).join("\n");
+    assert_eq!(text.matches("err: rejected").count(), 1, "{text}");
+}
+
+/// Contradictory request correlation must preserve the independent lifecycle
+/// row rather than merging an unrelated tool call into it.
+#[test]
+fn mismatched_self_compaction_correlation_fails_open_to_distinct_rows() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.apply_setting("show-tools", "compact");
+
+    let mut tool_start = tool_started("call-mismatch", "compact", CborValue::Null);
+    let Event::ToolStarted(started) = &mut tool_start else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("main");
+    renderer.handle(&tool_start);
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-mismatch", "call-mismatch"),
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        self_compaction_started("cr-other", "call-mismatch", "ct-mismatch", "ap-mismatch"),
+    ));
+    renderer.handle(&Event::AgentPromptStarted(
+        standalone_compaction_prompt_started("ap-mismatch"),
+    ));
+    sync(&handle);
+
+    let text = vt.screen_text(100).join("\n");
+    assert_eq!(text.matches("Compacting…").count(), 1, "{text}");
+    assert!(text.contains("compact 0s pending"), "{text}");
 }
 
 /// Ensures a typed standalone compaction lifecycle renders only compact
