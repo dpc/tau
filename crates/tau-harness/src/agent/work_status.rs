@@ -9,6 +9,9 @@ const FIRST_WAIT_THRESHOLD_MINUTES: u32 = 15;
 /// Maximum number of committed successful finals challenged while one
 /// unresolved status phase remains current.
 const MAX_FINAL_CHALLENGES: u8 = 2;
+/// Timed-out activating-input waits before the harness advises event-driven
+/// waiting.
+const REPEATED_WAIT_NUDGE_THRESHOLD: u8 = 3;
 
 /// Compact ordered range of crossed long-wait thresholds.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,8 +60,9 @@ impl WorkStatusReport {
             AgentWorkStatusPhase::Working
                 | AgentWorkStatusPhase::Done
                 | AgentWorkStatusPhase::Blocked
+                | AgentWorkStatusPhase::Waiting
         ) {
-            return Err("status state must be working, done, or blocked".to_owned());
+            return Err("status state must be working, done, blocked, or waiting".to_owned());
         }
         let canonical = title.trim();
         if canonical.is_empty() {
@@ -154,6 +158,11 @@ pub(crate) struct WorkStatus {
     /// Immediate scheduler deadline retained while crossed thresholds await
     /// bounded catch-up.
     wait_catchup_deadline: Option<Instant>,
+    /// Consecutive timed-out activating-input waits without substantive
+    /// progress.
+    timed_out_input_waits: u8,
+    /// Whether the current no-progress run already produced its advisory.
+    repeated_wait_nudged: bool,
 }
 
 impl Default for WorkStatus {
@@ -168,6 +177,8 @@ impl Default for WorkStatus {
             wait_started_at: None,
             next_wait_threshold_minutes: Some(FIRST_WAIT_THRESHOLD_MINUTES),
             wait_catchup_deadline: None,
+            timed_out_input_waits: 0,
+            repeated_wait_nudged: false,
         }
     }
 }
@@ -197,6 +208,7 @@ impl WorkStatus {
         wait_installed: bool,
     ) -> bool {
         let WorkStatusReport { phase, title } = report;
+        self.reset_repeated_wait_guard();
         if self.phase == phase && self.title.as_deref() == Some(title.as_str()) {
             if phase == AgentWorkStatusPhase::Working {
                 self.working_reminder_pending = false;
@@ -369,6 +381,7 @@ impl WorkStatus {
             },
             AgentWorkStatusPhase::Done
             | AgentWorkStatusPhase::Blocked
+            | AgentWorkStatusPhase::Waiting
             | AgentWorkStatusPhase::Unknown => return None,
         };
         Some(FinalStatusDecision::Challenge(challenge))
@@ -385,9 +398,16 @@ impl WorkStatus {
     /// Record admitted substantive tool work while the current status is not
     /// Working.
     pub(crate) fn record_substantive_tool_admission(&mut self) {
+        self.record_substantive_tool_progress();
         if self.phase != AgentWorkStatusPhase::Working {
             self.working_reminder_pending = true;
         }
+    }
+
+    /// Record substantive progress even when the current prompt cannot report
+    /// status and therefore must not receive a Working reminder.
+    pub(crate) fn record_substantive_tool_progress(&mut self) {
+        self.reset_repeated_wait_guard();
     }
 
     /// Consume the current foreground round's reminder obligation.
@@ -399,6 +419,26 @@ impl WorkStatus {
     /// cancelled.
     pub(crate) fn clear_working_reminder(&mut self) {
         self.working_reminder_pending = false;
+    }
+
+    /// Record one activating-input wait timeout and return whether to attach
+    /// the one-shot repeated-wait advisory.
+    pub(crate) fn record_input_wait_timeout(&mut self) -> bool {
+        if self.phase == AgentWorkStatusPhase::Waiting || self.repeated_wait_nudged {
+            return false;
+        }
+        self.timed_out_input_waits = self.timed_out_input_waits.saturating_add(1);
+        if self.timed_out_input_waits < REPEATED_WAIT_NUDGE_THRESHOLD {
+            return false;
+        }
+        self.repeated_wait_nudged = true;
+        true
+    }
+
+    /// Reset repeated-wait bookkeeping after reported or substantive progress.
+    fn reset_repeated_wait_guard(&mut self) {
+        self.timed_out_input_waits = 0;
+        self.repeated_wait_nudged = false;
     }
 
     /// Invalidate Working after an unsuccessful terminal or successful budget

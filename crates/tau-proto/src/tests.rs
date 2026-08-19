@@ -4432,6 +4432,11 @@ fn session_agent_work_status_serde_accepts_valid_phase_title_shapes() {
             AgentWorkStatusPhase::Blocked,
             Some("await approval"),
         ),
+        (
+            "waiting",
+            AgentWorkStatusPhase::Waiting,
+            Some("await automation"),
+        ),
         ("unknown", AgentWorkStatusPhase::Unknown, None),
         (
             "unknown",
@@ -4462,6 +4467,7 @@ fn session_agent_work_status_serde_rejects_invalid_phase_title_shapes() {
         serde_json::json!({ "phase": "working", "title": null }),
         serde_json::json!({ "phase": "done", "title": null }),
         serde_json::json!({ "phase": "blocked", "title": null }),
+        serde_json::json!({ "phase": "waiting", "title": null }),
         serde_json::json!({ "phase": "unknown", "title": "" }),
         serde_json::json!({ "phase": "unknown", "title": " leading space" }),
         serde_json::json!({ "phase": "unknown", "title": "trailing space " }),

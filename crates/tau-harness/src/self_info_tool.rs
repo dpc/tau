@@ -172,6 +172,7 @@ fn status_name(status: AgentWorkStatusPhase) -> &'static str {
         AgentWorkStatusPhase::Working => "working",
         AgentWorkStatusPhase::Done => "done",
         AgentWorkStatusPhase::Blocked => "blocked",
+        AgentWorkStatusPhase::Waiting => "waiting",
         AgentWorkStatusPhase::Unknown => "unknown",
     }
 }

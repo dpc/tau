@@ -74,8 +74,8 @@ clearly labeled as watch notifications, not as explicit `message` tool deliverie
 - `<tau_internal>Watched agent <agent-id> emitted a response …</tau_internal>`
 - `<tau_internal>Watched agent <agent-id> received a user prompt …</tau_internal>`
 
-Self-reported work status uses a closed phase (`unreported`, `working`, `done`,
-`blocked`, or `unknown`), a runtime-local epoch, and a canonical model-authored
+Self-reported work status uses a closed phase (`unreported`, `working`, `waiting`,
+`done`, `blocked`, or `unknown`), a runtime-local epoch, and a canonical model-authored
 title of at most 160 UTF-8 bytes. The title is nonempty, trimmed, single-line,
 and contains no control characters. An `unreported` notification carries no
 title. Initial snapshots do not activate the watcher. Later status transitions
@@ -100,9 +100,11 @@ any other activation.
 
 Work status is current agent state, not an activation acknowledgement. Working
 therefore suppresses start reminders across later prompts, messages, and tool
-rounds until an accepted Done or Blocked report changes it. Done and Blocked
-mutate reported status only, never close a turn or install a wait; later
-substantive work while either is current receives a fresh reminder to set
+rounds until an accepted Waiting, Done, or Blocked report changes it. Waiting
+means progress is paused pending an expected self-resolving event; Blocked means
+progress requires external intervention. Waiting, Done, and Blocked mutate
+reported status only, never close a turn or install a wait; later
+substantive work while any is current receives a fresh reminder to set
 Working.
 Tool guidance asks agents to report meaningful user-level work rather than
 routine progress or label-only changes, and to batch status with independent tool
@@ -123,7 +125,7 @@ challenged candidate remain permanently withheld after its semantic append;
 post-commit handling only queues guidance and continues the same outer turn.
 Each unresolved phase has its own two-challenge budget; entering Working resets
 the budget even when Unreported challenges already occurred in the same outer
-turn. An accepted Done or Blocked transition, or the third successful final
+turn. An accepted Waiting, Done, or Blocked transition, or the third successful final
 within the current unresolved phase, allows that later final to project and
 finish the turn after its own exact append commits. Budget escape changes
 Working to Unknown and leaves Unreported unchanged. Agents whose

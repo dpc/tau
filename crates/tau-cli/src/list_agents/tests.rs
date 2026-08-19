@@ -201,7 +201,7 @@ fn picker_rows_append_canonical_cost_and_status() {
 /// with unknown conservatively sharing the unreported symbol.
 #[test]
 fn picker_work_status_symbols_are_complete() {
-    use tau_proto::AgentWorkStatusPhase::{Blocked, Done, Unknown, Unreported, Working};
+    use tau_proto::AgentWorkStatusPhase::{Blocked, Done, Unknown, Unreported, Waiting, Working};
 
     assert_eq!(
         [
@@ -210,10 +210,11 @@ fn picker_work_status_symbols_are_complete() {
             Some(Working),
             Some(Done),
             Some(Blocked),
+            Some(Waiting),
             Some(Unknown)
         ]
         .map(work_status_symbol),
-        ["❓", "❓", "🚀", "✅", "⛔️", "❓"]
+        ["❓", "❓", "🚀", "✅", "⛔️", "⏳", "❓"]
     );
 }
 

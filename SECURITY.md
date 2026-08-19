@@ -453,25 +453,32 @@ occurrences per runtime scheduler cycle. A queued event runs between batches;
 without one, the remaining compact backlog schedules another immediate cycle.
 Only the model-owned, policy-authorized `status` call may mutate its calling
 agent. Configured extensions cannot invoke it directly or select a target agent.
-The harness validates the closed phase and canonical 160-byte, single-line title
+The harness validates the closed phase, including self-resolving Waiting versus
+intervention-required Blocked, and canonical 160-byte, single-line title
 at both tool and durable boundaries. A challenged successful response remains
 permanently withheld from watch, delegated-result, and detach projection even
 though its semantic append remains in the transcript; post-commit handling only
 queues guidance. The same guard applies while status remains Unreported only
 when the immutable dispatched prompt surface exposed model-visible `status`.
-After an accepted Done or Blocked transition, a distinct later successful final
+After an accepted Waiting, Done, or Blocked transition, a distinct later successful final
 may project and complete the outer turn, but only after its own exact append
 commits. Each unresolved phase has its own bounded escape: it challenges at most
 two successful finals, and the third within that phase projects even if status
 remains unresolved. Entering Working resets the budget even after Unreported
 challenges in the same outer turn. Escape invalidates Working to Unknown but
 leaves Unreported unchanged. Prompts without `status` bypass this guard.
-Done, Blocked, an unsuccessful terminal that invalidates Working to Unknown,
+Waiting, Done, Blocked, an unsuccessful terminal that invalidates Working to Unknown,
 budget escape, unload, and session rollover release that runtime ownership;
 append failure and interception rejection cannot project a challenged candidate. Work-status state
 tests, harness gated-final/interception tests, and the deterministic current-status
 provider scenario cover these boundaries. Revisit them whenever internal-tool
 ownership, response interception, final projection, or agent teardown changes.
+Repeated activating-input wait protection derives only from typed timeout
+settlements at terminal publication. Focused supplied-clock tests cover ordinary
+and compaction-rollback timeout publication, one-shot and Waiting suppression,
+substantive-admission reset even without `status`, and non-timeout wait
+exclusion. Revisit these oracles when settlement correlation, compaction claims,
+tool admission, or work-status phase handling changes.
 
 ## Prompt capability authority
 

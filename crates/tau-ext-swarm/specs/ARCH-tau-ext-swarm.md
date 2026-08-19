@@ -12,6 +12,14 @@ events are folded. At the unchanged Tau Swarm v4 publication boundary, the
 extension encodes that absence as an empty `name` string; a later explicit Tau
 display-name fact replaces it with the nonempty name.
 
+Tau Swarm v4 has no self-reported Waiting work-status variant. The projection
+therefore maps Tau `Waiting { task_name }` lossily to Swarm v4
+`Working { task_name }`; Tau `Blocked` remains `Blocked`, preserving the
+intervention-required distinction but losing Waiting versus Working in this
+compatibility projection. The independent Swarm `AgentActivity` remains derived
+only from Tau's runtime state because it controls `ActiveAuto` navigation and
+must not be overwritten by a self-reported status.
+
 A session switch cancels and joins the previous worker and clears session-local
 blocker history, updates, and acknowledgements while retaining the
 process-incarnation command table. Ordinary Iroh

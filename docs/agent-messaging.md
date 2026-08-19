@@ -60,7 +60,7 @@ blocks use the latest folded name metadata when re-rendered, while their
 immutable semantic message events remain unchanged. See
 [`SPEC-tau-cli-agent-message-labels`](../crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md).
 
-Watched-agent working, done, and blocked reports are structured status updates,
+Watched-agent working, waiting, done, and blocked reports are structured status updates,
 not empty messages. They render as one line:
 
 ```text
@@ -202,7 +202,7 @@ agent_watch({"agent_id":"engineer_b","enable":true})
 ```
 
 Successful enable first reports the watched agent's current self-reported work
-status. Later `working`, `done`, `blocked`, and harness-invalidated `unknown`
+status. Later `working`, `waiting`, `done`, `blocked`, and harness-invalidated `unknown`
 transitions arrive as typed notifications. The harness does not infer semantic
 progress from provider or tool activity.
 Enabling requires the target agent to be live. An enable request for a stopped

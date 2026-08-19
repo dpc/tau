@@ -11,7 +11,7 @@ fn status_guidance_prefers_meaningful_batched_reports() {
     assert_eq!(
         spec.description.as_deref(),
         Some(
-            "Report meaningful user-level work status to watchers. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
+            "Report meaningful user-level work status to watchers. Use `waiting` when progress is paused pending an expected self-resolving event; use `blocked` when progress requires external intervention. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
         )
     );
     assert_eq!(
@@ -19,7 +19,11 @@ fn status_guidance_prefers_meaningful_batched_reports() {
         Some(serde_json::json!({
             "type": "object",
             "properties": {
-                "state": {"type":"string","enum":["working","done","blocked"]},
+                "state": {
+                    "type":"string",
+                    "enum":["working","done","blocked","waiting"],
+                    "description":"`waiting` expects self-resolution; `blocked` requires external intervention."
+                },
                 "task_name": {
                     "type":"string",
                     "description":"Brief, independently informative user-visible task label; do not use opaque identifiers or task/ticket numbers alone."
@@ -68,6 +72,14 @@ fn status_arguments_are_closed_and_canonical() {
     let report = parse_status_args(&args).expect("valid status arguments");
     assert_eq!(report.phase(), tau_proto::AgentWorkStatusPhase::Working);
     assert_eq!(report.title(), "trace lifecycle");
+
+    let mut waiting = args.clone();
+    let CborValue::Map(entries) = &mut waiting else {
+        unreachable!()
+    };
+    entries[0].1 = CborValue::Text("waiting".to_owned());
+    let report = parse_status_args(&waiting).expect("waiting is model-reportable");
+    assert_eq!(report.phase(), tau_proto::AgentWorkStatusPhase::Waiting);
 
     for state in ["unknown", "Working", "idle"] {
         let mut invalid = args.clone();

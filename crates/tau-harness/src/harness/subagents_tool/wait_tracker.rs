@@ -1724,6 +1724,29 @@ impl WaitTracker {
 }
 
 impl WaitReply {
+    /// Add model-visible advice to a successful timeout result.
+    pub(super) fn add_timeout_advice(&mut self, advice: &str) {
+        let WaitReplyKind::Result {
+            result: CborValue::Map(entries),
+            ..
+        } = &mut self.kind
+        else {
+            return;
+        };
+        if !entries.iter().any(|(key, value)| {
+            matches!(
+                (key, value),
+                (CborValue::Text(key), CborValue::Bool(true)) if key == "timed_out"
+            )
+        }) {
+            return;
+        }
+        entries.push((
+            CborValue::Text("advice".to_owned()),
+            CborValue::Text(advice.to_owned()),
+        ));
+    }
+
     /// Attach a settlement only when the wait declaration and observation both
     /// exist.
     pub(super) fn with_settlement(

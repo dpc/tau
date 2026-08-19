@@ -28,7 +28,7 @@ UI code must render tool calls through generic `ToolUseState`, `ToolUsePayload`,
 Harness sub-agent activity is rendered from generic events, not
 delegation-specific UI paths. `agent.watches_updated` identifies which agents
 are observed; current-session structured work status keeps a watched row
-visible while it is unreported, working, blocked, or unknown, and removes it
+visible while it is unreported, working, waiting, blocked, or unknown, and removes it
 only after done. The complete `agent.stats_updated` detailed activity decides its turn emoji,
 while binary runtime remains navigation authority. Individual provider invocations are
 inner model rounds, and prompt/provider events are only a pre-stats

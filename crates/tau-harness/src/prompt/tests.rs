@@ -28,6 +28,7 @@ fn work_status_prompt_is_generic_escaped_and_ignores_initial_snapshot() {
     for (phase, state) in [
         (tau_proto::AgentWorkStatusPhase::Done, "done"),
         (tau_proto::AgentWorkStatusPhase::Blocked, "blocked"),
+        (tau_proto::AgentWorkStatusPhase::Waiting, "waiting"),
         (tau_proto::AgentWorkStatusPhase::Unknown, "unknown"),
     ] {
         status.phase = phase;

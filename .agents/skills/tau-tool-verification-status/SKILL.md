@@ -18,13 +18,17 @@ distinct nonce.
 
 ## Durable expectations
 
-* `status` accepts `working`, `blocked`, and `done`. It trims the title, then
+* `status` accepts `working`, `waiting`, `blocked`, and `done`. `waiting` means
+  progress is paused pending an expected self-resolving event; `blocked` means
+  progress needs external intervention. It trims the title, then
   requires a non-empty, single-line canonical title of at most 160 UTF-8 bytes
   with no control characters, U+2028, or U+2029.
 * A successful call clearly reports the accepted state and title. A rejected
   call must not imply that the requested state became current.
 * Ordinary transitions work in both directions: initial Working, Working title
-  update, Blocked, recovery to Working, and Done.
+  update, Waiting, recovery from Waiting to Working, Blocked, recovery from
+  Blocked to Working, and Done. Watched status projection preserves Waiting as
+  distinct from Blocked.
 * One accepted Working acknowledgement survives routine tool-result rounds.
   Routine results must not repeatedly steer the agent to acknowledge the same
   work.
@@ -36,8 +40,8 @@ distinct nonce.
   not a reminder loop.
 * Steering and watched progress use concise, generic shapes:
   `Reminder: when working on a task use \`status\` tool to acknowledge it.`,
-  `Your \`status\` is set to \`working\` on "<title>". Set it to \`done\` or
-  \`blocked\` to finish or call \`wait\` when waiting for external events.`,
+  `Your \`status\` is set to \`working\` on "<title>". Set it to \`done\`,
+  \`waiting\`, or \`blocked\` to finish or call \`wait\` when waiting for external events.`,
   and `Watched agent <agent-id> status: <state> on <title>`.
 
 ## Efficient live plan
@@ -51,8 +55,9 @@ probe.
 
 Use a nonce-tagged title and record exact results for:
 
-1. `working`, a second `working` title, `blocked`, recovery to `working`, and
-   `done`;
+1. `working`, a second `working` title, `waiting`, recovery to `working`,
+   `blocked`, another recovery to `working`, and `done`; verify watched
+   projections preserve both paused phases exactly;
 2. invalid state and omitted title, which may be rejected by tool-schema
    validation before invocation;
 3. empty, whitespace-only, and surrounding-whitespace titles; verify that

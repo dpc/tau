@@ -34,11 +34,11 @@ fn final_status_reminders_use_approved_wording() {
         final_status_reminder(&crate::agent::FinalStatusChallenge::Working {
             title: "STATUS-WATCH-4D8B".to_owned(),
         }),
-        "Your `status` is set to `working` on \"STATUS-WATCH-4D8B\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
+        "Your `status` is set to `working` on \"STATUS-WATCH-4D8B\". Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events."
     );
     assert_eq!(
         final_status_reminder(&crate::agent::FinalStatusChallenge::Unreported),
-        "You have not reported `status`. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
+        "You have not reported `status`. Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events."
     );
 }
 
@@ -23776,6 +23776,189 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
     h.shutdown().expect("shutdown");
 }
 
+/// Production timeout publication adds one advisory on the third consecutive
+/// activating-input timeout and leaves later timeouts in that run unadorned.
+#[test]
+fn repeated_input_wait_timeouts_add_one_advisory() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let has_advice = |h: &Harness, call_id: &str| {
+        event_log_contains_any_source(h, |event| {
+            matches!(
+                event,
+                Event::ToolResult(result)
+                    if result.call_id.as_str() == call_id
+                        && matches!(
+                            &result.result,
+                            CborValue::Map(entries)
+                                if entries.iter().any(|(key, _)|
+                                    key == &CborValue::Text("advice".to_owned()))
+                        )
+            )
+        })
+    };
+
+    for index in 1..=4 {
+        let call_id = format!("repeated-input-wait-{index}");
+        let mut call = wait_input_call(&call_id);
+        call.call_ref = Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([index; 16]),
+            item_index: 0,
+        });
+        seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+        let now = path_std_time::Instant::now();
+        h.handle_wait_tool_call_at(&cid, &call, ToolName::new("wait"), now)
+            .expect("register input wait");
+        h.process_input_wait_deadlines(
+            h.next_input_wait_deadline()
+                .expect("registered input deadline"),
+        );
+        assert_eq!(has_advice(&h, &call_id), index == 3);
+    }
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "resumed work".to_owned(),
+        )
+        .expect("valid working status"),
+    )
+    .expect("reset guard with status report");
+    for index in 5..=7 {
+        let call_id = format!("repeated-input-wait-{index}");
+        let mut call = wait_input_call(&call_id);
+        call.call_ref = Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([index; 16]),
+            item_index: 0,
+        });
+        seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+        h.handle_wait_tool_call_at(
+            &cid,
+            &call,
+            ToolName::new("wait"),
+            path_std_time::Instant::now(),
+        )
+        .expect("register reset input wait");
+        h.process_input_wait_deadlines(
+            h.next_input_wait_deadline()
+                .expect("registered input deadline"),
+        );
+        assert_eq!(has_advice(&h, &call_id), index == 7);
+    }
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Waiting,
+            "await automation".to_owned(),
+        )
+        .expect("valid waiting status"),
+    )
+    .expect("report waiting");
+    for index in 8..=10 {
+        let call_id = format!("repeated-input-wait-{index}");
+        let mut call = wait_input_call(&call_id);
+        call.call_ref = Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([index; 16]),
+            item_index: 0,
+        });
+        seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+        h.handle_wait_tool_call_at(
+            &cid,
+            &call,
+            ToolName::new("wait"),
+            path_std_time::Instant::now(),
+        )
+        .expect("register waiting-status input wait");
+        h.process_input_wait_deadlines(
+            h.next_input_wait_deadline()
+                .expect("registered input deadline"),
+        );
+        assert!(!has_advice(&h, &call_id));
+    }
+    h.shutdown().expect("shutdown");
+}
+
+/// Rejected bare/background waits are not activating-input timeouts and cannot
+/// advance the repeated-timeout advisory counter.
+#[test]
+fn background_wait_rejections_do_not_count_as_input_timeouts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let background_id = ToolCallId::from("completed-background-before-timeout");
+    h.tool_agents.insert(background_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        background_id.clone(),
+        PendingTool {
+            name: ToolName::new("slow"),
+            internal_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.record_wait_tool_request(&background_id);
+    h.record_wait_tool_result(
+        ToolResult {
+            presentation: Default::default(),
+            call_id: background_id.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("running".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::random()),
+    );
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: background_id,
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("done".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::random()),
+    );
+    let mut successful_background_wait = wait_no_args_call("successful-background-wait");
+    successful_background_wait.call_ref = Some(tau_proto::ToolCallRef {
+        declaration: tau_proto::ObservationId::from_bytes([1; 16]),
+        item_index: 0,
+    });
+    seed_tools_running(&mut h, &cid, vec![successful_background_wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &successful_background_wait, ToolName::new("wait"))
+        .expect("consume completed background result");
+    for call_id in ["bare-wait-a", "bare-wait-b"] {
+        let call = wait_no_args_call(call_id);
+        seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+        h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+            .expect("reject bare wait without background work");
+    }
+    let mut call = wait_input_call("first-real-timeout");
+    call.call_ref = Some(tau_proto::ToolCallRef {
+        declaration: tau_proto::ObservationId::from_bytes([3; 16]),
+        item_index: 0,
+    });
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+        .expect("register input wait");
+    h.process_input_wait_deadlines(h.next_input_wait_deadline().expect("input deadline"));
+    assert!(event_log_contains_any_source(&h, |event| {
+        matches!(
+            event,
+            Event::ToolResult(result)
+                if result.call_id == call.id
+                    && matches!(&result.result, CborValue::Map(entries)
+                        if entries.len() == 1
+                            && entries[0].0 == CborValue::Text("timed_out".to_owned()))
+        )
+    }));
+    h.shutdown().expect("shutdown");
+}
+
 /// Runtime construction carries configured input-wait bounds through the
 /// internal-tool facade, session rollover, and the actual wait registration.
 #[test]
@@ -31930,6 +32113,12 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     };
     h.prompt_tool_call_prompts
         .insert(unavailable_surface_call.id.clone(), unavailable_prompt);
+    {
+        let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+        assert!(!status.record_input_wait_timeout());
+        assert!(!status.record_input_wait_timeout());
+        assert!(status.record_input_wait_timeout());
+    }
     h.execute_agent_tool_call(&cid, &unavailable_surface_call)
         .expect("accept status-unavailable skill");
     assert!(
@@ -31939,6 +32128,15 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
             .work_status
             .take_working_reminder()
     );
+    {
+        let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+        assert!(!status.record_input_wait_timeout());
+        assert!(!status.record_input_wait_timeout());
+        assert!(
+            status.record_input_wait_timeout(),
+            "status-unavailable substantive admission resets the wait guard"
+        );
+    }
 
     let prompt_id = test_agent_prompt_id("working-reminder-admission");
     h.prompt_tool_specs.insert(

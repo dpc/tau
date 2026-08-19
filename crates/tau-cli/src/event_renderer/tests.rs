@@ -1374,6 +1374,7 @@ fn watch_work_status_renders_all_reportable_states() {
         (tau_proto::AgentWorkStatusPhase::Working, "working", "🚀"),
         (tau_proto::AgentWorkStatusPhase::Done, "done", "✅"),
         (tau_proto::AgentWorkStatusPhase::Blocked, "blocked", "⛔️"),
+        (tau_proto::AgentWorkStatusPhase::Waiting, "waiting", "⏳"),
     ] {
         let event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: tau_proto::AgentMessageId::parse(format!("status-{label}"))

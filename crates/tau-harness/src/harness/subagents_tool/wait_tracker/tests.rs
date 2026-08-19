@@ -1974,3 +1974,30 @@ fn exact_wait_after_background_cancel_returns_cancel_error_once() {
     let (message, _) = reply_error(reply);
     assert_eq!(message, "result for tool call `bg-cancel` already consumed");
 }
+
+/// Repeated-wait advice augments only timeout results and preserves the typed
+/// timeout flag that callers already consume.
+#[test]
+fn timeout_advice_is_additive_and_model_visible() {
+    let mut reply = wait_timed_out_reply(
+        ToolCallId::from("wait-timeout"),
+        wait_tool_name(),
+        "5m".to_owned(),
+    );
+    reply.add_timeout_advice("prefer an event-driven wake");
+    let WaitReplyKind::Result {
+        result: CborValue::Map(entries),
+        ..
+    } = reply.kind
+    else {
+        panic!("timeout reply must be a map result");
+    };
+    assert!(entries.contains(&(
+        CborValue::Text("timed_out".to_owned()),
+        CborValue::Bool(true)
+    )));
+    assert!(entries.contains(&(
+        CborValue::Text("advice".to_owned()),
+        CborValue::Text("prefer an event-driven wake".to_owned())
+    )));
+}

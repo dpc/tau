@@ -760,6 +760,11 @@ fn swarm_work_status(
         tau_proto::AgentWorkStatusPhase::Blocked => Ok(AgentWorkStatus::Blocked {
             task_name: task_name(status.title())?,
         }),
+        // Swarm v4 has no matching work-status phase. Its orthogonal activity
+        // remains independently derived from Tau's runtime state.
+        tau_proto::AgentWorkStatusPhase::Waiting => Ok(AgentWorkStatus::Working {
+            task_name: task_name(status.title())?,
+        }),
         tau_proto::AgentWorkStatusPhase::Unknown => Ok(AgentWorkStatus::Unknown {
             last_task_name: status.title().map(canonical_task_name).transpose()?,
         }),

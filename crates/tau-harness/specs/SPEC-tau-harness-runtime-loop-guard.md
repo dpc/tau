@@ -1,5 +1,12 @@
 # SPEC-tau-harness-runtime-loop-guard: Runtime loop guard
 
+## Record justification
+
+Runtime loop prevention spans assistant-response classification, tool terminal
+publication, branch-local state, prompt scheduling, provider terminal handling,
+and durable delivery facts, so no single implementation artifact can own the
+complete behavioral contract.
+
 The runtime loop guard is conservative and scoped to one loaded agent branch. It
 tracks a bounded recent signature window and bounded breaker bookkeeping, injects
 at most one internal pivot prompt for an obvious repeated cycle, and stops
@@ -16,3 +23,10 @@ remove stale queued pivots, while retaining unresolved in-flight argument
 signatures so a successful sibling in a multi-tool turn cannot make later failures
 argument-insensitive. Non-linear branch or head movement invalidates all
 branch-local guard state, including in-flight signatures and queued pivots.
+
+The separate repeated-wait guard counts consecutive activating-input waits that
+time out without a substantive tool admission or a new status report. The third
+timeout adds one model-visible advisory to use `status(waiting)` and rely on an
+event-driven wake. It does not reject, shorten, or otherwise change the wait.
+The advisory is one-shot for that no-progress run, and an already reported
+`waiting` phase suppresses it.

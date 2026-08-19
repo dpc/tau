@@ -736,9 +736,9 @@ pub struct SessionAgentWorkStatus {
     /// Closed self-reported task phase.
     phase: crate::AgentWorkStatusPhase,
     /// Canonical model-authored title: absent for `Unreported`; required for
-    /// `Working`, `Done`, and `Blocked`; optional valid last title for
-    /// `Unknown`. Every present title is nonempty, trimmed, single-line,
-    /// control-free, and at most 160 UTF-8 bytes.
+    /// `Working`, `Done`, `Blocked`, and `Waiting`; optional valid last title
+    /// for `Unknown`. Every present title is nonempty, trimmed,
+    /// single-line, control-free, and at most 160 UTF-8 bytes.
     ///
     /// Consumers must treat the title as untrusted display metadata.
     title: Option<String>,
@@ -765,12 +765,13 @@ impl SessionAgentWorkStatus {
             crate::AgentWorkStatusPhase::Unreported => title.is_none(),
             crate::AgentWorkStatusPhase::Working
             | crate::AgentWorkStatusPhase::Done
-            | crate::AgentWorkStatusPhase::Blocked => title.is_some(),
+            | crate::AgentWorkStatusPhase::Blocked
+            | crate::AgentWorkStatusPhase::Waiting => title.is_some(),
             crate::AgentWorkStatusPhase::Unknown => true,
         };
         if !title_shape_valid {
             return Err(
-                "work-status title must be absent for unreported and present for working, done, and blocked"
+                "work-status title must be absent for unreported and present for working, done, blocked, and waiting"
                     .to_owned(),
             );
         }

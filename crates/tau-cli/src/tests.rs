@@ -2834,7 +2834,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: false,
         agent_id: agent.clone(),
-        text: "Your `status` is set to `working` on \"Fix Slack mandatory terminal delivery\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.".to_owned(),
+        text: "Your `status` is set to `working` on \"Fix Slack mandatory terminal delivery\". Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events.".to_owned(),
         trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::Internal,
         internal_kind: None,
@@ -12084,6 +12084,14 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
     ));
     sync(&handle);
     assert!(vt.screen_contains(100, "⛔️💤 @engineer_1 await input"));
+
+    renderer.handle(&watch_status(
+        "status-waiting",
+        tau_proto::AgentWorkStatusPhase::Waiting,
+        Some("await automation"),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "⏳💤 @engineer_1 await automation"));
 
     renderer.handle(&watch_status(
         "status-unknown",

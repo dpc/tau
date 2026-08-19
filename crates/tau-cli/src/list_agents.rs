@@ -268,6 +268,7 @@ pub(crate) fn work_status_symbol(phase: Option<tau_proto::AgentWorkStatusPhase>)
         Some(tau_proto::AgentWorkStatusPhase::Working) => "🚀",
         Some(tau_proto::AgentWorkStatusPhase::Done) => "✅",
         Some(tau_proto::AgentWorkStatusPhase::Blocked) => "⛔️",
+        Some(tau_proto::AgentWorkStatusPhase::Waiting) => "⏳",
     }
 }
 

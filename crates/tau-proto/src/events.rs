@@ -2455,8 +2455,10 @@ pub enum AgentWorkStatusPhase {
     Working,
     /// The agent reports completed work.
     Done,
-    /// The agent reports work blocked on external input.
+    /// The agent reports work blocked pending external intervention.
     Blocked,
+    /// The agent reports paused work that should resume without intervention.
+    Waiting,
     /// The harness can no longer rely on the previous report.
     Unknown,
 }

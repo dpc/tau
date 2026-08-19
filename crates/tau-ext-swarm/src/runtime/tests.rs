@@ -386,6 +386,39 @@ fn stats_watches_and_unload_converge_projection() {
     );
     fold_event(
         &mut state,
+        &Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+            work_status: tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Waiting,
+                Some("await automation".to_owned()),
+            )
+            .expect("valid waiting status"),
+            navigation_mode: tau_proto::AgentNavigationMode::Suspended,
+            runtime_state: tau_proto::AgentRuntimeState::Running,
+            turn_activity: tau_proto::AgentTurnActivity::Idle,
+            tools: tau_proto::AgentToolStats::default(),
+            context: tau_proto::AgentContextStats::default(),
+            estimated_api_cost: tau_proto::EstimatedApiCost::default(),
+            creator_subtree_estimated_api_cost: Default::default(),
+        }),
+    )
+    .expect("waiting fold");
+    let snapshot = state.projection.blocking_lock().snapshot();
+    let agent = snapshot.snapshot.agents.first().expect("published agent");
+    assert_eq!(
+        agent.work_status,
+        tau_swarm_api::AgentWorkStatus::Working {
+            task_name: tau_swarm_api::TaskName::new("await automation").expect("valid task name"),
+        }
+    );
+    assert_eq!(
+        agent.activity,
+        tau_swarm_api::AgentActivity::Running,
+        "self-reported Waiting must not override independent runtime activity"
+    );
+    fold_event(
+        &mut state,
         &Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
             session_id,
             agent_id,
@@ -440,6 +473,17 @@ fn work_status_conversion_enforces_v4_invariants() {
             .expect("valid status"),
             tau_swarm_api::AgentWorkStatus::Blocked {
                 task_name: tau_swarm_api::TaskName::new("blocked task").expect("valid task name"),
+            },
+        ),
+        (
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Waiting,
+                Some("waiting task".to_owned()),
+            )
+            .expect("valid status"),
+            // Swarm v4 has no corresponding self-reported status phase.
+            tau_swarm_api::AgentWorkStatus::Working {
+                task_name: tau_swarm_api::TaskName::new("waiting task").expect("valid task name"),
             },
         ),
         (

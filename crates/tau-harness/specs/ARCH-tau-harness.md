@@ -164,12 +164,16 @@ Successful no-tool responses while Working, or while Unreported for a prompt
 whose frozen tool surface exposes `status`, remain durable assistant transcript
 entries but withhold watch, worker-result, and detach projections for at most two
 challenges in each unresolved phase. Entering Working resets the budget even
-after Unreported challenges in the same outer turn. Done or Blocked permits the
+after Unreported challenges in the same outer turn. Waiting, Done, or Blocked permits the
 next successful final to project; otherwise the third successful final within
 the current unresolved phase escapes the guard. Working becomes Unknown on
 escape, while Unreported remains unchanged. Agents without `status` remain
 unaffected. Every accepted final projects only after its exact append commits.
 Unsuccessful terminals invalidate Working to Unknown without a challenge.
+Activating-input wait timeouts remain successful scheduling results. The third
+consecutive timeout without a status report or substantive tool admission adds
+one bounded harness-authored advisory; later timeouts in that no-progress run
+remain unadorned, and current Waiting suppresses the advisory entirely.
 
 ## Tool-surface and extension-instance ownership
 

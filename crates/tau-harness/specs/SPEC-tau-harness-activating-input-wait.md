@@ -23,7 +23,12 @@ and unsuppressed activating background-completion prompts. Passive restore or
 background notices, progress, replay-only traffic, foreground sibling results,
 and input for another agent do not wake it. If its deadline is processed first,
 it instead completes normally with `timed_out: true` and warning/`timeout` UI
-metadata. Event-loop processing order decides races exactly once.
+metadata. After the third consecutive activating-input timeout without a status
+report or substantive tool admission, that result also carries one bounded
+`advice` string suggesting `status(waiting)` and an event-driven wake. The
+advisory is one-shot for that no-progress run, and current Waiting status
+suppresses it. It never rejects or shortens a wait. Event-loop processing order
+decides races exactly once.
 
 The provider-owned generic tool display shows the effective bound as compact
 `Nm` arguments, including the configured upper clamp (1,440 minutes by default).
@@ -80,9 +85,10 @@ Activating-input waits are scheduling, not a new input authority. They wake only
 after canonical admitted input is recorded or queued for that exact target
 agent, using harness-owned inference-activation classification. Raw extension
 traffic, replayed message facts, asserted publisher metadata, and another agent's
-input cannot wake them. Both bounded scheduling results are
-content-free: `input_available: true` reports accepted input and
-`timed_out: true` reports expiry. External payload, sender, and provenance remain
+input cannot wake them. Both bounded scheduling results disclose no activating
+payload: `input_available: true` reports accepted input and `timed_out: true`
+reports expiry, with only the optional harness-authored repeated-wait `advice`
+described above. External payload, sender, and provenance remain
 in ordinary recorded message-fact context and are never rewrapped as
 harness-authored tool output.
 Wait registration is runtime-only harness state: cancellation, target unload,

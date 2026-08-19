@@ -62,11 +62,16 @@ delivered to the model. If `wait({})` consumes a completion, it returns an
 knows which background call was collected.
 
 `wait({"timeout_minutes": N})` is the separate activating-input form. `N` must
-be a positive integer and values above 60 are silently capped at 60. It returns
+be a positive integer and is silently clamped to the configured bounds (five
+through 1,440 minutes by default). It returns
 `input_available: true` when accepted input wins or `timed_out: true` when the
 monotonic deadline wins, without consuming input or background results. Exact-id
 and bare background waits remain unbounded. Registration and expiry stay inside
 the running outer turn and must not emit an idle/watch lifecycle edge.
+After three consecutive input-wait timeouts without a status report or
+substantive tool admission, the third result also carries one `advice` string
+suggesting `status(waiting)` and event-driven wakeups. Later timeouts in that
+no-progress run omit it, and current Waiting suppresses it.
 
 Current background timing: most backgroundable tools background after about 2
 seconds, and `wait` itself never backgrounds. `agent_start` currently finishes

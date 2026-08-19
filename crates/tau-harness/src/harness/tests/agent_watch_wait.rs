@@ -290,6 +290,48 @@ fn claimed_wait_keeps_accounting_until_rollback_or_commit() {
     harness.shutdown().expect("shutdown");
 }
 
+/// A timeout that wins while manual compaction owns the wait is counted when
+/// rollback publishes it, so the third such timeout receives the same advisory
+/// as the ordinary deadline path.
+#[test]
+fn compaction_rollback_timeout_counts_toward_repeated_wait_advice() {
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut harness);
+
+    for index in 1..=3 {
+        let mut call = input_wait_call(&format!("claimed-input-{index}"));
+        call.call_ref = Some(tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([index; 16]),
+            item_index: 0,
+        });
+        seed_tools_running(&mut harness, &cid, vec![call.id.clone()]);
+        let now = Instant::now();
+        harness
+            .handle_wait_tool_call_at(&cid, &call, ToolName::new("wait"), now)
+            .expect("install input wait");
+        assert!(harness.claim_wait_for_manual_compaction(&cid, &call.id));
+        harness.process_runtime_deadlines_at(
+            harness
+                .next_input_wait_deadline()
+                .expect("claimed timeout deadline"),
+        );
+        harness.rollback_manual_compaction_wait_claim(&cid, &call.id);
+    }
+
+    assert!(event_log_events(&harness).iter().any(|event| {
+        matches!(
+            event,
+            Event::ToolResult(result)
+                if result.call_id.as_str() == "claimed-input-3"
+                    && matches!(&result.result, CborValue::Map(entries)
+                        if entries.iter().any(|(key, _)|
+                            key == &CborValue::Text("advice".to_owned())))
+        )
+    }));
+    harness.shutdown().expect("shutdown");
+}
+
 /// A real installed input wait contributes a semantic threshold deadline,
 /// while an immediately rejected bare wait contributes no duration.
 #[test]

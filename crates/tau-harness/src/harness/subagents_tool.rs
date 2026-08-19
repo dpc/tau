@@ -2814,7 +2814,24 @@ impl Harness {
     }
 
     fn publish_wait_replies(&mut self, replies: Vec<WaitReply>) {
-        for reply in replies {
+        for mut reply in replies {
+            if reply.settlement.as_ref().is_some_and(|settlement| {
+                settlement.outcome == tau_proto::ToolWaitOutcome::TimedOut
+            }) {
+                let owner = self
+                    .tool_agents
+                    .get(&reply.wait_call_id)
+                    .or_else(|| self.peer_internal_tool_agents.get(&reply.wait_call_id))
+                    .cloned();
+                if owner
+                    .and_then(|owner| self.agents.get_mut(&owner))
+                    .is_some_and(|agent| agent.work_status.record_input_wait_timeout())
+                {
+                    reply.add_timeout_advice(
+                        "Seems like you're waiting in a loop. Consider setting `status` to `waiting` and relying on a message or trigger to wake you.",
+                    );
+                }
+            }
             if let Some(call_id) = reply.unsuppress_call_id.clone() {
                 self.unsuppress_background_completion_prompt(call_id);
             }

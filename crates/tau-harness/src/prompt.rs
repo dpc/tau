@@ -751,6 +751,7 @@ pub(crate) fn watch_work_status_text(
         tau_proto::AgentWorkStatusPhase::Working => "working",
         tau_proto::AgentWorkStatusPhase::Done => "done",
         tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
+        tau_proto::AgentWorkStatusPhase::Waiting => "waiting",
         tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
     };
     Some(crate::internal_envelope::frame(&format!(

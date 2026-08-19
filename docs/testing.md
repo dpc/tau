@@ -766,3 +766,10 @@ turns with cache refresh disabled by default. It does not emulate cache-policy
 evidence or an enabled refresh lifecycle. Add that fake lifecycle fixture before
 depending on cross-process cache-refresh E2E coverage; never use live Provider
 cache behavior as the deterministic oracle.
+
+Repeated-wait guard coverage uses focused harness tests with supplied monotonic
+clocks rather than deterministic provider E2E sleeps. Those tests exercise
+ordinary timeout publication, one-shot/reset/suppression policy, exact and bare
+background-wait exclusion, and manual-compaction rollback settlement. Add
+deterministic E2E coverage if wait bounds become cheaply configurable in that
+suite or if provider-to-handler call correlation changes.

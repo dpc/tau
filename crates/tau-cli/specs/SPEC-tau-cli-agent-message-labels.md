@@ -74,8 +74,8 @@ the CLI cache.
 
 Current CLI watched status rows come from the current-session semantic
 `WorkStatus` snapshot for each selected target. Absent, unreported, and unknown
-status renders as `❓`; working, blocked, and done render as `🚀`, `⛔️`, and `✅`;
-unreported, working, blocked, and unknown remain visible, and done alone
+status renders as `❓`; working, waiting, blocked, and done render as `🚀`, `⏳`,
+`⛔️`, and `✅`; unreported, working, waiting, blocked, and unknown remain visible, and done alone
 removes the row. The target's complete generic agent-stats detailed turn activity controls
 activity decoration. Before the first stats snapshot, active
 prompt tracking for the target is the compatibility/catch-up fallback.
@@ -111,7 +111,7 @@ their compatibility fallback contribution.
 ## Lifecycle projection
 
 Harness-authored watched-agent `WorkStatus` records are structured
-state rather than ordinary messages. Working, done, and blocked reports render
+state rather than ordinary messages. Working, waiting, done, and blocked reports render
 as `▤ Status update from <sender>: <phase-emoji> (<reported task>)`, suppress their
 empty compatibility body, and bypass `show-messages`.
 

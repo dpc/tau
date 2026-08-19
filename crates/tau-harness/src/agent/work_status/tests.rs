@@ -198,16 +198,45 @@ fn working_epoch_resets_unreported_final_challenge_budget() {
     );
 }
 
-/// Done and Blocked disable final-status gating without changing the runtime
-/// into an implicit Working epoch.
+/// Done, Blocked, and Waiting disable final-status gating without changing the
+/// runtime into an implicit Working epoch.
 #[test]
 fn terminal_reports_disable_final_status_gate() {
-    for phase in [AgentWorkStatusPhase::Done, AgentWorkStatusPhase::Blocked] {
+    for phase in [
+        AgentWorkStatusPhase::Done,
+        AgentWorkStatusPhase::Blocked,
+        AgentWorkStatusPhase::Waiting,
+    ] {
         let mut status = WorkStatus::default();
         assert!(report(&mut status, phase, "terminal report"));
         assert_eq!(status.phase(), phase);
         assert_eq!(status.decide_final(final_input(true, true)), None);
         assert_eq!(status.epoch(), 0);
+    }
+}
+
+/// Three consecutive input-wait timeouts produce one advisory, while reported
+/// Waiting and substantive progress suppress or reset the no-progress run.
+#[test]
+fn repeated_wait_guard_is_one_shot_and_progress_scoped() {
+    let mut status = WorkStatus::default();
+    assert!(!status.record_input_wait_timeout());
+    assert!(!status.record_input_wait_timeout());
+    assert!(status.record_input_wait_timeout());
+    assert!(!status.record_input_wait_timeout());
+
+    status.record_substantive_tool_admission();
+    assert!(!status.record_input_wait_timeout());
+    assert!(!status.record_input_wait_timeout());
+    assert!(status.record_input_wait_timeout());
+
+    assert!(report(
+        &mut status,
+        AgentWorkStatusPhase::Waiting,
+        "awaiting review"
+    ));
+    for _ in 0..4 {
+        assert!(!status.record_input_wait_timeout());
     }
 }
 

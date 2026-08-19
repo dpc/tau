@@ -32963,15 +32963,18 @@ impl Harness {
                             .iter()
                             .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
                     });
-                if status_was_available
-                    && !matches!(visible_tool_name.as_str(), "status" | "wait")
+                if !matches!(visible_tool_name.as_str(), "status" | "wait")
                     && self
                         .agents
                         .get(cid)
                         .is_some_and(|agent| !agent.lifecycle_notification_only_turn)
                     && let Some(agent) = self.agents.get_mut(cid)
                 {
-                    agent.work_status.record_substantive_tool_admission();
+                    if status_was_available {
+                        agent.work_status.record_substantive_tool_admission();
+                    } else {
+                        agent.work_status.record_substantive_tool_progress();
+                    }
                 }
                 let started = route.invoke;
                 match route.target {
@@ -33024,10 +33027,10 @@ impl Harness {
 fn final_status_reminder(challenge: &FinalStatusChallenge) -> String {
     match challenge {
         FinalStatusChallenge::Unreported => {
-            "You have not reported `status`. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.".to_owned()
+            "You have not reported `status`. Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events.".to_owned()
         }
         FinalStatusChallenge::Working { title } => format!(
-            "Your `status` is set to `working` on {:?}. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.",
+            "Your `status` is set to `working` on {:?}. Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events.",
             title
         ),
     }

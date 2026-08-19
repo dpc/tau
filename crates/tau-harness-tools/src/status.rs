@@ -12,14 +12,18 @@ pub(crate) fn tool_spec() -> ToolSpec {
         name: ToolName::new("status"),
         model_visible_name: None,
         description: Some(
-            "Report meaningful user-level work status to watchers. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
+            "Report meaningful user-level work status to watchers. Use `waiting` when progress is paused pending an expected self-resolving event; use `blocked` when progress requires external intervention. Use an independently informative task name; do not use an opaque identifier or task/ticket number alone. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
                 .to_owned(),
         ),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
-                "state": {"type":"string","enum":["working","done","blocked"]},
+                "state": {
+                    "type":"string",
+                    "enum":["working","done","blocked","waiting"],
+                    "description":"`waiting` expects self-resolution; `blocked` requires external intervention."
+                },
                 "task_name": {"type":"string","description":"Brief, independently informative user-visible task label; do not use opaque identifiers or task/ticket numbers alone."}
             },
             "required": ["state", "task_name"],
@@ -100,7 +104,10 @@ pub(crate) fn parse_args(arguments: &CborValue) -> Result<WorkStatusReport, Stri
         Some("working") => AgentWorkStatusPhase::Working,
         Some("done") => AgentWorkStatusPhase::Done,
         Some("blocked") => AgentWorkStatusPhase::Blocked,
-        Some(_) => return Err("status state must be working, done, or blocked".to_owned()),
+        Some("waiting") => AgentWorkStatusPhase::Waiting,
+        Some(_) => {
+            return Err("status state must be working, done, blocked, or waiting".to_owned());
+        }
         None => return Err("status requires state".to_owned()),
     };
     WorkStatusReport::new(
@@ -140,6 +147,7 @@ fn phase_name(phase: AgentWorkStatusPhase) -> &'static str {
         AgentWorkStatusPhase::Working => "working",
         AgentWorkStatusPhase::Done => "done",
         AgentWorkStatusPhase::Blocked => "blocked",
+        AgentWorkStatusPhase::Waiting => "waiting",
         AgentWorkStatusPhase::Unreported | AgentWorkStatusPhase::Unknown => {
             unreachable!("status parser accepts only model-reportable phases")
         }

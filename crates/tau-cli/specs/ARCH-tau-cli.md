@@ -153,7 +153,7 @@ session-wide side-agent count. A separate cycle-safe graph projection selects
 the visible deduplicated closure from the viewed agent through eight rows and
 falls back to every direct watch on overflow. Current-session semantic
 `WorkStatus` snapshots own watched-row lifetime: absent or
-`unreported`, `working`, `blocked`, and `unknown` statuses remain visible, and
+`unreported`, `working`, `waiting`, `blocked`, and `unknown` statuses remain visible, and
 only `done` hides the row without stopping traversal to its descendants.
 Agent-stats runtime state remains the
 running-activity authority and never adds or removes a row.

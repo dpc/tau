@@ -1131,7 +1131,7 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         terminal_phase: StatusTerminalPhase,
     ) -> ClientResult<Event> {
-        let expected = "Your `status` is set to `working` on \"Exercise current status policy\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events.";
+        let expected = "Your `status` is set to `working` on \"Exercise current status policy\". Set it to `done`, `waiting`, or `blocked` to finish or call `wait` when waiting for external events.";
         if !prompt_contains_text(prompt, expected) {
             return Err(self.mismatch(index, "Working final challenge is absent"));
         }
