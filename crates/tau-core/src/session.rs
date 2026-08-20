@@ -4093,55 +4093,52 @@ impl AgentTree {
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
         if let Some(decision) = &response.automatic_compaction_decision {
-            let valid =
-                decision.threshold > 0
-                    && !self
-                        .automatic_compaction_decisions
-                        .contains_key(&decision.transaction_id)
-                    && !self
-                        .compaction_transactions
-                        .contains_key(&decision.transaction_id)
-                    && !self
-                        .automatic_compaction_decisions
-                        .values()
-                        .any(|existing| {
-                            existing.decision.outer_turn_id == decision.outer_turn_id
-                                && !existing.claimed
-                                && !existing.closed
-                        })
-                    && self.active_outer_turn.as_ref() == Some(&decision.outer_turn_id)
-                    && self
-                        .inference_dispatches
-                        .get(&response.agent_prompt_id)
-                        .is_some_and(|dispatch| {
-                            !dispatch.finished
-                                && dispatch.checkpoint.operation
-                                    == Some(tau_proto::PromptOperation::Inference)
-                                && dispatch.checkpoint.model.as_ref() == Some(&decision.model)
-                                && (self.outer_turns.get(&decision.outer_turn_id).is_some_and(
-                                    |turn| turn.agent_prompt_id == response.agent_prompt_id,
-                                ) || dispatch
-                                    .checkpoint
-                                    .output_length_continuation
-                                    .as_ref()
-                                    .is_some_and(|owner| {
-                                        owner.outer_turn_id == decision.outer_turn_id
-                                    }))
-                        })
-                    && self.pending_tool_rounds.is_empty()
-                    && self
-                        .provider_response_tool_call_order(&response.output_items)
-                        .is_empty()
-                    && response.stop_reason != tau_proto::ProviderStopReason::ToolCalls
-                    && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
-                    && !matches!(
-                        response.output_length_disposition,
-                        tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
-                    )
-                    && !response
-                        .output_items
-                        .iter()
-                        .any(|item| matches!(item, ContextItem::Compaction(_)));
+            let prompt_owns_outer_turn = self
+                .prompt_starts
+                .get(&response.agent_prompt_id)
+                .is_some_and(|started| {
+                    started.outer_turn_id.as_ref() == Some(&decision.outer_turn_id)
+                });
+            let valid = decision.threshold > 0
+                && !self
+                    .automatic_compaction_decisions
+                    .contains_key(&decision.transaction_id)
+                && !self
+                    .compaction_transactions
+                    .contains_key(&decision.transaction_id)
+                && !self
+                    .automatic_compaction_decisions
+                    .values()
+                    .any(|existing| {
+                        existing.decision.outer_turn_id == decision.outer_turn_id
+                            && !existing.claimed
+                            && !existing.closed
+                    })
+                && self.active_outer_turn.as_ref() == Some(&decision.outer_turn_id)
+                && self
+                    .inference_dispatches
+                    .get(&response.agent_prompt_id)
+                    .is_some_and(|dispatch| {
+                        !dispatch.finished
+                            && dispatch.checkpoint.operation
+                                == Some(tau_proto::PromptOperation::Inference)
+                            && dispatch.checkpoint.model.as_ref() == Some(&decision.model)
+                            && prompt_owns_outer_turn
+                    })
+                && self.pending_tool_rounds.is_empty()
+                && self
+                    .provider_response_tool_call_order(&response.output_items)
+                    .is_empty()
+                && response.stop_reason != tau_proto::ProviderStopReason::ToolCalls
+                && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
+                && !matches!(
+                    response.output_length_disposition,
+                    tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+                )
+                && !response
+                    .output_items
+                    .iter()
+                    .any(|item| matches!(item, ContextItem::Compaction(_)));
             if !valid {
                 return Err(AgentEventValidationError::new(
                     "automatic compaction decision is not owned by this canonical terminal",
@@ -4400,6 +4397,10 @@ impl AgentTree {
         let Some(decision) = &terminated.automatic_compaction_decision else {
             return Ok(());
         };
+        let prompt_owns_outer_turn = self
+            .prompt_starts
+            .get(&terminated.agent_prompt_id)
+            .is_some_and(|started| started.outer_turn_id.as_ref() == Some(&decision.outer_turn_id));
         let valid = terminated.reason == tau_proto::AgentPromptTerminationReason::Canceled
             && decision.threshold > 0
             && !self
@@ -4410,10 +4411,7 @@ impl AgentTree {
                 .contains_key(&decision.transaction_id)
             && self.active_outer_turn.as_ref() == Some(&decision.outer_turn_id)
             && self.pending_tool_rounds.is_empty()
-            && self
-                .outer_turns
-                .get(&decision.outer_turn_id)
-                .is_some_and(|turn| turn.agent_prompt_id == terminated.agent_prompt_id)
+            && prompt_owns_outer_turn
             && self
                 .inference_dispatches
                 .get(&terminated.agent_prompt_id)

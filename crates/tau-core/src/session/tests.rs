@@ -5255,15 +5255,18 @@ fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
         .expect("test connection id must satisfy the identifier grammar")
 }
 
-/// A terminal-owned eager decision survives the finish cut and is claimed by
-/// exactly the transaction identity persisted on the terminal.
+/// A continuation prompt's durable outer-turn ownership admits its eager
+/// decision, which survives the finish cut and is claimed exactly once.
 #[test]
 fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
     let agent_id = agent_id();
     let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
     let session_id = tau_proto::SessionId::parse("session").expect("session");
-    let prompt_id = tau_proto::AgentPromptId::parse("prompt-eager").expect("prompt");
-    let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
+    let initial_prompt_id =
+        tau_proto::AgentPromptId::parse("prompt-eager-initial").expect("prompt");
+    let continuation_prompt_id =
+        tau_proto::AgentPromptId::parse("prompt-eager-continuation").expect("prompt");
+    let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&initial_prompt_id);
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-eager").expect("transaction");
     let model = tau_proto::ModelId::new(
@@ -5274,7 +5277,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
         tau_proto::AgentInferenceDispatchStarted {
             agent_id: agent_id.clone(),
             transaction_id: None,
-            agent_prompt_id: prompt_id.clone(),
+            agent_prompt_id: continuation_prompt_id.clone(),
             through: AgentHead::Root,
             model: Some(model.clone()),
             operation: Some(tau_proto::PromptOperation::Inference),
@@ -5287,7 +5290,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             agent_id: agent_id.clone(),
             session_id: session_id.clone(),
             outer_turn_id: outer_turn_id.clone(),
-            agent_prompt_id: prompt_id.clone(),
+            agent_prompt_id: initial_prompt_id,
             runtime_id: tau_proto::AccountingRuntimeId::parse("runtime").expect("runtime"),
             activation: tau_proto::AgentOuterTurnActivation::External {
                 correlation_id: tau_proto::AgentActivationCorrelationId::parse("activation")
@@ -5295,8 +5298,21 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             },
         },
     ));
+    let tree_without_prompt_start = tree.clone();
+    tree.apply_event(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        agent_prompt_id: continuation_prompt_id.clone(),
+        agent_id: agent_id.clone(),
+        session_id: session_id.clone(),
+        model: model.clone(),
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: Some(outer_turn_id.clone()),
+        operation: tau_proto::PromptOperation::Inference,
+        originator: PromptOriginator::User,
+        ctx_id: None,
+    }));
     append_user_input(&mut tree, "terminal owner");
-    let mut terminal = tool_calling_response(&agent_id, prompt_id.as_str(), Vec::new());
+    let mut terminal =
+        tool_calling_response(&agent_id, continuation_prompt_id.as_str(), Vec::new());
     terminal.stop_reason = tau_proto::ProviderStopReason::EndTurn;
     terminal.automatic_compaction_decision = Some(tau_proto::AutomaticCompactionDecision {
         transaction_id: transaction_id.clone(),
@@ -5305,6 +5321,10 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
         threshold: 100,
     });
     let terminal = Event::ProviderResponseFinished(terminal);
+    assert!(
+        tree_without_prompt_start.validate_event(&terminal).is_err(),
+        "the initial outer-turn prompt id is not sufficient ownership"
+    );
     tree.validate_event(&terminal)
         .expect("terminal decision validates");
     tree.apply_event(&terminal);

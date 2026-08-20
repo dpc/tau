@@ -18507,8 +18507,8 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
     );
 }
 
-/// Matching eager policies coalesce on the canonical terminal, the outer finish
-/// references that authority, and one idle standalone transaction claims it.
+/// A done-policy decision on a post-tool continuation remains owned by the
+/// original outer turn and starts exactly one standalone transaction.
 #[test]
 fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
     let td = TempDir::new().expect("tempdir");
@@ -18540,22 +18540,30 @@ fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
             },
         );
     }
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish".to_owned()))
+        .expect("dispatch inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_tool_response(
+        &inference,
+        "finish-round-tool",
+        "self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("finish tool round");
+    let continuation = read_nth_prompt_created(&h, 1);
     h.report_agent_work_status(
         &cid,
         crate::WorkStatusReport::new(tau_proto::AgentWorkStatusPhase::Done, "finished".to_owned())
             .expect("valid status"),
     )
     .expect("report status");
-    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish".to_owned()))
-        .expect("dispatch inference");
-    let inference = read_nth_prompt_created(&h, 0);
     h.available_roles
         .get_mut(&h.selected_role)
         .expect("selected role")
         .compactions
         .clear();
     let mut response =
-        provider_text_response(&inference.agent_prompt_id, inference.agent_id, "done");
+        provider_text_response(&continuation.agent_prompt_id, continuation.agent_id, "done");
     response.usage = Some(tau_proto::ProviderTokenUsage {
         model: None,
         prompt_sent_tokens: 250,
@@ -18569,6 +18577,22 @@ fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
         .expect("finish inference");
 
     let events = event_log_events(&h);
+    assert!(
+        h.pending_agent_publish_completions.is_empty(),
+        "accepted continuation must not enter the retained publication retry path"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == continuation.agent_prompt_id
+            ))
+            .count(),
+        1,
+        "the canonical continuation terminal must commit exactly once"
+    );
     let decision = events
         .iter()
         .find_map(|event| match event {
@@ -18578,6 +18602,25 @@ fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
             _ => None,
         })
         .expect("terminal decision");
+    let outer_turn_id = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentOuterTurnStarted(started)
+                if started.agent_prompt_id == inference.agent_prompt_id =>
+            {
+                Some(started.outer_turn_id.clone())
+            }
+            _ => None,
+        })
+        .expect("outer turn start");
+    assert_ne!(continuation.agent_prompt_id, inference.agent_prompt_id);
+    assert_eq!(decision.outer_turn_id, outer_turn_id);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptStarted(started)
+            if started.agent_prompt_id == continuation.agent_prompt_id
+                && started.outer_turn_id.as_ref() == Some(&outer_turn_id)
+    )));
     assert_eq!(
         decision.threshold, 100,
         "matching policies coalesce to minimum"
@@ -18630,8 +18673,9 @@ fn outer_finish_policy_status_matrix_is_closed_and_policy_only() {
     );
 }
 
-/// Cancellation without a provider response uses the frozen prompt policy and
-/// projection, persists its terminal-owned decision, and starts after finish.
+/// Cancellation of a post-tool continuation uses that prompt's durable
+/// outer-turn ownership, persists its terminal-owned decision, and starts after
+/// finish.
 #[test]
 fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
     let td = TempDir::new().expect("tempdir");
@@ -18667,6 +18711,15 @@ fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
     }
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("cancel me".to_owned()))
         .expect("dispatch");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_tool_response(
+        &inference,
+        "cancel-round-tool",
+        "self_info",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("finish tool round");
+    let continuation = read_nth_prompt_created(&h, 1);
     h.finalize_canceled_in_flight_prompt(&cid);
 
     let events = event_log_events(&h);
@@ -18679,11 +18732,27 @@ fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
             _ => None,
         })
         .expect("termination decision");
+    assert_ne!(continuation.agent_prompt_id, inference.agent_prompt_id);
+    assert!(
+        h.pending_agent_publish_completions.is_empty(),
+        "accepted cancellation must not enter the retained publication retry path"
+    );
     assert!(events.iter().any(|event| matches!(
         event,
-        Event::AgentStandaloneCompactionStarted(started)
-            if started.transaction_id == decision.transaction_id
+        Event::AgentPromptTerminated(terminated)
+            if terminated.agent_prompt_id == continuation.agent_prompt_id
     )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if started.transaction_id == decision.transaction_id
+            ))
+            .count(),
+        1
+    );
     h.shutdown().expect("shutdown");
 }
 
