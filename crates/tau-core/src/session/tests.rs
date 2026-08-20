@@ -5463,3 +5463,357 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
         "decision identity must not collide with a prior transaction"
     );
 }
+
+/// Exhaustively checks the narrow automatic-policy lineage model across zero
+/// through three real tool rounds. Every accepted command must fold identically
+/// live and cold; rejected ownership and duplicate-repair commands must leave
+/// the complete live tree unchanged.
+#[test]
+fn automatic_policy_lineage_model_matches_live_and_cold_folds() {
+    for rounds in 0..=3 {
+        let trace = automatic_policy_tool_trace(rounds);
+        let mut live = AgentTree::from_events(trace.agent_id.clone(), &[]);
+        let mut records = Vec::new();
+        for (command, event) in &trace.events {
+            append_model_event(
+                &mut live,
+                &mut records,
+                event.clone(),
+                &trace.label(command),
+            );
+            let cold = AgentTree::try_from_events(trace.agent_id.clone(), &records).unwrap_or_else(
+                |error| panic!("{} cold replay failed: {error}", trace.label(command)),
+            );
+            assert_eq!(live, cold, "{}", trace.label(command));
+        }
+
+        let wrong_owner = {
+            let mut response = trace.terminal.clone();
+            response.agent_prompt_id =
+                tau_proto::AgentPromptId::parse("model-wrong-owner").expect("prompt");
+            Event::ProviderResponseFinished(response)
+        };
+        let terminal_cut = trace
+            .cuts
+            .terminal_decision
+            .checked_sub(1)
+            .expect("terminal has a predecessor");
+        let prefix = records[..terminal_cut].to_vec();
+        let mut before_terminal =
+            AgentTree::try_from_events(trace.agent_id.clone(), &prefix).expect("terminal prefix");
+        assert_rejected_model_event(
+            &mut before_terminal,
+            wrong_owner,
+            &trace.label("reject_wrong_owner"),
+        );
+
+        for (command, duplicate) in [
+            (
+                "duplicate_terminal",
+                Event::ProviderResponseFinished(trace.terminal.clone()),
+            ),
+            ("duplicate_finish", trace.finish.clone()),
+            ("duplicate_start", trace.start.clone()),
+        ] {
+            assert_rejected_model_event(&mut live, duplicate, &trace.label(command));
+        }
+
+        assert_automatic_policy_crash_cuts(&trace, &records);
+    }
+}
+
+/// One deterministic model trace and its named durable crash boundaries.
+struct AutomaticPolicyToolTrace {
+    /// Stable case label printed on every failed property.
+    rounds: usize,
+    /// Agent owning the trace.
+    agent_id: tau_proto::AgentId,
+    /// Ordered accepted model commands and their durable events.
+    events: Vec<(&'static str, Event)>,
+    /// Final decision-bearing response for negative mutations.
+    terminal: tau_proto::ProviderResponseFinished,
+    /// Matching outer-finish event.
+    finish: Event,
+    /// Matching protected standalone start.
+    start: Event,
+    /// Named durable record counts at each crash boundary.
+    cuts: AutomaticPolicyCuts,
+}
+
+impl AutomaticPolicyToolTrace {
+    /// Formats a reproducible fixed-seed trace label.
+    fn label(&self, command: &str) -> String {
+        format!("seed=0 rounds={} command={command}", self.rounds)
+    }
+}
+
+/// Durable record counts immediately after each named crash boundary.
+struct AutomaticPolicyCuts {
+    /// Latest continuation prompt start (or the initial prompt for zero
+    /// rounds).
+    continuation_prompt_started: usize,
+    /// Decision-bearing terminal.
+    terminal_decision: usize,
+    /// Matching outer-turn finish.
+    outer_finished: usize,
+    /// Protected automatic standalone start.
+    standalone_started: usize,
+}
+
+/// Builds one real linear tool topology for the bounded lineage model.
+fn automatic_policy_tool_trace(rounds: usize) -> AutomaticPolicyToolTrace {
+    let agent_id = agent_id();
+    let session_id = tau_proto::SessionId::parse("model-session").expect("session");
+    let model: tau_proto::ModelId = "test/model".into();
+    let initial_prompt =
+        tau_proto::AgentPromptId::parse(format!("model-prompt-{rounds}-0")).expect("prompt");
+    let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&initial_prompt);
+    let transaction_id = tau_proto::CompactionTransactionId::parse(format!("model-ct-{rounds}"))
+        .expect("transaction");
+    let mut events = Vec::new();
+    let mut prompt = initial_prompt.clone();
+    let push_prompt = |events: &mut Vec<(&'static str, Event)>,
+                       prompt_id: &tau_proto::AgentPromptId,
+                       through: AgentHead| {
+        events.push((
+            "dispatch",
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.clone(),
+                through,
+                model: Some(model.clone()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(through),
+                output_length_continuation: None,
+            }),
+        ));
+        events.push((
+            "prompt_started",
+            Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                agent_prompt_id: prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
+                model: model.clone(),
+                model_params: Some(tau_proto::ModelParams::default()),
+                outer_turn_id: Some(outer_turn_id.clone()),
+                operation: tau_proto::PromptOperation::Inference,
+                originator: PromptOriginator::User,
+                ctx_id: None,
+            }),
+        ));
+    };
+    push_prompt(&mut events, &prompt, AgentHead::Root);
+    let initial_prompt_started = events.pop().expect("initial prompt start");
+    events.push((
+        "outer_started",
+        Event::AgentOuterTurnStarted(tau_proto::AgentOuterTurnStarted {
+            agent_id: agent_id.clone(),
+            session_id: session_id.clone(),
+            outer_turn_id: outer_turn_id.clone(),
+            agent_prompt_id: initial_prompt.clone(),
+            runtime_id: tau_proto::AccountingRuntimeId::parse(format!("model-runtime-{rounds}"))
+                .expect("runtime"),
+            activation: tau_proto::AgentOuterTurnActivation::External {
+                correlation_id: tau_proto::AgentActivationCorrelationId::parse(format!(
+                    "model-activation-{rounds}"
+                ))
+                .expect("activation"),
+            },
+        }),
+    ));
+    events.push(initial_prompt_started);
+    for round in 0..rounds {
+        let call_id = tau_proto::ToolCallId::from(format!("model-call-{rounds}-{round}"));
+        events.push((
+            "tool_terminal",
+            Event::ProviderResponseFinished(tool_calling_response(
+                &agent_id,
+                prompt.as_str(),
+                vec![call_id.clone()],
+            )),
+        ));
+        events.push((
+            "tool_result",
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                presentation: Default::default(),
+                call_id,
+                tool_name: tau_proto::ToolName::new("tool"),
+                tool_type: tau_proto::ToolType::Function,
+                result: tau_proto::CborValue::Text("done".to_owned()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: PromptOriginator::User,
+            }),
+        ));
+        prompt = tau_proto::AgentPromptId::parse(format!("model-prompt-{rounds}-{}", round + 1))
+            .expect("prompt");
+        push_prompt(
+            &mut events,
+            &prompt,
+            AgentHead::Node(NodeId::new((round * 2 + 1) as u64)),
+        );
+    }
+    let continuation_prompt_started = events.len();
+    let mut terminal = tool_calling_response(&agent_id, prompt.as_str(), Vec::new());
+    terminal.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    terminal.automatic_compaction_decision = Some(tau_proto::AutomaticCompactionDecision {
+        transaction_id: transaction_id.clone(),
+        outer_turn_id: outer_turn_id.clone(),
+        model: model.clone(),
+        threshold: 100,
+    });
+    events.push((
+        "terminal_decision",
+        Event::ProviderResponseFinished(terminal.clone()),
+    ));
+    let terminal_decision = events.len();
+    let finish = Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+        agent_id: agent_id.clone(),
+        session_id,
+        outer_turn_id,
+        disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+        automatic_compaction_decision: Some(transaction_id.clone()),
+    });
+    events.push(("outer_finished", finish.clone()));
+    let outer_finished = events.len();
+    let start =
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id: tau_proto::AgentPromptId::parse(format!("model-compact-{rounds}"))
+                .expect("prompt"),
+            cut: AgentHead::Node(NodeId::new((rounds * 2) as u64)),
+            resume_through: None,
+            model,
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::AutomaticPolicy {
+                decision_id: transaction_id,
+            },
+        });
+    events.push(("standalone_started", start.clone()));
+    let standalone_started = events.len();
+    AutomaticPolicyToolTrace {
+        rounds,
+        agent_id,
+        events,
+        terminal,
+        finish,
+        start,
+        cuts: AutomaticPolicyCuts {
+            continuation_prompt_started,
+            terminal_decision,
+            outer_finished,
+            standalone_started,
+        },
+    }
+}
+
+/// Appends one model-accepted command and records its exact durable form.
+fn append_model_event(
+    tree: &mut AgentTree,
+    records: &mut Vec<PersistedAgentEvent>,
+    event: Event,
+    label: &str,
+) {
+    let parent = match &event {
+        Event::ProviderResponseFinished(response) => tree
+            .inference_dispatches
+            .get(&response.agent_prompt_id)
+            .map(|dispatch| match dispatch.checkpoint.through {
+                AgentHead::Root => AgentEventParent::Root,
+                AgentHead::Node(node) => AgentEventParent::Under(node),
+            })
+            .unwrap_or(AgentEventParent::InheritHead),
+        _ => AgentEventParent::InheritHead,
+    };
+    tree.validate_event_at(parent, &event)
+        .unwrap_or_else(|error| panic!("{label} unexpectedly rejected: {error}"));
+    let fold_semantics = AgentJournalFoldSemantics::for_new_event(&event);
+    let record = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([records.len() as u8; 16]),
+        seq: PersistedAgentEventSeq::new(records.len() as u64),
+        source: None,
+        event,
+        parent,
+        fold_semantics,
+        recorded_at: tau_proto::UnixMicros::new(records.len() as u64),
+    };
+    tree.apply_persisted_record(&record)
+        .unwrap_or_else(|error| panic!("{label} append failed: {error}"));
+    records.push(record);
+}
+
+/// Drives a rejected record through the mutating durable fold seam and proves
+/// that neither folded state nor the next sequence changes.
+fn assert_rejected_model_event(tree: &mut AgentTree, event: Event, label: &str) {
+    let unchanged = tree.clone();
+    let record = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([255; 16]),
+        seq: tree.next_event_seq(),
+        source: None,
+        event: event.clone(),
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: AgentJournalFoldSemantics::for_new_event(&event),
+        recorded_at: tau_proto::UnixMicros::new(u64::MAX),
+    };
+    assert!(
+        tree.apply_persisted_record(&record).is_err(),
+        "{label} must be rejected"
+    );
+    assert_eq!(*tree, unchanged, "{label} partially mutated the fold");
+}
+
+/// Replays each named post-tool crash cut twice and checks the exact cold
+/// recovery projection. Reopening is observational: it must not manufacture
+/// another durable fact or change which suffix is owed.
+fn assert_automatic_policy_crash_cuts(
+    trace: &AutomaticPolicyToolTrace,
+    records: &[PersistedAgentEvent],
+) {
+    for (name, cut, expected) in [
+        (
+            "continuation_prompt_started",
+            trace.cuts.continuation_prompt_started,
+            "none",
+        ),
+        (
+            "terminal_decision",
+            trace.cuts.terminal_decision,
+            "awaiting_finish",
+        ),
+        (
+            "outer_finished",
+            trace.cuts.outer_finished,
+            "awaiting_start",
+        ),
+        (
+            "standalone_started",
+            trace.cuts.standalone_started,
+            "interrupted",
+        ),
+    ] {
+        let first = AgentTree::try_from_events(trace.agent_id.clone(), &records[..cut])
+            .unwrap_or_else(|error| panic!("{} cut={name}: {error}", trace.label("reopen")));
+        let second = AgentTree::try_from_events(trace.agent_id.clone(), &records[..cut])
+            .expect("second reopen");
+        assert_eq!(first, second, "{} cut={name}", trace.label("second_reopen"));
+        let actual = match first.standalone_compaction_recovery() {
+            None => "none",
+            Some(super::StandaloneCompactionRecovery::AwaitingAutomaticStart {
+                finish_committed: false,
+                ..
+            }) => "awaiting_finish",
+            Some(super::StandaloneCompactionRecovery::AwaitingAutomaticStart {
+                finish_committed: true,
+                ..
+            }) => "awaiting_start",
+            Some(super::StandaloneCompactionRecovery::Interrupted(_)) => "interrupted",
+            Some(_) => "other",
+        };
+        assert_eq!(actual, expected, "{} cut={name}", trace.label("projection"));
+    }
+}

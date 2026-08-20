@@ -18650,6 +18650,289 @@ fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
     h.shutdown().expect("shutdown");
 }
 
+/// Post-tool lifecycle recovery repairs exactly the currently owed automatic
+/// suffix in stages: terminal/finish cuts first add the protected start, the
+/// next reopen records the now-interrupted in-flight transaction, and only the
+/// following reopen is quiescent. A start cut owes that interruption on its
+/// first reopen; a continuation-start cut owes no compaction repair.
+#[test]
+fn post_tool_automatic_policy_crash_cuts_repair_owed_suffix_once() {
+    for cut_name in [
+        "continuation_started",
+        "terminal_decision",
+        "outer_finished",
+        "standalone_started",
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let (agent_id, transaction_id, records, cut);
+        {
+            let mut h = quiet_provider_harness(&state).expect("start");
+            enable_remote_compaction_for_test_model(&mut h);
+            let info = h
+                .provider_model_info
+                .get_mut(&"test/model".into())
+                .expect("test model");
+            info.supports_compaction = false;
+            info.supports_standalone_compaction = true;
+            let cid = ensure_test_user_agent(&mut h);
+            h.available_roles
+                .get_mut(&h.selected_role)
+                .expect("selected role")
+                .compactions
+                .insert(
+                    "crash-cut".to_owned(),
+                    tau_config::settings::CompactionPolicy {
+                        threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(100),
+                        enable: true,
+                        when: tau_config::settings::ContextPolicyWhen {
+                            at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                            statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                        },
+                    },
+                );
+            h.dispatch_prompt_for_agent(
+                &cid,
+                PendingPrompt::user(format!("post-tool crash cut {cut_name}")),
+            )
+            .expect("dispatch inference");
+            let initial = read_nth_prompt_created(&h, 0);
+            h.handle_provider_response_finished(provider_tool_response(
+                &initial,
+                &format!("crash-cut-call-{cut_name}"),
+                "self_info",
+                CborValue::Map(Vec::new()),
+            ))
+            .expect("finish tool round");
+            let continuation = read_nth_prompt_created(&h, 1);
+            h.available_roles
+                .get_mut(&h.selected_role)
+                .expect("selected role")
+                .compactions
+                .clear();
+            let mut response = provider_text_response(
+                &continuation.agent_prompt_id,
+                continuation.agent_id.clone(),
+                "done",
+            );
+            response.usage = Some(tau_proto::ProviderTokenUsage {
+                prompt_sent_tokens: 250,
+                response_received_tokens: 1,
+                ..Default::default()
+            });
+            h.handle_provider_response_finished(response)
+                .expect("finish continuation");
+            agent_id = continuation.agent_id.clone();
+            records = h
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .expect("records");
+            let terminal_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::ProviderResponseFinished(response)
+                            if response.agent_prompt_id == continuation.agent_prompt_id
+                                && response.automatic_compaction_decision.is_some()
+                    )
+                })
+                .expect("decision terminal");
+            transaction_id = match &records[terminal_index].event {
+                Event::ProviderResponseFinished(response) => response
+                    .automatic_compaction_decision
+                    .as_ref()
+                    .expect("decision")
+                    .transaction_id
+                    .clone(),
+                _ => unreachable!("located response"),
+            };
+            let continuation_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentPromptStarted(started)
+                            if started.agent_prompt_id == continuation.agent_prompt_id
+                    )
+                })
+                .expect("continuation start");
+            let finish_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentOuterTurnFinished(finished)
+                            if finished.automatic_compaction_decision.as_ref()
+                                == Some(&transaction_id)
+                    )
+                })
+                .expect("finish");
+            let start_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentStandaloneCompactionStarted(started)
+                            if started.transaction_id == transaction_id
+                    )
+                })
+                .expect("start");
+            cut = match cut_name {
+                "continuation_started" => continuation_index + 1,
+                "terminal_decision" => terminal_index + 1,
+                "outer_finished" => finish_index + 1,
+                "standalone_started" => start_index + 1,
+                _ => unreachable!(),
+            };
+            h.shutdown().expect("shutdown seed");
+        }
+        wait_for_session_unlock(&state, "s1");
+        rewrite_agent_records(&state, &agent_id, &records[..cut]);
+
+        let mut previous_reopen_records: Option<Vec<tau_core::PersistedAgentEvent>> = None;
+        for reopen in 1..=3 {
+            let expected = match (cut_name, reopen) {
+                ("continuation_started", _) => (1, 0, 0, 0),
+                ("terminal_decision" | "outer_finished", 1) => (2, 1, 1, 0),
+                ("terminal_decision" | "outer_finished", _) => (2, 1, 1, 1),
+                ("standalone_started", _) => (2, 1, 1, 1),
+                _ => unreachable!(),
+            };
+            let mut restored = quiet_provider_harness_with_start_reason(
+                &state,
+                tau_proto::SessionStartReason::Resume,
+            )
+            .unwrap_or_else(|error| panic!("cut={cut_name} reopen={reopen}: {error}"));
+            let restored_records = restored
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .expect("restored records");
+            let counts = automatic_policy_recovery_counts(&restored_records, &transaction_id);
+            assert_eq!(
+                counts, expected,
+                "cut={cut_name} reopen={reopen} repaired a non-owed fact"
+            );
+            assert!(
+                restored.pending_agent_publish_completions.is_empty(),
+                "cut={cut_name} reopen={reopen} retained a completion"
+            );
+            let quiescent = match cut_name {
+                "continuation_started" | "standalone_started" => 2 <= reopen,
+                "terminal_decision" | "outer_finished" => 3 <= reopen,
+                _ => unreachable!(),
+            };
+            if quiescent {
+                let previous = previous_reopen_records
+                    .as_ref()
+                    .expect("quiescent reopen has predecessor");
+                assert_eq!(
+                    automatic_policy_recovery_events(&restored_records),
+                    automatic_policy_recovery_events(previous),
+                    "cut={cut_name} final reopen appended an unowed lifecycle record"
+                );
+            }
+            previous_reopen_records = Some(restored_records);
+            restored.shutdown().expect("shutdown reopen");
+            drop(restored);
+            wait_for_session_unlock(&state, "s1");
+        }
+    }
+}
+
+/// Rewrites one test agent journal to an exact complete-record crash prefix.
+fn rewrite_agent_records(
+    state: &std::path::Path,
+    agent_id: &tau_proto::AgentId,
+    records: &[tau_core::PersistedAgentEvent],
+) {
+    use std::io::Write as _;
+
+    let path = state
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let mut journal = path_std_fs::File::create(path).expect("rewrite crash prefix");
+    for record in records {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(record, &mut encoded).expect("encode record");
+        journal
+            .write_all(&(encoded.len() as u64).to_le_bytes())
+            .expect("write record length");
+        journal.write_all(&encoded).expect("write record");
+    }
+    journal.sync_all().expect("sync crash prefix");
+}
+
+/// Counts the decision terminal and its matching finish/start suffix.
+fn automatic_policy_recovery_counts(
+    records: &[tau_core::PersistedAgentEvent],
+    transaction_id: &tau_proto::CompactionTransactionId,
+) -> (usize, usize, usize, usize) {
+    let terminals = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderResponseFinished(_) | Event::AgentPromptTerminated(_)
+            )
+        })
+        .count();
+    let finishes = records
+        .iter()
+        .filter(|record| matches!(&record.event, Event::AgentOuterTurnFinished(_)))
+        .count();
+    let starts = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if &started.transaction_id == transaction_id
+            )
+        })
+        .count();
+    let failures = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentStandaloneCompactionFailed(failed)
+                if &failed.transaction_id == transaction_id =>
+            {
+                Some(failed)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        failures.iter().all(|failed| {
+            failed.reason == tau_proto::StandaloneCompactionFailureReason::Interrupted
+        }),
+        "automatic recovery closed with a non-interrupted failure: {failures:?}"
+    );
+    (terminals, finishes, starts, failures.len())
+}
+
+/// Projects only lifecycle records whose repetition would violate quiescent
+/// automatic-policy recovery; discovery snapshots are intentionally excluded.
+fn automatic_policy_recovery_events(
+    records: &[tau_core::PersistedAgentEvent],
+) -> Vec<&tau_proto::Event> {
+    records
+        .iter()
+        .filter_map(|record| {
+            matches!(
+                record.event,
+                Event::ProviderResponseFinished(_)
+                    | Event::AgentPromptTerminated(_)
+                    | Event::AgentOuterTurnFinished(_)
+                    | Event::AgentStandaloneCompactionStarted(_)
+                    | Event::AgentStandaloneCompactionFailed(_)
+            )
+            .then_some(&record.event)
+        })
+        .collect()
+}
+
 /// Frozen status availability selects explicit phases, while a settled
 /// no-status turn infers Done and an accepted unresolved Working final becomes
 /// Unknown.

@@ -136,6 +136,35 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the one version-two fixture that exposes the deterministic
+    /// no-side-effect dummy tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private directories, exact binaries, generated
+    /// configuration, or synthetic artifacts cannot be prepared.
+    pub fn new_dummy_tool_v2(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+        dummy_tool_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface {
+                dummy_tool_bin: Some(dummy_tool_bin.as_ref().to_path_buf()),
+                dummy_mode: FixtureDummyMode::Success,
+                status_policy: false,
+            },
+            FixtureMode::Standard,
+        )
+    }
+
     /// Creates the one closed typed-image replay fixture.
     ///
     /// # Errors

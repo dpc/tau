@@ -48,7 +48,9 @@ disconnect after correlated observation with one harness-owned disconnected
 terminal, provider repair, one replacement Ready, and a later explicit
 replacement-tool success, explicit local-only standalone-compaction
 replacement plus terminal provider-error/cancellation recovery and later
-continuation, one canonical context-window rejection followed by a uniquely
+continuation, one post-tool inferred-Done lifecycle policy followed by opaque
+standalone compaction, clean restart, and a replacement-only follow-up, one
+canonical context-window rejection followed by a uniquely
 correlated reactive opaque replacement and exactly one automatic continuation,
 typed errors followed by an explicit later turn,
 exact cancellation with same-agent post-cancel liveness, bounded holds, fatal

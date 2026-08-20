@@ -682,6 +682,29 @@ and no replayed checkpoint. Cover success, started failure/cancellation,
 pre-start failure, and explicit successor recovery independently; retain
 cross-agent `agent_compact` as the asynchronous waitable control case.
 
+## Automatic compaction lifecycle coverage
+
+Treat the initial prompt, each post-tool prompt start, the final response or
+canceled termination, outer-turn finish, and protected standalone start as
+distinct ownership and crash boundaries. Core tests derive terminal ownership
+from the exact `AgentPromptStarted.outer_turn_id`, cover initial and ordinary
+post-tool prompts, reject missing or mismatched prompt ownership without
+mutation, and compare live append with cold replay. Harness tests drive a real
+tool round for normal and canceled continuation terminals and assert one durable
+terminal, one matching finish, one protected start, no retained completion
+after success, and idempotent restart repair. One deterministic fake-provider
+scenario owns the cross-process post-tool lifecycle and compacted cold-replay
+composition. Keep manual, before-inference threshold, reactive recovery,
+output-length lineage, and provider request/response shapes in their focused
+suites; do not replace them with a combinatorial matrix.
+
+Restart repair is staged when a recovered finish creates protected standalone
+work: the first reopen commits the missing finish/start suffix, the next records
+the in-flight transaction as interrupted, and the following reopen is
+quiescent. A prefix that already contains the standalone start owes the
+interrupted outcome on its first reopen. Do not call the intermediate reopen
+quiescent while protected provider work remains in flight.
+
 
 ## Output-length continuation coverage
 

@@ -55,3 +55,13 @@
   fixtures. Compact-response parsing and opaque raw replay must verify
   `responses-compact-output.json`. Do not replace these focused rejection and
   live/replay oracles with broad matrix coverage.
+- Before changing automatic-compaction policy scheduling, canonical terminal
+  ownership/validation, `AgentPromptStarted.outer_turn_id`, outer-turn
+  finishing, or retained completion retry, preserve focused initial- and
+  post-tool-continuation oracles for both normal and canceled terminals. Assert
+  the canonical terminal, outer-turn finish, and protected standalone start are
+  each durable at most once; assert successful publication leaves no retained
+  completion; and verify live append, cold replay, and the applicable restart
+  cut. Keep manual, before-inference, reactive-overflow, and provider-shape
+  coverage in their owning focused suites rather than multiplying a broad
+  matrix.

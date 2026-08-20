@@ -1564,6 +1564,20 @@ impl FakeState {
                 });
                 handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
             }
+            ScenarioActionV2::DummyToolResultWithUsage { response, .. } => {
+                let mut finished = finished(
+                    prompt,
+                    vec![assistant_message(response)],
+                    ProviderStopReason::EndTurn,
+                );
+                finished.usage = Some(tau_proto::ProviderTokenUsage {
+                    prompt_sent_tokens: 2_000,
+                    prompt_cached_tokens: 0,
+                    response_received_tokens: 1,
+                    ..Default::default()
+                });
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished))
+            }
             ScenarioActionV2::Text { response, .. }
             | ScenarioActionV2::CompactedText { response, .. }
             | ScenarioActionV2::CompactedOpaqueText { response, .. }
@@ -2067,7 +2081,8 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "dummy tool snapshot mismatch"));
                 }
             }
-            ScenarioActionV2::DummyToolResult { call_id, .. } => {
+            ScenarioActionV2::DummyToolResult { call_id, .. }
+            | ScenarioActionV2::DummyToolResultWithUsage { call_id, .. } => {
                 let results = prompt
                     .context
                     .flatten_iter()
@@ -2367,12 +2382,21 @@ impl FakeState {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
+                let retained_source_items = prompt.context.flatten_iter().any(|item| {
+                    matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_))
+                        || matches!(
+                            item,
+                            ContextItem::Message(message)
+                                if message.role == ContextRole::Assistant
+                        )
+                });
                 if !matches!(
                     opaque_items.as_slice(),
                     [compaction]
                         if compaction.raw_json.as_deref()
                             == Some(CANONICAL_OPAQUE_COMPACTION_JSON)
                 ) || context.contains(removed_user_text)
+                    || retained_source_items
                 {
                     return Err(self.mismatch(
                         cursor,
@@ -3113,6 +3137,7 @@ impl ScenarioActionV2 {
             }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
+            | Self::DummyToolResultWithUsage { user_text, .. }
             | Self::TypedImageToolCall { user_text, .. }
             | Self::TypedImageReplay { user_text, .. }
             | Self::DummyToolRepair { user_text, .. }

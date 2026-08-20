@@ -187,6 +187,16 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response after the tool result.
         response: String,
     },
+    /// Accept the successful dummy result and finish with deterministic nonzero
+    /// usage for the automatic lifecycle-policy scenario.
+    DummyToolResultWithUsage {
+        /// Exact latest user text retained in the provider continuation.
+        user_text: String,
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Complete assistant response after the tool result.
+        response: String,
+    },
     /// Request the closed dummy mode that returns one fixed typed image.
     TypedImageToolCall {
         /// Exact latest user text.

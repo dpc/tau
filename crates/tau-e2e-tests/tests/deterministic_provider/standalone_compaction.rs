@@ -174,6 +174,10 @@ fn deterministic_opaque_standalone_compaction_replays_after_clean_restart()
     let compact_prompt = recv_until_compaction_prompt(&mut peer_a)?;
     let compacted = recv_until_compacted(&mut peer_a)?;
     assert_eq!(
+        compacted.compact_prompt_id.as_ref(),
+        Some(&compact_prompt.agent_prompt_id)
+    );
+    assert_eq!(
         compacted.transaction_id.as_ref(),
         Some(&started.transaction_id)
     );
@@ -214,27 +218,42 @@ fn deterministic_opaque_standalone_compaction_replays_after_clean_restart()
     Ok(())
 }
 
-/// A role without the status tool infers Done at its settled outer finish and
-/// immediately runs one named eager policy without another user activation.
+/// A post-tool continuation owns one inferred-Done automatic decision, whose
+/// opaque replacement survives a clean restart and excludes its source context
+/// from the next ordinary inference.
 #[test]
-fn deterministic_outer_finish_policy_infers_done_and_compacts()
+fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
 -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = DeterministicFixture::new_v2(
-        "deterministic_outer_finish_policy_infers_done_and_compacts",
+    const INITIAL: &str = "run the lifecycle tool and compact";
+    const FOLLOW_UP: &str = "continue from the lifecycle replacement";
+    const CALL_ID: &str = "lifecycle-call";
+    let fixture = DeterministicFixture::new_dummy_tool_v2(
+        "deterministic_post_tool_policy_compacts_and_replays_after_clean_restart",
         &ScenarioV2::new(
-            "outer-finish-policy",
+            "post-tool-outer-finish-policy-restart",
             vec![ScenarioLaneV2 {
-                ctx_id: "outer-finish-lane".to_owned(),
+                ctx_id: "post-tool-policy-lane".to_owned(),
                 actions: vec![
-                    ScenarioActionV2::TextWithUsage {
-                        user_text: "finish and compact".to_owned(),
-                        response: "finished work".to_owned(),
+                    ScenarioActionV2::DummyToolCall {
+                        user_text: INITIAL.to_owned(),
+                        call_id: CALL_ID.into(),
+                    },
+                    ScenarioActionV2::DummyToolResultWithUsage {
+                        user_text: INITIAL.to_owned(),
+                        call_id: CALL_ID.into(),
+                        response: "post-tool lifecycle finished".to_owned(),
                     },
                     ScenarioActionV2::StandaloneOpaqueCompaction,
+                    ScenarioActionV2::CompactedOpaqueText {
+                        user_text: FOLLOW_UP.to_owned(),
+                        removed_user_text: INITIAL.to_owned(),
+                        response: "continued from lifecycle replacement".to_owned(),
+                    },
                 ],
             }],
         ),
         FAKE_PROVIDER,
+        DUMMY_TOOL,
     )?;
     let config_path = fixture.config_dir().join("harness.yaml");
     let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
@@ -259,15 +278,19 @@ fn deterministic_outer_finish_policy_infers_done_and_compacts()
         }),
     );
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+    let user_config_dir = fixture.root().join("xdg-config").join("tau");
+    std::fs::create_dir_all(&user_config_dir)?;
+    std::fs::write(user_config_dir.join("harness.yaml"), "{}\n")?;
 
-    let socket = fixture.socket_path("outer-finish-policy");
-    let server = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
-    let mut peer = connect_ui(&socket)?;
-    create_agent(&mut peer, "outer-finish-lane", "finish and compact")?;
-    let finished = recv_until_finished(&mut peer)?;
-    assert_assistant(&finished.output_items, "finished work");
+    let socket_a = fixture.socket_path("post-tool-policy-a");
+    let server_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
+    let mut peer_a = connect_ui(&socket_a)?;
+    create_agent(&mut peer_a, "post-tool-policy-lane", INITIAL)?;
+    let continuation_prompt = recv_until_created(&mut peer_a, None)?;
+    let finished = recv_until_finished_for(&mut peer_a, &continuation_prompt.agent_prompt_id)?;
+    assert_assistant(&finished.output_items, "post-tool lifecycle finished");
     assert!(finished.automatic_compaction_decision.is_some());
-    let started = recv_until_compaction_started(&mut peer)?;
+    let started = recv_until_compaction_started(&mut peer_a)?;
     assert!(matches!(
         started.trigger,
         StandaloneCompactionTrigger::AutomaticPolicy { ref decision_id }
@@ -277,12 +300,224 @@ fn deterministic_outer_finish_policy_infers_done_and_compacts()
                     .as_ref()
                     .map(|decision| &decision.transaction_id)
     ));
-    let _compact_prompt = recv_until_compaction_prompt(&mut peer)?;
-    let _compacted = recv_until_compacted(&mut peer)?;
-    disconnect_ui(&mut peer)?;
-    server.finish()?;
+    let compact_prompt = recv_until_compaction_prompt(&mut peer_a)?;
+    let compacted = recv_until_compacted(&mut peer_a)?;
+    assert_eq!(
+        compacted.compact_prompt_id.as_ref(),
+        Some(&compact_prompt.agent_prompt_id)
+    );
+    assert!(matches!(
+        compacted.replacement_window.as_slice(),
+        [ContextItem::Compaction(item)]
+            if item.raw_json.as_deref()
+                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+    ));
+    disconnect_ui(&mut peer_a)?;
+    server_a.finish()?;
+
+    let snapshot_a = lifecycle_snapshot(&fixture, &continuation_prompt.agent_id)?;
+    let socket_b = fixture.socket_path("post-tool-policy-b");
+    let server_b = spawn_daemon(
+        &fixture,
+        &socket_b,
+        tau_harness::SessionLaunchStatus::Resumed,
+    );
+    let mut peer_b = connect_ui(&socket_b)?;
+    recv_until_session_replay_complete(&mut peer_b)?;
+    submit_prompt(
+        &mut peer_b,
+        &continuation_prompt.agent_id,
+        "post-tool-policy-follow-up",
+        FOLLOW_UP,
+    )?;
+    let follow_up = recv_until_finished(&mut peer_b)?;
+    assert_assistant(
+        &follow_up.output_items,
+        "continued from lifecycle replacement",
+    );
+    disconnect_ui(&mut peer_b)?;
+    server_b.finish()?;
+
+    let snapshot_b = lifecycle_snapshot(&fixture, &continuation_prompt.agent_id)?;
+    snapshot_b.require_prefix(&snapshot_a)?;
+    let prompts = snapshot_b
+        .agent_events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let outer_started = snapshot_b
+        .agent_events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentOuterTurnStarted(started) => Some(started),
+            _ => None,
+        })
+        .ok_or("missing outer turn start")?;
+    let decision_terminal = snapshot_b
+        .agent_events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.automatic_compaction_decision.is_some() =>
+            {
+                Some(response)
+            }
+            _ => None,
+        })
+        .ok_or("missing decision terminal")?;
+    let initial_started = prompts
+        .iter()
+        .find(|started| started.agent_prompt_id == outer_started.agent_prompt_id)
+        .ok_or("missing initial prompt start")?;
+    let continuation_started = prompts
+        .iter()
+        .find(|started| {
+            started.operation == PromptOperation::Inference
+                && started.agent_prompt_id == decision_terminal.agent_prompt_id
+                && started.outer_turn_id == initial_started.outer_turn_id
+        })
+        .ok_or("missing distinct post-tool continuation prompt")?;
+    assert_ne!(
+        initial_started.agent_prompt_id,
+        continuation_started.agent_prompt_id
+    );
+    let count = |predicate: &dyn Fn(&Event) -> bool| {
+        snapshot_b
+            .agent_events
+            .iter()
+            .filter(|record| predicate(&record.event))
+            .count()
+    };
+    assert_eq!(
+        count(&|event| matches!(event, Event::AgentPromptStarted(_))),
+        4,
+        "initial, tool continuation, compact, and follow-up prompts are the complete lineage"
+    );
+    assert_eq!(
+        count(&|event| matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.stop_reason == tau_proto::ProviderStopReason::ToolCalls
+        )),
+        1
+    );
+    assert_eq!(
+        count(&|event| matches!(event, Event::ProviderToolResult(_))),
+        1
+    );
+    assert_eq!(
+        count(&|event| matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == continuation_started.agent_prompt_id
+                    && response.automatic_compaction_decision.is_some()
+        )),
+        1
+    );
+    assert_eq!(
+        count(
+            &|event| matches!(event, Event::AgentOuterTurnFinished(finished)
+            if Some(&finished.outer_turn_id) == initial_started.outer_turn_id.as_ref())
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &|event| matches!(event, Event::AgentStandaloneCompactionStarted(value)
+            if value.transaction_id == started.transaction_id)
+        ),
+        1
+    );
+    assert_eq!(
+        count(&|event| matches!(event, Event::AgentCompacted(value)
+            if value.transaction_id.as_ref() == Some(&started.transaction_id))),
+        1
+    );
+    let position = |predicate: &dyn Fn(&Event) -> bool| {
+        snapshot_b
+            .agent_events
+            .iter()
+            .position(|record| predicate(&record.event))
+            .expect("expected lifecycle record")
+    };
+    let decision_index = position(&|event| {
+        matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.automatic_compaction_decision.as_ref().map(|decision| &decision.transaction_id)
+                    == Some(&started.transaction_id)
+        )
+    });
+    let finish_index = position(&|event| {
+        matches!(
+            event,
+            Event::AgentOuterTurnFinished(finished)
+                if finished.automatic_compaction_decision.as_ref() == Some(&started.transaction_id)
+        )
+    });
+    let start_index = position(&|event| {
+        matches!(
+            event,
+            Event::AgentStandaloneCompactionStarted(value)
+                if value.transaction_id == started.transaction_id
+        )
+    });
+    assert!(
+        decision_index < finish_index && finish_index < start_index,
+        "automatic lifecycle order changed"
+    );
+    assert_eq!(fixture.trace()?.matches(" matched ").count(), 4);
+    let published = fixture.published_trace_events()?;
+    let diagnostics = published
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::HarnessNotice(notice)
+                    if matches!(
+                        notice.level,
+                        tau_proto::NoticeLevel::Warning | tau_proto::NoticeLevel::Critical
+                    )
+            ) || matches!(
+                event,
+                Event::ProviderResponseFinished(response) if response.failure_kind.is_some()
+            ) || matches!(event, Event::AgentStandaloneCompactionFailed(_))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        diagnostics.is_empty(),
+        "closed lifecycle emitted warning/failure frames: {diagnostics:?}"
+    );
+    assert_durable_opaque_compaction(&fixture, &continuation_prompt.agent_id)?;
     fixture.assert_consumed()?;
     Ok(())
+}
+
+/// Loads the single-agent durable lifecycle snapshot and rejects persisted
+/// provider failures or harness warnings in the closed success scenario.
+fn lifecycle_snapshot(
+    fixture: &DeterministicFixture,
+    expected_agent_id: &tau_proto::AgentId,
+) -> Result<tau_e2e_tests::DurableSnapshot, Box<dyn std::error::Error>> {
+    let snapshot = tau_e2e_tests::DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    if snapshot.agent_id != *expected_agent_id
+        || snapshot.agent_events.iter().any(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderResponseFinished(response) if response.failure_kind.is_some()
+            ) || matches!(&record.event, Event::HarnessNotice(_))
+                || matches!(&record.event, Event::AgentStandaloneCompactionFailed(_))
+        })
+    {
+        return Err("closed lifecycle scenario persisted a warning or failure".into());
+    }
+    Ok(snapshot)
 }
 
 /// Proves an explicitly opted-in deterministic model completes the real

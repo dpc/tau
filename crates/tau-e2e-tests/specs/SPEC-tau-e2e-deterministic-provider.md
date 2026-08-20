@@ -329,6 +329,14 @@ transcript-v1 materialization and limits, the Chat Completions adapter owns its
 private static no-tools wire lowering, and provider-builtin tests own public
 Responses fallback dispatch and validation.
 
+One separate closed lifecycle scenario runs a successful deterministic dummy
+tool round, finishes on its distinct ordinary continuation above an inferred
+Done outer-finish threshold, commits one automatic opaque standalone
+replacement, restarts cleanly, and requires the next ordinary inference to see
+the replacement without the removed source prompt. It owns that exact
+cross-process lifecycle and replay composition, not other statuses, terminal
+classes, provider shapes, triggers, retry policies, or a general outcome matrix.
+
 This boundary validates extension supervision, CBOR lifecycle, model routing,
 prompt assembly, provider-event validation, one real tool continuation, typed
 terminal error projection, exact cancellation with same-agent post-cancel
