@@ -60,13 +60,22 @@ fn responses_profile_round_trips_canonically() {
 }
 
 fn compatibility_profiles() -> BuiltinProviderProfiles {
+    let chatgpt = ProviderName::new("chatgpt");
     BuiltinProviderProfiles {
-        credentials: Default::default(),
-        providers: BTreeMap::from([
-            (
-                ProviderName::new("chatgpt"),
-                load_profile_fixture("profiles/chatgpt.json"),
+        credentials: BTreeMap::from([(
+            chatgpt.clone(),
+            ProviderCredential::Stored(
+                ProviderCredentialReference::new(
+                    ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef")
+                        .expect("valid credential identity"),
+                    ProviderCredentialSlot::OAuth,
+                    None,
+                )
+                .expect("valid OAuth credential reference"),
             ),
+        )]),
+        providers: BTreeMap::from([
+            (chatgpt, load_profile_fixture("profiles/chatgpt.json")),
             (
                 ProviderName::new("local"),
                 load_profile_fixture("profiles/chat_completions.json"),

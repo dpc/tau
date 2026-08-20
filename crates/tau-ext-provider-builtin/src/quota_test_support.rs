@@ -131,7 +131,18 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
     );
     let profiles = BuiltinProviderProfiles {
         providers,
-        credentials: Default::default(),
+        credentials: BTreeMap::from([(
+            ProviderName::new(CHATGPT_PROVIDER_NAME),
+            ProviderCredential::Stored(
+                ProviderCredentialReference::new(
+                    ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef")
+                        .expect("valid credential identity"),
+                    ProviderCredentialSlot::OAuth,
+                    None,
+                )
+                .expect("valid OAuth credential reference"),
+            ),
+        )]),
     };
     let reload_profiles = profiles.clone();
     let result = run_inner_with_prompt_executor(

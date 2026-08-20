@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::sync::atomic as path_std_sync_atomic;
 use std::{io as path_std_io, time as path_std_time};
@@ -8,6 +9,18 @@ use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
 mod compatibility;
 
 use super::*;
+
+/// Returns a parsed OAuth credential reference whose storage identity differs
+/// from the provider names used by refresh-routing tests.
+fn oauth_test_credential_reference() -> ProviderCredentialReference {
+    ProviderCredentialReference::new(
+        ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef")
+            .expect("valid opaque credential identity"),
+        ProviderCredentialSlot::OAuth,
+        None,
+    )
+    .expect("valid OAuth credential reference")
+}
 
 /// A route downgrade must remove both standalone admission fields only from
 /// the affected provider's published model snapshot.
@@ -725,6 +738,34 @@ fn provider_settings_credential_reference_is_authoritative_and_exact() {
     }
 }
 
+/// Ensures initial profile hydration retains an opaque credential path instead
+/// of reconstructing it from the user-facing provider namespace.
+#[test]
+fn chatgpt_initial_hydration_retains_credential_identity() {
+    let provider = ProviderName::new("chatgpt-fedi");
+    let profiles = try_load_settings_profiles(vec![(
+        provider.clone(),
+        br#"{
+            "kind": "chatgpt",
+            "credential": {
+                "kind": "oauth",
+                "identity": "0123456789abcdef0123456789abcdef"
+            }
+        }"#
+        .to_vec(),
+    )])
+    .expect("credential-free ChatGPT settings");
+
+    assert_eq!(
+        profiles
+            .chatgpt_credential_reference(&provider)
+            .expect("parsed OAuth credential reference")
+            .path()
+            .as_str(),
+        "providers/0123456789abcdef0123456789abcdef/oauth.json"
+    );
+}
+
 fn configured_chat_completions_settings(_provider: &str, extra: serde_json::Value) -> Vec<u8> {
     let mut settings = serde_json::json!({
         "kind": "chat_completions",
@@ -1360,7 +1401,8 @@ fn oauth_unauthorized_recovery_is_exact_generation_and_once_only() {
 /// endpoint attempt.
 #[test]
 fn oauth_unauthorized_forces_once_then_suppresses_rejected_generation() {
-    let provider = ProviderName::new("chatgpt");
+    let provider = ProviderName::new("chatgpt-fedi");
+    let credential_reference = oauth_test_credential_reference();
     let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
     let original = OpenAiAuth {
         access_token: oauth_test_jwt("account-a"),
@@ -1388,11 +1430,16 @@ fn oauth_unauthorized_forces_once_then_suppresses_rejected_generation() {
     let first = resolve_chatgpt_backend_with_refresh(
         &model,
         &provider,
+        &credential_reference,
         &mut auth,
         CodexMode::Standard,
         &mut cache,
-        |_, _, _, force| {
+        |_, reference, _, _, force| {
             assert!(force);
+            assert_eq!(
+                reference.path().as_str(),
+                "providers/0123456789abcdef0123456789abcdef/oauth.json"
+            );
             attempts.set(attempts.get() + 1);
             Err(RefreshCredentialsError::OAuth {
                 credentials: Box::new(original.clone()),
@@ -1407,13 +1454,93 @@ fn oauth_unauthorized_forces_once_then_suppresses_rejected_generation() {
     let second = resolve_chatgpt_backend_with_refresh(
         &model,
         &provider,
+        &credential_reference,
         &mut auth,
         CodexMode::Standard,
         &mut cache,
-        |_, _, _, _| panic!("rejected generation must remain suppressed"),
+        |_, _, _, _, _| panic!("rejected generation must remain suppressed"),
     );
     assert!(second.is_none());
     assert_eq!(attempts.get(), 1);
+}
+
+/// Ensures the refresh read, CAS publication, and losing-CAS reload all use
+/// the parsed credential identity rather than the provider namespace.
+#[test]
+fn oauth_refresh_cas_and_reload_follow_credential_identity() {
+    let provider = ProviderName::new("chatgpt-fedi");
+    let credential_reference = oauth_test_credential_reference();
+    let current = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh-current".to_owned(),
+        expires_at_ms: u64::MAX,
+        account_id: Some("account-a".to_owned()),
+    };
+    let mut winner = current.clone();
+    winner.access_token = format!("{}-winner", oauth_test_jwt("account-a"));
+    winner.refresh_token = "refresh-winner".to_owned();
+    let current_record = serde_json::to_vec(&credential_record::ChatGptOAuthCredential::from(
+        current.clone(),
+    ))
+    .expect("encode current credential");
+    let winner_record = serde_json::to_vec(&credential_record::ChatGptOAuthCredential::from(
+        winner.clone(),
+    ))
+    .expect("encode winning credential");
+    let mut results = VecDeque::from([
+        Ok(tau_proto::ExtensionDataValue::ReadFile {
+            contents: current_record,
+        }),
+        Err(OAuthCredentialStorageError::GenerationMismatch),
+        Ok(tau_proto::ExtensionDataValue::ReadFile {
+            contents: winner_record,
+        }),
+    ]);
+    let mut operations = Vec::new();
+    let mut rejections = OAuthRefreshRejectionCache::default();
+
+    let refreshed = refresh_chatgpt_credentials_with(
+        &provider,
+        &credential_reference,
+        CodexMode::Standard,
+        &mut rejections,
+        true,
+        |operation| {
+            operations.push(operation);
+            results.pop_front().expect("expected Secret RPC operation")
+        },
+        |refresh_token| {
+            assert_eq!(refresh_token, "refresh-current");
+            Ok(path_tau_provider_codex_oauth::OAuthTokenRefresh {
+                access_token: Some(format!("{}-attempt", oauth_test_jwt("account-a"))),
+                refresh_token: Some("refresh-attempt".to_owned()),
+                expires_at_ms: Some(u64::MAX),
+                account_id: Some("account-a".to_owned()),
+            })
+        },
+    )
+    .expect("losing CAS adopts same-account winner");
+
+    assert_eq!(refreshed, winner);
+    assert!(results.is_empty(), "all expected Secret RPC operations ran");
+    let paths = operations
+        .into_iter()
+        .map(|operation| match operation {
+            tau_proto::ExtensionDataRequestOp::ReadFile { path }
+            | tau_proto::ExtensionDataRequestOp::CompareAndSwapFile { path, .. } => path,
+            _ => panic!("unexpected OAuth credential operation"),
+        })
+        .map(|path| path.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            "providers/0123456789abcdef0123456789abcdef/oauth.json",
+            "providers/0123456789abcdef0123456789abcdef/oauth.json",
+            "providers/0123456789abcdef0123456789abcdef/oauth.json",
+        ],
+        "initial read, CAS, and reload retain the parsed credential identity"
+    );
 }
 
 /// Forced recovery without a refresh credential cannot return the exact
@@ -1498,7 +1625,16 @@ fn startup_quota_initialization_resolves_once_per_provider() {
         account_id: None,
     };
     let mut profiles = BuiltinProviderProfiles {
-        credentials: Default::default(),
+        credentials: BTreeMap::from([
+            (
+                first.clone(),
+                ProviderCredential::Stored(oauth_test_credential_reference()),
+            ),
+            (
+                second.clone(),
+                ProviderCredential::Stored(oauth_test_credential_reference()),
+            ),
+        ]),
         providers: BTreeMap::from([
             (
                 first.clone(),
@@ -1558,10 +1694,11 @@ fn startup_quota_initialization_resolves_once_per_provider() {
             resolve_chatgpt_backend_with_refresh(
                 model,
                 &model.provider,
+                &oauth_test_credential_reference(),
                 &mut profile.auth,
                 mode,
                 &mut refresh_rejections,
-                |provider, _, _, _| {
+                |provider, _, _, _, _| {
                     attempts.push(provider.clone());
                     Err(RefreshCredentialsError::OAuth {
                         credentials: Box::new(authoritative),
@@ -1616,12 +1753,14 @@ fn startup_quota_initialization_resolves_once_per_provider() {
 /// without calling the endpoint.
 #[test]
 fn refresh_failure_falls_back_only_to_still_valid_access_token() {
-    let provider = ProviderName::new("chatgpt");
+    let provider = ProviderName::new("chatgpt-fedi");
+    let credential_reference = oauth_test_credential_reference();
     let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
     let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
+    let preemptive_refreshes = Cell::new(0);
 
     for (expires_at_ms, refresh_token, expected_available) in [
         (now_ms().saturating_sub(1), "refresh", false),
@@ -1639,10 +1778,18 @@ fn refresh_failure_falls_back_only_to_still_valid_access_token() {
         let config = resolve_chatgpt_backend_with_refresh(
             &model,
             &provider,
+            &credential_reference,
             &mut auth,
             CodexMode::Standard,
             &mut cache,
-            |_, _, _, _| {
+            |requested_provider, reference, _, _, force| {
+                assert_eq!(requested_provider, &provider);
+                assert_eq!(
+                    reference.path().as_str(),
+                    "providers/0123456789abcdef0123456789abcdef/oauth.json"
+                );
+                assert!(!force, "expiry-triggered refresh is not forced recovery");
+                preemptive_refreshes.set(preemptive_refreshes.get() + 1);
                 Err(RefreshCredentialsError::OAuth {
                     credentials: Box::new(authoritative),
                     error: rejection.clone(),
@@ -1652,6 +1799,11 @@ fn refresh_failure_falls_back_only_to_still_valid_access_token() {
 
         assert_eq!(config.is_some(), expected_available);
     }
+    assert_eq!(
+        preemptive_refreshes.get(),
+        2,
+        "expired and near-expiry credentials both preemptively refresh"
+    );
 }
 
 /// Startup-selected modes independently control same-process publication and

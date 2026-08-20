@@ -175,6 +175,21 @@ pub struct BuiltinProviderProfiles {
 }
 
 impl BuiltinProviderProfiles {
+    /// Returns the stored OAuth credential selection for one ChatGPT profile.
+    fn chatgpt_credential_reference(
+        &self,
+        provider: &ProviderName,
+    ) -> Option<&ProviderCredentialReference> {
+        match self.credentials.get(provider) {
+            Some(ProviderCredential::Stored(reference))
+                if reference.slot() == ProviderCredentialSlot::OAuth =>
+            {
+                Some(reference)
+            }
+            Some(ProviderCredential::Stored(_)) | Some(ProviderCredential::Keyless) | None => None,
+        }
+    }
+
     fn startup_responses_modes(&self) -> BTreeMap<ProviderName, CodexMode> {
         self.providers
             .iter()
@@ -2321,9 +2336,10 @@ where
 
 #[cfg(test)]
 fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
+    let provider = ProviderName::new(CHATGPT_PROVIDER_NAME);
     let mut providers = BTreeMap::new();
     providers.insert(
-        ProviderName::new(CHATGPT_PROVIDER_NAME),
+        provider.clone(),
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {
             auth,
             responses_lite_compatibility: false,
@@ -2331,7 +2347,17 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
     );
     BuiltinProviderProfiles {
         providers,
-        ..Default::default()
+        credentials: BTreeMap::from([(
+            provider,
+            ProviderCredential::Stored(
+                ProviderCredentialReference::new(
+                    ProviderCredentialIdentity::random(),
+                    ProviderCredentialSlot::OAuth,
+                    None,
+                )
+                .expect("OAuth credential reference"),
+            ),
+        )]),
     }
 }
 
@@ -5520,6 +5546,9 @@ fn resolve_prompt_backend(
     network: &tau_provider::OutboundNetworkPolicy,
     extension_data_client: Option<&ExtensionDataClient>,
 ) -> Option<PromptBackend> {
+    let credential_reference = profiles
+        .chatgpt_credential_reference(&model.provider)
+        .cloned();
     let Some(profile) = profiles.providers.get_mut(&model.provider) else {
         refresh_rejections.clear(&model.provider);
         return None;
@@ -5527,9 +5556,10 @@ fn resolve_prompt_backend(
     match profile {
         BuiltinProviderProfile::Chatgpt(profile) => {
             let mode = profile.responses_mode();
+            let credential_reference = credential_reference?;
             resolve_chatgpt_backend(
                 model,
-                &model.provider,
+                &credential_reference,
                 &mut profile.auth,
                 mode,
                 refresh_rejections,
@@ -5585,6 +5615,9 @@ fn resolve_responses_backend(
     network: &tau_provider::OutboundNetworkPolicy,
     extension_data_client: Option<&ExtensionDataClient>,
 ) -> Option<ResolvedConfig> {
+    let credential_reference = profiles
+        .chatgpt_credential_reference(&model.provider)
+        .cloned();
     let Some(profile) = profiles.providers.get_mut(&model.provider) else {
         refresh_rejections.clear(&model.provider);
         return None;
@@ -5592,9 +5625,10 @@ fn resolve_responses_backend(
     match profile {
         BuiltinProviderProfile::Chatgpt(profile) => {
             let mode = profile.responses_mode();
+            let credential_reference = credential_reference?;
             resolve_chatgpt_backend(
                 model,
-                &model.provider,
+                &credential_reference,
                 &mut profile.auth,
                 mode,
                 refresh_rejections,
@@ -5613,7 +5647,7 @@ fn resolve_responses_backend(
 
 fn resolve_chatgpt_backend(
     model: &ModelId,
-    provider_name: &ProviderName,
+    credential_reference: &ProviderCredentialReference,
     auth_store: &mut OpenAiAuth,
     mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
@@ -5622,13 +5656,15 @@ fn resolve_chatgpt_backend(
 ) -> Option<ResolvedConfig> {
     resolve_chatgpt_backend_with_refresh(
         model,
-        provider_name,
+        &model.provider,
+        credential_reference,
         auth_store,
         mode,
         refresh_rejections,
-        |provider, mode, rejections, force| {
+        |provider, credential_reference, mode, rejections, force| {
             refresh_chatgpt_credentials_rpc(
                 provider,
+                credential_reference,
                 mode,
                 rejections,
                 force,
@@ -5642,11 +5678,13 @@ fn resolve_chatgpt_backend(
 fn resolve_chatgpt_backend_with_refresh(
     model: &ModelId,
     provider_name: &ProviderName,
+    credential_reference: &ProviderCredentialReference,
     auth_store: &mut OpenAiAuth,
     mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     refresh: impl FnOnce(
         &ProviderName,
+        &ProviderCredentialReference,
         CodexMode,
         &mut OAuthRefreshRejectionCache,
         bool,
@@ -5673,7 +5711,13 @@ fn resolve_chatgpt_backend_with_refresh(
         oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
             && !auth_store.refresh_token.trim().is_empty();
     if forced || refresh_due || refresh_rejections.contains(provider_name) {
-        match refresh(provider_name, mode, refresh_rejections, forced) {
+        match refresh(
+            provider_name,
+            credential_reference,
+            mode,
+            refresh_rejections,
+            forced,
+        ) {
             Ok(refreshed) => {
                 *auth_store = refreshed;
             }
@@ -5730,8 +5774,17 @@ fn resolve_chatgpt_backend_with_refresh(
     ))
 }
 
+/// Closed result category for one Secret RPC used by OAuth credential refresh.
+enum OAuthCredentialStorageError {
+    /// The Secret RPC failed for a reason other than a CAS race.
+    Unavailable,
+    /// Another refresher replaced the credential after its initial read.
+    GenerationMismatch,
+}
+
 fn refresh_chatgpt_credentials_rpc(
     provider_name: &ProviderName,
+    credential_reference: &ProviderCredentialReference,
     mode: CodexMode,
     refresh_rejections: &mut OAuthRefreshRejectionCache,
     force: bool,
@@ -5744,14 +5797,51 @@ fn refresh_chatgpt_credentials_rpc(
             "Secret RPC is unavailable",
         ))
     })?;
-    let path = format!("providers/{provider_name}/oauth.json");
-    let value = client
-        .request(
-            tau_proto::ExtensionDataScope::Secret,
-            tau_proto::ExtensionDataRequestOp::ReadFile {
-                path: tau_proto::ExtensionDataPath::new(path.clone()),
-            },
-        )
+    refresh_chatgpt_credentials_with(
+        provider_name,
+        credential_reference,
+        mode,
+        refresh_rejections,
+        force,
+        |operation| {
+            client
+                .request(tau_proto::ExtensionDataScope::Secret, operation)
+                .map_err(|error| match error {
+                    tau_client::ExtensionDataRpcError::Harness {
+                        kind: tau_proto::ExtensionDataErrorKind::GenerationMismatch,
+                        ..
+                    } => OAuthCredentialStorageError::GenerationMismatch,
+                    tau_client::ExtensionDataRpcError::Client(_)
+                    | tau_client::ExtensionDataRpcError::Harness { .. }
+                    | tau_client::ExtensionDataRpcError::InputClosed
+                    | tau_client::ExtensionDataRpcError::Disconnect(_)
+                    | tau_client::ExtensionDataRpcError::Timeout => {
+                        OAuthCredentialStorageError::Unavailable
+                    }
+                })
+        },
+        |refresh_token| tau_provider_codex::oauth::openai_codex_refresh(refresh_token, network),
+    )
+}
+
+fn refresh_chatgpt_credentials_with(
+    provider_name: &ProviderName,
+    credential_reference: &ProviderCredentialReference,
+    mode: CodexMode,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
+    force: bool,
+    mut request: impl FnMut(
+        tau_proto::ExtensionDataRequestOp,
+    ) -> Result<tau_proto::ExtensionDataValue, OAuthCredentialStorageError>,
+    refresh: impl FnOnce(
+        &str,
+    ) -> Result<
+        tau_provider_codex::oauth::OAuthTokenRefresh,
+        tau_provider_codex::oauth::OAuthError,
+    >,
+) -> Result<OpenAiAuth, RefreshCredentialsError> {
+    let path = credential_reference.path().clone();
+    let value = request(tau_proto::ExtensionDataRequestOp::ReadFile { path: path.clone() })
         .map_err(|_| {
             RefreshCredentialsError::Storage(path_std_io::Error::other(
                 "could not read OAuth credential through Secret RPC",
@@ -5780,17 +5870,16 @@ fn refresh_chatgpt_credentials_rpc(
         refresh_rejections.clear_refresh_rejection(provider_name);
         return Ok(current);
     }
-    let tokens =
-        match tau_provider_codex::oauth::openai_codex_refresh(&current.refresh_token, network) {
-            Ok(tokens) => tokens,
-            Err(error) => {
-                refresh_rejections.record_if_permanent(provider_name, &current, mode, &error);
-                return Err(RefreshCredentialsError::OAuth {
-                    credentials: Box::new(current),
-                    error,
-                });
-            }
-        };
+    let tokens = match refresh(&current.refresh_token) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            refresh_rejections.record_if_permanent(provider_name, &current, mode, &error);
+            return Err(RefreshCredentialsError::OAuth {
+                credentials: Box::new(current),
+                error,
+            });
+        }
+    };
     let refreshed = merge_chatgpt_refresh(&current, tokens)?;
     let replacement = serde_json::to_vec(&credential_record::ChatGptOAuthCredential::from(
         refreshed.clone(),
@@ -5801,14 +5890,11 @@ fn refresh_chatgpt_credentials_rpc(
         ))
     })?;
     let expected_generation = blake3::hash(&contents).to_hex().to_string();
-    match client.request(
-        tau_proto::ExtensionDataScope::Secret,
-        tau_proto::ExtensionDataRequestOp::CompareAndSwapFile {
-            path: tau_proto::ExtensionDataPath::new(path.clone()),
-            expected_generation,
-            contents: replacement,
-        },
-    ) {
+    match request(tau_proto::ExtensionDataRequestOp::CompareAndSwapFile {
+        path: path.clone(),
+        expected_generation,
+        contents: replacement,
+    }) {
         Ok(tau_proto::ExtensionDataValue::CompareAndSwapFile) => {
             if force && refreshed.access_token == current.access_token {
                 return Err(RefreshCredentialsError::RejectedGeneration);
@@ -5819,20 +5905,11 @@ fn refresh_chatgpt_credentials_rpc(
         Ok(_) => Err(RefreshCredentialsError::Storage(path_std_io::Error::other(
             "unexpected OAuth credential CAS result",
         ))),
-        Err(tau_client::ExtensionDataRpcError::Harness {
-            kind: tau_proto::ExtensionDataErrorKind::GenerationMismatch,
-            ..
-        }) => {
+        Err(OAuthCredentialStorageError::GenerationMismatch) => {
             // A concurrent rotating refresh may have won CAS. Reload and use its
             // complete generation rather than retrying the now-consumed token.
-            let value = client
-                .request(
-                    tau_proto::ExtensionDataScope::Secret,
-                    tau_proto::ExtensionDataRequestOp::ReadFile {
-                        path: tau_proto::ExtensionDataPath::new(path),
-                    },
-                )
-                .map_err(|_| {
+            let value =
+                request(tau_proto::ExtensionDataRequestOp::ReadFile { path }).map_err(|_| {
                     RefreshCredentialsError::Storage(path_std_io::Error::other(
                         "OAuth credential CAS failed and reload was unavailable",
                     ))
@@ -5854,9 +5931,9 @@ fn refresh_chatgpt_credentials_rpc(
             refresh_rejections.clear_refresh_rejection(provider_name);
             Ok(authoritative)
         }
-        Err(_) => Err(RefreshCredentialsError::Storage(path_std_io::Error::other(
-            "OAuth credential CAS failed",
-        ))),
+        Err(OAuthCredentialStorageError::Unavailable) => Err(RefreshCredentialsError::Storage(
+            path_std_io::Error::other("OAuth credential CAS failed"),
+        )),
     }
 }
 
