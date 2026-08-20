@@ -111,8 +111,8 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
         )
         .into());
     }
-    if let Some(error) = result.error {
-        return Err(format!("external message failed: {error}").into());
+    if let Some(failure) = result.failure {
+        return Err(format!("external message failed: {failure:?}").into());
     }
     if !result.started {
         return Err("external message did not auto-start its bare recipient".into());

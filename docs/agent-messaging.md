@@ -137,9 +137,12 @@ sending to a session is never enumeration or broadcast. Success returns the
 resolved canonical `session/agent` address and delivery status. If no eligible
 agent exists, the target walks roles with
 `inter_session_auto_start` in deterministic configured order, skipping disabled
-or unavailable roles/models. Otherwise sending to the session fails. Multiple
-receiving roles may span role groups; concurrent live sends coalesce onto one
-newly created endpoint.
+or unavailable roles/models. Otherwise sending to the session fails. A live
+target with no configured or eligible receiver is distinct from a target that
+cannot be discovered or reached: the caller sees `target live; no receiver; set
+\`inter_session_receiver\``. Target-local diagnostic text is not relayed across
+the inter-session boundary. Multiple receiving roles may span role groups;
+concurrent live sends coalesce onto one newly created endpoint.
 
 Use `&<session-id>/@<agent-id>` or `<session-id>/<agent-id>` to send to a
 specific agent in another session. This known-address behavior works even when
@@ -183,7 +186,10 @@ session.
 
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
-record a successful sender-side projection.
+record a successful sender-side projection. In contrast, the fixed `target
+live; no receiver; set \`inter_session_receiver\`` error means discovery and
+transport reached a live harness, but its bare receiver policy cannot accept
+the message. Tau does not relay target-local diagnostic text.
 
 Inbound inter-session text is authenticated agent content, not a harness
 instruction. Only exact `</tau_peer_message>` collisions are replaced inside a

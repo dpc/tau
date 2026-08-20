@@ -64,7 +64,7 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     /// Tool type declared by the provider.
     pub(crate) tool_type: tau_proto::ToolType,
     /// Resolved recipient and started flag on delivery success.
-    pub(crate) result: Result<(tau_proto::AgentId, bool), String>,
+    pub(crate) result: Result<(tau_proto::AgentId, bool), ExternalMessageDeliveryError>,
     /// Original call arguments for error details.
     pub(crate) details: tau_proto::CborValue,
     /// Pending sender-authentication entry to remove when the async attempt
@@ -80,6 +80,46 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) kind: tau_proto::AgentMessageKind,
     /// Message body.
     pub(crate) message: String,
+}
+
+/// Sender-side outcome of one cross-harness delivery attempt.
+///
+/// Local failures retain their existing diagnostic, while target failures carry
+/// only a protocol-defined classification and are rendered as fixed local text.
+pub(crate) enum ExternalMessageDeliveryError {
+    /// A local lookup, connection, or deadline failure.
+    Local(String),
+    /// A sanitized rejection classification returned by the target harness.
+    Target(tau_proto::ExternalAgentMessageFailure),
+}
+
+impl ExternalMessageDeliveryError {
+    /// Return the fixed caller-visible message for this delivery failure.
+    pub(crate) fn tool_message(self) -> String {
+        match self {
+            Self::Local(message) => message,
+            Self::Target(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged) => {
+                "target session changed before message delivery; retry".to_owned()
+            }
+            Self::Target(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver) => {
+                "target live; no receiver; set `inter_session_receiver`".to_owned()
+            }
+            Self::Target(tau_proto::ExternalAgentMessageFailure::RecipientStopped) => {
+                "target recipient is stopped; start a replacement and retry".to_owned()
+            }
+            Self::Target(tau_proto::ExternalAgentMessageFailure::RecipientRestoredUnavailable) => {
+                "target recipient cannot resume its pre-restart delegation; \
+                 start a replacement and retry"
+                    .to_owned()
+            }
+            Self::Target(tau_proto::ExternalAgentMessageFailure::RecipientUnknown) => {
+                "target recipient is unknown; choose a live recipient and retry".to_owned()
+            }
+            Self::Target(tau_proto::ExternalAgentMessageFailure::Rejected) => {
+                "target session rejected the inter-session message".to_owned()
+            }
+        }
+    }
 }
 
 /// Completion payload for receiver-side external-message authentication.

@@ -12873,6 +12873,47 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     assert_eq!(text.matches("overlapping edits").count(), 1);
 }
 
+/// Inter-session receiver rejection must retain its actionable fixed detail in
+/// the terminal's ordinary tool-error presentation.
+#[test]
+fn message_tool_receiver_rejection_renders_actionable_detail() {
+    let (_term, handle, vt) = setup(120, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started("message-no-receiver", "message", CborValue::Map(Vec::new())),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolError(ToolError {
+            presentation: Default::default(),
+            call_id: "message-no-receiver".into(),
+            tool_name: tau_proto::ToolName::new("message"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "target live; no receiver; set `inter_session_receiver`".to_owned(),
+            details: None,
+            originator: tau_proto::PromptOriginator::User,
+            display: None,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+
+    let text = vt.screen_text(120).join("\n");
+    assert!(
+        text.contains("target live; no receiv"),
+        "terminal did not retain the receiver diagnosis: {text}"
+    );
+    assert!(
+        text.contains("inter_session_receiver"),
+        "terminal did not retain the configuration key: {text}"
+    );
+}
+
 /// Provider-facing errors must not finish live UI tool blocks. The harness is
 /// responsible for publishing a logical `ToolError` for user-visible failures.
 #[test]

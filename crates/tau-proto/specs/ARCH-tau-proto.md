@@ -232,6 +232,10 @@ caller-supplied sender identity, message/watch-response kind, or message body.
 The authenticated recipient is a tagged `bare_entrypoint` or exact agent value,
 so route authority cannot be substituted during callback authentication. A
 successful response carries the concrete resolved agent id and started flag.
+An unsuccessful response carries one bounded `ExternalAgentMessageFailure`
+classification instead of target-local diagnostic text. Callers may render
+fixed actionable text from that classification, but cannot relay arbitrary
+target errors across the cooperative peer boundary.
 
 `peer_session_probe` is a separate narrow RPC that returns only whether the live
 harness is currently bound to a claimed session and accepts bare inter-session

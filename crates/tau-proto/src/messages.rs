@@ -443,15 +443,37 @@ pub struct ExternalAgentMessageAuthResult {
 pub struct ExternalAgentMessageResult {
     /// Request correlation id copied from the request.
     pub request_id: String,
-    /// Empty on success; otherwise a bounded user-facing delivery error.
+    /// Bounded target-side delivery failure, when the request was rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub failure: Option<ExternalAgentMessageFailure>,
     /// Canonical resolved recipient on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<AgentId>,
     /// Whether resolving this request started the recipient.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub started: bool,
+}
+
+/// Safe target-side reasons for rejecting an external agent message.
+///
+/// The receiving harness reports only these fixed classifications to its peer.
+/// It never forwards arbitrary local diagnostics across the inter-session
+/// boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalAgentMessageFailure {
+    /// The target switched away from the requested session.
+    TargetSessionChanged,
+    /// The target has no configured or eligible bare inter-session receiver.
+    NoInterSessionReceiver,
+    /// The exact recipient stopped and cannot receive a message.
+    RecipientStopped,
+    /// The exact recipient cannot resume its pre-restart delegation.
+    RecipientRestoredUnavailable,
+    /// The exact recipient does not exist in the target session.
+    RecipientUnknown,
+    /// The target rejected the request for a reason not safe to expose.
+    Rejected,
 }
 
 /// Narrow live-harness probe used by bounded session discovery.

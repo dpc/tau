@@ -16,6 +16,12 @@ Absence or unavailability of a grant fails without spawn. The result reports the
 resolved recipient. Successful model tool results report only delivery status and
 that resolved recipient; they do not expose recipient selection or auto-start
 mechanics.
+Target rejections report only a fixed `ExternalAgentMessageFailure`
+classification. In particular, a reached bare target with no available
+inter-session receiver reports that condition separately from a target that
+cannot be reached. The sender renders a compact fixed diagnostic that directs
+the caller to set `inter_session_receiver`, and never exposes arbitrary
+target-local errors.
 
 Remote routing uses cooperative same-UID Tau IPC. Callback correlation proves
 that the claimed sender harness owns a matching live pending request and binds

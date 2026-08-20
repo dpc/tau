@@ -4931,12 +4931,12 @@ impl Harness {
                             None,
                         );
                     }
-                    Err(message) => self.finish_harness_owned_tool_with_error(
+                    Err(error) => self.finish_harness_owned_tool_with_error(
                         &command.conversation_id,
                         command.call_id,
                         command.tool_name,
                         command.tool_type,
-                        message,
+                        error.tool_message(),
                         Some(command.details),
                     ),
                 }
@@ -6516,6 +6516,7 @@ impl Harness {
                 self.fail_pending_external_receive(
                     &event,
                     "peer receive projection failed to persist",
+                    tau_proto::ExternalAgentMessageFailure::Rejected,
                 );
                 if sync_head_for
                     .as_ref()
@@ -8114,6 +8115,34 @@ impl Harness {
                             == AgentMessageRecipientStatus::Live
             );
         if !valid {
+            let fallback_failure = if pending.session_generation != self.current_session_generation
+            {
+                tau_proto::ExternalAgentMessageFailure::TargetSessionChanged
+            } else if matches!(
+                pending.recipient,
+                tau_proto::ExternalAgentMessageRecipient::BareEntrypoint
+            ) {
+                if self.inter_session_receivers.is_empty() {
+                    tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver
+                } else {
+                    tau_proto::ExternalAgentMessageFailure::Rejected
+                }
+            } else {
+                match self.agent_message_recipient_status(pending.recipient_id.as_str()) {
+                    AgentMessageRecipientStatus::Stopped => {
+                        tau_proto::ExternalAgentMessageFailure::RecipientStopped
+                    }
+                    AgentMessageRecipientStatus::RestoredUnavailable => {
+                        tau_proto::ExternalAgentMessageFailure::RecipientRestoredUnavailable
+                    }
+                    AgentMessageRecipientStatus::Unknown => {
+                        tau_proto::ExternalAgentMessageFailure::RecipientUnknown
+                    }
+                    AgentMessageRecipientStatus::Live => {
+                        tau_proto::ExternalAgentMessageFailure::Rejected
+                    }
+                }
+            };
             let may_reselect = pending.session_generation == self.current_session_generation
                 && !pending.canceled
                 && completion_live
@@ -8122,10 +8151,25 @@ impl Harness {
                     tau_proto::ExternalAgentMessageRecipient::BareEntrypoint
                 )
                 && !pending.reselect_attempted;
-            if may_reselect && self.reselect_pending_external_receive(message_id, event) {
-                return false;
+            if may_reselect {
+                match self.reselect_pending_external_receive(message_id, event) {
+                    Ok(true) => return false,
+                    Ok(false) => {}
+                    Err(failure) => {
+                        self.fail_pending_external_receive(
+                            event,
+                            "peer target changed before receive commit",
+                            failure,
+                        );
+                        return valid;
+                    }
+                }
             }
-            self.fail_pending_external_receive(event, "peer target changed before receive commit");
+            self.fail_pending_external_receive(
+                event,
+                "peer target changed before receive commit",
+                fallback_failure,
+            );
         }
         valid
     }
@@ -8173,19 +8217,22 @@ impl Harness {
         &mut self,
         message_id: &tau_proto::AgentMessageId,
         event: &Event,
-    ) -> bool {
+    ) -> Result<bool, tau_proto::ExternalAgentMessageFailure> {
         let Some(mut pending) = self.pending_external_receive_acks.remove(message_id) else {
-            return false;
+            return Ok(false);
         };
         let old_recipient = pending.recipient_id.clone();
         let message_bytes = pending.expected_receive.message.len();
         self.release_peer_input_rate(&old_recipient, pending.rate_admitted_at);
-        let replacement = self.resolve_peer_entrypoint_recipient(message_id, message_bytes);
-        let Ok((recipient_id, started, rate_admitted_at)) = replacement else {
-            self.pending_external_receive_acks
-                .insert(message_id.clone(), pending);
-            return false;
-        };
+        let (recipient_id, started, rate_admitted_at) =
+            match self.resolve_peer_entrypoint_recipient(message_id, message_bytes) {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    self.pending_external_receive_acks
+                        .insert(message_id.clone(), pending);
+                    return Err(error.failure());
+                }
+            };
         pending.recipient_id = recipient_id.clone();
         pending.expected_receive.recipient_id = recipient_id;
         pending.started = started;
@@ -8201,10 +8248,15 @@ impl Harness {
             Some(crate::harness::harness_connection_id()),
             replacement_event,
         );
-        true
+        Ok(true)
     }
 
-    fn fail_pending_external_receive(&mut self, event: &Event, error: &str) {
+    fn fail_pending_external_receive(
+        &mut self,
+        event: &Event,
+        error: &str,
+        failure: tau_proto::ExternalAgentMessageFailure,
+    ) {
         let Some(message_id) = Self::pending_external_receive_message_id(event) else {
             return;
         };
@@ -8227,7 +8279,7 @@ impl Harness {
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
                             request_id,
-                            error: Some(error.to_owned()),
+                            failure: Some(failure),
                             recipient_id: None,
                             started: false,
                         },
@@ -8272,7 +8324,7 @@ impl Harness {
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
                             request_id,
-                            error: None,
+                            failure: None,
                             recipient_id: Some(pending.recipient_id),
                             started: pending.started,
                         },
@@ -24243,7 +24295,9 @@ impl Harness {
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
                             request_id: request_id.clone(),
-                            error: Some("target session changed before receive commit".to_owned()),
+                            failure: Some(
+                                tau_proto::ExternalAgentMessageFailure::TargetSessionChanged,
+                            ),
                             recipient_id: None,
                             started: false,
                         },

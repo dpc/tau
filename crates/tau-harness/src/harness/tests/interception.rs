@@ -1698,6 +1698,7 @@ fn peer_receive_target_disappearance_before_commit_fails() {
     .expect("register interceptor");
     let connection_id = tau_proto::ConnectionId::parse("peer-client")
         .expect("test connection id must satisfy the identifier grammar");
+    let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "target-gone");
 
     h.remove_agent(&cid);
@@ -1711,6 +1712,19 @@ fn peer_receive_target_disappearance_before_commit_fails() {
 
     assert!(h.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
+    let peer_results = peer_results.lock().expect("peer results");
+    assert!(
+        peer_results.iter().any(|frame| {
+            matches!(
+                &frame.frame,
+                HarnessOutputMessage::ExternalAgentMessageResult(result)
+                    if result.request_id == "peer-request-target-gone"
+                        && result.failure
+                            == Some(tau_proto::ExternalAgentMessageFailure::RecipientStopped)
+            )
+        }),
+        "peer results: {peer_results:?}"
+    );
 }
 
 /// Current-session bare routing delays its sent projection until the exact
@@ -1965,8 +1979,8 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
         .expect("terminal authentication result");
 
     assert_eq!(
-        result.error.as_deref(),
-        Some("external message authentication failed")
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
     assert!(h.agents.is_empty());
     assert!(h.pending_external_receive_acks.is_empty());
@@ -2014,8 +2028,14 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         )
         .expect("disconnected result");
 
-    assert!(stale.error.is_some());
-    assert!(disconnected.error.is_some());
+    assert_eq!(
+        stale.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged)
+    );
+    assert_eq!(
+        disconnected.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
+    );
     assert!(h.agents.is_empty());
     assert!(h.pending_external_receive_acks.is_empty());
 }
@@ -2096,6 +2116,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
     .expect("register interceptor");
     let connection_id = tau_proto::ConnectionId::parse("peer-client")
         .expect("test connection id must satisfy the identifier grammar");
+    let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
     h.external_message_peers.insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
@@ -2129,6 +2150,19 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
 
     assert!(h.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
+    let peer_results = peer_results.lock().expect("peer results");
+    assert!(
+        peer_results.iter().any(|frame| {
+            matches!(
+                &frame.frame,
+                HarnessOutputMessage::ExternalAgentMessageResult(result)
+                    if result.request_id == "bare-revoke"
+                        && result.failure
+                            == Some(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver)
+            )
+        }),
+        "peer results: {peer_results:?}"
+    );
 }
 
 /// Bare routing gets only one deterministic re-selection: invalidating the
@@ -2157,6 +2191,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     .expect("register interceptor");
     let connection_id = tau_proto::ConnectionId::parse("peer-client")
         .expect("test connection id must satisfy the identifier grammar");
+    let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
     h.external_message_peers.insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
@@ -2230,6 +2265,19 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         h.agent_routes.is_empty(),
         "second invalidation must not reselect"
     );
+    let peer_results = peer_results.lock().expect("peer results");
+    assert!(
+        peer_results.iter().any(|frame| {
+            matches!(
+                &frame.frame,
+                HarnessOutputMessage::ExternalAgentMessageResult(result)
+                    if result.request_id == "bare-reselect"
+                        && result.failure
+                            == Some(tau_proto::ExternalAgentMessageFailure::Rejected)
+            )
+        }),
+        "peer results: {peer_results:?}"
+    );
 }
 
 /// A parked old-generation receive retains a canceled tombstone across
@@ -2275,8 +2323,8 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
                 &frame.frame,
                 HarnessOutputMessage::ExternalAgentMessageResult(result)
                     if result.request_id == "peer-request-rollover"
-                        && result.error.as_deref()
-                            == Some("target session changed before receive commit")
+                        && result.failure
+                            == Some(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged)
                         && result.recipient_id.is_none()
                         && !result.started
             )

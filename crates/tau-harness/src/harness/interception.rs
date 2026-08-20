@@ -1291,6 +1291,7 @@ impl Harness {
             self.fail_pending_external_receive(
                 &pending.event,
                 "target session changed before receive commit",
+                tau_proto::ExternalAgentMessageFailure::TargetSessionChanged,
             );
             self.discard_peer_activation_reservation(&pending.source.peer_context);
         }
@@ -1335,7 +1336,11 @@ impl Harness {
         if Self::pending_external_receive_message_id(&event)
             .is_some_and(|id| self.pending_external_receive_acks.contains_key(id))
         {
-            self.fail_pending_external_receive(&event, reason);
+            self.fail_pending_external_receive(
+                &event,
+                reason,
+                tau_proto::ExternalAgentMessageFailure::Rejected,
+            );
         }
         if let Event::ShellCommandProgress(progress) = &event {
             self.discard_uncommitted_shell_canonical_marker(&progress.command_id);
@@ -2114,6 +2119,7 @@ impl Harness {
                     self.fail_pending_external_receive(
                         &original_event,
                         "peer receive projection was rejected by interception",
+                        tau_proto::ExternalAgentMessageFailure::Rejected,
                     );
                     None
                 } else {

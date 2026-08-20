@@ -34519,7 +34519,7 @@ fn external_agent_message_request_publishes_received_projection() {
     );
 
     assert_eq!(result.request_id, "external-ok");
-    assert_eq!(result.error, None);
+    assert_eq!(result.failure, None);
     assert!(session_agent_message_sent_events(&h).is_empty());
     let received = session_agent_message_received_events(&h);
     assert_eq!(received.len(), 1);
@@ -34585,7 +34585,10 @@ fn external_agent_message_request_rejects_wrong_active_session() {
     );
 
     assert_eq!(result.request_id, "external-wrong-session");
-    assert!(result.error.expect("error").contains("active session"));
+    assert_eq!(
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged)
+    );
     assert!(session_agent_message_received_events(&h).is_empty());
 
     h.shutdown().expect("shutdown");
@@ -34617,11 +34620,9 @@ fn external_agent_message_request_rejects_unknown_recipient() {
     );
 
     assert_eq!(result.request_id, "external-unknown");
-    assert!(
-        result
-            .error
-            .expect("error")
-            .contains("unknown message recipient")
+    assert_eq!(
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::RecipientUnknown)
     );
     assert!(session_agent_message_received_events(&h).is_empty());
 
@@ -34656,7 +34657,10 @@ fn external_agent_message_request_rejects_empty_message() {
     );
 
     assert_eq!(result.request_id, "external-empty");
-    assert!(result.error.expect("error").contains("must not be empty"));
+    assert_eq!(
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
+    );
     assert!(session_agent_message_received_events(&h).is_empty());
 
     h.shutdown().expect("shutdown");
@@ -34697,7 +34701,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
                 recipient_session_id: test_session_id("wrong-session"),
                 ..base.clone()
             },
-            "target session unavailable",
+            tau_proto::ExternalAgentMessageFailure::TargetSessionChanged,
         ),
         (
             tau_proto::ExternalAgentMessageRequest {
@@ -34705,17 +34709,17 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
                 message: " \n\t ".to_owned(),
                 ..base.clone()
             },
-            "must not be empty",
+            tau_proto::ExternalAgentMessageFailure::Rejected,
         ),
     ];
 
-    for (request, expected_error) in cases {
+    for (request, expected_failure) in cases {
         let request_id = request.request_id.clone();
         let result = h
             .start_external_agent_message_auth(client_id.clone(), request)
             .expect("invalid target request should be rejected immediately");
         assert_eq!(result.request_id, request_id);
-        assert!(result.error.expect("error").contains(expected_error));
+        assert_eq!(result.failure, Some(expected_failure));
     }
     let unknown = tau_proto::ExternalAgentMessageRequest {
         request_id: "external-preauth-unknown".to_owned(),
@@ -34976,11 +34980,9 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     };
 
     assert_eq!(result.request_id, "socket-external-ok");
-    assert!(
-        result
-            .error
-            .expect("authentication error")
-            .contains("external message authentication failed")
+    assert_eq!(
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
     assert!(session_agent_message_received_events(&target).is_empty());
 
@@ -35124,7 +35126,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         }
     };
 
-    assert_eq!(result.error, None);
+    assert_eq!(result.failure, None);
     let recipient_id = result.recipient_id.expect("resolved auto-start recipient");
     assert!(result.started);
     assert!(target.agent_routes.contains_key(recipient_id.as_str()));
@@ -35390,6 +35392,58 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     h.shutdown().expect("shutdown");
 }
 
+/// A reachable target without an inter-session receiver must show the caller a
+/// configuration action rather than the generic unavailable-session failure.
+#[test]
+fn external_message_no_receiver_failure_is_actionable_to_caller() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: tau_proto::ToolCallId = "external-message-no-receiver".into();
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+
+    h.handle_harness_command(
+        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+            crate::event::ExternalMessageToolCompletedCommand {
+                _permit: None,
+                conversation_id: cid,
+                session_generation: h.current_session_generation,
+                call_id: call_id.clone(),
+                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_type: tau_proto::ToolType::Function,
+                result: Err(path_crate_event::ExternalMessageDeliveryError::Target(
+                    tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver,
+                )),
+                details: CborValue::Null,
+                auth_message_id: tau_proto::AgentMessageId::parse("no-receiver-message")
+                    .expect("test identifier must satisfy its grammar"),
+                publish_sent: true,
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: test_session_id("reachable-session"),
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "hello".to_owned(),
+            },
+        )),
+    )
+    .expect("handle completion");
+
+    let error = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ToolError(error) if error.call_id == call_id => Some(error.message),
+            _ => None,
+        })
+        .expect("caller-visible tool error");
+    assert_eq!(
+        error,
+        "target live; no receiver; set `inter_session_receiver`"
+    );
+    assert!(session_agent_message_sent_events(&h).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Cross-session message successes hide bare-recipient reuse and auto-start
 /// mechanics while retaining the unambiguous delivery status and recipient.
 #[test]
@@ -35534,7 +35588,7 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
-    assert_eq!(result.error, None);
+    assert_eq!(result.failure, None);
     assert_eq!(
         result.recipient_id.as_ref().map(ToString::to_string),
         Some(idle_id)
@@ -35571,8 +35625,8 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
     assert_eq!(
-        result.error.as_deref(),
-        Some("target session is unavailable for inter-session messaging")
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::NoInterSessionReceiver)
     );
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
@@ -35601,7 +35655,7 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
-    assert_eq!(result.error, None);
+    assert_eq!(result.failure, None);
     assert!(result.started);
     assert_eq!(h.agents.len(), agents_before + 1);
     let recipient_id = result.recipient_id.expect("resolved recipient");
@@ -35677,7 +35731,7 @@ fn bare_peer_auto_start_uses_first_configured_candidate() {
         },
     );
 
-    assert_eq!(result.error, None);
+    assert_eq!(result.failure, None);
     let recipient = result.recipient_id.expect("auto-started recipient");
     let cid = h
         .agent_routes
@@ -35721,7 +35775,7 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
         },
     );
 
-    assert_eq!(result.error, None);
+    assert_eq!(result.failure, None);
     let recipient = result.recipient_id.expect("fallback recipient");
     let cid = h
         .agent_routes
@@ -35931,7 +35985,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
 
     let second = h.handle_external_agent_message_request_without_auth_for_test(request("two"));
 
-    assert_eq!(second.error, None);
+    assert_eq!(second.failure, None);
     assert_eq!(second.recipient_id, Some(recipient));
     assert!(!second.started);
     assert_eq!(h.agents.len(), 1);
@@ -35979,8 +36033,8 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(request);
 
     assert_eq!(
-        result.error.as_deref(),
-        Some("peer input queue is full; retry later")
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
     assert_eq!(h.agents.len(), agents_before);
     assert!(durable_agent_message_received_events(&h).is_empty());
@@ -36443,11 +36497,9 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
             message: "hello".to_owned(),
         },
     );
-    assert!(
-        result
-            .error
-            .expect("stopped recipient error")
-            .contains("stopped message recipient")
+    assert_eq!(
+        result.failure,
+        Some(tau_proto::ExternalAgentMessageFailure::RecipientStopped)
     );
     assert!(session_agent_message_received_events(&resumed).is_empty());
     resumed.shutdown().expect("shutdown resumed");

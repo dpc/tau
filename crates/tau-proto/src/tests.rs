@@ -2286,8 +2286,14 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         })),
         HarnessOutputMessage::ExternalAgentMessageResult(ExternalAgentMessageResult {
             request_id: "external-1".to_owned(),
-            error: None,
+            failure: None,
             recipient_id: Some(agent_id("recipient_agent")),
+            started: false,
+        }),
+        HarnessOutputMessage::ExternalAgentMessageResult(ExternalAgentMessageResult {
+            request_id: "external-no-receiver".to_owned(),
+            failure: Some(ExternalAgentMessageFailure::NoInterSessionReceiver),
+            recipient_id: None,
             started: false,
         }),
         HarnessOutputMessage::ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult {
@@ -4499,6 +4505,43 @@ fn provider_stop_reason_repetition_detected_uses_snake_case_wire_value() {
     let decoded: ProviderStopReason =
         serde_json::from_value(json).expect("deserialize stop reason");
     assert_eq!(decoded, ProviderStopReason::RepetitionDetected);
+}
+
+/// External peer failures have a closed, actionable wire vocabulary rather than
+/// forwarding target-local diagnostics.
+#[test]
+fn external_agent_message_failures_use_fixed_snake_case_wire_values() {
+    for (failure, spelling) in [
+        (
+            ExternalAgentMessageFailure::TargetSessionChanged,
+            "target_session_changed",
+        ),
+        (
+            ExternalAgentMessageFailure::NoInterSessionReceiver,
+            "no_inter_session_receiver",
+        ),
+        (
+            ExternalAgentMessageFailure::RecipientStopped,
+            "recipient_stopped",
+        ),
+        (
+            ExternalAgentMessageFailure::RecipientRestoredUnavailable,
+            "recipient_restored_unavailable",
+        ),
+        (
+            ExternalAgentMessageFailure::RecipientUnknown,
+            "recipient_unknown",
+        ),
+        (ExternalAgentMessageFailure::Rejected, "rejected"),
+    ] {
+        let json = serde_json::to_value(failure).expect("serialize failure");
+        assert_eq!(json, serde_json::json!(spelling));
+        assert_eq!(
+            serde_json::from_value::<ExternalAgentMessageFailure>(json)
+                .expect("deserialize failure"),
+            failure
+        );
+    }
 }
 
 /// Ensures harness role info remains backward compatible when role descriptions
