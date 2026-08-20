@@ -59,6 +59,11 @@ errors rather than missing files.
 
 Provider profile path helpers keep portable read-only config and mutable state
 under the same instance-qualified `providers/<instance>/<provider>.json` shape.
+Authenticated profile settings carry one validated opaque credential identity;
+the closed credential-slot mapping resolves it only under that extension's
+Secret scope. The identity survives a profile namespace rename, so renaming
+changes only the profile filename and never rewrites settings or moves
+credentials.
 Callers disjoint-union the two sources and reject duplicate profile names. Config
 leaf symlinks may resolve to bounded regular files outside the canonical config
 instance root, including read-only Nix-store targets; unusable targets fail

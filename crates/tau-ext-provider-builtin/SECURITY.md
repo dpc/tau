@@ -98,7 +98,10 @@ implementation.
 
 ## Scoped credential records
 
-Authenticated settings contain one deterministic `credential.secret_path`.
+Authenticated settings contain one opaque `credential.identity` and a closed
+credential-slot kind. The identity can resolve only to that slot under the
+selected extension's Secret scope; it survives a provider-profile filename
+rename without making settings point at arbitrary filesystem paths.
 Supported local-compatible profiles may instead use the exact explicit
 `credential: {"kind":"none"}` marker, which neither creates nor reads a Secret
 record. Missing or malformed credential selection remains invalid. For stored

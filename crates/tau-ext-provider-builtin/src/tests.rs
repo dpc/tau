@@ -80,8 +80,24 @@ fn provider_remove_rejects_conflicting_source_flags() {
     assert!(error.to_string().contains("exactly one source flag"));
 }
 
+/// Ensures rename exposes its required two-name CLI shape before touching local
+/// storage.
+#[test]
+fn provider_rename_requires_old_and_new_names() {
+    let extension = tau_proto::ExtensionName::parse("provider-builtin").expect("extension");
+    let error = cmd_rename(&["old".to_owned()], &extension).expect_err("missing new name");
+    assert!(
+        error
+            .to_string()
+            .contains("tau provider rename requires OLD and NEW")
+    );
+    assert!(PROVIDER_CLI_HELP.contains("rename <old> <new>"));
+}
+
 fn cli_setup_plan(name: &str) -> setup_store::ProviderSetupPlan {
     let provider = ProviderName::try_new(name.to_owned()).expect("provider");
+    let identity =
+        ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef").expect("identity");
     setup_store::ProviderSetupPlan {
         extension_instance: tau_proto::ExtensionName::parse("provider-builtin").expect("extension"),
         provider: provider.clone(),
@@ -95,13 +111,13 @@ fn cli_setup_plan(name: &str) -> setup_store::ProviderSetupPlan {
             "compat": {},
             "credential": {
                 "kind": "api_key",
-                "secret_path": format!("providers/{provider}/api-key.json")
+                "identity": identity.as_str()
             }
         }))
         .expect("settings"),
         credential: setup_store::CredentialSetup::Stored {
             secret: setup_store::SecretWrite {
-                path: ProviderCredentialSlot::ApiKey.path(&provider),
+                path: ProviderCredentialSlot::ApiKey.path(&identity),
                 contents: setup_store::SecretBytes::new(
                     serde_json::to_vec(&credential_record::ApiKeyCredential::new("key".to_owned()))
                         .expect("credential"),
@@ -180,6 +196,11 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
         .contents;
     let expected_remediation =
         "login: tau provider --extension provider-work login portable-chatgpt";
+    let (_, credential) =
+        parse_settings_profile(&provider, &settings).expect("valid profile credential");
+    let ProviderCredential::Stored(reference) = credential else {
+        panic!("ChatGPT profile requires stored credentials");
+    };
     for (expires_at_ms, expected_status, expects_remediation) in [
         (None, "not-configured", true),
         (Some(1), "expired", true),
@@ -199,7 +220,7 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
                     setup_store::ProfileSource::Config,
                     &settings,
                     &setup_store::SecretWrite {
-                        path: ProviderCredentialSlot::OAuth.path(&provider),
+                        path: ProviderCredentialSlot::OAuth.path(reference.identity()),
                         contents: setup_store::SecretBytes::new(
                             serde_json::to_vec(&record).expect("credential"),
                         ),
@@ -638,8 +659,13 @@ fn default_provider_setup_identity_rejects_command_replacement_without_suffix() 
 /// malformed, missing, or orphan-like API-key record as inactive.
 #[test]
 fn setup_api_key_status_is_closed_and_value_aware() {
-    let provider = ProviderName::new("status");
-    let key = (provider.clone(), ProviderCredentialSlot::ApiKey);
+    let identity =
+        ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef").expect("identity");
+    let credential = ProviderCredential::Stored(
+        ProviderCredentialReference::new(identity.clone(), ProviderCredentialSlot::ApiKey, None)
+            .expect("credential reference"),
+    );
+    let key = (identity, ProviderCredentialSlot::ApiKey);
     for (record, expected) in [
         (
             Some(br#"{"version":0,"kind":"api_key","value":"active"}"#.to_vec()),
@@ -655,7 +681,7 @@ fn setup_api_key_status_is_closed_and_value_aware() {
         let credentials = record
             .map(|record| BTreeMap::from([(key.clone(), record)]))
             .unwrap_or_default();
-        assert_eq!(setup_api_key_status(&credentials, &provider), expected);
+        assert_eq!(setup_api_key_status(&credentials, &credential), expected);
     }
 }
 
@@ -699,13 +725,13 @@ fn provider_settings_credential_reference_is_authoritative_and_exact() {
     }
 }
 
-fn configured_chat_completions_settings(provider: &str, extra: serde_json::Value) -> Vec<u8> {
+fn configured_chat_completions_settings(_provider: &str, extra: serde_json::Value) -> Vec<u8> {
     let mut settings = serde_json::json!({
         "kind": "chat_completions",
         "models": [{"id": "deepseek-chat"}],
         "credential": {
             "kind": "api_key",
-            "secret_path": format!("providers/{provider}/api-key.json")
+            "identity": "0123456789abcdef0123456789abcdef"
         }
     });
     settings
@@ -1068,7 +1094,8 @@ fn login_subcommand_requires_exactly_one_existing_profile_name() {
     assert!(
         error
             .to_string()
-            .contains("provider login requires exactly one NAME")
+            .contains("provider login requires exactly one NAME"),
+        "{error}"
     );
 }
 

@@ -50,6 +50,7 @@ tau provider login <name>
 tau provider list
 tau provider show <name>
 tau provider remove <name>
+tau provider rename <old> <new>
 ```
 
 Use `--extension <instance>` when more than one enabled built-in provider
@@ -114,7 +115,8 @@ For API-key profiles, setup asks for the authority first: `Enter API key now`,
 the profile kind supports keyless operation. Only direct entry opens the masked
 value prompt.
 
-Settings contain either a deterministic Secret-scope credential reference or,
+Settings contain either a stable opaque Secret-scope credential identity with a
+closed credential-slot kind or,
 for supported local-compatible profiles, the exact explicit
 `credential: {"kind":"none"}` marker. Explicit keyless profiles create and read
 no Secret record. Missing or malformed credential selection remains invalid, so

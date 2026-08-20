@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io, sync as path_std_sync};
 
 use tau_config::provider_settings::{
-    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES,
-    ProviderProfileLeafSymlinkPolicy, read_provider_profile,
+    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredential,
+    ProviderProfileLeafSymlinkPolicy, parse_provider_credential, read_provider_profile,
 };
 use tau_config::settings::{
     TauDirs, TestingProvider, TestingSettings, extension_provider_config_dir_of,
@@ -281,14 +281,25 @@ fn copy_provider_target(
         ))
     })?;
 
+    let value: serde_json::Value = serde_json::from_slice(&settings).map_err(|_| {
+        CliError::Participant("opted-in provider profile is not valid JSON".to_owned())
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        CliError::Participant("opted-in provider profile is not a JSON object".to_owned())
+    })?;
+    let credential = parse_provider_credential(&target.provider, object)
+        .map_err(|error| CliError::Participant(error.to_string()))?;
+    let ProviderCredential::Stored(reference) = credential else {
+        return Ok(());
+    };
     let source_secrets = extension_secret_dir_of(source_state, target.extension.as_str())
         .map_err(|error| CliError::Participant(error.to_string()))?
         .join("providers")
-        .join(target.provider.as_str());
+        .join(reference.identity().as_str());
     let destination_secrets = extension_secret_dir_of(scratch_state, target.extension.as_str())
         .map_err(|error| CliError::Participant(error.to_string()))?
         .join("providers")
-        .join(target.provider.as_str());
+        .join(reference.identity().as_str());
     reject_path_components_no_follow(source_state, &source_secrets).map_err(CliError::Io)?;
     reject_path_components_no_follow(scratch_state, &destination_secrets).map_err(CliError::Io)?;
     copy_regular_directory(&source_secrets, &destination_secrets).map_err(|error| {

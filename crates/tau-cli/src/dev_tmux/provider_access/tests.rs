@@ -31,11 +31,26 @@ fn provider_allowlist_copies_exact_instance_registration() {
             .expect("settings root")
             .join(format!("{}.json", entry.provider));
         std::fs::create_dir_all(settings.parent().expect("parent")).expect("settings dir");
-        std::fs::write(&settings, format!("settings:{}", entry.provider)).expect("settings");
+        std::fs::write(
+            &settings,
+            format!(
+                r#"{{"kind":"chatgpt","credential":{{"kind":"oauth","identity":"{}"}}}}"#,
+                if entry.provider.as_str() == "chatgpt" {
+                    "0123456789abcdef0123456789abcdef"
+                } else {
+                    "fedcba9876543210fedcba9876543210"
+                }
+            ),
+        )
+        .expect("settings");
         let secrets = extension_secret_dir_of(&source, entry.extension.as_str())
             .expect("secret root")
             .join("providers")
-            .join(entry.provider.as_str());
+            .join(if entry.provider.as_str() == "chatgpt" {
+                "0123456789abcdef0123456789abcdef"
+            } else {
+                "fedcba9876543210fedcba9876543210"
+            });
         std::fs::create_dir_all(&secrets).expect("secret dir");
         std::fs::write(
             secrets.join("oauth.json"),
@@ -58,10 +73,10 @@ fn provider_allowlist_copies_exact_instance_registration() {
         .join("chatgpt.json");
     let copied_secret = extension_secret_dir_of(&scratch, allowed.extension.as_str())
         .expect("secrets")
-        .join("providers/chatgpt/oauth.json");
+        .join("providers/0123456789abcdef0123456789abcdef/oauth.json");
     assert_eq!(
         std::fs::read_to_string(copied_settings).expect("read"),
-        "settings:chatgpt"
+        r#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#
     );
     assert_eq!(
         std::fs::read_to_string(copied_secret).expect("read"),
@@ -88,7 +103,11 @@ fn provider_allowlist_copies_external_config_profile_symlink() {
     let scratch = temp.path().join("scratch");
     let allowed = target("provider-builtin", "chatgpt");
     let deployment = temp.path().join("nix-store-chatgpt.json");
-    std::fs::write(&deployment, "deployed-settings").expect("deployment");
+    std::fs::write(
+        &deployment,
+        r#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#,
+    )
+    .expect("deployment");
     std::fs::set_permissions(&deployment, Permissions::from_mode(0o444))
         .expect("read-only deployment");
     let profile = extension_provider_config_dir_of(&config, allowed.extension.as_str())
@@ -98,7 +117,7 @@ fn provider_allowlist_copies_external_config_profile_symlink() {
     symlink(&deployment, profile).expect("profile symlink");
     let secrets = extension_secret_dir_of(&state, allowed.extension.as_str())
         .expect("secret root")
-        .join("providers/chatgpt");
+        .join("providers/0123456789abcdef0123456789abcdef");
     std::fs::create_dir_all(&secrets).expect("secret directory");
     std::fs::write(secrets.join("oauth.json"), "host-secret").expect("secret");
     let access = provider_access_from_dirs_and_settings(
@@ -115,12 +134,12 @@ fn provider_allowlist_copies_external_config_profile_symlink() {
     assert_eq!(
         std::fs::read_to_string(scratch.join("providers/provider-builtin/chatgpt.json"))
             .expect("copied profile"),
-        "deployed-settings"
+        r#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#
     );
     assert_eq!(
-        std::fs::read_to_string(
-            scratch.join("secrets/ext/provider-builtin/providers/chatgpt/oauth.json")
-        )
+        std::fs::read_to_string(scratch.join(
+            "secrets/ext/provider-builtin/providers/0123456789abcdef0123456789abcdef/oauth.json"
+        ))
         .expect("copied secret"),
         "host-secret"
     );
@@ -198,21 +217,18 @@ fn provider_allowlist_rejects_per_instance_aggregate_profile_bytes() {
     let state = temp.path().join("state");
     let scratch = temp.path().join("scratch");
     let mut profiles = Vec::new();
-    for index in 0..16 {
+    for index in 0..17 {
         let entry = target("provider-builtin", &format!("p-{index}"));
         let profile = extension_provider_config_dir_of(&config, entry.extension.as_str())
             .expect("config root")
             .join(format!("{}.json", entry.provider));
         std::fs::create_dir_all(profile.parent().expect("profile parent"))
             .expect("config instance");
-        let file = File::create(profile).expect("profile");
-        file.set_len(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILE_BYTES)
-            .expect("bounded profile");
-        let secrets = extension_secret_dir_of(&state, entry.extension.as_str())
-            .expect("secret root")
-            .join("providers")
-            .join(entry.provider.as_str());
-        std::fs::create_dir_all(secrets).expect("secret directory");
+        let size = usize::try_from(tau_config::provider_settings::MAX_PROVIDER_PROFILE_FILE_BYTES)
+            .expect("profile limit fits usize");
+        let mut settings = br#"{"credential":{"kind":"none"}}"#.to_vec();
+        settings.resize(size, b' ');
+        std::fs::write(profile, settings).expect("bounded profile");
         profiles.push(entry);
     }
     let access = provider_access_from_dirs_and_settings(
@@ -226,8 +242,11 @@ fn provider_allowlist_rejects_per_instance_aggregate_profile_bytes() {
 
     let error = access.copy_allowed_profiles().expect_err("aggregate bound");
 
-    assert!(error.to_string().contains("snapshot for instance"));
-    assert!(error.to_string().contains("exceeds"));
+    assert!(
+        error.to_string().contains("snapshot for instance"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("exceeds"), "{error}");
     assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
 }
 
@@ -271,10 +290,14 @@ fn partial_copy_failure_reconciles_both_scratch_trees() {
         .expect("settings root")
         .join("chatgpt.json");
     std::fs::create_dir_all(settings.parent().expect("parent")).expect("settings dir");
-    std::fs::write(settings, "settings").expect("settings");
+    std::fs::write(
+        settings,
+        r#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#,
+    )
+    .expect("settings");
     let secrets = extension_secret_dir_of(&source, valid.extension.as_str())
         .expect("secret root")
-        .join("providers/chatgpt");
+        .join("providers/0123456789abcdef0123456789abcdef");
     std::fs::create_dir_all(&secrets).expect("secret dir");
     std::fs::write(secrets.join("oauth.json"), "secret").expect("secret");
     let access = provider_access_from_settings(
@@ -307,10 +330,14 @@ fn source_secret_symlink_fails_closed() {
         .expect("settings")
         .join("chatgpt.json");
     std::fs::create_dir_all(settings.parent().expect("parent")).expect("dir");
-    std::fs::write(settings, "settings").expect("settings");
+    std::fs::write(
+        settings,
+        r#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#,
+    )
+    .expect("settings");
     let credential_dir = extension_secret_dir_of(&source, entry.extension.as_str())
         .expect("secrets")
-        .join("providers/chatgpt");
+        .join("providers/0123456789abcdef0123456789abcdef");
     std::fs::create_dir_all(&credential_dir).expect("dir");
     let outside = temp.path().join("outside");
     std::fs::write(&outside, "secret").expect("outside");

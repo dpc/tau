@@ -1217,7 +1217,7 @@ fn named_provider_settings() -> Vec<u8> {
         "kind": "chat_completions",
         "credential": {
             "kind": "api_key",
-            "secret_path": "providers/deepseek/api-key.json",
+            "identity": "0123456789abcdef0123456789abcdef",
             "source": {"kind": "named_secret", "name": "provider_key"}
         }
     }))
@@ -2360,7 +2360,9 @@ fn memory_only_provider_snapshot_omits_named_declaration_value() {
     assert!(configure.secrets.is_empty());
     assert!(
         !state
-            .join("secrets/ext/provider-work/providers/deepseek/api-key.json")
+            .join(
+                "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json"
+            )
             .exists()
     );
 }
@@ -2414,8 +2416,10 @@ fn provider_startup_retains_materialized_settings_snapshot() {
     assert!(bound_names["provider-work"].contains("provider_key"));
     assert!(diagnostics.is_empty());
     let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(state.join("secrets/ext/provider-work/providers/deepseek/api-key.json"))
-            .expect("materialized record"),
+        &std::fs::read(state.join(
+            "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json",
+        ))
+        .expect("materialized record"),
     )
     .expect("typed record");
     assert_eq!(record["value"], "first-key");
@@ -2707,7 +2711,8 @@ fn provider_startup_missing_declaration_suppresses_stale_credential() {
             .expect("settings");
     std::fs::create_dir_all(&settings).expect("settings root");
     std::fs::write(settings.join("deepseek.json"), named_provider_settings()).expect("settings");
-    let credential = state.join("secrets/ext/provider-work/providers/deepseek/api-key.json");
+    let credential = state
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json");
     std::fs::create_dir_all(credential.parent().expect("parent")).expect("credential root");
     std::fs::write(
         &credential,
@@ -2802,7 +2807,8 @@ fn provider_startup_source_error_preserves_stale_credential() {
     std::fs::write(settings.join("deepseek.json"), named_provider_settings()).expect("settings");
     std::fs::create_dir_all(state.join("secrets")).expect("source root");
     std::fs::write(state.join("secrets/provider_key.yaml"), [0xff]).expect("invalid source");
-    let credential = state.join("secrets/ext/provider-work/providers/deepseek/api-key.json");
+    let credential = state
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json");
     std::fs::create_dir_all(credential.parent().expect("credential parent"))
         .expect("credential root");
     let stale = br#"{"version":0,"kind":"api_key","value":"stale"}"#;
@@ -2857,7 +2863,7 @@ fn provider_startup_preserves_direct_and_explicit_keyless_secret_state() {
             "kind": "chat_completions",
             "credential": {
                 "kind": "api_key",
-                "secret_path": "providers/direct/api-key.json"
+                "identity": "fedcba9876543210fedcba9876543210"
             }
         }))
         .expect("direct settings"),
@@ -2872,7 +2878,8 @@ fn provider_startup_preserves_direct_and_explicit_keyless_secret_state() {
         .expect("keyless settings"),
     )
     .expect("keyless settings file");
-    let direct_credential = state.join("secrets/ext/provider-work/providers/direct/api-key.json");
+    let direct_credential = state
+        .join("secrets/ext/provider-work/providers/fedcba9876543210fedcba9876543210/api-key.json");
     std::fs::create_dir_all(direct_credential.parent().expect("parent")).expect("credential root");
     let direct_record = serde_json::to_vec(&serde_json::json!({
         "version": 0, "kind": "api_key", "value": "direct-key"

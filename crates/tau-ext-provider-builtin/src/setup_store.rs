@@ -5,8 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_config::provider_settings::{
-    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredentialSlot,
-    ProviderProfileLeafSymlinkPolicy, ProviderSettingsInstanceLock, ProviderSettingsLockAttempt,
+    MAX_PROVIDER_PROFILE_FILES, MAX_PROVIDER_PROFILE_SNAPSHOT_BYTES, ProviderCredential,
+    ProviderCredentialIdentity, ProviderCredentialSlot, ProviderProfileLeafSymlinkPolicy,
+    ProviderSettingsInstanceLock, ProviderSettingsLockAttempt, parse_provider_credential,
     read_provider_profile,
 };
 use tau_config::secret_sources::{
@@ -99,8 +100,9 @@ pub(crate) struct SecretBytes(
 pub(crate) struct SetupSnapshot {
     /// Complete profiles in deterministic provider order.
     pub(crate) profiles: Vec<SetupProfile>,
-    /// Existing closed credential slots keyed by provider and family.
-    pub(crate) credentials: BTreeMap<(tau_proto::ProviderName, ProviderCredentialSlot), Vec<u8>>,
+    /// Existing closed credential slots keyed by opaque profile identity and
+    /// family.
+    pub(crate) credentials: BTreeMap<(ProviderCredentialIdentity, ProviderCredentialSlot), Vec<u8>>,
 }
 
 /// One credential-free provider profile discovered by setup tooling.
@@ -301,6 +303,43 @@ impl SetupStore {
                 ),
             ));
         }
+        if target == ProfileTarget::Stdout && path_exists(&config_path)? {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::AlreadyExists,
+                "provider profile already exists in config; stdout output cannot replace its credential identity",
+            ));
+        }
+        let target_path = match target {
+            ProfileTarget::State => Some(&state_path),
+            ProfileTarget::Config => Some(&config_path),
+            ProfileTarget::Stdout => None,
+        };
+        let replaced_credential = match target_path {
+            Some(path) if path_exists(path)? => {
+                let contents = read_provider_profile(
+                    path,
+                    match target {
+                        ProfileTarget::State => ProviderProfileLeafSymlinkPolicy::Reject,
+                        ProfileTarget::Config => ProviderProfileLeafSymlinkPolicy::Follow,
+                        ProfileTarget::Stdout => unreachable!("stdout has no profile path"),
+                    },
+                );
+                contents.ok().and_then(|contents| {
+                    credential_from_settings(&SetupProfile {
+                        provider: plan.provider.clone(),
+                        source: match target {
+                            ProfileTarget::State => ProfileSource::State,
+                            ProfileTarget::Config => ProfileSource::Config,
+                            ProfileTarget::Stdout => unreachable!("stdout has no profile path"),
+                        },
+                        path: path.to_path_buf(),
+                        contents,
+                    })
+                    .ok()
+                })
+            }
+            Some(_) | None => None,
+        };
         let (secret, named_source) = match &plan.credential {
             CredentialSetup::Keyless => (None, None),
             CredentialSetup::Stored {
@@ -333,7 +372,47 @@ impl SetupStore {
             }
             ProfileTarget::Stdout => None,
         };
+        if let Some(ProviderCredential::Stored(reference)) = replaced_credential
+            && secret.is_none_or(|new_secret| new_secret.path != *reference.path())
+        {
+            self.remove_credential(&plan.extension_instance, &reference)?;
+        }
         Ok(path)
+    }
+
+    /// Retires one superseded closed credential record after its replacement
+    /// profile becomes active.
+    fn remove_credential(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        reference: &tau_config::provider_settings::ProviderCredentialReference,
+    ) -> path_std_io::Result<()> {
+        use fs2::FileExt as _;
+
+        let secret_root = tau_config::settings::extension_secret_dir_of(
+            &self.state_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        let secret_lock = match open_directory_no_follow(&secret_root) {
+            Ok(lock) => {
+                lock.lock_exclusive()?;
+                Some(lock)
+            }
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let relative = PathBuf::from(reference.path().as_str());
+        reject_existing_symlink_components(&secret_root, &relative)?;
+        let result = remove_file_sync(&secret_root.join(relative));
+        if let Some(secret_lock) = secret_lock {
+            fs2::FileExt::unlock(&secret_lock)?;
+        }
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Publishes one credential for an unchanged existing profile without
@@ -524,6 +603,19 @@ impl SetupStore {
             ProfileSource::Config => config_path,
             ProfileSource::State => state_path,
         };
+        let contents = read_provider_profile(
+            &settings_path,
+            match source {
+                ProfileSource::Config => ProviderProfileLeafSymlinkPolicy::Follow,
+                ProfileSource::State => ProviderProfileLeafSymlinkPolicy::Reject,
+            },
+        )?;
+        let credential = credential_from_settings(&SetupProfile {
+            provider: provider.clone(),
+            source,
+            path: settings_path.clone(),
+            contents,
+        })?;
         let removed = remove_file_sync(&settings_path)?;
         let secret_root = tau_config::settings::extension_secret_dir_of(
             &self.state_dir,
@@ -538,16 +630,92 @@ impl SetupStore {
             Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let secret_rel = PathBuf::from("providers").join(provider.as_str());
-        reject_existing_symlink_components(&secret_root, &secret_rel)?;
-        for slot in ProviderCredentialSlot::all() {
-            let _ = remove_file_sync(&secret_root.join(slot.path(provider).as_str()))?;
+        if let ProviderCredential::Stored(reference) = credential {
+            let secret_rel = PathBuf::from("providers").join(reference.identity().as_str());
+            reject_existing_symlink_components(&secret_root, &secret_rel)?;
+            let _ = remove_file_sync(&secret_root.join(reference.path().as_str()))?;
         }
         if let Some(secret_lock) = secret_lock {
             fs2::FileExt::unlock(&secret_lock)?;
         }
         drop(settings_lock);
         Ok(removed)
+    }
+
+    /// Renames one provider profile file without inspecting its contents or
+    /// changing its stable credential storage.
+    pub(crate) fn rename_profile(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+        old: &tau_proto::ProviderName,
+        new: &tau_proto::ProviderName,
+    ) -> path_std_io::Result<ProfileSource> {
+        if old == new {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidInput,
+                "provider rename requires distinct names",
+            ));
+        }
+        let state_root = tau_config::settings::extension_provider_settings_dir_of(
+            &self.state_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        ensure_private_directory_tree(
+            &self.state_dir,
+            &PathBuf::from("providers").join(extension_instance.as_str()),
+        )?;
+        let _settings_lock = self
+            .acquire_instance_lock(extension_instance)?
+            .ok_or_else(|| {
+                path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    "provider settings directory disappeared before locking",
+                )
+            })?;
+        let config_root = tau_config::settings::extension_provider_config_dir_of(
+            &self.config_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        let old_relative = PathBuf::from(format!("{old}.json"));
+        let new_relative = PathBuf::from(format!("{new}.json"));
+        reject_existing_symlink_components(&state_root, &old_relative)?;
+        reject_existing_symlink_components(&state_root, &new_relative)?;
+        let config_old = config_root.join(&old_relative);
+        let state_old = state_root.join(&old_relative);
+        let config_new = config_root.join(&new_relative);
+        let state_new = state_root.join(&new_relative);
+        let config_old_exists = path_exists(&config_old)?;
+        let state_old_exists = path_exists(&state_old)?;
+        let source = match (config_old_exists, state_old_exists) {
+            (true, true) => {
+                return Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::AlreadyExists,
+                    "provider profile is duplicated across config and state",
+                ));
+            }
+            (true, false) => ProfileSource::Config,
+            (false, true) => ProfileSource::State,
+            (false, false) => {
+                return Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    "provider profile is not configured",
+                ));
+            }
+        };
+        if path_exists(&config_new)? || path_exists(&state_new)? {
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::AlreadyExists,
+                "new provider profile name already exists in config or state",
+            ));
+        }
+        let (old_path, new_path) = match source {
+            ProfileSource::Config => (config_old, config_new),
+            ProfileSource::State => (state_old, state_new),
+        };
+        path_std_fs::rename(old_path, new_path)?;
+        Ok(source)
     }
 
     /// Returns the selected instance's credential-free settings files.
@@ -704,10 +872,15 @@ impl SetupStore {
         };
         let mut credentials = BTreeMap::new();
         for profile in &settings {
+            let Ok(ProviderCredential::Stored(reference)) = credential_from_settings(profile)
+            else {
+                continue;
+            };
+            let identity = reference.identity().clone();
             for slot in ProviderCredentialSlot::all() {
-                match self.credential(extension_instance, &profile.provider, slot) {
+                match self.credential(extension_instance, &identity, slot) {
                     Ok(bytes) => {
-                        credentials.insert((profile.provider.clone(), slot), bytes);
+                        credentials.insert((identity.clone(), slot), bytes);
                     }
                     Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
@@ -728,7 +901,7 @@ impl SetupStore {
     pub(crate) fn credential(
         &self,
         extension_instance: &tau_proto::ExtensionName,
-        provider: &tau_proto::ProviderName,
+        identity: &ProviderCredentialIdentity,
         slot: ProviderCredentialSlot,
     ) -> path_std_io::Result<Vec<u8>> {
         let root = tau_config::settings::extension_secret_dir_of(
@@ -736,9 +909,37 @@ impl SetupStore {
             extension_instance.as_str(),
         )
         .map_err(path_std_io::Error::other)?;
-        let relative = PathBuf::from(slot.path(provider).as_str());
+        let relative = PathBuf::from(slot.path(identity).as_str());
         reject_existing_symlink_components(&root, &relative)?;
         path_std_fs::read(root.join(relative))
+    }
+}
+
+/// Parses the closed credential selection needed to locate one profile's Secret
+/// records.
+fn credential_from_settings(profile: &SetupProfile) -> path_std_io::Result<ProviderCredential> {
+    let settings: serde_json::Value = serde_json::from_slice(&profile.contents).map_err(|_| {
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            "provider profile is not valid JSON",
+        )
+    })?;
+    let settings = settings.as_object().ok_or_else(|| {
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            "provider profile is not a JSON object",
+        )
+    })?;
+    parse_provider_credential(&profile.provider, settings)
+        .map_err(|error| path_std_io::Error::new(path_std_io::ErrorKind::InvalidData, error))
+}
+
+/// Returns whether a directory entry exists, including a dangling symlink.
+fn path_exists(path: &Path) -> path_std_io::Result<bool> {
+    match path_std_fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

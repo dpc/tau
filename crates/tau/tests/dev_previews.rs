@@ -450,7 +450,7 @@ fn print_tools_matches_model_defaults_and_explicit_role_grants() {
   "kind": "chatgpt",
   "credential": {
     "kind": "oauth",
-    "secret_path": "providers/chatgpt/oauth.json"
+    "identity": "0123456789abcdef0123456789abcdef"
   }
 }"#,
     )
@@ -463,7 +463,7 @@ fn print_tools_matches_model_defaults_and_explicit_role_grants() {
   "models": [{"id": "ordinary", "context_window": 32768}],
   "credential": {
     "kind": "api_key",
-    "secret_path": "providers/local/api-key.json"
+    "identity": "fedcba9876543210fedcba9876543210"
   }
 }"#,
     )

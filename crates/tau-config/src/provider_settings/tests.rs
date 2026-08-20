@@ -6,6 +6,10 @@ fn provider() -> ProviderName {
     ProviderName::new("deepseek")
 }
 
+fn identity() -> ProviderCredentialIdentity {
+    ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef").expect("identity")
+}
+
 fn parse(value: serde_json::Value) -> Result<ProviderCredentialReference, String> {
     parse_provider_credential_reference(&provider(), value.as_object().expect("settings object"))
         .map_err(|error| error.to_string())
@@ -26,7 +30,7 @@ fn parses_only_explicit_closed_keyless_credentials() {
     );
     for invalid in [
         serde_json::json!({}),
-        serde_json::json!({"credential": {"kind": "none", "secret_path": "providers/deepseek/api-key.json"}}),
+        serde_json::json!({"credential": {"kind": "none", "identity": "0123456789abcdef0123456789abcdef"}}),
         serde_json::json!({"credential": {"kind": "none", "source": {"kind": "named_secret", "name": "key"}}}),
     ] {
         assert!(
@@ -46,7 +50,7 @@ fn parses_closed_api_key_references() {
     let direct = serde_json::json!({
         "credential": {
             "kind": "api_key",
-            "secret_path": "providers/deepseek/api-key.json"
+            "identity": "0123456789abcdef0123456789abcdef"
         }
     });
     assert_eq!(parse(direct).expect("direct").named_source(), None);
@@ -54,7 +58,7 @@ fn parses_closed_api_key_references() {
     let named = serde_json::json!({
         "credential": {
             "kind": "api_key",
-            "secret_path": "providers/deepseek/api-key.json",
+            "identity": "0123456789abcdef0123456789abcdef",
             "source": {"kind": "named_secret", "name": "deepseek_api_key"}
         }
     });
@@ -64,7 +68,7 @@ fn parses_closed_api_key_references() {
     );
 }
 
-/// Proves malformed, path-confused, OAuth-bound, whitespace, and
+/// Proves malformed, identity-confused, OAuth-bound, whitespace, and
 /// unknown-field references fail closed for every consumer.
 #[test]
 fn rejects_noncanonical_references() {
@@ -73,33 +77,33 @@ fn rejects_noncanonical_references() {
         serde_json::json!({"credential": {"kind": "api_key"}}),
         serde_json::json!({"credential": {
             "kind": "api_key",
-            "secret_path": "providers/other/api-key.json"
+            "identity": "not-an-identity"
         }}),
         serde_json::json!({"credential": {
             "kind": "oauth",
-            "secret_path": "providers/deepseek/oauth.json",
+            "identity": "0123456789abcdef0123456789abcdef",
             "source": {"kind": "named_secret", "name": "oauth_key"}
         }}),
         serde_json::json!({"credential": {
             "kind": "api_key",
-            "secret_path": "providers/deepseek/api-key.json",
+            "identity": "0123456789abcdef0123456789abcdef",
             "source": {"kind": "named_secret", "name": " "}
         }}),
         serde_json::json!({"credential": {
             "kind": "api_key",
-            "secret_path": "providers/deepseek/api-key.json",
+            "identity": "0123456789abcdef0123456789abcdef",
             "source": {"kind": "named_secret", "name": "key", "extra": true}
         }}),
         serde_json::json!({"credential": {
             "kind": "api_key",
-            "secret_path": "providers/deepseek/api-key.json",
+            "identity": "0123456789abcdef0123456789abcdef",
             "extra": true
         }}),
         serde_json::json!({
             "api_key_secret": "legacy",
             "credential": {
                 "kind": "api_key",
-                "secret_path": "providers/deepseek/api-key.json"
+                "identity": "0123456789abcdef0123456789abcdef"
             }
         }),
     ] {
@@ -113,14 +117,14 @@ fn rejects_noncanonical_references() {
 fn serialized_reference_round_trips_through_shared_parser() {
     for source in [None, Some("deepseek_api_key")] {
         let credential =
-            ProviderCredentialReference::new(&provider(), ProviderCredentialSlot::ApiKey, source)
+            ProviderCredentialReference::new(identity(), ProviderCredentialSlot::ApiKey, source)
                 .expect("valid reference")
                 .to_value();
         let parsed = parse(serde_json::json!({"credential": credential})).expect("round trip");
         assert_eq!(parsed.named_source(), source);
         assert_eq!(
             parsed.path(),
-            &ProviderCredentialSlot::ApiKey.path(&provider())
+            &ProviderCredentialSlot::ApiKey.path(&identity())
         );
     }
 }

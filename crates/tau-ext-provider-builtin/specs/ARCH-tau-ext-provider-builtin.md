@@ -10,7 +10,9 @@ services, and reports provider execution through Tau protocol events.
 Tau loads credential-free profiles as a disjoint union from XDG config and state
 at `providers/<extension>/<namespace>.json`; each profile's serialized kind
 selects its backend family. Typed credentials live separately in the selected
-extension instance's Secret scope. ChatGPT profiles use the
+extension instance's Secret scope under a stable opaque profile credential
+identity. A profile namespace rename changes only its filename, preserving the
+credential identity and raw settings bytes. ChatGPT profiles use the
 model matrix and finite inference facade owned by `tau-provider-codex`; Chat
 Completions and OpenRouter profiles use the Chat Completions backend. Generic
 public `responses` profiles use the separate API-key Responses backend with

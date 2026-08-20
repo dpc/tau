@@ -717,7 +717,7 @@ into dotfiles while publishing any required host-local Secret record:
 ```text
 $XDG_CONFIG_HOME/tau/providers/<extension>/<provider>.json
 $XDG_STATE_HOME/tau/providers/<extension>/<provider>.json
-$XDG_STATE_HOME/tau/secrets/ext/<extension>/providers/<provider>/{oauth,api-key}.json  # authenticated only
+$XDG_STATE_HOME/tau/secrets/ext/<extension>/providers/<credential-id>/{oauth,api-key}.json  # authenticated only
 ```
 
 Config and state names form a disjoint union. A duplicate fails startup even when
@@ -744,8 +744,15 @@ provider instance. Bare `tau provider add chatgpt` offers this login path when t
 default config-owned `chatgpt` profile needs authentication; noninteractive use
 prints the exact command instead of starting OAuth.
 
-Settings contain backend and model metadata plus either a deterministic
-credential reference or, for supported local-compatible profiles, the exact
+`tau provider rename <old> <new>` renames only the unique config- or
+state-owned profile filename. It does not parse or rewrite profile bytes, move
+credentials, or modify `harness.yaml`; the profile's stable opaque credential
+identity keeps the existing host-local credential usable after the rename.
+The command rejects a missing, duplicated, or colliding profile name before
+renaming anything.
+
+Settings contain backend and model metadata plus either a stable opaque
+credential identity and a closed credential-slot kind or, for supported local-compatible profiles, the exact
 explicit marker `"credential": {"kind": "none"}`. They never contain OAuth
 tokens or API keys. The keyless marker performs no Secret lookup and makes the
 profile fully portable. Omitting `credential`, adding fields to the keyless

@@ -102,14 +102,15 @@ impl ProviderCredentialSlot {
         [Self::OAuth, Self::ApiKey]
     }
 
-    /// Returns the canonical Secret-scope path for this provider and slot.
+    /// Returns the canonical Secret-scope path for this credential identity and
+    /// slot.
     #[must_use]
-    pub fn path(self, provider: &ProviderName) -> ExtensionDataPath {
+    pub fn path(self, identity: &ProviderCredentialIdentity) -> ExtensionDataPath {
         let file = match self {
             Self::OAuth => "oauth.json",
             Self::ApiKey => "api-key.json",
         };
-        ExtensionDataPath::new(format!("providers/{provider}/{file}"))
+        ExtensionDataPath::new(format!("providers/{identity}/{file}"))
     }
 
     fn kind(self) -> &'static str {
@@ -120,11 +121,61 @@ impl ProviderCredentialSlot {
     }
 }
 
+/// Stable opaque identity of one provider profile's credential storage.
+///
+/// The identity survives a provider namespace rename. Its closed lowercase
+/// hexadecimal representation can name only the corresponding two credential
+/// slots under the selected extension's Secret scope.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProviderCredentialIdentity {
+    /// Canonical 128-bit lowercase hexadecimal identity.
+    value: String,
+}
+
+impl ProviderCredentialIdentity {
+    /// Creates a fresh cryptographically random credential-storage identity.
+    #[must_use]
+    pub fn random() -> Self {
+        let bytes: [u8; 16] = rand::random();
+        Self {
+            value: bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+        }
+    }
+
+    /// Parses one canonical opaque credential-storage identity.
+    pub fn parse(value: &str) -> Result<Self, ProviderCredentialError> {
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(invalid("provider credential identity is invalid"));
+        }
+        Ok(Self {
+            value: value.to_owned(),
+        })
+    }
+
+    /// Returns the canonical identity string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+}
+
+impl fmt::Display for ProviderCredentialIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(formatter)
+    }
+}
+
 /// A validated credential destination and optional named source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderCredentialReference {
     /// Closed credential slot selected by the profile kind.
     slot: ProviderCredentialSlot,
+    /// Stable opaque owner of the credential storage.
+    identity: ProviderCredentialIdentity,
     /// Exact canonical Secret-scope record path.
     path: ExtensionDataPath,
     /// Declared named secret that setup/startup materializes, if any.
@@ -167,7 +218,7 @@ impl ProviderCredentialReference {
     /// Construct a reference whose destination and source combination satisfy
     /// the closed provider credential schema.
     pub fn new(
-        provider: &ProviderName,
+        identity: ProviderCredentialIdentity,
         slot: ProviderCredentialSlot,
         named_source: Option<&str>,
     ) -> Result<Self, ProviderCredentialError> {
@@ -180,7 +231,8 @@ impl ProviderCredentialReference {
         }
         Ok(Self {
             slot,
-            path: slot.path(provider),
+            path: slot.path(&identity),
+            identity,
             named_source: named_source.map(str::to_owned),
         })
     }
@@ -189,6 +241,12 @@ impl ProviderCredentialReference {
     #[must_use]
     pub fn slot(&self) -> ProviderCredentialSlot {
         self.slot
+    }
+
+    /// Returns the stable opaque owner of the credential storage.
+    #[must_use]
+    pub fn identity(&self) -> &ProviderCredentialIdentity {
+        &self.identity
     }
 
     /// Return the canonical Secret-scope destination.
@@ -208,7 +266,7 @@ impl ProviderCredentialReference {
     pub fn to_value(&self) -> serde_json::Value {
         serde_json::to_value(SerializedReference {
             kind: self.slot.kind(),
-            secret_path: self.path.as_str(),
+            identity: self.identity.as_str(),
             source: self.named_source().map(|name| SerializedSource {
                 kind: "named_secret",
                 name,
@@ -232,8 +290,8 @@ struct SerializedSource<'a> {
 struct SerializedReference<'a> {
     /// Closed credential-slot discriminator.
     kind: &'static str,
-    /// Canonical Secret-scope destination.
-    secret_path: &'a str,
+    /// Stable opaque owner of the credential storage.
+    identity: &'a str,
     /// Optional validated named source.
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<SerializedSource<'a>>,
@@ -242,10 +300,10 @@ struct SerializedReference<'a> {
 /// Parse the only credential reference form accepted in one provider settings
 /// object. The caller retains ownership of all non-credential settings fields.
 pub fn parse_provider_credential_reference(
-    provider: &ProviderName,
+    _provider: &ProviderName,
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<ProviderCredentialReference, ProviderCredentialError> {
-    match parse_provider_credential(provider, settings)? {
+    match parse_provider_credential(_provider, settings)? {
         ProviderCredential::Stored(reference) => Ok(reference),
         ProviderCredential::Keyless => Err(invalid(
             "provider settings select keyless authentication".to_owned(),
@@ -255,7 +313,7 @@ pub fn parse_provider_credential_reference(
 
 /// Parse the closed stored-credential or explicitly keyless provider schema.
 pub fn parse_provider_credential(
-    provider: &ProviderName,
+    _provider: &ProviderName,
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
     if settings.contains_key("auth")
@@ -293,12 +351,11 @@ pub fn parse_provider_credential(
             ));
         }
     };
-    let path = credential
-        .get("secret_path")
+    let identity = credential
+        .get("identity")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            invalid("provider credential reference is missing secret_path".to_owned())
-        })?;
+        .ok_or_else(|| invalid("provider credential reference is missing identity".to_owned()))?;
+    let identity = ProviderCredentialIdentity::parse(identity)?;
     let named_source = match credential.get("source") {
         None => None,
         Some(value) if slot == ProviderCredentialSlot::ApiKey => {
@@ -323,18 +380,12 @@ pub fn parse_provider_credential(
             ));
         }
     };
-    let expected = slot.path(provider);
-    if path != expected.as_str() {
-        return Err(invalid(
-            "provider credential reference does not match its provider and kind".to_owned(),
-        ));
-    }
     if credential.len() != usize::from(named_source.is_some()) + 2 {
         return Err(invalid(
             "provider credential reference has unknown fields".to_owned(),
         ));
     }
-    ProviderCredentialReference::new(provider, slot, named_source.as_deref())
+    ProviderCredentialReference::new(identity, slot, named_source.as_deref())
         .map(ProviderCredential::Stored)
 }
 

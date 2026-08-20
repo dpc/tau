@@ -62,7 +62,7 @@ testing_providers:
 
 When providers are allowlisted, the helper copies only exact
 `providers/<extension>/<provider>.json` settings and
-`secrets/ext/<extension>/providers/<provider>/` typed credentials into scratch
+`secrets/ext/<extension>/providers/<credential-id>/` typed credentials into scratch
 state. It does not copy all providers, general config, sessions, logs, or
 unrelated state.
 

@@ -74,8 +74,8 @@ use tau_client::{
     RawEventContext, TauExtension, TauExtensionRunner,
 };
 use tau_config::provider_settings::{
-    ProviderCredential, ProviderCredentialReference, ProviderCredentialSlot,
-    parse_provider_credential,
+    ProviderCredential, ProviderCredentialIdentity, ProviderCredentialReference,
+    ProviderCredentialSlot, parse_provider_credential,
 };
 use tau_config::settings::BuiltinComponentIdentity;
 use tau_proto::{
@@ -779,12 +779,16 @@ const PROMPT_CONCURRENCY_ENV: &str = "TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY";
 
 /// Runs setup commands for registered built-in providers.
 pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
+    if matches!(args.first().map(String::as_str), Some("login")) && args.len() != 2 {
+        return Err("tau provider login requires exactly one NAME".into());
+    }
     let (extension_instance, args) = provider_cli_target(args)?;
     let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
     match args.first().map(String::as_str).unwrap_or("help") {
         "add" => cmd_add(&args[1..], &network, &extension_instance)?,
         "login" => cmd_login(&args[1..], &network, &extension_instance)?,
         "remove" | "delete" => cmd_remove(&args[1..], &extension_instance)?,
+        "rename" => cmd_rename(&args[1..], &extension_instance)?,
         "list" | "status" => cmd_list(&args[1..], &extension_instance)?,
         "show" => cmd_show(&args[1..], &extension_instance)?,
         "help" | "--help" | "-h" => println!("{PROVIDER_CLI_HELP}"),
@@ -869,7 +873,8 @@ Subcommands:
                                  Add or replace a provider profile (default: state)
   login <name>                   Authenticate an existing provider profile
   remove [--state|--config] <name>
-                                 Remove a provider profile
+                                  Remove a provider profile
+  rename <old> <new>             Rename a provider profile without changing credentials
   list [--state|--config|--all]  List provider profiles with their source
   show <name>                    Show a credential-free profile and source path
 
@@ -1142,18 +1147,22 @@ fn offer_login_for_existing_config_profile_in(
     if profile.source != setup_store::ProfileSource::Config {
         return Ok(false);
     }
-    let (parsed, _) = parse_settings_profile(name, &profile.contents).map_err(|reason| {
-        format!(
-            "provider profile '{name}' is invalid: {reason} (source=config, path={})",
-            profile.path.display()
-        )
-    })?;
+    let (parsed, credential) =
+        parse_settings_profile(name, &profile.contents).map_err(|reason| {
+            format!(
+                "provider profile '{name}' is invalid: {reason} (source=config, path={})",
+                profile.path.display()
+            )
+        })?;
     if !matches!(parsed, BuiltinProviderProfile::Chatgpt(_)) {
         return Err(format!("provider '{name}' already exists in config").into());
     }
+    let ProviderCredential::Stored(reference) = credential else {
+        return Err(format!("provider '{name}' is keyless and cannot use ChatGPT").into());
+    };
     let needs_login = !snapshot
         .credentials
-        .get(&(name.clone(), ProviderCredentialSlot::OAuth))
+        .get(&(reference.identity().clone(), ProviderCredentialSlot::OAuth))
         .and_then(|bytes| {
             serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(bytes).ok()
         })
@@ -1424,6 +1433,27 @@ fn cmd_remove(
     Ok(())
 }
 
+/// Renames one profile file while retaining its opaque credential identity.
+fn cmd_rename(
+    args: &[String],
+    extension_instance: &tau_proto::ExtensionName,
+) -> Result<(), Box<dyn Error>> {
+    let [old, new] = args else {
+        return Err("tau provider rename requires OLD and NEW".into());
+    };
+    let old = ProviderName::try_new(old.clone())
+        .map_err(|error| format!("invalid old provider namespace '{old}': {error}"))?;
+    let new = ProviderName::try_new(new.clone())
+        .map_err(|error| format!("invalid new provider namespace '{new}': {error}"))?;
+    let source =
+        setup_store::SetupStore::open_default()?.rename_profile(extension_instance, &old, &new)?;
+    eprintln!(
+        "Renamed {source_label} provider profile '{old}' to '{new}'; credentials were unchanged.",
+        source_label = source.label()
+    );
+    Ok(())
+}
+
 fn cmd_list(
     args: &[String],
     extension_instance: &tau_proto::ExtensionName,
@@ -1455,8 +1485,8 @@ fn cmd_list_from_store(
         .into_iter()
         .filter(|profile| source_filter.is_none_or(|wanted| wanted == profile.source))
     {
-        let (parsed, _) =
-            parse_settings_profile(&profile.provider, &profile.contents).map_err(|reason| {
+        let (parsed, credential) = parse_settings_profile(&profile.provider, &profile.contents)
+            .map_err(|reason| {
                 format!(
                     "provider profile '{}' is invalid: {reason} (source={}, path={})",
                     profile.provider,
@@ -1469,8 +1499,11 @@ fn cmd_list_from_store(
         let source = profile.source.label();
         match parsed {
             BuiltinProviderProfile::Chatgpt(parsed) => {
+                let ProviderCredential::Stored(reference) = &credential else {
+                    return Err("ChatGPT profile has no stored credential".into());
+                };
                 let status = match credentials
-                    .get(&(name.clone(), ProviderCredentialSlot::OAuth))
+                    .get(&(reference.identity().clone(), ProviderCredentialSlot::OAuth))
                     .and_then(|bytes| {
                         serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(bytes)
                             .ok()
@@ -1499,7 +1532,7 @@ fn cmd_list_from_store(
                 )?;
             }
             BuiltinProviderProfile::ChatCompletions(parsed) => {
-                let auth_status = setup_api_key_status(&credentials, name);
+                let auth_status = setup_api_key_status(&credentials, &credential);
                 let models = parsed
                     .models
                     .iter()
@@ -1513,7 +1546,7 @@ fn cmd_list_from_store(
                 )?;
             }
             BuiltinProviderProfile::OpenRouter(parsed) => {
-                let auth_status = setup_api_key_status(&credentials, name);
+                let auth_status = setup_api_key_status(&credentials, &credential);
                 let models = parsed
                     .models
                     .iter()
@@ -1526,7 +1559,7 @@ fn cmd_list_from_store(
                 )?;
             }
             BuiltinProviderProfile::Responses(parsed) => {
-                let auth_status = setup_api_key_status(&credentials, name);
+                let auth_status = setup_api_key_status(&credentials, &credential);
                 let models = parsed
                     .models
                     .iter()
@@ -1587,11 +1620,17 @@ fn cmd_show_from_store(
 }
 
 fn setup_api_key_status(
-    credentials: &std::collections::BTreeMap<(ProviderName, ProviderCredentialSlot), Vec<u8>>,
-    provider: &ProviderName,
+    credentials: &std::collections::BTreeMap<
+        (ProviderCredentialIdentity, ProviderCredentialSlot),
+        Vec<u8>,
+    >,
+    credential: &ProviderCredential,
 ) -> &'static str {
+    let ProviderCredential::Stored(reference) = credential else {
+        return "no-api-key";
+    };
     match credentials
-        .get(&(provider.clone(), ProviderCredentialSlot::ApiKey))
+        .get(&(reference.identity().clone(), ProviderCredentialSlot::ApiKey))
         .and_then(|bytes| serde_json::from_slice::<credential_record::ApiKeyCredential>(bytes).ok())
     {
         Some(record) if record.has_value() => "api-key",
@@ -1835,7 +1874,7 @@ struct ProviderSetupPayload {
 }
 
 fn provider_setup_payload(
-    name: &ProviderName,
+    _name: &ProviderName,
     profile: &BuiltinProviderProfile,
     credential_input: ProviderSetupInput,
 ) -> Result<ProviderSetupPayload, Box<dyn Error>> {
@@ -1915,7 +1954,7 @@ fn provider_setup_payload(
     let reference = (!keyless)
         .then(|| {
             ProviderCredentialReference::new(
-                name,
+                ProviderCredentialIdentity::random(),
                 slot,
                 match api_key_source.as_ref() {
                     Some(ApiKeySource::Named { name, .. }) => Some(name.as_str()),
@@ -1935,9 +1974,9 @@ fn provider_setup_payload(
         settings: serde_json::to_vec_pretty(&settings)?,
         credential: match reference {
             None => setup_store::CredentialSetup::Keyless,
-            Some(_) => setup_store::CredentialSetup::Stored {
+            Some(reference) => setup_store::CredentialSetup::Stored {
                 secret: setup_store::SecretWrite {
-                    path: slot.path(name),
+                    path: reference.path().clone(),
                     contents: setup_store::SecretBytes::new(secret),
                 },
                 named_source: match api_key_source {

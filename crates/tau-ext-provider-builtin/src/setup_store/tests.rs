@@ -26,7 +26,7 @@ fn config_target_uses_portable_profile_and_host_local_secret() {
     );
     assert!(
         temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json")
             .exists()
     );
     let snapshot = store.snapshot(&extension()).expect("snapshot");
@@ -62,7 +62,11 @@ fn snapshot_and_login_preserve_external_config_profile_symlink() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = SetupStore::open_in(temp.path());
     let deployment = temp.path().join("nix-store-chatgpt.json");
-    std::fs::write(&deployment, b"{\"deployed\":true}").expect("deployment");
+    std::fs::write(
+        &deployment,
+        br#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#,
+    )
+    .expect("deployment");
     std::fs::set_permissions(&deployment, Permissions::from_mode(0o444))
         .expect("read-only deployment");
     let profile = temp
@@ -76,10 +80,13 @@ fn snapshot_and_login_preserve_external_config_profile_symlink() {
     assert_eq!(snapshot.profiles.len(), 1);
     assert_eq!(snapshot.profiles[0].source, ProfileSource::Config);
     assert_eq!(snapshot.profiles[0].path, profile);
-    assert_eq!(snapshot.profiles[0].contents, b"{\"deployed\":true}");
+    assert_eq!(
+        snapshot.profiles[0].contents,
+        br#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#
+    );
 
     let replacement = SecretWrite {
-        path: ProviderCredentialSlot::OAuth.path(&provider()),
+        path: ProviderCredentialSlot::OAuth.path(&identity()),
         contents: SecretBytes::new(b"host-local-secret".to_vec()),
     };
     store
@@ -87,7 +94,7 @@ fn snapshot_and_login_preserve_external_config_profile_symlink() {
             &extension(),
             &provider(),
             ProfileSource::Config,
-            b"{\"deployed\":true}",
+            br#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#,
             &replacement,
             None,
         )
@@ -100,7 +107,7 @@ fn snapshot_and_login_preserve_external_config_profile_symlink() {
     );
     assert_eq!(
         std::fs::read(&deployment).expect("deployed profile"),
-        b"{\"deployed\":true}"
+        br#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#
     );
 }
 
@@ -113,7 +120,7 @@ fn stdout_target_rejects_state_collision_before_secret_write() {
     store.apply(&plan()).expect("state setup");
     let secret = temp
         .path()
-        .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
     let before = std::fs::read(&secret).expect("credential before collision");
 
     let error = store
@@ -148,7 +155,7 @@ fn remove_infers_unique_config_source() {
     assert!(
         !temp
             .path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json")
             .exists()
     );
 }
@@ -162,7 +169,7 @@ fn remove_rejects_source_mismatch_without_touching_credentials() {
     store.apply(&plan()).expect("state setup");
     let secret = temp
         .path()
-        .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
 
     let error = store
         .remove_from(&extension(), &provider(), Some(ProfileSource::Config))
@@ -198,7 +205,7 @@ fn remove_rejects_cross_source_ambiguity() {
     );
     assert!(
         temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json")
             .exists()
     );
 }
@@ -226,7 +233,7 @@ fn remove_config_failure_preserves_credentials() {
     assert!(result.is_err());
     assert!(
         temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json")
             .exists()
     );
 }
@@ -239,15 +246,19 @@ fn provider() -> tau_proto::ProviderName {
     tau_proto::ProviderName::new("chatgpt")
 }
 
+fn identity() -> ProviderCredentialIdentity {
+    ProviderCredentialIdentity::parse("0123456789abcdef0123456789abcdef").expect("identity")
+}
+
 fn plan() -> ProviderSetupPlan {
     ProviderSetupPlan {
         extension_instance: extension(),
         provider: provider(),
-        settings: br#"{"kind":"chatgpt","credential":{"kind":"oauth","secret_path":"providers/chatgpt/oauth.json"}}"#.to_vec(),
+        settings: br#"{"kind":"chatgpt","credential":{"kind":"oauth","identity":"0123456789abcdef0123456789abcdef"}}"#.to_vec(),
         credential: CredentialSetup::Stored {
             secret: SecretWrite {
                 path: tau_proto::ExtensionDataPath::new(
-                    "providers/chatgpt/oauth.json".to_owned(),
+                    "providers/0123456789abcdef0123456789abcdef/oauth.json".to_owned(),
                 ),
                 contents: SecretBytes::new(b"typed-secret".to_vec()),
             },
@@ -258,11 +269,11 @@ fn plan() -> ProviderSetupPlan {
 
 fn named_plan() -> ProviderSetupPlan {
     ProviderSetupPlan {
-        settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","secret_path":"providers/chatgpt/api-key.json","source":{"kind":"named_secret","name":"setup_key"}}}"#.to_vec(),
+        settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","identity":"0123456789abcdef0123456789abcdef","source":{"kind":"named_secret","name":"setup_key"}}}"#.to_vec(),
         credential: CredentialSetup::Stored {
             secret: SecretWrite {
                 path: tau_proto::ExtensionDataPath::new(
-                    "providers/chatgpt/api-key.json".to_owned(),
+                    "providers/0123456789abcdef0123456789abcdef/api-key.json".to_owned(),
                 ),
                 contents: SecretBytes::new(b"placeholder".to_vec()),
             },
@@ -280,19 +291,169 @@ fn direct_plan_with(settings_marker: &str, secret: &str) -> ProviderSetupPlan {
         extension_instance: extension(),
         provider: provider(),
         settings: format!(
-            "{{\"kind\":\"chatgpt\",\"marker\":\"{settings_marker}\",\"credential\":{{\"kind\":\"oauth\",\"secret_path\":\"providers/chatgpt/oauth.json\"}}}}"
+            "{{\"kind\":\"chatgpt\",\"marker\":\"{settings_marker}\",\"credential\":{{\"kind\":\"oauth\",\"identity\":\"0123456789abcdef0123456789abcdef\"}}}}"
         )
         .into_bytes(),
         credential: CredentialSetup::Stored {
             secret: SecretWrite {
                 path: tau_proto::ExtensionDataPath::new(
-                    "providers/chatgpt/oauth.json".to_owned(),
+                    "providers/0123456789abcdef0123456789abcdef/oauth.json".to_owned(),
                 ),
                 contents: SecretBytes::new(secret.as_bytes().to_vec()),
             },
             named_source: None,
         },
     }
+}
+
+/// Ensures a rename moves only a profile filename, preserving opaque credential
+/// ownership and every profile byte, including unrelated harness configuration.
+#[test]
+fn rename_profile_keeps_credentials_and_harness_config_unchanged() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let old_path = store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup")
+        .expect("profile path");
+    let profile_before = std::fs::read(&old_path).expect("profile");
+    let harness = temp.path().join("config/harness.yaml");
+    std::fs::write(&harness, "extensions: {}\n").expect("harness config");
+    let harness_before = std::fs::read(&harness).expect("harness config");
+    let credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    let credential_before = std::fs::read(&credential).expect("credential");
+
+    let source = store
+        .rename_profile(
+            &extension(),
+            &provider(),
+            &tau_proto::ProviderName::new("renamed"),
+        )
+        .expect("rename");
+
+    assert_eq!(source, ProfileSource::Config);
+    assert!(!old_path.exists());
+    assert_eq!(
+        std::fs::read(
+            temp.path()
+                .join("config/providers/provider-work/renamed.json")
+        )
+        .expect("renamed profile"),
+        profile_before
+    );
+    assert_eq!(
+        std::fs::read(&credential).expect("credential"),
+        credential_before
+    );
+    assert_eq!(
+        std::fs::read(&harness).expect("harness config"),
+        harness_before
+    );
+}
+
+/// Ensures a colliding target rejects before moving the source profile or
+/// changing its stable opaque credential record.
+#[test]
+fn rename_profile_rejects_target_collision_without_partial_move() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    let old_path = store.apply(&plan).expect("state setup").expect("profile");
+    let profile_before = std::fs::read(&old_path).expect("profile");
+    let credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    let credential_before = std::fs::read(&credential).expect("credential");
+    let target = temp
+        .path()
+        .join("config/providers/provider-work/renamed.json");
+    std::fs::create_dir_all(target.parent().expect("target parent")).expect("target parent");
+    std::fs::write(&target, b"collision").expect("target profile");
+
+    let error = store
+        .rename_profile(
+            &extension(),
+            &provider(),
+            &tau_proto::ProviderName::new("renamed"),
+        )
+        .expect_err("target collision");
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(&old_path).expect("old profile"),
+        profile_before
+    );
+    assert_eq!(
+        std::fs::read(&credential).expect("credential"),
+        credential_before
+    );
+}
+
+/// Ensures replacing a profile retires its previous opaque credential so a
+/// later removal leaves no inaccessible credential record behind.
+#[test]
+fn replacing_profile_retires_superseded_credential_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let old = plan();
+    store.apply(&old).expect("initial setup");
+    let old_credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    let replacement_identity =
+        ProviderCredentialIdentity::parse("fedcba9876543210fedcba9876543210").expect("identity");
+    let mut replacement = plan();
+    replacement.settings = String::from_utf8(replacement.settings)
+        .expect("settings text")
+        .replace(
+            "0123456789abcdef0123456789abcdef",
+            replacement_identity.as_str(),
+        )
+        .into_bytes();
+    let CredentialSetup::Stored { secret, .. } = &mut replacement.credential else {
+        panic!("test profile stores credentials");
+    };
+    secret.path = ProviderCredentialSlot::OAuth.path(&replacement_identity);
+
+    store.apply(&replacement).expect("replacement setup");
+
+    assert!(!old_credential.exists());
+    let replacement_credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/fedcba9876543210fedcba9876543210/oauth.json");
+    assert!(replacement_credential.exists());
+    assert!(
+        store
+            .remove(&extension(), &provider())
+            .expect("remove replacement")
+    );
+    assert!(!replacement_credential.exists());
+}
+
+/// Ensures dotfiles output cannot strand a config profile's opaque credential
+/// before the caller has deployed a replacement profile.
+#[test]
+fn stdout_rejects_config_replacement_without_changing_credentials() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let plan = plan();
+    store
+        .apply_to(&plan, ProfileTarget::Config)
+        .expect("config setup");
+    let credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    let before = std::fs::read(&credential).expect("credential");
+
+    let error = store
+        .apply_to(&plan, ProfileTarget::Stdout)
+        .expect_err("stdout replacement");
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&credential).expect("credential"), before);
 }
 
 /// Proves registration uses the exact scoped layout and private modes, then
@@ -308,7 +469,7 @@ fn apply_and_remove_use_scoped_private_layout() {
     let settings_path = temp.path().join("providers/provider-work/chatgpt.json");
     let secret_path = temp
         .path()
-        .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
     assert_eq!(std::fs::read(&settings_path).expect("settings"), settings);
     assert_eq!(
         std::fs::read(&secret_path).expect("secret"),
@@ -336,7 +497,7 @@ fn apply_and_remove_use_scoped_private_layout() {
         temp.path().join("secrets/ext/provider-work"),
         temp.path().join("secrets/ext/provider-work/providers"),
         temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt"),
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef"),
     ] {
         assert_eq!(
             std::fs::metadata(directory)
@@ -372,7 +533,7 @@ fn snapshot_pairs_active_settings_with_matching_credentials_only() {
     assert_eq!(
         snapshot
             .credentials
-            .get(&(provider(), ProviderCredentialSlot::OAuth)),
+            .get(&(identity(), ProviderCredentialSlot::OAuth)),
         Some(&b"typed-secret".to_vec())
     );
     assert!(
@@ -402,7 +563,7 @@ fn publish_credential_preserves_config_profile_without_state_shadow() {
         .expect("config path");
     let settings_before = std::fs::read(&config_path).expect("settings");
     let replacement = SecretWrite {
-        path: ProviderCredentialSlot::ApiKey.path(&plan.provider),
+        path: ProviderCredentialSlot::ApiKey.path(&identity()),
         contents: SecretBytes::new(b"refreshed-secret".to_vec()),
     };
 
@@ -431,7 +592,7 @@ fn publish_credential_preserves_config_profile_without_state_shadow() {
         store
             .credential(
                 &plan.extension_instance,
-                &plan.provider,
+                &identity(),
                 ProviderCredentialSlot::ApiKey
             )
             .expect("credential"),
@@ -452,13 +613,13 @@ fn publish_credential_rejects_every_stale_profile_identity() {
         .expect("config path");
     let settings_before = std::fs::read(&config_path).expect("settings");
     let replacement = SecretWrite {
-        path: ProviderCredentialSlot::OAuth.path(&plan.provider),
+        path: ProviderCredentialSlot::OAuth.path(&identity()),
         contents: SecretBytes::new(b"new-secret".to_vec()),
     };
     let secret_before = store
         .credential(
             &plan.extension_instance,
-            &plan.provider,
+            &identity(),
             ProviderCredentialSlot::OAuth,
         )
         .expect("credential");
@@ -494,7 +655,7 @@ fn publish_credential_rejects_every_stale_profile_identity() {
             store
                 .credential(
                     &plan.extension_instance,
-                    &plan.provider,
+                    &identity(),
                     ProviderCredentialSlot::OAuth
                 )
                 .expect("credential after refusal"),
@@ -520,7 +681,7 @@ fn publish_credential_materializes_named_source_before_replacement() {
     let source_path = temp.path().join("secrets/setup_key.yaml");
     std::fs::write(&source_path, "resolved-value\n").expect("named source");
     let replacement = SecretWrite {
-        path: ProviderCredentialSlot::ApiKey.path(&plan.provider),
+        path: ProviderCredentialSlot::ApiKey.path(&identity()),
         contents: SecretBytes::new(b"placeholder".to_vec()),
     };
     let source = NamedSecretSource {
@@ -541,7 +702,7 @@ fn publish_credential_materializes_named_source_before_replacement() {
     let before = store
         .credential(
             &plan.extension_instance,
-            &plan.provider,
+            &identity(),
             ProviderCredentialSlot::ApiKey,
         )
         .expect("materialized credential");
@@ -564,7 +725,7 @@ fn publish_credential_materializes_named_source_before_replacement() {
         store
             .credential(
                 &plan.extension_instance,
-                &plan.provider,
+                &identity(),
                 ProviderCredentialSlot::ApiKey,
             )
             .expect("preserved credential"),
@@ -587,7 +748,7 @@ fn publish_credential_enforces_direct_secret_file_limit() {
     let secret_limit =
         usize::try_from(MAX_SECRET_DATA_FILE_BYTES).expect("Secret limit fits usize");
     let exact = SecretWrite {
-        path: ProviderCredentialSlot::OAuth.path(&plan.provider),
+        path: ProviderCredentialSlot::OAuth.path(&identity()),
         contents: SecretBytes::new(vec![b'x'; secret_limit]),
     };
     store
@@ -601,7 +762,7 @@ fn publish_credential_enforces_direct_secret_file_limit() {
         )
         .expect("exact-limit credential");
     let too_large = SecretWrite {
-        path: ProviderCredentialSlot::OAuth.path(&plan.provider),
+        path: ProviderCredentialSlot::OAuth.path(&identity()),
         contents: SecretBytes::new(vec![b'y'; secret_limit + 1]),
     };
 
@@ -621,7 +782,7 @@ fn publish_credential_enforces_direct_secret_file_limit() {
         store
             .credential(
                 &plan.extension_instance,
-                &plan.provider,
+                &identity(),
                 ProviderCredentialSlot::OAuth,
             )
             .expect("preserved exact-limit credential"),
@@ -651,7 +812,7 @@ fn publish_credential_enforces_materialized_named_secret_file_limit() {
     let exact_value = "x".repeat(secret_limit - serialized_overhead);
     std::fs::write(&source_path, &exact_value).expect("exact named source");
     let replacement = SecretWrite {
-        path: ProviderCredentialSlot::ApiKey.path(&plan.provider),
+        path: ProviderCredentialSlot::ApiKey.path(&identity()),
         contents: SecretBytes::new(b"placeholder".to_vec()),
     };
     let source = NamedSecretSource {
@@ -671,7 +832,7 @@ fn publish_credential_enforces_materialized_named_secret_file_limit() {
     let before = store
         .credential(
             &plan.extension_instance,
-            &plan.provider,
+            &identity(),
             ProviderCredentialSlot::ApiKey,
         )
         .expect("exact-limit credential");
@@ -694,7 +855,7 @@ fn publish_credential_enforces_materialized_named_secret_file_limit() {
         store
             .credential(
                 &plan.extension_instance,
-                &plan.provider,
+                &identity(),
                 ProviderCredentialSlot::ApiKey,
             )
             .expect("preserved credential"),
@@ -747,7 +908,7 @@ fn snapshot_cannot_mix_concurrent_replacement_generations() {
     assert_eq!(
         snapshot
             .credentials
-            .get(&(provider(), ProviderCredentialSlot::OAuth)),
+            .get(&(identity(), ProviderCredentialSlot::OAuth)),
         Some(&b"old-secret".to_vec())
     );
     assert!(
@@ -756,10 +917,9 @@ fn snapshot_cannot_mix_concurrent_replacement_generations() {
             .contains("\"marker\":\"new\"")
     );
     assert_eq!(
-        std::fs::read(
-            temp.path()
-                .join("secrets/ext/provider-work/providers/chatgpt/oauth.json"),
-        )
+        std::fs::read(temp.path().join(
+            "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json"
+        ),)
         .expect("new secret"),
         b"new-secret"
     );
@@ -810,11 +970,11 @@ fn named_apply_blocks_on_instance_lock_and_publishes_coherent_pair() {
         .expect("named apply");
     worker.join().expect("setup thread").expect("send result");
 
-    let credential = std::fs::read(
-        temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt/api-key.json"),
-    )
-    .expect("credential");
+    let credential =
+        std::fs::read(temp.path().join(
+            "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json",
+        ))
+        .expect("credential");
     let credential: crate::credential_record::ApiKeyCredential =
         serde_json::from_slice(&credential).expect("typed credential");
     assert_eq!(credential.into_value(), "named-value");
@@ -846,7 +1006,9 @@ fn missing_named_source_does_not_activate_settings_or_write_placeholder() {
     assert!(
         !temp
             .path()
-            .join("secrets/ext/provider-work/providers/chatgpt/api-key.json")
+            .join(
+                "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json"
+            )
             .exists()
     );
 }
@@ -859,7 +1021,7 @@ fn orphan_removal_racing_first_setup_leaves_one_complete_generation() {
     let settings_root = temp.path().join("providers/provider-work");
     let secret = temp
         .path()
-        .join("secrets/ext/provider-work/providers/chatgpt/oauth.json");
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
     std::fs::create_dir_all(secret.parent().expect("secret parent")).expect("secret root");
     std::fs::write(&secret, "orphan").expect("orphan credential");
     assert!(!settings_root.exists());
@@ -940,7 +1102,7 @@ fn remove_blocks_on_instance_lock_and_removes_complete_registration() {
     assert!(
         !temp
             .path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json")
             .exists()
     );
 }
@@ -959,11 +1121,11 @@ fn setup_replacement_cannot_split_startup_generation() {
         .expect("lock")
         .expect("existing root");
     let old_settings = std::fs::read(lock.root().join("chatgpt.json")).expect("old settings");
-    let old_secret = std::fs::read(
-        temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json"),
-    )
-    .expect("old secret");
+    let old_secret =
+        std::fs::read(temp.path().join(
+            "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json",
+        ))
+        .expect("old secret");
     let (sender, receiver) = mpsc::channel();
     let state = temp.path().to_path_buf();
     let barrier = Arc::new(Barrier::new(2));
@@ -997,10 +1159,9 @@ fn setup_replacement_cannot_split_startup_generation() {
             .contains("\"marker\":\"new\"")
     );
     assert_eq!(
-        std::fs::read(
-            temp.path()
-                .join("secrets/ext/provider-work/providers/chatgpt/oauth.json"),
-        )
+        std::fs::read(temp.path().join(
+            "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json"
+        ),)
         .expect("new secret"),
         b"new-secret"
     );
@@ -1020,7 +1181,7 @@ fn removal_cannot_split_startup_generation() {
     assert!(lock.root().join("chatgpt.json").is_file());
     assert!(
         temp.path()
-            .join("secrets/ext/provider-work/providers/chatgpt/oauth.json")
+            .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json")
             .is_file()
     );
     let (sender, receiver) = mpsc::channel();
@@ -1074,10 +1235,9 @@ fn apply_failure_preserves_secret_first_boundary() {
         .expect_err("settings publication must fail");
 
     assert_eq!(
-        std::fs::read(
-            temp.path()
-                .join("secrets/ext/provider-work/providers/chatgpt/oauth.json"),
-        )
+        std::fs::read(temp.path().join(
+            "secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json"
+        ),)
         .expect("orphaned secret"),
         b"typed-secret"
     );
@@ -1099,7 +1259,7 @@ fn remove_failure_preserves_settings_first_boundary() {
     store.apply(&plan()).expect("apply");
     let provider_dir = temp
         .path()
-        .join("secrets/ext/provider-work/providers/chatgpt");
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef");
     std::fs::remove_dir_all(&provider_dir).expect("remove provider directory");
     let outside = temp.path().join("outside");
     std::fs::create_dir(&outside).expect("outside");
