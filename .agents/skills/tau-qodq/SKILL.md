@@ -1,150 +1,152 @@
 ---
 name: tau-qodq
 description: >
-  Extract and chart Tau's canonical provider quota observations as an offline,
-  privacy-aware CSV, SVG, and summary. Use for historical provider quota
-  diagnostics without adding a Tau command or changing runtime semantics.
+  Extract and chart canonical provider quota observations and terminal token usage
+  as offline, privacy-aware CSV, SVG, and summary artifacts.
 ---
 
-# Tau QODQ: Offline quota-observation diagnostics
+# Tau QODQ: offline quota and token-usage diagnostics
 
-Use `extract_quota.py` to answer a bounded historical question about provider
-quota observations. It reads local event logs, writes CSV/SVG/summary artifacts,
-and uses only the Python standard library. Default to one relevant session or a
-small selected directory. Resolve the checked-in companion script from the
-repository root as shown below. Treat all-local aggregation as diagnostic
-evidence, not an account-level statement.
+Use `extract_quota.py` for bounded historical diagnostics from canonical Tau
+events. It uses only Python's standard library and writes redacted CSV, SVG,
+summary, and artifact README files. It is an offline aid, not a Tau command;
+do not change provider, journal, or runtime semantics for it.
 
 ## Run
 
-The default time range is the rolling 14 days ending at execution time. `--since` replaces
-the lower boundary; `--until` supplies an exclusive upper boundary. Use UTC
-RFC3339 timestamps or date values and record the chosen `[since, until)` range.
-Ranges longer than 366 days are rejected so daily guides and artifacts remain
-bounded.
+Select each configured subscription explicitly. `LABEL` is presentation-only;
+`PROVIDER` exactly selects canonical quota `payload.provider` and the
+`PROVIDER/` prefix of canonical token-usage `usage.model`. This checked-in
+extractor invocation is the complete reproducible generator template; change
+only its bounded UTC range and output directory.
 
 ```bash
-# Run from the repository root so this checked-in companion path resolves.
 cd "$(jj workspace root)"
 skill_dir=.agents/skills/tau-qodq
 "$skill_dir/extract_quota.py" \
   --sessions-root "$HOME/.local/state/tau/sessions" \
-  --provider chatgpt \
-  --out /tmp/public/tau-qodq
-
-# Narrower, reproducible selection and range:
-"$skill_dir/extract_quota.py" \
-  --sessions-root /tmp/public/selected-sessions \
-  --provider chatgpt \
-  --since 2026-07-14T00:00:00Z --until 2026-07-28T00:00:00Z \
-  --out /tmp/public/tau-qodq
+  --profile chatgpt=chatgpt \
+  --profile chatgpt-fedi=chatgpt-fedi \
+  --since 2026-08-07T00:00:00Z --until 2026-08-21T00:00:00Z \
+  --out /tmp/public/tau-qodq-chatgpt-chatgpt-fedi
 ```
 
-Inspect `summary.txt`, retain it with `quota.csv` and `quota.svg`, and do not
-commit generated artifacts or session data. The script scans `events.jsonl`
-without an index: a date bound reduces output, not necessarily bytes read.
+The exact range is `[since, until)` in UTC and must start/end on UTC-day
+boundaries, so token-chart buckets align at 00:00/06:00/12:00/18:00 and both
+charts can guide every UTC midnight. The default is the fourteen complete UTC
+days ending at the current UTC midnight.
+Ranges over 366 days are rejected. The
+compatibility `--provider NAME` selection remains equivalent to
+`--profile NAME=NAME`; prefer repeatable `--profile`.
 
-## Input contract and selection
+Keep the generated `README.md`, `summary.txt`, `quota.csv`, `quota.svg`,
+`tokens.csv`, and `tokens.svg` together. Do not commit artifacts or session
+data. The extractor scans selected `events.jsonl` files without an index, so
+time bounds constrain output but may not reduce bytes scanned.
 
-Select **only** nested semantic events whose canonical name is exactly
-`harness.provider_quota_changed`. Never select or combine
-`provider.quota_replace_reported`, `provider.quota_patch_reported`, or
-`provider.quota_clear_reported`: reported forms can be adjacent to the accepted
-snapshot, and a committed report does not prove harness acceptance. The
-canonical event is the protected, validated full current snapshot; it is also
-emitted for late-subscriber catch-up.
+## Inputs and privacy boundary
 
-The extractor enumerates exactly one `events.jsonl` beneath each selected session
-directory (including selected session-directory symlinks), validates the outer
-`published` record and nested canonical payload, and filters by configured
-`payload.provider`. It never follows debug provider captures. Malformed canonical
-candidates are counted; root enumeration and selected-file read failures stop the
-run rather than silently producing an empty chart.
+Select only these exact nested canonical published events:
 
-Rows are grouped by provider, profile epoch, limit ID, and window ID. Within each
-group, consecutive observations with identical quota, reset, route, and timing
-freshness evidence retain their first and latest points. The latest point records
-the exact number of intervening rows in `omitted_unchanged_before`. Epoch changes,
-zero-use reset changes, many-to-many route changes, timing-anchor changes, and
-server-offset calibration changes remain evidence. Independent profile/process
-epochs are never merged.
+* `harness.provider_quota_changed` provides accepted full quota snapshots.
+  Do not substitute provider `_reported` quota events.
+* `provider.response_finished` provides accepted terminal
+  `usage.model`, `prompt_sent_tokens`, `prompt_cached_tokens`, and
+  `response_received_tokens`.
 
-## Units and chart semantics
+The extractor reads no provider capture files and never exports credentials,
+prompts, response/output items, routes beyond the quota snapshot's normalized
+route metadata, or raw event records. A canonical response terminal can contain
+output items, but the extractor deliberately reads only the listed identity,
+time, model-selection, and usage fields.
 
-`used_basis_points` is the upstream normalized fraction used: `10000` means
-`100%`. It is not tokens, credits, spend, or a count of quota units. The CSV
-also gives `used_percent`, `remaining_basis_points`, and `remaining_percent`.
-The latter two are derived exactly as `10000 - used_basis_points` and
-`100% - used_basis_points / 100`; they are the displayed quantity.
+`provider.response_finished` does not carry a quota profile epoch. Token rows
+therefore identify the selected configured provider/model prefix and human
+label, not an account or credential. Quota rows retain `profile_epoch`, which
+is opaque process-lifetime evidence, **not** an account identity. Never infer
+that selected names, profile epochs, or separate sessions prove a shared or
+different account.
 
-The SVG is a **point-only scatter plot** of `remaining_percent`: it never
-connects, interpolates, or predicts observations. Its x-axis is strictly
-`usage_observed_at_unix_ms`, the provider observation time, rather than local
-log admission time or reset time. Dashed vertical guides mark each 00:00 UTC
-inside the selected `[since, until)` observation-time domain. Reset fields are
-metadata and never set or expand the axis.
-CSV collapse is evidence-preserving but lossy: it retains run endpoints and an
-exact omitted count, but intermediate observation timestamps and sequences are
-unavailable. To keep a large all-local SVG usable, rendering emits one circle
-for observations that land on the same tenth-pixel coordinate and window color;
-the summary distinguishes retained CSV evidence rows from rendered SVG circles.
+The extractor structurally skips unselected JSON values before decoding any
+terminal fields. In particular, it does not materialize `output_items`, error
+details, prompts, or provider content while selecting terminal usage.
 
-## Artifact schema
+## Chart and CSV semantics
 
-`quota.csv` always uses one fixed schema, including when it has no rows. Copied
-columns are provider, profile epoch, sequence, window identity, used basis points,
-window duration, reset seconds, relative remaining seconds and timing anchor,
-server offset and calibration time, and route evidence. `observed_at` and
-`reset_at` are derived UTC renderings. `used_percent`, `remaining_basis_points`,
-and `remaining_percent` are derived arithmetic values. Many-to-many route models,
-provenances, and observation times are deterministic JSON arrays in their three
-CSV columns. Empty reset/timing cells mean absent or unknown, not zero.
-`omitted_unchanged_before` counts only rows actually omitted between the retained
-first/latest evidence points. It does not reconstruct the omitted rows' exact
-timestamps or sequences.
+`quota.svg` shows one line for each selected subscription. It explicitly selects
+the canonical default `codex/primary` series: the Codex adapter maps an official
+nameless rate-limit observation to the canonical default `codex` pool, and
+`primary` is the provider-normalized primary window. It retains the maximum actual
+`remaining_percent` observation per subscription and UTC hour, breaking the line
+for every missing hour. This display-only reduction never averages, interpolates,
+predicts, or alters CSV evidence. Ties retain the latest `(observation time,
+sequence, profile epoch)`.
+`quota.csv` still retains every pool, window, and process epoch. The SVG legend
+contains only the supplied subscription labels; it exposes no pool/window or
+epoch IDs. Its values are `remaining_percent = 100 - used_basis_points / 100`.
+It guides and labels every UTC day boundary.
 
-`summary.txt` reports exact scopes: selected canonical files and their logical
-bytes; candidate lines containing the exact canonical-name token; validated
-canonical events for the selected provider (including empty/out-of-range events);
-malformed canonical candidates; sessions with in-range observations; in-range
-window observations before collapse; emitted rows; and exactly omitted unchanged
-rows. The extractor streams files and retains only normalized rows grouped by full
-series identity; memory is proportional to selected canonical window observations,
-never raw log size or unrelated/private event content.
+`tokens.csv` retains selected canonical terminals in UTC-aligned half-open
+one-hour rows `[HH:00, HH+1:00)`, selected by the terminal's
+`recorded_at_micros`. `tokens.svg` reduces those rows to UTC-aligned six-hour
+buckets starting at 00:00, 06:00, 12:00, and 18:00, with connected lines only
+across consecutive buckets. It renders all three six-hour measurements on one
+shared logarithmic `log1p` Y axis:
 
-Run the maintained focused fixtures after changing the extractor:
+```text
+Cache hits    = Σ prompt_cached_tokens / 21,600 tokens/s
+Cache misses  = Σ (prompt_sent_tokens - prompt_cached_tokens) / 21,600 tokens/s
+Output tokens = Σ response_received_tokens / 21,600 tokens/s
+```
+
+Subscription color identifies the selected profile; line style identifies the
+metric. The chart contains exactly those six profile/metric lines. Its
+zero-preserving transform is
+`log(1 + six-hour tokens/s) / log(1 + largest displayed six-hour tokens/s)`: an
+observed zero remains at the baseline, rather than being dropped or replaced
+with a positive value. Y ticks label actual tokens/s values, not transformed
+coordinates.
+
+The SVG never invents a six-hour bucket for absent evidence and never connects
+across a missing UTC six-hour bucket. Missing hourly rows are unknown/missing
+evidence, not zero use. An absent
+`usage` record is unavailable usage. An old canonical record lacking the
+serialized `prompt_cached_tokens` field is also unavailable for this chart:
+the extractor does **not** reinterpret it as Cache hits zero, and excludes
+that terminal's three categories. A present zero is used because the current
+canonical schema serializes the field as a non-optional count.
+
+For token replay/catch-up deduplication, one terminal identity is
+`(selected profile label, agent_id, agent_prompt_id, provider_attempt)`.
+Repeated identities retain the earliest `(recorded_at_micros, selected file
+path, line number)` record **before** the time filter; a replay inside a range
+does not turn an original terminal outside it into new consumption. Conflicting
+complete-usage counts are reported once per terminal identity, not summed. If
+the retained earliest copy lacks `prompt_cached_tokens`, later explicit-zero
+replays cannot replace it and that terminal remains omitted. This is intentionally separate from quota
+plotting: quota is snapshot evidence, not additive consumption.
+
+## Summary and interpretation
+
+`summary.txt` reports selected profiles/files/bytes, candidate and validated
+canonical events, malformed data, missing usage/cache fields, out-of-range and
+unselected-model terminals, duplicate/conflicting token identities, retained
+quota rows, omitted unchanged quota rows, hourly token rows, rendered values,
+and elapsed time. Report these exact values, the exact selection/range, and
+the artifact paths with any conclusion.
+
+Remember:
+
+* A quota plateau is repeated observed state, not continuous metering.
+* A rise in remaining quota or reset shift can be reset/reconciliation, not
+  negative consumption.
+* Gaps, empty snapshots, missing terminal usage, and absent hourly rows are
+  unknown, not zero.
+* Token timestamps are canonical log-admission/accepted-terminal times, not
+  provider metering instants.
+
+Run the focused oracle after changing the generator:
 
 ```bash
 python3 .agents/skills/tau-qodq/test_extract_quota.py
 ```
-
-Local/self CI runs the same command in its lint job.
-
-## Evidence and interpretation
-
-- A plateau means repeated observed state, not continuous metering.
-- A rise in remaining quota or a reset shift can be a reset or reconciliation,
-  not negative consumption.
-- Gaps, empty snapshots, and absent rows are unknown/missing state, not zero
-  use or zero remaining quota. Event logs are best effort and can have torn
-  tails, loss, and restart gaps.
-- `profile_epoch` is opaque lifetime/process evidence, not an account ID.
-  A configured provider name and cross-session snapshots do not establish a
-  common credential/account.
-- Route bindings only describe an observed route for that snapshot. Blank
-  values mean unknown, not all-model applicability. Bindings can be stale.
-- `reset_at` is optional/server-declared. Relative timing requires its timing
-  anchor; absolute reset interpretation needs fresh server-offset calibration.
-
-Never inspect or export provider request captures for this task. They can hold
-private prompts/outputs while the canonical quota event already contains the
-normalized fields needed here. Report selection, elapsed time, bytes scanned, validated/malformed canonical
-counts, emitted/omitted row counts, and these caveats with any conclusion.
-
-## Scope and performance
-
-For behavioral interpretation, create a directory containing only symlinks to
-relevant session directories and pass it with `--sessions-root`. All-local
-scans may be slow and can interleave unrelated harnesses/profiles. This skill
-is intentionally an offline diagnostic: do not add a native Tau command and do
-not change runtime, event, journal, or provider semantics to support it.
