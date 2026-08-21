@@ -308,6 +308,17 @@ sidecars. Harness-authored `CompactionTrigger` items, malformed messages, and
 open, duplicate, or otherwise incomplete tool rounds remain invalid. A standalone
 terminal commits a replacement only on `EndTurn` with neither provider error nor
 typed failure; error and typed failure take precedence as provider failures.
+The canonical `agent.compacted` boundary may also carry optional harness-owned
+before and after token measurements. Each count records whether it is exact
+provider-reported usage or an estimate. Before-count precedence is canonical
+provider prompt/input usage, then a prior context-usage baseline only when its
+model and selected-branch ancestry still apply. After-count precedence is
+canonical provider compacted-output usage, including a reported zero, then the
+replacement-window byte estimate. The measurements are content-free display
+metadata: they do not affect replacement authority or replay, and missing fields
+on older boundaries remain valid. Because they live on the at-most-once boundary,
+live publication, late catch-up, and cold replay expose the same values without
+publishing the private standalone provider response.
 Rejected terminals retain the transaction cut/resume and context/cache baselines,
 while their report/accounting behavior is owned by
 [SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).

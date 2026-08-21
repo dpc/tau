@@ -3207,6 +3207,25 @@ impl EventRenderer {
         format!("#{}", format_token_count(tokens))
     }
 
+    fn compaction_measurement_chip(measurement: tau_proto::CompactionTokenMeasurement) -> String {
+        let estimate = matches!(
+            measurement.provenance,
+            tau_proto::CompactionTokenProvenance::Estimated
+        )
+        .then_some("~")
+        .unwrap_or_default();
+        format!(
+            "{estimate}{}",
+            Self::compaction_token_chip(measurement.tokens)
+        )
+    }
+
+    fn retained_percentage(original: u64, compacted: u64) -> Option<u128> {
+        (0 < original).then(|| {
+            (u128::from(compacted) * 100 + u128::from(original) / 2) / u128::from(original)
+        })
+    }
+
     fn compaction_progress_status(original_input_tokens: Option<u64>) -> String {
         original_input_tokens
             .map(|tokens| {
@@ -3231,6 +3250,33 @@ impl EventRenderer {
             ),
             (Some(original), None) => format!("{} ok", Self::compaction_token_chip(original)),
             (None, Some(compacted)) => format!("ok: {}", Self::compaction_token_chip(compacted)),
+            (None, None) => "ok".to_owned(),
+        }
+    }
+
+    /// Formats one successful standalone compaction terminal from durable
+    /// metrics.
+    pub(crate) fn standalone_compaction_success_status(
+        original: Option<tau_proto::CompactionTokenMeasurement>,
+        compacted: Option<tau_proto::CompactionTokenMeasurement>,
+    ) -> String {
+        match (original, compacted) {
+            (Some(original), Some(compacted)) => {
+                let ratio = Self::retained_percentage(original.tokens, compacted.tokens)
+                    .map(|percentage| format!(" ({percentage}%)"))
+                    .unwrap_or_default();
+                format!(
+                    "{} → {}{ratio} ok",
+                    Self::compaction_measurement_chip(original),
+                    Self::compaction_measurement_chip(compacted),
+                )
+            }
+            (Some(original), None) => {
+                format!("{} → ? ok", Self::compaction_measurement_chip(original))
+            }
+            (None, Some(compacted)) => {
+                format!("? → {} ok", Self::compaction_measurement_chip(compacted))
+            }
             (None, None) => "ok".to_owned(),
         }
     }
@@ -6495,6 +6541,7 @@ impl EventRenderer {
         if self.finish_standalone_compaction_prompt(
             terminated.agent_prompt_id.as_str(),
             Some(("stopped", CompactionStatus::Failure)),
+            false,
         ) {
             return;
         }
@@ -6547,6 +6594,7 @@ impl EventRenderer {
         &mut self,
         prompt_id: &str,
         terminal: Option<(&str, CompactionStatus)>,
+        render_without_state: bool,
     ) -> bool {
         let terminal = if let Some(call_id) = self.self_compaction_tool_for_prompt(prompt_id) {
             if let Some((text, status)) = terminal {
@@ -6559,6 +6607,14 @@ impl EventRenderer {
         let Some(state) = self.prompts.remove(prompt_id) else {
             self.standalone_compaction_transactions
                 .retain(|_, mapped_prompt_id| mapped_prompt_id.as_str() != prompt_id);
+            if render_without_state && let Some((text, status)) = terminal {
+                self.handle.print_output(
+                    "standalone-compaction-terminal",
+                    render_compaction_block(&self.theme, text, status),
+                );
+                self.handle.redraw();
+                return true;
+            }
             return false;
         };
         if !state.is_standalone_compaction {
@@ -6595,7 +6651,7 @@ impl EventRenderer {
         prompt_id: &tau_proto::AgentPromptId,
         terminal: Option<(&str, CompactionStatus)>,
     ) {
-        self.finish_standalone_compaction_prompt(prompt_id.as_str(), terminal);
+        self.finish_standalone_compaction_prompt(prompt_id.as_str(), terminal, true);
         self.mark_agent_prompt_inactive(agent_id.as_str(), prompt_id.as_str());
         self.agent_activity.finish_prompt(prompt_id, &[]);
         if !self.agent_activity.has_active_prompts() {
@@ -6989,7 +7045,8 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
     ) {
-        if self.finish_standalone_compaction_prompt(finished.agent_prompt_id.as_str(), None) {
+        if self.finish_standalone_compaction_prompt(finished.agent_prompt_id.as_str(), None, false)
+        {
             return;
         }
         if finished.originator.is_user()
@@ -8585,10 +8642,14 @@ impl EventRenderer {
                         })
                 });
                 if let Some(prompt_id) = prompt_id {
+                    let status = Self::standalone_compaction_success_status(
+                        compacted.original_input_tokens,
+                        compacted.compacted_input_tokens,
+                    );
                     self.complete_standalone_compaction_prompt(
                         &compacted.agent_id,
                         &prompt_id,
-                        Some(("complete", CompactionStatus::Success)),
+                        Some((&status, CompactionStatus::Success)),
                     );
                 }
                 true

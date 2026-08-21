@@ -400,6 +400,8 @@ fn repeated_compactions_do_not_hide_recent_durable_ancestry() {
     tree.apply_event_at(
         AgentEventParent::Under(first),
         &Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: agent_id(),
             transaction_id: None,
             cut: None,
@@ -423,6 +425,8 @@ fn repeated_compactions_do_not_hide_recent_durable_ancestry() {
     tree.apply_event_at(
         AgentEventParent::Under(middle),
         &Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: agent_id(),
             transaction_id: None,
             cut: None,

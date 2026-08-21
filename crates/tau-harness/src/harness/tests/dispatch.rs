@@ -13969,6 +13969,8 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
         h.publish_for_agent(
             &cid,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: None,
+                compacted_input_tokens: None,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 transaction_id: None,
                 cut: None,
@@ -13999,6 +14001,98 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
     assert_eq!(h.agents[&cid].context_input_tokens, None);
     assert_eq!(h.agents[&cid].context_cached_tokens, None);
     h.shutdown().expect("shutdown");
+}
+
+fn standalone_compaction_boundary_with_measurements(
+    usage: Option<tau_proto::ProviderTokenUsage>,
+    baseline_model: Option<tau_proto::ModelId>,
+    baseline_head: Option<tau_proto::NodeId>,
+) -> tau_proto::AgentCompacted {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    if let Some(model) = baseline_model {
+        let agent = h.agents.get_mut(&cid).expect("agent");
+        agent.context_input_tokens = Some(226_200);
+        agent.context_usage_model = Some(model);
+        agent.context_usage_head = baseline_head.or(agent.head);
+    }
+
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    let prompt = read_nth_prompt_created(&h, 0);
+    let mut response = standalone_compaction_success_response(&prompt, "summary");
+    response.usage = usage;
+    h.handle_provider_response_finished(response)
+        .expect("accept compact response");
+    let boundary = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentCompacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("durable compaction boundary");
+    h.shutdown().expect("shutdown");
+    boundary
+}
+
+/// Durable standalone measurements must follow exact-then-estimated precedence,
+/// reject stale prior-context baselines, and preserve canonical reported zeros.
+#[test]
+fn standalone_compaction_boundary_measurement_precedence_is_canonical() {
+    let estimated =
+        standalone_compaction_boundary_with_measurements(None, Some("test/model".into()), None);
+    assert_eq!(
+        estimated.original_input_tokens,
+        Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 226_200,
+            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+        })
+    );
+    assert!(matches!(
+        estimated.compacted_input_tokens,
+        Some(tau_proto::CompactionTokenMeasurement {
+            tokens,
+            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+        }) if tokens > 0
+    ));
+
+    for (model, head) in [
+        (Some(tau_proto::ModelId::from("other/model")), None),
+        (
+            Some(tau_proto::ModelId::from("test/model")),
+            Some(tau_proto::NodeId::new(u64::MAX)),
+        ),
+    ] {
+        let stale = standalone_compaction_boundary_with_measurements(None, model, head);
+        assert_eq!(stale.original_input_tokens, None);
+        assert!(matches!(
+            stale.compacted_input_tokens,
+            Some(tau_proto::CompactionTokenMeasurement {
+                provenance: tau_proto::CompactionTokenProvenance::Estimated,
+                ..
+            })
+        ));
+    }
+
+    let zero = standalone_compaction_boundary_with_measurements(
+        Some(tau_proto::ProviderTokenUsage::default()),
+        Some("other/model".into()),
+        None,
+    );
+    let exact_zero = Some(tau_proto::CompactionTokenMeasurement {
+        tokens: 0,
+        provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+    });
+    assert_eq!(zero.original_input_tokens, exact_zero);
+    assert_eq!(zero.compacted_input_tokens, exact_zero);
 }
 
 /// A standalone-capable model must dispatch an explicit compact operation and
@@ -14072,7 +14166,11 @@ fn manual_standalone_compact_installs_one_boundary() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
-        usage: None,
+        usage: Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 226_200,
+            response_received_tokens: 4_500,
+            ..Default::default()
+        }),
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
@@ -14093,6 +14191,23 @@ fn manual_standalone_compact_installs_one_boundary() {
         })
         .collect();
     assert_eq!(compacted.len(), 1);
+    assert_eq!(
+        (
+            compacted[0].original_input_tokens,
+            compacted[0].compacted_input_tokens,
+        ),
+        (
+            Some(tau_proto::CompactionTokenMeasurement {
+                tokens: 226_200,
+                provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+            }),
+            Some(tau_proto::CompactionTokenMeasurement {
+                tokens: 4_500,
+                provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+            }),
+        ),
+        "the durable boundary must retain canonical provider usage"
+    );
     assert_eq!(
         (
             compacted[0].compact_prompt_id.as_ref(),
@@ -15110,6 +15225,8 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id,
             transaction_id: Some(transaction_id.clone()),
             cut: Some(tau_proto::AgentHead::Root),
@@ -15343,6 +15460,8 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             None,
             tau_core::AgentEventParent::Root,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: None,
+                compacted_input_tokens: None,
                 agent_id: agent_id.clone(),
                 transaction_id: Some(transaction_id.clone()),
                 cut: Some(tau_proto::AgentHead::Root),
@@ -19698,6 +19817,8 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
     h.publish_for_agent(
         &cid,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: started.agent_id.clone(),
             transaction_id: Some(started.transaction_id.clone()),
             cut: Some(started.cut),
@@ -21006,6 +21127,8 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: None,
+                compacted_input_tokens: None,
                 agent_id: started.agent_id.clone(),
                 transaction_id: Some(transaction_id.clone()),
                 cut: Some(started.cut),
@@ -21402,6 +21525,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         )
         .expect("append standalone provider materialization");
     let compacted = tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id.clone(),
         transaction_id: Some(transaction_id.clone()),
         cut: Some(compact_cut),
@@ -22905,6 +23030,8 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
     h.publish_for_agent(
         &target,
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: target_id.clone(),
             transaction_id: Some(started.transaction_id),
             cut: Some(started.cut),

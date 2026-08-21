@@ -63,8 +63,10 @@ successful boundaries repeat that tuple so replay can validate exact provider
 work ownership. Canonical submitted, injected, and steered inputs carry a
 default-false `inference_activation` marker: new activating writes set it true,
 while passive and legacy facts cannot independently replay-wake inference.
-`agent.compacted` records carry immutable cut and suffix metadata; metadata-free
-historical records retain legacy hard-boundary replay semantics.
+`agent.compacted` records carry immutable cut and suffix metadata plus optional
+harness-owned before/after token measurements with exact-provider or estimated
+provenance; metadata-free historical records retain legacy hard-boundary replay
+semantics.
 It exists for semantic inspection and compatibility with protocol consumers that
 need structured data.
 

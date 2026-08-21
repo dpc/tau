@@ -9331,6 +9331,30 @@ fn prompt_termination_clears_live_response_and_activity() {
     assert!(!vt.screen_contains(80, "…"));
 }
 
+/// An unknown ordinary prompt terminal must not be mistaken for a standalone
+/// compaction merely because no local prompt state exists.
+#[test]
+fn unknown_ordinary_prompt_termination_does_not_render_compaction() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptTerminated(AgentPromptTerminated {
+        automatic_compaction_decision: None,
+        agent_prompt_id: test_agent_prompt_id("sp-unknown"),
+        agent_id: agent_id("main"),
+        reason: AgentPromptTerminationReason::Stale,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    let text = vt.screen_text(80).join("\n");
+    assert!(!text.contains("compact"), "{text}");
+}
+
 /// Ensures provider response stats make the standalone live indicator
 /// look active without entering the final transcript.
 #[test]
@@ -11142,8 +11166,8 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
 }
 
 /// A self-`compact` call and its private standalone transaction must share one
-/// evolving tool row, while the generic background terminal still owns its
-/// final result.
+/// evolving tool row with canonical `ok` success before and after the generic
+/// background terminal owns the final result.
 #[test]
 fn self_compaction_reuses_its_tool_row_through_background_completion() {
     let (_term, handle, vt) = setup(100, 24);
@@ -11176,6 +11200,14 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     assert_eq!(progress.matches("Compacting…").count(), 1, "{progress}");
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 226_200,
+            provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+        }),
+        compacted_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 4_500,
+            provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+        }),
         agent_id: agent_id("main"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-self")
@@ -11189,7 +11221,9 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
         replacement_window: Vec::new(),
     }));
     sync(&handle);
-    assert!(vt.screen_contains(100, "complete"));
+    let compacted = vt.screen_text(100).join("\n");
+    assert!(compacted.contains("#226.2k → #4.5k (2%) ok"), "{compacted}");
+    assert!(!compacted.contains("complete"), "{compacted}");
 
     renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {
         call_id: "call-self".into(),
@@ -11405,8 +11439,8 @@ fn mismatched_self_compaction_correlation_fails_open_to_distinct_rows() {
     assert!(text.contains("compact 0s pending"), "{text}");
 }
 
-/// Ensures a typed standalone compaction lifecycle renders only compact
-/// progress and terminal markers while keeping streamed compactor text out of
+/// Ensures an independent standalone compaction terminal says `compact ok`,
+/// never uses a custom success verb, and keeps streamed compactor text out of
 /// the transcript and editor context.
 #[test]
 fn standalone_compaction_stream_is_hidden_from_cli_output() {
@@ -11455,6 +11489,14 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     drop(editor_context);
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 226_200,
+            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+        }),
+        compacted_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 4_500,
+            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+        }),
         agent_id: agent_id("main"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-private")
@@ -11469,8 +11511,11 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact complete"));
+    assert!(vt.screen_contains(100, "compact ~#226.2k → ~#4.5k (2%) ok"));
+    assert!(!vt.screen_contains(100, "compact complete"));
     assert!(!vt.screen_contains(100, "Compacting…"));
+    assert!(!vt.screen_contains(100, "private compactor answer"));
+    assert!(!vt.screen_contains(100, "private compactor reasoning"));
     assert!(!vt.screen_contains(100, "private checkpoint"));
     assert!(!renderer.agent_has_active_prompt_for_test("main"));
     assert!(!renderer.main_agent_turn_active_for_test());
@@ -11497,6 +11542,14 @@ fn standalone_compaction_replay_retires_private_progress() {
         standalone_compaction_started("ct-replay", "ap-replay"),
     ));
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 226_200,
+            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+        }),
+        compacted_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
+            tokens: 4_500,
+            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+        }),
         agent_id: agent_id("main"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-replay")
@@ -11511,6 +11564,7 @@ fn standalone_compaction_replay_retires_private_progress() {
     }));
     sync(&handle);
 
+    assert!(vt.screen_contains(100, "compact ~#226.2k → ~#4.5k (2%) ok"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "synthetic checkpoint"));
     assert!(!vt.screen_contains(100, "◆"));
@@ -11597,6 +11651,8 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
     assert!(vt.screen_contains(100, "@1"));
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id("engineer"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-side-success")
@@ -11728,6 +11784,64 @@ fn render_provider_compaction_item_when_response_finishes() {
 
     assert!(vt.screen_contains(80, "compact #226.2k ok: #4.5k"));
     assert!(!vt.screen_contains(80, "compacted"));
+}
+
+/// Compaction terminals must keep `ok` last, distinguish estimates, round the
+/// retained ratio, and degrade without inventing a percentage or missing count.
+#[test]
+fn compaction_success_status_formats_provenance_and_partial_measurements() {
+    use tau_proto::{CompactionTokenMeasurement as Measurement, CompactionTokenProvenance};
+
+    let exact = |tokens| Measurement {
+        tokens,
+        provenance: CompactionTokenProvenance::ProviderReported,
+    };
+    let estimated = |tokens| Measurement {
+        tokens,
+        provenance: CompactionTokenProvenance::Estimated,
+    };
+
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(
+            Some(exact(226_200)),
+            Some(estimated(4_500)),
+        ),
+        "#226.2k → ~#4.5k (2%) ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(
+            Some(estimated(226_200)),
+            Some(exact(4_500)),
+        ),
+        "~#226.2k → #4.5k (2%) ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(Some(estimated(12_000)), None),
+        "~#12k → ? ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(None, Some(exact(4_500))),
+        "? → #4.5k ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(Some(exact(0)), Some(exact(1))),
+        "#0 → #1 ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(Some(exact(3)), Some(exact(2))),
+        "#3 → #2 (67%) ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(
+            Some(exact(u64::MAX)),
+            Some(exact(u64::MAX)),
+        ),
+        "#18446744073709.5m → #18446744073709.5m (100%) ok"
+    );
+    assert_eq!(
+        EventRenderer::standalone_compaction_success_status(None, None),
+        "ok"
+    );
 }
 
 /// Ensures idle watched status rows repaint with self-reported work and stats.

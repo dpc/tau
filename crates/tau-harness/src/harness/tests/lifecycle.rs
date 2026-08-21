@@ -1050,6 +1050,8 @@ pub(super) fn seed_restored_compaction_checkpoint(
     for event in [
         Event::AgentStandaloneCompactionStarted(started),
         Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: agent_id.clone(),
             transaction_id: Some(transaction_id.clone()),
             cut: Some(tau_proto::AgentHead::Root),

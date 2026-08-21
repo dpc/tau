@@ -4512,9 +4512,34 @@ pub struct AgentCompacted {
     /// Captured provider operation; absent on legacy boundaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<PromptOperation>,
+    /// Token count before compaction, with its measurement provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_input_tokens: Option<CompactionTokenMeasurement>,
+    /// Token count after compaction, with its measurement provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_input_tokens: Option<CompactionTokenMeasurement>,
     /// Provider-validated ordered context that replaces all older model-visible
     /// history.
     pub replacement_window: Vec<ContextItem>,
+}
+
+/// One durable harness-owned compaction token measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompactionTokenMeasurement {
+    /// Measured or estimated token count.
+    pub tokens: u64,
+    /// Authority from which the count was derived.
+    pub provenance: CompactionTokenProvenance,
+}
+
+/// Provenance of a durable compaction token measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTokenProvenance {
+    /// Exact usage reported for the accepted provider response.
+    ProviderReported,
+    /// Approximation derived from prior context or replacement bytes.
+    Estimated,
 }
 
 /// A previously queued user or harness-internal prompt folded into an in-flight

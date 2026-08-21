@@ -677,6 +677,8 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             "the whole results node is already closed"
         );
         tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: agent_id(),
             transaction_id: None,
             cut: None,
@@ -843,6 +845,8 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
     let successful = compaction_start("ct-successful-predecessor");
     successful_tree.apply_event(&Event::AgentStandaloneCompactionStarted(successful.clone()));
     successful_tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id(),
         transaction_id: Some(successful.transaction_id.clone()),
         cut: Some(successful.cut),
@@ -899,6 +903,8 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
         .expect("corrected ancestor successor");
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(successor.clone()));
     let compacted = tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id(),
         transaction_id: Some(successor.transaction_id.clone()),
         cut: Some(successor.cut),
@@ -1307,6 +1313,8 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
         .expect("start");
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
     let compacted = tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id(),
         replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::User,
@@ -1390,6 +1398,8 @@ fn compaction_boundary_validates_explicit_parent() {
         &Event::AgentStandaloneCompactionStarted(started.clone()),
     );
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         compact_prompt_id: Some(started.compact_prompt_id.clone()),
         model: Some(started.model.clone()),
         operation: Some(started.operation),
@@ -1467,6 +1477,8 @@ fn compaction_boundary_validates_explicit_parent() {
 fn legacy_compaction_boundary_without_transaction_metadata_replays() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id(),
         transaction_id: None,
         cut: None,
@@ -1502,6 +1514,8 @@ fn provider_compaction_replacement_has_identical_live_and_replay_state() {
         r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#.to_owned(),
     ));
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: agent_id(),
         transaction_id: None,
         cut: None,
@@ -1555,6 +1569,8 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         ));
         let started = compaction_start(&format!("ct-opaque-{case}"));
         let compacted = tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![replacement.clone()],
             transaction_id: Some(started.transaction_id.clone()),
@@ -1651,6 +1667,8 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         let invalid = record(
             sequence.get(),
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: None,
+                compacted_input_tokens: None,
                 agent_id: agent_id(),
                 replacement_window,
                 transaction_id,
@@ -2693,6 +2711,8 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
             &mut tree,
             AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: None,
+                compacted_input_tokens: None,
                 agent_id: agent_id.clone(),
                 transaction_id: Some(started.transaction_id),
                 cut: Some(started.cut),
@@ -4408,6 +4428,8 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
     let compact_parent = AgentHead::Node(tree.head().expect("rejected response node"));
     let compacted = tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         agent_id: fixture.agent_id().clone(),
         transaction_id: Some(started.transaction_id.clone()),
         cut: Some(started.cut),

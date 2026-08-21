@@ -30724,6 +30724,40 @@ impl Harness {
             agent_id,
             parent,
             Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: response.usage.as_ref().map_or_else(
+                    || {
+                        (agent.context_usage_model.as_ref() == Some(&model)
+                            && self.context_usage_baseline_applies(agent))
+                        .then_some(agent.context_input_tokens)
+                        .flatten()
+                        .map(|tokens| tau_proto::CompactionTokenMeasurement {
+                            tokens,
+                            provenance: tau_proto::CompactionTokenProvenance::Estimated,
+                        })
+                    },
+                    |usage| {
+                        Some(tau_proto::CompactionTokenMeasurement {
+                            tokens: usage.prompt_sent_tokens,
+                            provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+                        })
+                    },
+                ),
+                compacted_input_tokens: response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.response_received_tokens)
+                    .map(|tokens| tau_proto::CompactionTokenMeasurement {
+                        tokens,
+                        provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
+                    })
+                    .or_else(|| {
+                        estimate_compacted_input_tokens(replacement_window.items()).map(|tokens| {
+                            tau_proto::CompactionTokenMeasurement {
+                                tokens,
+                                provenance: tau_proto::CompactionTokenProvenance::Estimated,
+                            }
+                        })
+                    }),
                 compact_prompt_id: Some(compact_prompt_id),
                 model: Some(model),
                 operation: Some(tau_proto::PromptOperation::StandaloneCompaction),

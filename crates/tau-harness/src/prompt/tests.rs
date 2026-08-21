@@ -1340,6 +1340,8 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&user_prompt("old history"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         compact_prompt_id: None,
         model: None,
         operation: None,
@@ -1690,6 +1692,8 @@ fn materialized_message(text: &str) -> ContextItem {
 
 fn compacted_event(replacement_window: Vec<ContextItem>) -> Event {
     Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         compact_prompt_id: None,
         model: None,
         operation: None,
@@ -1755,6 +1759,8 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
             seq: tau_core::PersistedAgentEventSeq::new(1),
             source: None,
             event: Event::AgentCompacted(tau_proto::AgentCompacted {
+                original_input_tokens: None,
+                compacted_input_tokens: None,
                 compact_prompt_id: None,
                 model: None,
                 operation: None,
@@ -1797,6 +1803,8 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
     tree.apply_event(&user_prompt("late fact B"));
     let suffix_end = tau_proto::AgentHead::Node(tree.head().expect("suffix end"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
         compact_prompt_id: None,
         model: None,
         operation: None,

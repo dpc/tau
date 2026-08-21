@@ -295,7 +295,9 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   exactly once. New boundaries require the transaction id, cut, suffix end,
   compact prompt id, provider-qualified model, and standalone operation as one
   all-present group matching the durable start. Legacy records have all six
-  absent and remain hard boundaries. Connection ids are intentionally not
+  absent and remain hard boundaries. Optional before/after token measurements
+  identify exact provider-reported usage or an estimate; absent fields preserve
+  older journal semantics. Connection ids are intentionally not
   durable. Either form invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display

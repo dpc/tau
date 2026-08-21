@@ -1331,6 +1331,8 @@ fn representative_events() -> Vec<Event> {
             resume_inference: false,
         }),
         Event::AgentCompacted(AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
             compact_prompt_id: None,
             model: None,
             operation: None,
