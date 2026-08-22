@@ -874,7 +874,10 @@ DM or stream/topic policies gate ingress; separately configured proactive-DM
 aliases fix outbound recipient authority. Queue identifiers and native
 participant, stream, topic, and message routes remain extension-local authority;
 model tools accept only current configured aliases or bounded Tau-issued source
-references. With the default `offline_message_catch_up: false`, queue expiry
+references. Opt-in send-only mode declares only the send tool for one fixed
+proactive-DM alias and rejects every inbound route, allowlist, queue, reply,
+reaction, and catch-up surface. With the default
+`offline_message_catch_up: false`, queue expiry
 reconnects at a fresh live tip and warns about a possible gap rather than
 fetching missed backlog. Opting into `offline_message_catch_up: true` uses the
 extension-local `CheckpointRuntime` to recover bounded newly created messages

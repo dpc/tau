@@ -534,6 +534,7 @@ fn queue_recovery_repeats_resolution_subscription_and_registration() {
 
 fn cfg() -> RuntimeConfig {
     RuntimeConfig {
+        mode: BridgeMode::Receive,
         email: "bot@example.test".to_owned(),
         api_key: "top-secret".to_owned(),
         api_base: "http://127.0.0.1:1/api/v1".to_owned(),
@@ -584,6 +585,39 @@ fn validated_config_with_direct_messages(
         "conversations":conversations,
         "proactive_direct_messages":proactive_direct_messages,
         "direct_messages":{"receive":"all_messages"},
+    }))
+    .expect("config value")
+    .deserialized::<ExtConfig>()
+    .expect("config schema");
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    config.validate(&secrets)
+}
+
+/// Validate the deliberately narrow fixed-recipient mode without any inbound
+/// sender or route authority.
+fn validated_send_only_config() -> Result<RuntimeConfig, String> {
+    let config = CborValue::serialized(&serde_json::json!({
+        "send_only":true,
+        "bot_email_secret":"email",
+        "api_key_secret":"key",
+        "identity_key_secret":"identity",
+        "site":"https://chat.example.test",
+        "proactive_direct_messages":[{
+            "alias":"dpc",
+            "recipient":1180954,
+            "description":"Operator escalation"
+        }],
+        "max_message_bytes":4096
     }))
     .expect("config value")
     .deserialized::<ExtConfig>()
@@ -1064,6 +1098,255 @@ fn configuration_validation_is_strict() {
         panic!("empty allowlist accepted")
     };
     assert_eq!(error, "zulip config requires non-empty `allowed_user_ids`");
+}
+
+/// Send-only validation rejects every mixed inbound surface and requires one
+/// fixed proactive DM, preventing an operator typo from creating receive
+/// authority.
+#[test]
+fn send_only_configuration_rejects_mixed_authority() {
+    assert!(
+        validated_send_only_config()
+            .expect("valid send-only")
+            .mode
+            .is_send_only()
+    );
+    let secrets = BTreeMap::from([
+        (
+            "email".to_owned(),
+            tau_proto::SecretValue::new("bot@example.test"),
+        ),
+        ("key".to_owned(), tau_proto::SecretValue::new("secret")),
+        (
+            "identity".to_owned(),
+            tau_proto::SecretValue::new("stable-pseudonym-key"),
+        ),
+    ]);
+    let base = serde_json::json!({
+        "send_only":true,
+        "bot_email_secret":"email",
+        "api_key_secret":"key",
+        "identity_key_secret":"identity",
+        "site":"https://chat.example.test",
+        "proactive_direct_messages":[{"alias":"dpc","recipient":1180954}]
+    });
+    let cases = [
+        (
+            "allowed_user_ids",
+            serde_json::json!([42]),
+            "zulip send-only config forbids `allowed_user_ids`",
+        ),
+        (
+            "sender_aliases",
+            serde_json::json!([{"user_id":42,"alias":"alice"}]),
+            "zulip send-only config forbids `sender_aliases`",
+        ),
+        (
+            "conversations",
+            serde_json::json!([{"name":"ops","receive":"all_messages"}]),
+            "zulip send-only config forbids `conversations`",
+        ),
+        (
+            "direct_messages",
+            serde_json::json!({"receive":"all_messages"}),
+            "zulip send-only config forbids `direct_messages`",
+        ),
+        (
+            "offline_message_catch_up",
+            serde_json::json!(true),
+            "zulip send-only config forbids `offline_message_catch_up`",
+        ),
+    ];
+    for (field, value, expected) in cases {
+        let mut mixed = base.clone();
+        mixed[field] = value;
+        let config = CborValue::serialized(&mixed)
+            .expect("config value")
+            .deserialized::<ExtConfig>()
+            .expect("config schema");
+        assert_eq!(config.validate(&secrets).err().as_deref(), Some(expected));
+    }
+    for routes in [
+        serde_json::json!([]),
+        serde_json::json!([
+            {"alias":"dpc","recipient":1180954},
+            {"alias":"other","recipient":2}
+        ]),
+    ] {
+        let mut invalid = base.clone();
+        invalid["proactive_direct_messages"] = routes;
+        let config = CborValue::serialized(&invalid)
+            .expect("config value")
+            .deserialized::<ExtConfig>()
+            .expect("config schema");
+        assert_eq!(
+            config.validate(&secrets).err().as_deref(),
+            Some("zulip send-only config requires exactly one `proactive_direct_messages` route")
+        );
+    }
+}
+
+/// The send-only startup declaration exposes only the fixed-alias send shape,
+/// excluding reply and topic arguments from model-visible authority.
+#[test]
+fn send_only_tool_schema_is_narrowed_to_fixed_destination() {
+    let spec = send_only_spec(&ToolNames::logical());
+    assert_eq!(spec.name.as_str(), SEND_TOOL_NAME);
+    assert_eq!(
+        spec.parameters,
+        Some(serde_json::json!({
+            "type":"object",
+            "properties":{
+                "message":{"type":"string"},
+                "destination":{"type":"string"}
+            },
+            "required":["message","destination"],
+            "additionalProperties":false
+        }))
+    );
+}
+
+/// Send-only permits one fixed proactive DM without registration while denying
+/// queue creation, arbitrary destinations, replies, and every injected inbound
+/// create or mutation event.
+#[test]
+fn send_only_sends_without_registering_and_ignores_all_ingress() {
+    let config = validated_send_only_config().expect("valid send-only config");
+    let (tx, rx) = mpsc::channel();
+    let client = Arc::new(FakeClient::default());
+    let ext = Extension::new(client.clone(), tx, ToolNames::logical());
+    ext.apply_config(config.clone(), publisher());
+
+    let result = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            (
+                "message",
+                CborValue::Text("host needs attention".to_owned()),
+            ),
+            ("destination", CborValue::Text("dpc".to_owned())),
+        ],
+    ));
+    assert!(matches!(result, Event::ToolResult(_)));
+    assert_eq!(
+        client.sends.lock().expect("sends").as_slice(),
+        &[(
+            NativeRoute::Direct(vec![1180954]),
+            "host needs attention".to_owned()
+        )]
+    );
+    assert!(matches!(
+        event_from(rx.recv().expect("sent report")),
+        Event::MessageSentReported(_)
+    ));
+    assert!(
+        ext.state.lock().owners.is_empty(),
+        "send-only must install no reply or mutation capability"
+    );
+
+    for fields in [
+        vec![
+            ("message", CborValue::Text("wrong".to_owned())),
+            ("destination", CborValue::Text("1180954".to_owned())),
+        ],
+        vec![
+            ("message", CborValue::Text("wrong".to_owned())),
+            (
+                "reply_to",
+                CborValue::Text(message_fact_id(&config, 777).as_str().to_owned()),
+            ),
+        ],
+    ] {
+        assert!(matches!(
+            ext.handle_send(tool(SEND_TOOL_NAME, fields)),
+            Event::ToolError(_)
+        ));
+    }
+    assert!(matches!(
+        ext.handle_register(
+            tool(REGISTER_TOOL_NAME, vec![("enabled", CborValue::Bool(true))]),
+            Some(0)
+        ),
+        Event::ToolError(_)
+    ));
+    assert!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .is_empty(),
+        "send-only must not resolve, subscribe, or register a queue"
+    );
+    assert_eq!(client.active_event_polls.load(AtomicOrdering::SeqCst), 0);
+
+    let (generation, registration) = {
+        let mut state = ext.state.lock();
+        let conversation = direct_conversation(&config, &config.direct_routes[0]);
+        state.insert_owner(MessageOwner {
+            agent_id: agent_id(),
+            fact_id: message_fact_id(&config, 777),
+            native_message_id: 777,
+            conversation,
+        });
+        (state.config_generation, state.registration_generation)
+    };
+    let events = [
+        serde_json::json!({"id":1,"type":"message","message":{"id":1,"type":"private","sender_id":42,"content":"DM","display_recipient":[{"id":42},{"id":99}]}}),
+        serde_json::json!({"id":2,"type":"message","message":{"id":2,"type":"stream","sender_id":42,"stream_id":7,"subject":"ops","content":"stream"}}),
+        serde_json::json!({"id":3,"type":"update_message","message_id":777,"user_id":42,"message":{"content":"edit"}}),
+        serde_json::json!({"id":4,"type":"delete_message","message_id":777,"user_id":42}),
+        serde_json::json!({"id":5,"type":"reaction","message_id":777,"user_id":42,"op":"add","emoji_name":"eyes"}),
+        serde_json::json!({"id":6,"type":"update_message","message_id":777,"message":{"content":"actorless"}}),
+        serde_json::json!({"id":7,"type":"delete_message","message_id":777}),
+        serde_json::json!({"id":8,"type":"reaction","message_id":777,"op":"add","emoji_name":"eyes"}),
+        serde_json::json!({"id":9,"type":"update_message","message_id":777,"user_id":"bad","message":{"content":"edit"}}),
+        serde_json::json!({"id":10,"type":"delete_message","message_id":777,"user_id":null}),
+        serde_json::json!({"id":11,"type":"reaction","message_id":777,"user_id":{},"op":"add","emoji_name":"eyes"}),
+    ];
+    for event in events {
+        ext.process_event(event, generation, registration, 99);
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "Zulip-originated ingress must publish no activation-producing report"
+    );
+}
+
+/// Ordinary receive mode requires a present numeric allowlisted actor for every
+/// owned edit, delete, and reaction, closing the actor-less mutation bypass.
+#[test]
+fn ordinary_mutations_reject_missing_actor_identity() {
+    let (ext, rx, _) = extension();
+    let (generation, registration) = {
+        let state = ext.state.lock();
+        (state.config_generation, state.registration_generation)
+    };
+    ext.process_event(
+        serde_json::json!({
+            "id":20,"type":"message","message":{
+                "id":600,"type":"private","sender_id":42,"content":"base","flags":[],
+                "display_recipient":[{"id":42},{"id":99}]
+            }
+        }),
+        generation,
+        registration,
+        99,
+    );
+    assert!(matches!(
+        event_from(rx.recv().expect("base report")),
+        Event::MessageDeliveredReported(_)
+    ));
+    for event in [
+        serde_json::json!({"id":21,"type":"update_message","message_id":600,"message":{"content":"edited"}}),
+        serde_json::json!({"id":22,"type":"delete_message","message_id":600}),
+        serde_json::json!({"id":23,"type":"reaction","message_id":600,"op":"add","emoji_name":"eyes"}),
+    ] {
+        ext.process_event(event, generation, registration, 99);
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "actor-less owned mutations must publish no agent-targeted report"
+    );
 }
 
 /// Channel-wide topic authority requires both proactive-send authority and no

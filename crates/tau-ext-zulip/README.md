@@ -4,6 +4,23 @@
 
 It exposes disabled-by-default, prefix-aware `zulip_register`, `zulip_conversations`, `zulip_send`, and separately tagged `zulip_react` tools. Use one configured instance per receiving Tau agent when exact routing matters. An instance fails closed while zero or multiple agents are registered.
 
+For a dedicated outbound-only role, set `send_only: true` and configure exactly one proactive DM:
+
+```yaml
+send_only: true
+site: https://chat.example.com
+bot_email_secret: zulip-bot-email
+api_key_secret: zulip-api-key
+identity_key_secret: zulip-identity-key
+max_message_bytes: 4096
+proactive_direct_messages:
+  - alias: dpc
+    recipient: 1180954
+    description: Operator escalation
+```
+
+Omit `allowed_user_ids`, `sender_aliases`, `conversations`, `direct_messages`, and `offline_message_catch_up`. Send-only declares only the scoped `zulip_send` tool, with no Zulip tool group. The role must select that exact tool rather than register/discover/react. `zulip_send {"message":"host needs attention","destination":"dpc"}` works without registration and can reach only the fixed configuration-private recipient. Send-only never creates or polls a receive queue, processes Zulip events, or activates an agent. Restart the extension to change between ordinary and send-only modes.
+
 ## Configuration
 
 ```yaml
@@ -72,7 +89,7 @@ require HTTPS.
 
 ## Routing and tools
 
-Call `zulip_register {"enabled":true}` before receiving, discovering, sending, or reacting. Registration resolves configured channel names, subscribes every `all_messages` channel, and creates a live event queue before returning success. `zulip_conversations {}` returns only proactive stream names/proactive-DM aliases, kinds, configured topics, explicit `agent_chosen_topic` authority, and trusted operator descriptions; it never returns stream IDs, participant IDs, queue IDs, credentials, or runtime authority.
+In ordinary mode, call `zulip_register {"enabled":true}` before receiving, discovering, sending, or reacting. Registration resolves configured channel names, subscribes every `all_messages` channel, and creates a live event queue before returning success. `zulip_conversations {}` returns only proactive stream names/proactive-DM aliases, kinds, configured topics, explicit `agent_chosen_topic` authority, and trusted operator descriptions; it never returns stream IDs, participant IDs, queue IDs, credentials, or runtime authority.
 
 `zulip_send` requires exactly one selector:
 

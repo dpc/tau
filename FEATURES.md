@@ -215,7 +215,8 @@ authorization explicit:
   [Telegram README](crates/tau-ext-telegram/README.md).
 - **Zulip:** the disabled-by-default bot bridge uses native event queues for
   allowlisted direct messages and configured stream/topic routes, with
-  source-bound replies and reactions. See the
+  source-bound replies and reactions. A separate send-only mode can expose one
+  fixed proactive DM without registering any receive queue. See the
   [Zulip README](crates/tau-ext-zulip/README.md).
 - **XMPP:** the disabled-by-default bridge supports fixed recipients or
   per-agent MUC rooms with allowlisted senders and TLS transport. See the

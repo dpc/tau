@@ -13,6 +13,8 @@ use crate::{DEFAULT_MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ExtConfig {
+    /// Restrict this instance to one fixed proactive direct-message route.
+    pub(crate) send_only: bool,
     /// Secret containing the bot email used for HTTP Basic authentication.
     pub(crate) bot_email_secret: Option<String>,
     /// Secret containing the bot API key used for HTTP Basic authentication.
@@ -160,6 +162,8 @@ impl ProactiveRoute {
 /// Validated runtime configuration including resolved secrets.
 #[derive(Clone)]
 pub(crate) struct RuntimeConfig {
+    /// Validated authority mode for this bridge instance.
+    pub(crate) mode: BridgeMode,
     /// Bot email secret; never log this value.
     pub(crate) email: String,
     /// Bot API key secret; never log this value.
@@ -188,6 +192,22 @@ pub(crate) struct RuntimeConfig {
     pub(crate) state_dir: Option<PathBuf>,
 }
 
+/// Validated bridge authority selected by operator configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeMode {
+    /// Ordinary registered queue receive and source-bound tool authority.
+    Receive,
+    /// One fixed proactive direct-message route with no receive authority.
+    SendOnly,
+}
+
+impl BridgeMode {
+    /// Return whether this mode forbids every Zulip ingress surface.
+    pub(crate) fn is_send_only(self) -> bool {
+        self == Self::SendOnly
+    }
+}
+
 impl ExtConfig {
     /// Resolve secrets and reject ambiguous or unsafe routing policy.
     pub(crate) fn validate(
@@ -197,7 +217,29 @@ impl ExtConfig {
         let email = secret(secrets, self.bot_email_secret, "bot_email_secret")?;
         let api_key = secret(secrets, self.api_key_secret, "api_key_secret")?;
         let identity_key = secret(secrets, self.identity_key_secret, "identity_key_secret")?;
-        if self.allowed_user_ids.is_empty() {
+        if self.send_only {
+            if !self.allowed_user_ids.is_empty() {
+                return Err("zulip send-only config forbids `allowed_user_ids`".to_owned());
+            }
+            if !self.sender_aliases.is_empty() {
+                return Err("zulip send-only config forbids `sender_aliases`".to_owned());
+            }
+            if !self.conversations.is_empty() {
+                return Err("zulip send-only config forbids `conversations`".to_owned());
+            }
+            if self.direct_messages.is_some() {
+                return Err("zulip send-only config forbids `direct_messages`".to_owned());
+            }
+            if self.offline_message_catch_up {
+                return Err("zulip send-only config forbids `offline_message_catch_up`".to_owned());
+            }
+            if self.proactive_direct_messages.len() != 1 {
+                return Err(
+                    "zulip send-only config requires exactly one `proactive_direct_messages` route"
+                        .to_owned(),
+                );
+            }
+        } else if self.allowed_user_ids.is_empty() {
             return Err("zulip config requires non-empty `allowed_user_ids`".to_owned());
         }
         if 64 < self.conversations.len() + self.proactive_direct_messages.len()
@@ -291,6 +333,11 @@ impl ExtConfig {
             }
         };
         Ok(RuntimeConfig {
+            mode: if self.send_only {
+                BridgeMode::SendOnly
+            } else {
+                BridgeMode::Receive
+            },
             email,
             api_key,
             api_base,

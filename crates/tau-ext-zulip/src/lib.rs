@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use api::{ApiError, EventQueue, HttpZulipClient, NativeRoute, ZulipClient};
 use checkpoint::CheckpointRuntime;
+#[cfg(test)]
+use config::BridgeMode;
 use config::{DirectRoute, ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
 #[cfg(test)]
 pub(crate) use output::MUTATION_PUBLICATION_HOOK;
@@ -472,6 +474,18 @@ impl Extension {
             Ok(value) => value,
             Err(error) => return tool_error(invoke, error),
         };
+        if self
+            .state
+            .lock()
+            .config
+            .as_ref()
+            .is_some_and(|cfg| cfg.mode.is_send_only())
+        {
+            return tool_error(
+                invoke,
+                "zulip registration is disabled by send-only configuration".to_owned(),
+            );
+        }
         let Some(registration_epoch) = registration_epoch else {
             return tool_error(invoke, "invalid Zulip registration intent".to_owned());
         };
@@ -674,7 +688,10 @@ impl Extension {
         }
         let (cfg, route, conversation, generation, registration_generation) = {
             let state = self.state.lock();
-            if !state.registered_agents.contains(&invoke.agent_id) {
+            let Some(cfg) = state.config.clone() else {
+                return tool_error(invoke, "zulip extension is not configured".to_owned());
+            };
+            if !cfg.mode.is_send_only() && !state.registered_agents.contains(&invoke.agent_id) {
                 return tool_error(
                     invoke,
                     format!(
@@ -683,9 +700,13 @@ impl Extension {
                     ),
                 );
             }
-            let Some(cfg) = state.config.clone() else {
-                return tool_error(invoke, "zulip extension is not configured".to_owned());
-            };
+            if cfg.mode.is_send_only() && (reply_to.is_some() || requested_topic.is_some()) {
+                return tool_error(
+                    invoke,
+                    "zulip send-only mode accepts only a configured direct `destination`"
+                        .to_owned(),
+                );
+            }
             if cfg.max_message_bytes < message.len() {
                 return tool_error(
                     invoke,
@@ -785,7 +806,7 @@ impl Extension {
             let state = self.state.lock();
             if state.config_generation != generation
                 || state.registration_generation != registration_generation
-                || !state.registered_agents.contains(&invoke.agent_id)
+                || (!cfg.mode.is_send_only() && !state.registered_agents.contains(&invoke.agent_id))
             {
                 return tool_error(
                     invoke,
@@ -813,19 +834,21 @@ impl Extension {
             let mut state = self.state.lock();
             if state.config_generation != generation
                 || state.registration_generation != registration_generation
-                || !state.registered_agents.contains(&invoke.agent_id)
+                || (!cfg.mode.is_send_only() && !state.registered_agents.contains(&invoke.agent_id))
             {
                 return tool_error(
                     invoke,
                     "zulip authority changed after sent-report publication".to_owned(),
                 );
             }
-            state.insert_owner(MessageOwner {
-                agent_id: invoke.agent_id.clone(),
-                fact_id: message_ref.clone(),
-                native_message_id: sent.message_id,
-                conversation,
-            });
+            if !cfg.mode.is_send_only() {
+                state.insert_owner(MessageOwner {
+                    agent_id: invoke.agent_id.clone(),
+                    fact_id: message_ref.clone(),
+                    native_message_id: sent.message_id,
+                    conversation,
+                });
+            }
         }
         tool_result(invoke, serde_json::json!({"status":"sent","message_ref":message_ref.as_str(),"delivery_copies":"one"}).to_string())
     }
@@ -930,6 +953,15 @@ impl Extension {
         registration_generation: u64,
         bot_user_id: u64,
     ) {
+        if self
+            .state
+            .lock()
+            .config
+            .as_ref()
+            .is_none_or(|cfg| cfg.mode.is_send_only())
+        {
+            return;
+        }
         let event_id = match event.get("id").and_then(serde_json::Value::as_i64) {
             Some(value) => value,
             None => return,
@@ -1191,10 +1223,14 @@ impl Extension {
                 return;
             };
             let cfg = state.config.as_ref().expect("active config");
-            let actor = actor_id
-                .filter(|id| cfg.allowed_user_ids.contains(id))
-                .map(|id| sender_party(cfg, id, cfg.sender_aliases.get(&id).cloned()));
-            if actor_id.is_some() && actor.is_none() {
+            let Some(actor_id) = actor_id else {
+                return;
+            };
+            let actor = cfg
+                .allowed_user_ids
+                .contains(&actor_id)
+                .then(|| sender_party(cfg, actor_id, cfg.sender_aliases.get(&actor_id).cloned()));
+            if actor.is_none() {
                 return;
             }
             (
@@ -2096,6 +2132,21 @@ fn handle_configure(runtime: &ZulipRuntime, configure: tau_proto::Configure) -> 
             cfg
         });
     match result {
+        Ok(cfg)
+            if runtime
+                .ext
+                .state
+                .lock()
+                .config
+                .as_ref()
+                .is_some_and(|current| current.mode != cfg.mode) =>
+        {
+            if let Some(handle) = runtime.ext.output.client_handle() {
+                handle.config_error(
+                    "changing Zulip `send_only` mode requires an extension restart".to_owned(),
+                )?;
+            }
+        }
         Ok(cfg) => runtime.ext.apply_config(cfg, configure.instance_name),
         Err(error) => {
             runtime.ext.clear_config();
@@ -2166,6 +2217,26 @@ fn send_startup(
     runtime: &mut tau_client::ManualExtensionRuntime<ZulipRuntime>,
     names: &ToolNames,
 ) -> ClientResult<()> {
+    let send_only = runtime
+        .state()
+        .ext
+        .state
+        .lock()
+        .config
+        .as_ref()
+        .is_some_and(|cfg| cfg.mode.is_send_only());
+    if send_only {
+        runtime.startup_subscribe([
+            tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+            tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
+        ])?;
+        runtime.startup_local_tool(tau_proto::ToolRegistrationDeclared {
+            tool: send_only_spec(names),
+            tool_group: None,
+            prompt_fragment: None,
+        })?;
+        return runtime.startup_ready(Some("zulip send-only ready".to_owned()));
+    }
     runtime.startup_subscribe([
         tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
@@ -2275,6 +2346,27 @@ fn send_spec(names: &ToolNames) -> ToolSpec {
                 ),
             ]),
         )],
+    )
+}
+
+fn send_only_spec(names: &ToolNames) -> ToolSpec {
+    base_spec(
+        SEND_TOOL_NAME,
+        names.send.clone(),
+        "Send Zulip Markdown to the instance's single operator-configured direct-message \
+         destination. The destination alias selects only that fixed private recipient."
+            .to_owned(),
+        serde_json::json!({
+            "type":"object",
+            "properties":{
+                "message":{"type":"string"},
+                "destination":{"type":"string"}
+            },
+            "required":["message","destination"],
+            "additionalProperties":false
+        }),
+        SEND_TOOL_TAG,
+        vec![],
     )
 }
 fn react_spec(names: &ToolNames) -> ToolSpec {
