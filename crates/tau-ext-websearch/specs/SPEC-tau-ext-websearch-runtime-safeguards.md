@@ -20,7 +20,7 @@ workers; workers may finish, but the reader never blocks waiting for a permit.
 
 HTTP error bodies other than HTTP 429 are capped at 64 KiB. An HTTP 429 returns
 the bounded generic advice `web service rate-limited the request; try again
-later.` without reading or projecting the provider body. Successful MCP response
+later.` without reading or projecting the provider body. Successful hosted response
 bodies are capped at 1 MiB before decode. Decoded provider text retains its
 512 KiB pre-projection cap, and the complete framed, closed
 `<tau_web_content>` result is independently capped at 512 KiB. Expansion from
@@ -35,7 +35,9 @@ Cancellation prevents subsequent attempts. An already issued request through
 the blocking transport can continue until its allocated attempt deadline and
 may consume quota; its response is discarded when cancellation wins before the
 serial protocol loop commits another terminal. Every issued failover attempt
-may independently consume quota or incur charges.
+may independently consume quota or incur charges. Multi-request adapters check
+cancellation between requests, so a canceled You.com initialization cannot
+proceed to its quota-bearing tool call.
 
 Exa result count defaults to five and accepts only 1–100. Replay-marked
 `ToolStarted` deliveries are ignored: they issue no provider request and publish

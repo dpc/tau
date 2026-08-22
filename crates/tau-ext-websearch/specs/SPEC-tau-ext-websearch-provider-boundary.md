@@ -3,17 +3,23 @@
 ## Record justification
 
 The provider boundary spans adapter-specific tool schemas, endpoint
-configuration, MCP transport, result projection, and diagnostic sanitization, so
+configuration, MCP/REST transport, result projection, and diagnostic sanitization, so
 no single implementation area can own the complete external-content contract.
 
-Provider calls send model-supplied tool arguments to external hosted MCP
-services. Provider output is untrusted web content that can contain prompt
+Provider calls send model-supplied tool arguments to external hosted MCP or
+REST services. Provider output is untrusted web content that can contain prompt
 injection, misleading text, or large payloads before it re-enters model context.
+Each anonymous You.com attempt performs the MCP initialize/initialized
+handshake before `tools/call`, sends the negotiated protocol header only after
+initialization, requires the server's tools capability, and returns any
+server-issued session id on subsequent requests. All handshake requests share
+the scheduler-owned attempt deadline.
 
 Every successful result has exactly one extension-owned projection:
-`<tau_web_content adapter="exa|parallel" operation="search|fetch"
+`<tau_web_content adapter="exa|parallel|you|brave|tavily|firecrawl" operation="search|fetch"
 content_trust="external">…</tau_web_content>`. Attribute values are closed:
-Exa and Parallel support search and fetch. Attribute order is
+Exa, Parallel, Tavily, and Firecrawl support search and fetch. You.com and
+Brave support search only. Attribute order is
 `adapter`, `operation`, `content_trust`; no query, requested URL, tool-call id,
 endpoint, MCP id, remote tool name, or extension identifier is repeated.
 Provider-returned titles, URLs, sources, ranks, and similar metadata remain
@@ -43,6 +49,11 @@ fragments can contain secrets, so logs do not print them. Provider transport
 diagnostics and JSON-RPC error messages can become model-visible tool errors.
 Before return, endpoint-derived secrets are sanitized and the diagnostic is
 bounded.
+
+Credentialed adapters resolve API keys from named Tau secrets rather than
+ordinary extension configuration. Provider requests carry credentials only in
+the documented authentication header. Model-visible and logged diagnostics
+redact both endpoint material and credential values.
 
 Response and diagnostic bounds are specified by
 [SPEC-tau-ext-websearch-runtime-safeguards](SPEC-tau-ext-websearch-runtime-safeguards.md).

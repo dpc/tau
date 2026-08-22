@@ -20,7 +20,7 @@ admission resumes. Forced mandatory-write failure must exit the extension loop
 without falsely publishing a terminal.
 
 Display-state lifecycle tests must assert the same safe query/fetch target appears
-on progress, success, error, and busy terminals. Exercise the Exa and Parallel
+on progress, success, error, and busy terminals. Exercise the production
 paths, including a configured tool-name prefix. Treat query/URL labels as
 untrusted metadata: cover control/layout escaping, byte bounds that preserve whole
 escaped units, fetch-host projection without URL userinfo/query secrets, and the
@@ -33,9 +33,11 @@ Use loopback servers to verify that HTTP 429 takes the shared generic
 rate-limit path for both hosted clients and never projects hostile, oversized
 error bodies or endpoint secrets.
 
-Successful-result coverage must exercise Exa and Parallel search/fetch with
+Successful-result coverage must exercise Exa and Parallel search/fetch and use
+exact local fixtures for You.com, Brave, Tavily, and Firecrawl request,
+authentication, response-normalization, and redaction behavior. Use
 exact canonical `<tau_web_content>` attributes and loopback wire assertions for
-both providers' fetch argument adaptation. Adversarial
+the MCP providers' fetch argument adaptation. Adversarial
 coverage keeps provider titles/URLs and attempted markup literal, replaces only
 exact closing sentinels, makes unsafe Unicode visible, checks the exact final
 512 KiB post-framing boundary

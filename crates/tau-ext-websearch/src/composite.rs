@@ -10,6 +10,7 @@ use tau_proto::{
     CborValue, Event, ToolProgress, ToolResult, ToolStarted, ToolUseState, ToolUseStatus,
 };
 
+use super::hosted::{HostedClient, HostedRequest};
 use super::{
     AGGREGATE_ERROR_MAX_BYTES, ATTEMPT_CHIP_MAX_CHARS, MAX_PROVIDER_ATTEMPTS,
     MODEL_VISIBLE_FETCH_TOOL_NAME, MODEL_VISIBLE_SEARCH_TOOL_NAME, PARALLEL_REMOTE_FETCH_TOOL,
@@ -54,6 +55,11 @@ impl ProviderPool {
         (0..self.providers.len().min(MAX_PROVIDER_ATTEMPTS))
             .map(|offset| self.providers[(start + offset) % self.providers.len()])
             .collect()
+    }
+
+    /// Return whether the configured pool contains `provider`.
+    pub(super) fn contains(&self, provider: WebAdapter) -> bool {
+        self.providers.contains(&provider)
     }
 }
 
@@ -192,6 +198,7 @@ pub(super) trait ProviderDispatcher {
         search: Option<(&str, u32)>,
         url: Option<&str>,
         timeout: Duration,
+        cancelled: &AtomicBool,
     ) -> Result<String, String>;
 }
 
@@ -201,6 +208,8 @@ pub(super) struct HostedProviderDispatcher<'a> {
     pub(super) searcher: &'a dyn Searcher,
     /// Parallel search/fetch implementation.
     pub(super) parallel_client: &'a dyn ParallelClient,
+    /// Additional hosted provider implementations.
+    pub(super) hosted_client: &'a dyn HostedClient,
 }
 
 impl ProviderDispatcher for HostedProviderDispatcher<'_> {
@@ -211,6 +220,7 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
         search: Option<(&str, u32)>,
         url: Option<&str>,
         timeout: Duration,
+        cancelled: &AtomicBool,
     ) -> Result<String, String> {
         match (provider, operation) {
             (WebAdapter::Exa, WebOperation::Search) => {
@@ -234,6 +244,26 @@ impl ProviderDispatcher for HostedProviderDispatcher<'_> {
                 serde_json::json!({"urls": [url.expect("validated fetch URL")]}),
                 timeout,
             ),
+            (
+                provider @ (WebAdapter::You
+                | WebAdapter::Brave
+                | WebAdapter::Tavily
+                | WebAdapter::Firecrawl),
+                operation,
+            ) => {
+                let (query, count) = search.unwrap_or(("", 0));
+                self.hosted_client.call(
+                    provider,
+                    HostedRequest {
+                        operation,
+                        query,
+                        count,
+                        url: url.unwrap_or(""),
+                        timeout,
+                        cancelled,
+                    },
+                )
+            }
             #[cfg(test)]
             (WebAdapter::Third | WebAdapter::Fourth, _) => {
                 Err("test provider requires an injected dispatcher".to_owned())
@@ -319,6 +349,7 @@ impl CompositeCall<'_> {
                 search,
                 parsed_url.as_deref(),
                 attempt_timeout,
+                self.cancelled,
             );
             if self.cancelled.load(Ordering::Acquire) {
                 attempts.push(AttemptRecord {
@@ -444,7 +475,7 @@ pub(super) fn attempt_chip(attempts: &[AttemptRecord], current: Option<WebAdapte
     )
 }
 
-fn classify_provider_error(message: &str) -> AttemptOutcome {
+pub(super) fn classify_provider_error(message: &str) -> AttemptOutcome {
     let lower = message.to_ascii_lowercase();
     if lower.contains("rate-limit") || lower.contains("429") {
         AttemptOutcome::Failure(FailureCategory::RateLimited)
@@ -461,7 +492,8 @@ fn classify_provider_error(message: &str) -> AttemptOutcome {
         || lower.contains("forbidden")
     {
         AttemptOutcome::Failure(FailureCategory::Rejected)
-    } else if lower.contains("utf-8")
+    } else if lower.contains("invalid response")
+        || lower.contains("utf-8")
         || lower.contains("invalid json")
         || lower.contains("missing `result.content`")
         || lower.contains("no text content")

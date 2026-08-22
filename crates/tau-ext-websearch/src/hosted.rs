@@ -1,0 +1,467 @@
+//! HTTP adapters for You.com, Brave, Tavily, and Firecrawl.
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use super::{
+    DEFAULT_BRAVE_ENDPOINT, DEFAULT_FIRECRAWL_ENDPOINT, DEFAULT_TAVILY_ENDPOINT,
+    DEFAULT_YOU_ENDPOINT, HTTP_TOO_MANY_REQUESTS, MCP_PROTOCOL_VERSION, RATE_LIMITED_ERROR,
+    WebAdapter, WebOperation, decode_mcp_text_result, limit_tool_output, parse_sse_or_json,
+    provider_http_agent, read_capped, read_success_body, sanitize_endpoint_error,
+};
+
+const YOU_SEARCH_TOOL: &str = "you-search";
+
+/// Runtime updates for the additional hosted providers.
+pub(super) struct HostedConfig {
+    /// Optional You.com MCP endpoint.
+    pub(super) you_endpoint: Option<String>,
+    /// Optional Brave search endpoint.
+    pub(super) brave_endpoint: Option<String>,
+    /// Optional Brave subscription token.
+    pub(super) brave_api_key: Option<String>,
+    /// Optional Tavily API base endpoint.
+    pub(super) tavily_endpoint: Option<String>,
+    /// Optional Tavily bearer token.
+    pub(super) tavily_api_key: Option<String>,
+    /// Optional Firecrawl API base endpoint.
+    pub(super) firecrawl_endpoint: Option<String>,
+    /// Optional Firecrawl bearer token.
+    pub(super) firecrawl_api_key: Option<String>,
+}
+
+/// Provider seam used by the composite scheduler.
+pub(super) trait HostedClient: Send + Sync + 'static {
+    /// Issue one normalized search or fetch request.
+    fn call(&self, provider: WebAdapter, request: HostedRequest<'_>) -> Result<String, String>;
+
+    /// Apply a fully validated runtime configuration.
+    fn configure(&self, _config: HostedConfig) {}
+}
+
+/// One scheduler-owned request passed to an additional hosted adapter.
+pub(super) struct HostedRequest<'a> {
+    /// Requested search or fetch capability.
+    pub(super) operation: WebOperation,
+    /// Validated search query, empty for fetch.
+    pub(super) query: &'a str,
+    /// Validated requested search result count.
+    pub(super) count: u32,
+    /// Validated fetch URL, empty for search.
+    pub(super) url: &'a str,
+    /// Remaining scheduler-owned attempt budget.
+    pub(super) timeout: Duration,
+    /// Cooperative cancellation flag for multi-request adapters.
+    pub(super) cancelled: &'a AtomicBool,
+}
+
+/// Complete in-memory endpoint and credential state for hosted adapters.
+#[derive(Clone)]
+struct RuntimeConfig {
+    /// You.com MCP endpoint.
+    you_endpoint: String,
+    /// Brave search endpoint.
+    brave_endpoint: String,
+    /// Brave subscription token.
+    brave_api_key: Option<String>,
+    /// Tavily API base endpoint.
+    tavily_endpoint: String,
+    /// Tavily bearer token.
+    tavily_api_key: Option<String>,
+    /// Firecrawl API base endpoint.
+    firecrawl_endpoint: String,
+    /// Firecrawl bearer token.
+    firecrawl_api_key: Option<String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            you_endpoint: DEFAULT_YOU_ENDPOINT.to_owned(),
+            brave_endpoint: DEFAULT_BRAVE_ENDPOINT.to_owned(),
+            brave_api_key: None,
+            tavily_endpoint: DEFAULT_TAVILY_ENDPOINT.to_owned(),
+            tavily_api_key: None,
+            firecrawl_endpoint: DEFAULT_FIRECRAWL_ENDPOINT.to_owned(),
+            firecrawl_api_key: None,
+        }
+    }
+}
+
+/// Production client for the additional hosted providers.
+pub(super) struct HttpHostedClient {
+    /// Mutable configuration replaced by successful `Configure` messages.
+    config: Mutex<RuntimeConfig>,
+}
+
+impl Default for HttpHostedClient {
+    fn default() -> Self {
+        Self {
+            config: Mutex::new(RuntimeConfig::default()),
+        }
+    }
+}
+
+impl HostedClient for HttpHostedClient {
+    fn call(&self, provider: WebAdapter, request: HostedRequest<'_>) -> Result<String, String> {
+        let HostedRequest {
+            operation,
+            query,
+            count,
+            url,
+            timeout,
+            cancelled,
+        } = request;
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        match (provider, operation) {
+            (WebAdapter::You, WebOperation::Search) => {
+                call_you(&config.you_endpoint, query, count, timeout, cancelled)
+            }
+            (WebAdapter::Brave, WebOperation::Search) => call_brave(
+                &config.brave_endpoint,
+                required_key(&config.brave_api_key, "brave")?,
+                query,
+                count,
+                timeout,
+            ),
+            (WebAdapter::Tavily, operation) => call_tavily(
+                &config.tavily_endpoint,
+                required_key(&config.tavily_api_key, "tavily")?,
+                operation,
+                query,
+                count,
+                url,
+                timeout,
+            ),
+            (WebAdapter::Firecrawl, operation) => call_firecrawl(
+                &config.firecrawl_endpoint,
+                required_key(&config.firecrawl_api_key, "firecrawl")?,
+                operation,
+                query,
+                count,
+                url,
+                timeout,
+            ),
+            _ => Err(format!(
+                "{} does not support {}",
+                provider.as_str(),
+                operation.as_str()
+            )),
+        }
+    }
+
+    fn configure(&self, config: HostedConfig) {
+        let mut current = self
+            .config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(endpoint) = config.you_endpoint {
+            current.you_endpoint = endpoint;
+        }
+        if let Some(endpoint) = config.brave_endpoint {
+            current.brave_endpoint = endpoint;
+        }
+        if let Some(endpoint) = config.tavily_endpoint {
+            current.tavily_endpoint = endpoint;
+        }
+        if let Some(endpoint) = config.firecrawl_endpoint {
+            current.firecrawl_endpoint = endpoint;
+        }
+        current.brave_api_key = config.brave_api_key;
+        current.tavily_api_key = config.tavily_api_key;
+        current.firecrawl_api_key = config.firecrawl_api_key;
+    }
+}
+
+fn required_key<'a>(key: &'a Option<String>, provider: &str) -> Result<&'a str, String> {
+    key.as_deref()
+        .ok_or_else(|| format!("{provider} credentials are not configured"))
+}
+
+fn call_you(
+    endpoint: &str,
+    query: &str,
+    count: u32,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let deadline = Instant::now() + timeout;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "tau-ext-websearch", "version": env!("CARGO_PKG_VERSION")},
+        },
+    });
+    let (payload, session_id) =
+        post_you_mcp(endpoint, initialize, None, false, remaining(deadline)?)?;
+    let initialized = parse_sse_or_json(&payload, "you")
+        .map_err(|error| sanitize_endpoint_error(&error, endpoint))?;
+    let negotiated = initialized
+        .pointer("/result/protocolVersion")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "you invalid response: initialize omitted protocol version".to_owned())?;
+    if negotiated != MCP_PROTOCOL_VERSION {
+        return Err(format!(
+            "you invalid response: unsupported negotiated MCP version `{negotiated}`"
+        ));
+    }
+    if initialized
+        .pointer("/result/capabilities/tools")
+        .and_then(serde_json::Value::as_object)
+        .is_none()
+    {
+        return Err(
+            "you invalid response: initialize did not negotiate tools capability".to_owned(),
+        );
+    }
+    check_cancelled(cancelled)?;
+    post_you_mcp(
+        endpoint,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }),
+        session_id.as_deref(),
+        true,
+        remaining(deadline)?,
+    )?;
+    check_cancelled(cancelled)?;
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": YOU_SEARCH_TOOL,
+            "arguments": {"query": query, "count": count},
+        },
+    });
+    let (payload, _) = post_you_mcp(
+        endpoint,
+        call,
+        session_id.as_deref(),
+        true,
+        remaining(deadline)?,
+    )?;
+    let text = decode_mcp_text_result(&payload, "you")
+        .map_err(|error| sanitize_endpoint_error(&error, endpoint))?;
+    limit_tool_output(text, "you").map_err(|error| sanitize_endpoint_error(&error, endpoint))
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("you MCP request cancelled".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn remaining(deadline: Instant) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| "you MCP request timed out".to_owned())
+}
+
+fn post_you_mcp(
+    endpoint: &str,
+    body: serde_json::Value,
+    session_id: Option<&str>,
+    negotiated: bool,
+    timeout: Duration,
+) -> Result<(String, Option<String>), String> {
+    let agent = provider_http_agent(timeout);
+    let mut request = agent
+        .post(endpoint)
+        .content_type("application/json")
+        .header("Accept", "application/json, text/event-stream");
+    if negotiated {
+        request = request.header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION);
+    }
+    if let Some(session_id) = session_id {
+        request = request.header("Mcp-Session-Id", session_id);
+    }
+    let mut response = request.send(body.to_string()).map_err(|error| {
+        format!(
+            "you MCP transport error: {}",
+            sanitize_endpoint_error(&error.to_string(), endpoint)
+        )
+    })?;
+    if response.status().as_u16() == HTTP_TOO_MANY_REQUESTS {
+        return Err(RATE_LIMITED_ERROR.to_owned());
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = sanitize_endpoint_error(&read_capped(response.body_mut().as_reader()), endpoint);
+        return Err(format!("you MCP returned HTTP {status}: {body}"));
+    }
+    let response_session = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    read_success_body(response.body_mut().as_reader(), "you")
+        .map(|payload| (payload, response_session))
+}
+
+fn call_brave(
+    endpoint: &str,
+    key: &str,
+    query: &str,
+    count: u32,
+    timeout: Duration,
+) -> Result<String, String> {
+    let agent = provider_http_agent(timeout);
+    let response = agent
+        .get(endpoint)
+        .query("q", query)
+        .query("count", count.min(20).to_string())
+        .query("extra_snippets", "true")
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", key)
+        .call()
+        .map_err(|error| safe_error("brave", error.to_string(), endpoint, key))?;
+    normalize_response(response, "brave", endpoint, key, &["web", "results"])
+}
+
+fn call_tavily(
+    base: &str,
+    key: &str,
+    operation: WebOperation,
+    query: &str,
+    count: u32,
+    url: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let (endpoint, body, path): (String, serde_json::Value, &[&str]) = match operation {
+        WebOperation::Search => (
+            endpoint_path(base, "search")?,
+            serde_json::json!({
+                "query": query,
+                "max_results": count.min(20),
+                "search_depth": "basic",
+            }),
+            &["results"],
+        ),
+        WebOperation::Fetch => (
+            endpoint_path(base, "extract")?,
+            serde_json::json!({"urls": [url], "format": "markdown"}),
+            &["results"],
+        ),
+    };
+    post_json(&endpoint, key, "tavily", body, timeout, path)
+}
+
+fn call_firecrawl(
+    base: &str,
+    key: &str,
+    operation: WebOperation,
+    query: &str,
+    count: u32,
+    url: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let (endpoint, body, path): (String, serde_json::Value, &[&str]) = match operation {
+        WebOperation::Search => (
+            endpoint_path(base, "search")?,
+            serde_json::json!({"query": query, "limit": count}),
+            &["data", "web"],
+        ),
+        WebOperation::Fetch => (
+            endpoint_path(base, "scrape")?,
+            serde_json::json!({"url": url, "formats": [{"type": "markdown"}]}),
+            &["data", "markdown"],
+        ),
+    };
+    post_json(&endpoint, key, "firecrawl", body, timeout, path)
+}
+
+fn endpoint_path(base: &str, path: &str) -> Result<String, String> {
+    let mut base = url::Url::parse(base)
+        .map_err(|_| "configured provider endpoint cannot accept an API path".to_owned())?;
+    if !base.path().ends_with('/') {
+        let path = format!("{}/", base.path());
+        base.set_path(&path);
+    }
+    base.join(path)
+        .map(String::from)
+        .map_err(|_| "configured provider endpoint cannot accept an API path".to_owned())
+}
+
+fn post_json(
+    endpoint: &str,
+    key: &str,
+    provider: &str,
+    body: serde_json::Value,
+    timeout: Duration,
+    path: &[&str],
+) -> Result<String, String> {
+    let response = provider_http_agent(timeout)
+        .post(endpoint)
+        .content_type("application/json")
+        .header("Accept", "application/json")
+        .header("Authorization", &format!("Bearer {key}"))
+        .send(body.to_string())
+        .map_err(|error| safe_error(provider, error.to_string(), endpoint, key))?;
+    normalize_response(response, provider, endpoint, key, path)
+}
+
+fn normalize_response(
+    mut response: ureq::http::Response<ureq::Body>,
+    provider: &str,
+    endpoint: &str,
+    key: &str,
+    path: &[&str],
+) -> Result<String, String> {
+    if response.status().as_u16() == HTTP_TOO_MANY_REQUESTS {
+        return Err(RATE_LIMITED_ERROR.to_owned());
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = read_capped(response.body_mut().as_reader());
+        return Err(safe_diagnostic(
+            format!("{provider} API returned HTTP {status}: {body}"),
+            endpoint,
+            key,
+        ));
+    }
+    let payload = read_success_body(response.body_mut().as_reader(), provider)?;
+    let json: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| format!("{provider} invalid response: invalid JSON: {error}"))?;
+    let selected = path.iter().try_fold(&json, |value, segment| {
+        value
+            .get(*segment)
+            .ok_or_else(|| format!("{provider} invalid response: omitted `{}`", path.join(".")))
+    })?;
+    let text = match selected {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(values) if values.is_empty() => String::new(),
+        serde_json::Value::Object(values) if values.is_empty() => String::new(),
+        selected => serde_json::to_string_pretty(selected).map_err(|error| {
+            format!("{provider} invalid response: normalization failed: {error}")
+        })?,
+    };
+    limit_tool_output(text, provider)
+}
+
+fn safe_error(provider: &str, message: String, endpoint: &str, key: &str) -> String {
+    format!(
+        "{provider} transport error: {}",
+        safe_diagnostic(message, endpoint, key)
+    )
+}
+
+fn safe_diagnostic(message: String, endpoint: &str, key: &str) -> String {
+    sanitize_endpoint_error(&message.replace(key, "…"), endpoint)
+        .replace(&format!("Bearer {key}"), "Bearer …")
+        .replace(key, "…")
+}

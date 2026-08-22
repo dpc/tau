@@ -1,8 +1,9 @@
 # tau-ext-websearch
 
-A Tau extension that registers generic web search and fetch tools. The default
-tools rotate between Exa and Parallel, then fail over sequentially when the
-selected provider fails or returns empty text.
+A Tau extension that registers generic web search and fetch tools. Default
+search rotates through Exa, Parallel, and anonymous You.com. Default fetch
+rotates through Exa and Parallel. Brave, Tavily, and Firecrawl are optional
+credentialed adapters.
 
 
 ## Tools
@@ -15,6 +16,18 @@ selected provider fails or returns empty text.
 - Exa uses its anonymously accessible hosted MCP at
   <https://mcp.exa.ai/mcp>. Parallel uses its anonymously accessible Search MCP
   at <https://search.parallel.ai/mcp>. Both providers supply search and fetch.
+- You.com search uses the anonymous
+  <https://api.you.com/mcp?profile=free> profile. Its documented limit is 100
+  searches per day; this profile does not support fetch. Each attempt performs
+  the required MCP initialization and carries any returned session id through
+  the initialized notification and search call.
+- Brave supports search. Tavily and Firecrawl support search and fetch. These
+  adapters use named Tau secrets and are never enabled implicitly.
+
+Earlier provider research found opportunistic keyless Tavily and Firecrawl
+routes. Tau deliberately does not guess those semantics: the current standard
+Tavily REST and Firecrawl v2 REST contracts require bearer credentials, so
+these adapters remain credentialed-only.
 
 Hybrid search retains Exa's `query` and optional `num_results` input. Parallel
 receives the query and uses its own fixed result budget. Hybrid fetch accepts one
@@ -38,7 +51,7 @@ to prevent its outbound HTTP calls:
 }
 ```
 
-Configure endpoints and ordered provider membership:
+Configure anonymous endpoints and ordered provider membership:
 
 ```json5
 {
@@ -49,15 +62,44 @@ Configure endpoints and ordered provider membership:
         endpoint: "https://mcp.exa.ai/mcp?exaApiKey=sk-…",
         exa_endpoint: "https://mcp.exa.ai/mcp",
         parallel_endpoint: "https://search.parallel.ai/mcp",
+        you_endpoint: "https://api.you.com/mcp?profile=free",
 
         // Defaults shown. One entry selects explicit single-provider mode.
-        search_providers: ["exa", "parallel"],
+        search_providers: ["exa", "parallel", "you"],
         fetch_providers: ["exa", "parallel"],
       },
     },
   },
 }
 ```
+
+Add credentialed adapters by declaring Tau secrets and referring to their
+names. API-key bytes do not belong in `config`:
+
+```yaml
+extensions:
+  std-websearch:
+    secrets:
+      brave_search: {}
+      tavily: {}
+      firecrawl: {}
+    config:
+      search_providers: [exa, parallel, you, brave, tavily, firecrawl]
+      fetch_providers: [exa, parallel, tavily, firecrawl]
+      brave_api_key_secret: brave_search
+      tavily_api_key_secret: tavily
+      firecrawl_api_key_secret: firecrawl
+      # Optional final/base endpoint overrides:
+      brave_endpoint: https://api.search.brave.com/res/v1/web/search
+      tavily_endpoint: https://api.tavily.com/
+      firecrawl_endpoint: https://api.firecrawl.dev/v2/
+```
+
+Brave cannot appear in `fetch_providers`; anonymous You.com cannot either.
+Selecting Brave, Tavily, or Firecrawl without its named, non-empty Tau secret
+rejects configuration. Tau does not watch configuration or secret files:
+restart Tau (or explicitly restart the extension through its supervisor) after
+changing them.
 
 Provider lists must be non-empty and contain no duplicates. Search and fetch
 have independent extension-process cursors. Successful configuration resets
@@ -98,7 +140,7 @@ redaction before local diagnostics.
 ## Result and UI boundary
 
 Every successful result is an ordinary tool-result string enclosed in
-`<tau_web_content adapter="exa|parallel" operation="search|fetch"
+`<tau_web_content adapter="exa|parallel|you|brave|tavily|firecrawl" operation="search|fetch"
 content_trust="external">…</tau_web_content>`. Tau returns only the first
 successful provider's text; it does not merge or rank provider outputs.
 Provider content and metadata remain untrusted external claims.

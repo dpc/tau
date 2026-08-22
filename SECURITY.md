@@ -802,13 +802,17 @@ transport itself adversarial. The boundary summary is recorded in
 [`ARCH-external-message-boundary`](specs/ARCH-external-message-boundary.md).
 
 Successful `tau-ext-websearch` results remain ordinary invocation-correlated
-tool-result strings. The extension places Exa and Parallel search/fetch
-text inside one exact-close-framed `<tau_web_content>` boundary with closed adapter,
-operation, and external-trust labels, and enforces its result bound after
-framing and closure. Adapter identity authenticates neither page authorship nor
-truth; provider titles, URLs, ranks, sources, and prose remain untrusted body
-claims capable of prompt injection. The envelope prevents exact closing-sentinel
-breakout but is not a sandbox or instruction-authority change. See
+tool-result strings. The extension places Exa/Parallel search/fetch, anonymous
+You.com search, credentialed Brave search, and credentialed Tavily/Firecrawl
+search/fetch results inside one exact-close-framed `<tau_web_content>` boundary
+with closed adapter, operation, and external-trust labels, and enforces its
+result bound after framing and closure. Credentialed adapters resolve API keys
+only from named Tau secrets and send them in provider authentication headers;
+logs and model-visible errors redact credential and endpoint material. Adapter
+identity authenticates neither page authorship nor truth; provider titles,
+URLs, ranks, sources, and prose remain untrusted body claims capable of prompt
+injection. The envelope prevents exact closing-sentinel breakout but is not a
+sandbox or instruction-authority change. See
 [`SPEC-tau-ext-websearch-provider-boundary`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-provider-boundary.md)
 and
 [`SPEC-tau-ext-websearch-runtime-safeguards`](crates/tau-ext-websearch/specs/SPEC-tau-ext-websearch-runtime-safeguards.md).

@@ -1,10 +1,12 @@
 # ARCH-tau-ext-websearch: tau-ext-websearch architecture
 
 `std-websearch` runs the `tau-ext-websearch` process and is enabled by default.
-The extension adapts hosted MCP web providers into Tau tools. Default
+The extension adapts hosted MCP and REST web providers into Tau tools. Default
 model-visible `web_search` and `web_fetch` tools rotate independently through
-ordered Exa and Parallel pools and perform bounded sequential failover.
-Provider-specific Exa and Parallel search/fetch tools remain disabled by
+ordered provider pools and perform bounded sequential failover. Search defaults
+to Exa, Parallel, and anonymous You.com; fetch defaults to Exa and Parallel.
+Credentialed Brave search and Tavily/Firecrawl search/fetch adapters may be
+added explicitly. Provider-specific Exa and Parallel tools remain disabled by
 default for explicit role opt-in. An ordered list with one provider gives the
 default tool explicit single-provider behavior.
 

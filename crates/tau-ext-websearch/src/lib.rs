@@ -1,7 +1,7 @@
 //! Generic web-search extension backed by hosted MCP search providers.
 //!
 //! The extension registers composite `web_search` and `web_fetch` tools that
-//! rotate between Exa and Parallel and fail over sequentially.
+//! rotate through configured hosted providers and fail over sequentially.
 //! Provider-specific tools use collision-free Tau-internal names and remain
 //! disabled by default. The extension's architecture and security boundaries
 //! are summarized in `ARCH-tau-ext-websearch`.
@@ -10,6 +10,9 @@
 //! `testing.md`.
 
 mod composite;
+mod hosted;
+#[cfg(test)]
+mod hosted_tests;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -22,6 +25,9 @@ use std::time::{Duration, Instant};
 use composite::{
     CompositeCall, HostedProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal,
 };
+#[cfg(test)]
+use hosted::HostedRequest;
+use hosted::{HostedClient, HostedConfig, HttpHostedClient};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     CborValue, Event, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolStarted,
@@ -75,6 +81,15 @@ pub const DEFAULT_ENDPOINT: &str = DEFAULT_EXA_ENDPOINT;
 /// Default unauthenticated Parallel Search MCP endpoint.
 pub const DEFAULT_PARALLEL_ENDPOINT: &str = "https://search.parallel.ai/mcp";
 
+/// Default anonymous You.com MCP endpoint.
+pub const DEFAULT_YOU_ENDPOINT: &str = "https://api.you.com/mcp?profile=free";
+/// Default Brave Web Search API endpoint.
+pub const DEFAULT_BRAVE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
+/// Default Tavily API base endpoint.
+pub const DEFAULT_TAVILY_ENDPOINT: &str = "https://api.tavily.com/";
+/// Default Firecrawl v2 API base endpoint.
+pub const DEFAULT_FIRECRAWL_ENDPOINT: &str = "https://api.firecrawl.dev/v2/";
+
 const EXA_REMOTE_TOOL: &str = "web_search_exa";
 const EXA_REMOTE_FETCH_TOOL: &str = "web_fetch_exa";
 const PARALLEL_REMOTE_SEARCH_TOOL: &str = "web_search";
@@ -106,6 +121,10 @@ const AGGREGATE_ERROR_MAX_BYTES: usize = 1024;
 enum WebAdapter {
     Exa,
     Parallel,
+    You,
+    Brave,
+    Tavily,
+    Firecrawl,
     #[cfg(test)]
     Third,
     #[cfg(test)]
@@ -117,6 +136,10 @@ impl WebAdapter {
         match self {
             Self::Exa => "exa",
             Self::Parallel => "parallel",
+            Self::You => "you",
+            Self::Brave => "brave",
+            Self::Tavily => "tavily",
+            Self::Firecrawl => "firecrawl",
             #[cfg(test)]
             Self::Third => "third",
             #[cfg(test)]
@@ -128,6 +151,10 @@ impl WebAdapter {
         match self {
             Self::Exa => "Exa",
             Self::Parallel => "Parallel",
+            Self::You => "You.com",
+            Self::Brave => "Brave",
+            Self::Tavily => "Tavily",
+            Self::Firecrawl => "Firecrawl",
             #[cfg(test)]
             Self::Third => "Third",
             #[cfg(test)]
@@ -172,11 +199,12 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    run_with_clients(
+    run_with_all_clients(
         reader,
         writer,
         Arc::new(HttpExaSearcher::default()),
         Arc::new(HttpParallelClient::default()),
+        Arc::new(HttpHostedClient::default()),
     )
 }
 
@@ -240,6 +268,20 @@ struct ExtConfig {
     /// Parallel endpoint override. No API-key/auth configuration is supported;
     /// Tau uses Parallel's default unauthenticated endpoint.
     parallel_endpoint: Option<String>,
+    /// Anonymous You.com MCP endpoint override.
+    you_endpoint: Option<String>,
+    /// Brave Web Search endpoint override.
+    brave_endpoint: Option<String>,
+    /// Name of the Tau secret containing the Brave subscription token.
+    brave_api_key_secret: Option<String>,
+    /// Tavily API base endpoint override.
+    tavily_endpoint: Option<String>,
+    /// Name of the Tau secret containing the Tavily bearer token.
+    tavily_api_key_secret: Option<String>,
+    /// Firecrawl v2 API base endpoint override.
+    firecrawl_endpoint: Option<String>,
+    /// Name of the Tau secret containing the Firecrawl bearer token.
+    firecrawl_api_key_secret: Option<String>,
     /// Ordered providers used for model-visible web search.
     search_providers: Vec<WebAdapter>,
     /// Ordered providers used for model-visible web fetch.
@@ -252,14 +294,24 @@ impl Default for ExtConfig {
             endpoint: None,
             exa_endpoint: None,
             parallel_endpoint: None,
-            search_providers: vec![WebAdapter::Exa, WebAdapter::Parallel],
+            you_endpoint: None,
+            brave_endpoint: None,
+            brave_api_key_secret: None,
+            tavily_endpoint: None,
+            tavily_api_key_secret: None,
+            firecrawl_endpoint: None,
+            firecrawl_api_key_secret: None,
+            search_providers: vec![WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::You],
             fetch_providers: vec![WebAdapter::Exa, WebAdapter::Parallel],
         }
     }
 }
 
 impl ExtConfig {
-    fn validate(self) -> Result<ValidatedConfig, String> {
+    fn validate(
+        self,
+        secrets: &std::collections::BTreeMap<String, tau_proto::SecretValue>,
+    ) -> Result<ValidatedConfig, String> {
         if self.endpoint.is_some()
             && self.exa_endpoint.is_some()
             && self.endpoint != self.exa_endpoint
@@ -272,6 +324,10 @@ impl ExtConfig {
             ("endpoint", self.endpoint.as_deref()),
             ("exa_endpoint", self.exa_endpoint.as_deref()),
             ("parallel_endpoint", self.parallel_endpoint.as_deref()),
+            ("you_endpoint", self.you_endpoint.as_deref()),
+            ("brave_endpoint", self.brave_endpoint.as_deref()),
+            ("tavily_endpoint", self.tavily_endpoint.as_deref()),
+            ("firecrawl_endpoint", self.firecrawl_endpoint.as_deref()),
         ] {
             if let Some(endpoint) = endpoint {
                 validate_endpoint(name, endpoint)?;
@@ -279,14 +335,84 @@ impl ExtConfig {
         }
         let search_pool = ProviderPool::new("search_providers", self.search_providers)?;
         let fetch_pool = ProviderPool::new("fetch_providers", self.fetch_providers)?;
+        if fetch_pool.contains(WebAdapter::You) || fetch_pool.contains(WebAdapter::Brave) {
+            return Err("`fetch_providers` contains a search-only provider".to_owned());
+        }
+        for (provider, secret, field) in [
+            (
+                WebAdapter::Brave,
+                self.brave_api_key_secret.as_deref(),
+                "brave_api_key_secret",
+            ),
+            (
+                WebAdapter::Tavily,
+                self.tavily_api_key_secret.as_deref(),
+                "tavily_api_key_secret",
+            ),
+            (
+                WebAdapter::Firecrawl,
+                self.firecrawl_api_key_secret.as_deref(),
+                "firecrawl_api_key_secret",
+            ),
+        ] {
+            if (search_pool.contains(provider) || fetch_pool.contains(provider)) && secret.is_none()
+            {
+                return Err(format!(
+                    "`{field}` is required when `{}` is enabled",
+                    provider.as_str()
+                ));
+            }
+        }
         Ok(ValidatedConfig {
             endpoint: self.endpoint,
             exa_endpoint: self.exa_endpoint,
             parallel_endpoint: self.parallel_endpoint,
+            hosted: HostedConfig {
+                you_endpoint: self.you_endpoint,
+                brave_endpoint: self.brave_endpoint,
+                brave_api_key: resolve_secret(
+                    secrets,
+                    self.brave_api_key_secret.as_deref(),
+                    "brave_api_key_secret",
+                )?,
+                tavily_endpoint: self.tavily_endpoint,
+                tavily_api_key: resolve_secret(
+                    secrets,
+                    self.tavily_api_key_secret.as_deref(),
+                    "tavily_api_key_secret",
+                )?,
+                firecrawl_endpoint: self.firecrawl_endpoint,
+                firecrawl_api_key: resolve_secret(
+                    secrets,
+                    self.firecrawl_api_key_secret.as_deref(),
+                    "firecrawl_api_key_secret",
+                )?,
+            },
             search_pool,
             fetch_pool,
         })
     }
+}
+
+fn resolve_secret(
+    secrets: &std::collections::BTreeMap<String, tau_proto::SecretValue>,
+    name: Option<&str>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    if name.trim().is_empty() {
+        return Err(format!("`{field}` must name a non-empty Tau secret"));
+    }
+    let value = secrets
+        .get(name)
+        .ok_or_else(|| format!("`{field}` references unavailable secret `{name}`"))?
+        .expose_secret();
+    if value.trim().is_empty() {
+        return Err(format!("secret `{name}` referenced by `{field}` is empty"));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 /// Fully validated runtime configuration built before state mutation.
@@ -297,17 +423,20 @@ struct ValidatedConfig {
     exa_endpoint: Option<String>,
     /// Parallel endpoint override.
     parallel_endpoint: Option<String>,
+    /// Validated additional hosted-provider settings.
+    hosted: HostedConfig,
     /// Validated non-empty search provider pool.
     search_pool: ProviderPool,
     /// Validated non-empty fetch provider pool.
     fetch_pool: ProviderPool,
 }
 
-fn run_with_clients<R, W>(
+fn run_with_all_clients<R, W>(
     reader: R,
     writer: W,
     searcher: Arc<dyn Searcher>,
     parallel_client: Arc<dyn ParallelClient>,
+    hosted_client: Arc<dyn HostedClient>,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
@@ -317,9 +446,10 @@ where
     let state = WebsearchState {
         searcher,
         parallel_client,
+        hosted_client,
         search_pool: ProviderPool::new(
             "search_providers",
-            vec![WebAdapter::Exa, WebAdapter::Parallel],
+            vec![WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::You],
         )
         .expect("built-in search pool is valid"),
         fetch_pool: ProviderPool::new(
@@ -357,6 +487,37 @@ where
             Err(Box::new(error))
         }
     }
+}
+
+#[cfg(test)]
+fn run_with_clients<R, W>(
+    reader: R,
+    writer: W,
+    searcher: Arc<dyn Searcher>,
+    parallel_client: Arc<dyn ParallelClient>,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    /// Deterministic unavailable additional-provider client for legacy tests.
+    struct StubHostedClient;
+    impl HostedClient for StubHostedClient {
+        fn call(
+            &self,
+            provider: WebAdapter,
+            _request: HostedRequest<'_>,
+        ) -> Result<String, String> {
+            Err(format!("{} test provider failure", provider.as_str()))
+        }
+    }
+    run_with_all_clients(
+        reader,
+        writer,
+        searcher,
+        parallel_client,
+        Arc::new(StubHostedClient),
+    )
 }
 
 /// Reason the manual runtime stopped.
@@ -457,7 +618,8 @@ impl TauExtension for WebsearchExtension {
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
             .configure::<ExtConfig>(|cx| {
-                let cfg = cx.config.validate().map_err(ClientError::handler)?;
+                let secrets = cx.secrets().clone();
+                let cfg = cx.config.validate(&secrets).map_err(ClientError::handler)?;
                 if let Some(endpoint) = cfg.endpoint.or(cfg.exa_endpoint) {
                     tracing::info!(target: LOG_TARGET, provider = "exa", "applying endpoint override");
                     cx.state.searcher.set_endpoint(endpoint);
@@ -466,6 +628,7 @@ impl TauExtension for WebsearchExtension {
                     tracing::info!(target: LOG_TARGET, provider = "parallel", "applying endpoint override");
                     cx.state.parallel_client.set_endpoint(endpoint);
                 }
+                cx.state.hosted_client.configure(cfg.hosted);
                 cx.state.search_pool = cfg.search_pool;
                 cx.state.fetch_pool = cfg.fetch_pool;
                 Ok(())
@@ -498,6 +661,8 @@ struct WebsearchState {
     searcher: Arc<dyn Searcher>,
     /// Parallel MCP client implementation.
     parallel_client: Arc<dyn ParallelClient>,
+    /// You.com, Brave, Tavily, and Firecrawl implementations.
+    hosted_client: Arc<dyn HostedClient>,
     /// Ordered provider membership for composite search.
     search_pool: ProviderPool,
     /// Ordered provider membership for composite fetch.
@@ -738,6 +903,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
         .expect("manual runtime waker installed before dispatch");
     let searcher = Arc::clone(&cx.state.searcher);
     let parallel_client = Arc::clone(&cx.state.parallel_client);
+    let hosted_client = Arc::clone(&cx.state.hosted_client);
     let handle = cx.handle();
     if let Some(permit) = cx.state.sem.try_acquire() {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -769,6 +935,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
                 let dispatcher = HostedProviderDispatcher {
                     searcher: searcher.as_ref(),
                     parallel_client: parallel_client.as_ref(),
+                    hosted_client: hosted_client.as_ref(),
                 };
                 CompositeCall {
                     invoke,
@@ -1481,19 +1648,19 @@ fn read_success_body(reader: impl std::io::Read, provider: &str) -> Result<Strin
     reader
         .take(SUCCESS_BODY_MAX_BYTES as u64 + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| format!("reading {provider} MCP response: {e}"))?;
+        .map_err(|e| format!("reading {provider} hosted response: {e}"))?;
     if SUCCESS_BODY_MAX_BYTES < buf.len() {
         return Err(format!(
-            "{provider} MCP response exceeded {SUCCESS_BODY_MAX_BYTES} bytes"
+            "{provider} hosted response exceeded {SUCCESS_BODY_MAX_BYTES} bytes"
         ));
     }
-    String::from_utf8(buf).map_err(|e| format!("{provider} MCP response was not UTF-8: {e}"))
+    String::from_utf8(buf).map_err(|e| format!("{provider} hosted response was not UTF-8: {e}"))
 }
 
 fn limit_tool_output(text: String, provider: &str) -> Result<String, String> {
     if TOOL_OUTPUT_MAX_BYTES < text.len() {
         Err(format!(
-            "{provider} MCP text result exceeded {TOOL_OUTPUT_MAX_BYTES} bytes"
+            "{provider} hosted text result exceeded {TOOL_OUTPUT_MAX_BYTES} bytes"
         ))
     } else {
         Ok(text)

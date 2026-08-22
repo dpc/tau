@@ -14,6 +14,7 @@ use tau_proto::{
 use super::composite::{
     AttemptOutcome, AttemptRecord, CompositeCall, FailureCategory, HostedProviderDispatcher,
     ProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal, attempt_budget, attempt_chip,
+    classify_provider_error,
 };
 use super::*;
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -287,6 +288,15 @@ impl ParallelClient for StubParallelClient {
 
     fn set_endpoint(&self, endpoint: String) {
         self.endpoints.lock().expect("lock").push(endpoint);
+    }
+}
+
+/// Additional-provider stub used by direct production-dispatcher tests.
+struct StubHostedClient;
+
+impl HostedClient for StubHostedClient {
+    fn call(&self, provider: WebAdapter, _request: HostedRequest<'_>) -> Result<String, String> {
+        Err(format!("{} test provider failure", provider.as_str()))
     }
 }
 
@@ -766,12 +776,12 @@ fn hybrid_search_all_provider_failure_is_normalized() {
     };
     assert_eq!(
         error.message,
-        "web_search failed after 2 attempts: exa=rate_limited, parallel=transport"
+        "web_search failed after 3 attempts: exa=rate_limited, parallel=transport, you=provider"
     );
     assert!(!error.message.contains("secret"));
     assert_eq!(
         error.display.expect("display").info_chips,
-        vec!["✗ Exa → ✗ Parallel"]
+        vec!["✗ Exa → ✗ Parallel → ✗ You.com"]
     );
 }
 
@@ -983,7 +993,10 @@ fn busy_hybrid_runtime_rejection_preserves_next_primary() {
     let Event::ToolResultReported(result) = read_terminal_including_progress(&mut reader) else {
         panic!("expected result");
     };
-    assert_eq!(result.display.expect("display").info_chips, ["✓ Exa"]);
+    assert_eq!(
+        result.display.expect("display").info_chips,
+        ["✗ You.com → ✓ Exa"]
+    );
 }
 
 /// Ensures the actual composite scheduler accepts a third adapter, issues at
@@ -1005,6 +1018,7 @@ fn composite_scheduler_handles_third_provider_and_max_three() {
             _search: Option<(&str, u32)>,
             _url: Option<&str>,
             _timeout: Duration,
+            _cancelled: &AtomicBool,
         ) -> Result<String, String> {
             self.calls.lock().expect("calls").push(provider);
             Err("provider failed".to_owned())
@@ -1056,7 +1070,7 @@ fn provider_list_configuration_distinguishes_single_and_invalid_modes() {
         "fetch_providers": ["exa"]
     }))
     .expect("deserialize");
-    let mut single = single.validate().expect("single mode");
+    let mut single = single.validate(&BTreeMap::new()).expect("single mode");
     assert_eq!(
         single.search_pool.reserve().as_ref(),
         [WebAdapter::Parallel]
@@ -1068,8 +1082,72 @@ fn provider_list_configuration_distinguishes_single_and_invalid_modes() {
         serde_json::json!({"fetch_providers": ["exa", "exa"]}),
     ] {
         let config: ExtConfig = serde_json::from_value(invalid).expect("deserialize invalid");
-        assert!(config.validate().is_err());
+        assert!(config.validate(&BTreeMap::new()).is_err());
     }
+}
+
+/// Keeps REST provider rejections, transport failures, and malformed successes
+/// in distinct scheduler accounting categories.
+#[test]
+fn rest_failures_keep_stable_scheduler_categories() {
+    assert_eq!(
+        classify_provider_error("brave API returned HTTP 401: denied"),
+        AttemptOutcome::Failure(FailureCategory::Rejected)
+    );
+    assert_eq!(
+        classify_provider_error("tavily transport error: connection reset"),
+        AttemptOutcome::Failure(FailureCategory::Transport)
+    );
+    assert_eq!(
+        classify_provider_error("firecrawl invalid response: omitted `data.web`"),
+        AttemptOutcome::Failure(FailureCategory::InvalidResponse)
+    );
+}
+
+/// Ensures optional credentialed providers require named Tau secrets, resolve
+/// them only from the secret channel, and reject unsupported fetch capability.
+#[test]
+fn optional_provider_configuration_resolves_secrets_and_capabilities() {
+    let config: ExtConfig = serde_json::from_value(serde_json::json!({
+        "search_providers": ["brave", "tavily", "firecrawl"],
+        "fetch_providers": ["tavily", "firecrawl"],
+        "brave_api_key_secret": "brave",
+        "tavily_api_key_secret": "tavily",
+        "firecrawl_api_key_secret": "firecrawl"
+    }))
+    .expect("credentialed provider config");
+    assert!(config.validate(&BTreeMap::new()).is_err());
+
+    let secrets = [
+        ("brave".to_owned(), tau_proto::SecretValue::new("brave-key")),
+        (
+            "tavily".to_owned(),
+            tau_proto::SecretValue::new("tavily-key"),
+        ),
+        (
+            "firecrawl".to_owned(),
+            tau_proto::SecretValue::new("firecrawl-key"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let config: ExtConfig = serde_json::from_value(serde_json::json!({
+        "search_providers": ["brave", "tavily", "firecrawl"],
+        "fetch_providers": ["tavily", "firecrawl"],
+        "brave_api_key_secret": "brave",
+        "tavily_api_key_secret": "tavily",
+        "firecrawl_api_key_secret": "firecrawl"
+    }))
+    .expect("credentialed provider config");
+    assert!(config.validate(&secrets).is_ok());
+
+    let unsupported: ExtConfig = serde_json::from_value(serde_json::json!({
+        "search_providers": ["you"],
+        "fetch_providers": ["brave"],
+        "brave_api_key_secret": "brave"
+    }))
+    .expect("unsupported capability config");
+    assert!(unsupported.validate(&secrets).is_err());
 }
 
 /// Ensures deadline slices divide only the remaining total so unused time
@@ -1132,6 +1210,7 @@ fn composite_deadline_is_anchored_before_worker_entry() {
         dispatcher: &HostedProviderDispatcher {
             searcher: &searcher,
             parallel_client: StubParallelClient::ok("unused").as_ref(),
+            hosted_client: &StubHostedClient,
         },
         handle: None,
         deadline: Instant::now() + Duration::from_secs(20),
@@ -1153,6 +1232,7 @@ fn composite_deadline_is_anchored_before_worker_entry() {
         dispatcher: &HostedProviderDispatcher {
             searcher: &searcher,
             parallel_client: StubParallelClient::ok("unused").as_ref(),
+            hosted_client: &StubHostedClient,
         },
         handle: None,
         deadline: Instant::now(),
@@ -1177,6 +1257,7 @@ fn composite_deadline_attempt_renders_deadline_chip() {
             _search: Option<(&str, u32)>,
             _url: Option<&str>,
             _timeout: Duration,
+            _cancelled: &AtomicBool,
         ) -> Result<String, String> {
             thread::sleep(Duration::from_millis(3));
             Err("late failure".to_owned())
@@ -1236,6 +1317,7 @@ fn hybrid_cancellation_stops_after_current_attempt() {
                 cancelled: Arc::clone(&cancelled),
             },
             parallel_client: StubParallelClient::ok("must not run").as_ref(),
+            hosted_client: &StubHostedClient,
         },
         handle: None,
         deadline: Instant::now() + REQUEST_TIMEOUT,
