@@ -1149,6 +1149,10 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert_eq!(s.bind.get("C-k").expect("C-k").action, "agent-previous");
     assert_eq!(s.bind.get("C-j").expect("C-j").action, "agent-next");
     assert_eq!(s.bind.get("C-b").expect("C-b").action, "agent-pick");
+    assert_eq!(
+        s.bind.get("C-v").expect("C-v").action,
+        "verbose-mode-toggle"
+    );
     assert!(!s.bind.contains_key("M-a"));
     assert!(!built_in.bind.contains_key("C-B"));
     assert_eq!(s.bind.get("C-p").expect("C-p").action, "prompt-previous");

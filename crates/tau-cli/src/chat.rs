@@ -640,6 +640,10 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ),
     (":fast", "Toggle Fast mode"),
     (
+        ":verbose-mode-toggle",
+        "Toggle compact conversation and verbose diagnostic display",
+    ),
+    (
         ":set",
         "Set a UI setting (e.g. :set show-diff true); Tab cycles names + values",
     ),
@@ -1351,6 +1355,7 @@ pub(crate) fn run_chat(
                             renderer.handle_disconnect(reason);
                         }
                         RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
+                        RendererCmd::ToggleVerboseMode => renderer.toggle_verbose_mode(),
                         RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
                         RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
                         RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
@@ -1665,6 +1670,8 @@ fn tool_timer_loop(state: Arc<(Mutex<ToolTimerState>, Condvar)>, renderer_tx: Lo
 /// Local commands remain independent from socket admission, while prompt and
 /// cancel uplink bypass renderer work entirely.
 enum RendererCmd {
+    /// Toggle the process-local top-level transcript presentation mode.
+    ToggleVerboseMode,
     /// `:set <name> <value>` — validated by the input loop before send.
     Set {
         /// Registered CLI setting name.
@@ -2382,6 +2389,9 @@ impl<'a> TerminalInputSession<'a> {
     fn handle_binding_action(&mut self, action: &str) -> Result<(), CliError> {
         match action {
             "fast-toggle" => self.toggle_fast_service_tier(),
+            "verbose-mode-toggle" => {
+                let _ = self.ctx.renderer_tx.send(RendererCmd::ToggleVerboseMode);
+            }
             "cycle-role" => self.cycle_role_inner(),
             "cycle-role-group" => self.cycle_role_group(),
             "agent-previous" => self.switch_agent_by_delta(-1),
@@ -2685,6 +2695,9 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_command(&mut self, text: &str) -> bool {
+        if self.handle_verbose_mode_command(text) {
+            return true;
+        }
         if self.handle_session_stats_command(text) {
             return true;
         }
@@ -2698,6 +2711,20 @@ impl<'a> TerminalInputSession<'a> {
             return true;
         }
         self.handle_utility_alias_command(text)
+    }
+
+    /// Handles the no-argument process-local verbose-mode toggle command.
+    fn handle_verbose_mode_command(&self, text: &str) -> bool {
+        if text == ":verbose-mode-toggle" {
+            let _ = self.ctx.renderer_tx.send(RendererCmd::ToggleVerboseMode);
+            return true;
+        }
+        if text.starts_with(":verbose-mode-toggle ") {
+            self.output
+                .system_info(":verbose-mode-toggle takes no arguments");
+            return true;
+        }
+        false
     }
 
     /// Handles the local session-wide token totals command.
@@ -4117,6 +4144,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":tree"
             | ":compact"
             | ":fast"
+            | ":verbose-mode-toggle"
             | ":provider-auth"
             | ":agent"
             | ":new"

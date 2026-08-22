@@ -14104,6 +14104,215 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     assert!(vt.screen_contains(80, "read src/main.rs 0s ok"));
 }
 
+/// Compact mode must be a reversible projection: it retains conversation text,
+/// removes thinking and completed tools, and exposes one payload-free row for
+/// every tool that is still running, regardless of its eventual terminal kind.
+#[test]
+fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
+    let (_term, handle, vt) = setup(120, 30);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.apply_setting("show-turn-stats", "true");
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-verbose",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("sp-verbose"),
+            "conversation answer",
+            Some("private reasoning".to_owned()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-verbose",
+        vec![assistant_message_item("conversation answer")],
+    )));
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage("sp-stats", "main", 20_000, 10_000, 500, "stats answer"),
+    ));
+
+    for (call_id, tool_name) in [
+        ("call-ok", "read"),
+        ("call-error", "search"),
+        ("call-cancel", "write"),
+    ] {
+        let mut started = tool_started(call_id, tool_name, CborValue::Null);
+        let Event::ToolStarted(started_event) = &mut started else {
+            unreachable!("tool_started helper returns a tool start");
+        };
+        started_event.agent_id = agent_id("main");
+        renderer.handle(&started);
+        renderer.handle(&initial_tool_progress(
+            call_id,
+            tool_name,
+            "SECRET_ARGUMENT",
+            "SECRET_MODE",
+        ));
+    }
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+
+    let compact = vt.screen_text(120).join("\n");
+    assert!(compact.contains("conversation answer"), "{compact}");
+    assert!(!compact.contains("private reasoning"), "{compact}");
+    assert!(!compact.contains('Δ'), "{compact}");
+    assert!(!compact.contains("SECRET_ARGUMENT"), "{compact}");
+    assert!(!compact.contains("SECRET_MODE"), "{compact}");
+    for tool_name in ["read", "search", "write"] {
+        assert_eq!(compact.matches(tool_name).count(), 1, "{compact}");
+    }
+
+    renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
+        call_id: "call-ok".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("SECRET_RESULT".to_owned()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(tau_proto::ToolUseState {
+            args: "SECRET_ARGUMENT".to_owned(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    renderer.handle(&Event::ToolError(ToolError {
+        presentation: Default::default(),
+        call_id: "call-error".into(),
+        tool_name: tau_proto::ToolName::new("search"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "SECRET_ERROR".to_owned(),
+        details: None,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
+        call_id: "call-cancel".into(),
+        tool_name: tau_proto::ToolName::new("write"),
+        tool_type: tau_proto::ToolType::Function,
+        display: None,
+    }));
+    sync(&handle);
+
+    let completed_compact = vt.screen_text(120).join("\n");
+    for hidden in [
+        "read",
+        "search",
+        "write",
+        "SECRET_RESULT",
+        "SECRET_ERROR",
+        "SECRET_ARGUMENT",
+    ] {
+        assert!(!completed_compact.contains(hidden), "{completed_compact}");
+    }
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    let restored = vt.screen_text(120).join("\n");
+    assert!(restored.contains("private reasoning"), "{restored}");
+    assert!(restored.contains('Δ'), "{restored}");
+    assert!(restored.contains("read"), "{restored}");
+    assert!(restored.contains("search"), "{restored}");
+    assert!(restored.contains("write"), "{restored}");
+    assert!(restored.contains("SECRET_ERROR"), "{restored}");
+}
+
+/// Live and attach-reconstructed blocks must use the same mode projection when
+/// they move between visible and detached agent transcripts.
+#[test]
+fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "main-live",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("main-live"),
+            "",
+            Some("main live reasoning".to_owned()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "main live reasoning"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "main live reasoning"));
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "main live reasoning"));
+
+    let mut worker_created = agent_prompt_created("worker-live", "s1");
+    worker_created.agent_id = agent_id("worker");
+    renderer.handle(&Event::AgentPromptCreated(worker_created));
+    let mut worker_update = provider_response_delta_update(
+        test_agent_prompt_id("worker-live"),
+        "",
+        Some("worker hidden reasoning".to_owned()),
+        tau_proto::PromptOriginator::User,
+    );
+    worker_update.agent_id = agent_id("worker");
+    renderer.handle(&Event::ProviderResponseUpdated(worker_update));
+
+    renderer.toggle_verbose_mode();
+    renderer.switch_agent("worker".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "worker hidden reasoning"));
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "worker hidden reasoning"));
+
+    renderer.toggle_verbose_mode();
+    let mut reconstructed = tool_started(
+        "attach-tool",
+        "read",
+        CborValue::Text("SECRET_ATTACH_ARGUMENT".to_owned()),
+    );
+    let Event::ToolStarted(started) = &mut reconstructed else {
+        unreachable!("tool_started helper returns a tool start");
+    };
+    started.agent_id = agent_id("worker");
+    renderer.handle_reconstructed_tool_start_socket_delivery(
+        &reconstructed,
+        &agent_id("worker"),
+        tau_proto::UnixMicros::new(1),
+        1,
+    );
+    sync(&handle);
+    let pending = vt.screen_text(100).join("\n");
+    assert!(pending.contains("read pending"), "{pending}");
+    assert!(!pending.contains("SECRET_ATTACH_ARGUMENT"), "{pending}");
+
+    renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
+        call_id: "attach-tool".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        display: None,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "read pending"));
+}
+
 #[test]
 fn show_tools_summarize_turn_summarizes_tool_batch() {
     let (_term, handle, vt) = setup(80, 24);

@@ -65,6 +65,27 @@ Type `:` as the first non-whitespace character to enter command mode and open co
 
 Submitted prompts are kept in the current process and persisted under the state directory as `prompt-history.cbor`. Up/Down navigate prompt history. Built-in key bindings also support prompt undo/redo, Ctrl-R history search, Ctrl-O/Ctrl-G external editor integration, and shell-backed prompt insertion commands.
 
+## Verbose and compact transcript modes
+
+The CLI starts in verbose mode. This is the full diagnostic transcript: existing
+`:set` choices continue to control thinking, tools, turn stats, and other
+presentation details. Press Ctrl-V, invoke the configurable
+`verbose-mode-toggle` action, or type `:verbose-mode-toggle` to switch to the
+compact conversation view.
+
+Compact mode is a stricter top-level filter. It hides all thinking and turn
+statistics. Completed historical tools and results disappear; each currently
+running tool remains as exactly one payload-free line naming the tool, and that
+line disappears on success, error, or cancellation. User and agent messages,
+critical notices, prompt input, navigation, watched activity, and other
+user-facing UI remain available.
+
+Switching back restores the retained verbose transcript and the prior `:set`
+choices; compact mode does not mutate them or discard transcript data. The mode
+belongs only to the current CLI process/attachment, is not written to `cli.json`,
+and resets to verbose when the CLI starts. It changes neither harness or agent
+behavior nor journal, provider, or model context.
+
 ## Prompt completions
 
 Prompt word completions are configured in `cli.yaml` with a `completions` map from trigger prefix to completer spec:

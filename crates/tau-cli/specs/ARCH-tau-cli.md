@@ -189,6 +189,15 @@ the terminal once before publishing editor context or accepting cloned-handle
 output. The resulting behavior is specified by
 [SPEC-tau-cli-transcript-context](SPEC-tau-cli-transcript-context.md).
 
+The process-local verbose-mode flag is a top-level projection over those
+retained presentation models. Verbose mode preserves the configured `show-*`
+rendering. Compact mode replaces thinking, terminal tool history/summaries, and
+turn stats with position-stable empty blocks while projecting each live tool as
+one identity/status row without payload. Terminal tool outcomes remove the live
+row through the ordinary lifecycle path. Switching modes re-renders retained
+blocks and does not mutate `CliState`, protocol events, journals, or model
+context.
+
 The visible, hidden, and no-agent presentation models and retroactive-render
 caches retain accepted transcript data until an explicit new-session reset or
 interactive UI process exit. They have no aggregate item or byte eviction.

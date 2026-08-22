@@ -31,6 +31,7 @@ sample `config/cli.yaml`.
 | `C-j` | `agent-next` | Cycle to the next active agent or overview. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
+| `C-v` | `verbose-mode-toggle` | Toggle between the full diagnostic transcript and the compact conversation view. |
 | `Tab` | `cycle-role` | Cycle roles within the current role group. |
 | `BackTab` / `Shift-Tab` | `cycle-role-group` | Cycle to the first role in the next role group. |
 | `C-p`, `C-Up` | `prompt-previous` | Move to the previous prompt/history entry. |
@@ -89,6 +90,11 @@ terminal `ESC a` encoding.
 Tau does not reserve a Meta chord by default. Explicit user bindings may use
 Meta chords or `C-B` on terminal paths that preserve Shift.
 
+Ctrl-V previously had no raw editing action in Tau: it was neither literal-next
+nor the bracketed-paste path. The built-in `C-v` binding now toggles verbose
+mode. Terminal bracketed paste remains a distinct paste event and is unchanged;
+users may override `C-v` like any other built-in binding.
+
 - `submit-prompt` — submit the current prompt, or accept a previewed completion without submitting.
 - `insert-newline` — insert a newline at the cursor.
 - `prompt-eof` — signal EOF when the prompt is empty.
@@ -110,6 +116,10 @@ Meta chords or `C-B` on terminal paths that preserve Shift.
 - `prompt-undo` — undo an edit in the current prompt/history entry.
 - `prompt-redo` — redo an undone edit in the current prompt/history entry.
 - `fast-toggle` — toggle fast mode without editing the prompt draft.
+- `verbose-mode-toggle` — toggle the process-local transcript projection. Verbose
+  mode honors the configured `show-*` settings. Compact mode additionally hides
+  thinking, completed tools, and turn stats, while retaining one payload-free
+  line for each running tool.
 - `cycle-role` — cycle roles within the current role group.
 - `cycle-role-group` — cycle to the first role in the next role group.
 - `agent-previous` — cycle to the previous active agent or all-agent overview.

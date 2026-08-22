@@ -561,6 +561,12 @@ pub(crate) struct EventRenderer {
     /// summaries are not rendered (live or in history). Controlled
     /// by `:set show-thinking`; persisted in `<state_dir>/cli.json`.
     show_thinking: bool,
+    /// Process-local top-level presentation mode.
+    ///
+    /// Verbose mode preserves configured `show-*` projections. Compact mode
+    /// additionally hides thinking, completed tools, and turn stats while
+    /// retaining their semantic blocks for reversible reprojection.
+    verbose_mode: bool,
     /// Persisted thinking blocks (one per finished assistant turn).
     /// When `show-thinking` flips, every entry is re-rendered as
     /// either the full text or removed, so the toggle takes effect
@@ -1909,6 +1915,7 @@ impl EventRenderer {
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
+            verbose_mode: true,
             show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
             show_messages: state.show_messages,
@@ -3086,7 +3093,7 @@ impl EventRenderer {
         }
         self.show_thinking = on;
         for entry in &self.thinking_history {
-            let display = if self.show_thinking {
+            let display = if self.verbose_mode && self.show_thinking {
                 entry.text.as_str()
             } else {
                 ""
@@ -3105,7 +3112,7 @@ impl EventRenderer {
             let Some(bid) = state.thinking_block_id else {
                 continue;
             };
-            let block = if self.show_thinking {
+            let block = if self.verbose_mode && self.show_thinking {
                 let display = state.thinking_text.clone().unwrap_or_default();
                 markdown_streaming_block_with_osc8(
                     &self.theme,
@@ -3185,7 +3192,7 @@ impl EventRenderer {
         self.save_cli_state();
     }
     fn render_turn_stats_entry(&self, entry: &TurnStatsBlockEntry) -> tau_cli_term::StyledBlock {
-        if self.show_turn_stats {
+        if self.verbose_mode && self.show_turn_stats {
             render_turn_stats_block_with_cumulative_usage(
                 &self.theme,
                 &entry.usage,
@@ -3282,6 +3289,9 @@ impl EventRenderer {
     }
 
     fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
+        if !self.verbose_mode {
+            return Self::empty_block();
+        }
         match self.show_tools {
             path_tau_config_settings::ShowTools::Full => render_tool_block(&self.theme, display),
             path_tau_config_settings::ShowTools::Compact => self.render_compact_tool_block(display),
@@ -3289,6 +3299,17 @@ impl EventRenderer {
             | path_tau_config_settings::ShowTools::SummarizeTurn
             | path_tau_config_settings::ShowTools::SummarizePrompt => Self::empty_block(),
         }
+    }
+
+    /// Renders one still-running tool according to the top-level display mode.
+    fn render_live_tool_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
+        if self.verbose_mode {
+            return self.render_tool_history_block(display);
+        }
+        render_tool_block(
+            &self.theme,
+            &pending_tool_call_display(display.tool_name.as_str()),
+        )
     }
 
     fn render_compact_tool_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
@@ -3302,6 +3323,9 @@ impl EventRenderer {
         display: &ToolCallDisplay,
         diff: &tau_proto::ToolUsePayload,
     ) -> tau_cli_term::StyledBlock {
+        if !self.verbose_mode {
+            return Self::empty_block();
+        }
         match self.show_tools {
             path_tau_config_settings::ShowTools::Full => match diff {
                 tau_proto::ToolUsePayload::Diff(summary) => {
@@ -3320,11 +3344,13 @@ impl EventRenderer {
     }
 
     fn render_summary_block(&self, summary: &ToolSummaryDisplay) -> tau_cli_term::StyledBlock {
-        if matches!(
-            self.show_tools,
-            tau_config::settings::ShowTools::SummarizeTurn
-                | tau_config::settings::ShowTools::SummarizePrompt
-        ) {
+        if self.verbose_mode
+            && matches!(
+                self.show_tools,
+                tau_config::settings::ShowTools::SummarizeTurn
+                    | tau_config::settings::ShowTools::SummarizePrompt
+            )
+        {
             render_tool_block(&self.theme, &build_tool_summary_display(summary))
         } else {
             Self::empty_block()
@@ -3409,7 +3435,7 @@ impl EventRenderer {
                 .set_block(*block_id, self.render_summary_block(summary));
         }
         for entry in &self.thinking_history {
-            let display = if self.show_thinking {
+            let display = if self.verbose_mode && self.show_thinking {
                 entry.text.as_str()
             } else {
                 ""
@@ -3433,6 +3459,76 @@ impl EventRenderer {
                 entry.block_id,
                 self.render_source_aware_prompt_block(&entry.submission_source, &entry.text),
             );
+        }
+        self.rerender_live_thinking();
+        let live_tool_blocks = self
+            .tool_calls
+            .values()
+            .filter_map(|state| {
+                Some((
+                    state.block_id?,
+                    state
+                        .live_display
+                        .as_ref()
+                        .map(|display| self.render_live_tool_block(display)),
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (block_id, block) in live_tool_blocks {
+            self.handle
+                .set_block(block_id, block.unwrap_or_else(Self::empty_block));
+        }
+    }
+
+    /// Reprojects retained in-flight reasoning in either top-level mode.
+    fn rerender_live_thinking(&mut self) {
+        use tau_themes::names;
+
+        let existing = self
+            .prompts
+            .values_mut()
+            .filter_map(|state| {
+                let block_id = state.thinking_block_id?;
+                let block = if self.verbose_mode && self.show_thinking {
+                    markdown_streaming_block_with_osc8(
+                        &self.theme,
+                        names::AGENT_THINKING,
+                        state.thinking_text.as_deref().unwrap_or_default(),
+                        &mut state.thinking_markdown_cache,
+                        self.osc8_links,
+                    )
+                } else {
+                    markdown_block_with_osc8(
+                        &self.theme,
+                        names::AGENT_THINKING,
+                        "",
+                        self.osc8_links,
+                    )
+                };
+                Some((block_id, block))
+            })
+            .collect::<Vec<_>>();
+        for (block_id, block) in existing {
+            self.handle.set_block(block_id, block);
+        }
+
+        if !self.verbose_mode || !self.show_thinking {
+            return;
+        }
+        let missing = self
+            .prompts
+            .iter()
+            .filter(|(_, state)| state.thinking_block_id.is_none())
+            .filter_map(|(prompt_id, state)| {
+                state
+                    .thinking_text
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| (prompt_id.clone(), text.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        for (prompt_id, thinking) in missing {
+            self.update_live_thinking_block(prompt_id.as_str(), Some(thinking.as_str()));
         }
     }
 
@@ -3534,7 +3630,7 @@ impl EventRenderer {
         for (block_id, display) in live_updates {
             let block = display
                 .as_ref()
-                .map(|display| self.render_tool_history_block(display))
+                .map(|display| self.render_live_tool_block(display))
                 .unwrap_or_else(Self::empty_block);
             self.handle.set_block(block_id, block);
         }
@@ -3548,6 +3644,13 @@ impl EventRenderer {
         }
         self.invalidate_for_retroactive_toggle();
         self.save_cli_state();
+    }
+
+    /// Toggles the reversible process-local transcript presentation projection.
+    pub(crate) fn toggle_verbose_mode(&mut self) {
+        self.verbose_mode = !self.verbose_mode;
+        self.rerender_visible_for_current_settings();
+        self.invalidate_for_retroactive_toggle();
     }
 
     /// Clears all session-scoped UI state and re-renders an empty
@@ -6461,7 +6564,7 @@ impl EventRenderer {
                 state.effective_shell_timeout,
             );
         }
-        let block = self.render_tool_history_block(&display);
+        let block = self.render_live_tool_block(&display);
         self.handle.set_block(block_id, block);
         if let Some(state) = self.tool_calls.get_mut(call_id) {
             state.live_display = Some(display);
@@ -6886,7 +6989,7 @@ impl EventRenderer {
             .entry(spid.to_owned())
             .or_default()
             .thinking_text = Some(thinking.to_owned());
-        if !self.show_thinking {
+        if !self.verbose_mode || !self.show_thinking {
             return;
         }
         let state = self.prompts.entry(spid.to_owned()).or_default();
@@ -7100,15 +7203,20 @@ impl EventRenderer {
         if let Some(tbid) = thinking_block_id {
             self.handle.remove_block(tbid);
         }
-        if self.show_thinking
+        if (self.show_thinking || !self.verbose_mode)
             && let Some(thinking) = thinking.filter(|t| !t.is_empty())
         {
+            let display = if self.verbose_mode && self.show_thinking {
+                thinking.as_str()
+            } else {
+                ""
+            };
             let bid = self.handle.print_output(
                 "agent-thinking",
                 markdown_block_with_osc8(
                     &self.theme,
                     names::AGENT_THINKING,
-                    &thinking,
+                    display,
                     self.osc8_links,
                 ),
             );
@@ -7435,7 +7543,7 @@ impl EventRenderer {
         let mut display = pending_tool_call_display(started.tool_name.as_str());
         sanitize_blocker_display(&mut display, is_blocker, blocker_action);
         Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO, effective_shell_timeout);
-        let live_block = self.render_tool_history_block(&display);
+        let live_block = self.render_live_tool_block(&display);
         let live_id = self.handle.new_block(
             format!("tool-call-live:{}:{}", started.tool_name, started.call_id),
             live_block,
@@ -7565,7 +7673,7 @@ impl EventRenderer {
                 update = Some((block_id, display));
             }
             if let Some((block_id, display)) = update {
-                let block = self.render_tool_history_block(&display);
+                let block = self.render_live_tool_block(&display);
                 self.handle.set_block(block_id, block);
                 if self.model_status_block.is_some() {
                     self.render_model_status();
@@ -7578,6 +7686,9 @@ impl EventRenderer {
 
         let state = self.tool_calls.get(progress.call_id.as_str());
         if state.is_none_or(|s| s.block_id.is_none()) {
+            if !self.verbose_mode {
+                return;
+            }
             let text = tau_harness::format_tool_progress(progress);
             self.handle.print_output(
                 "tool-progress",
@@ -7619,7 +7730,7 @@ impl EventRenderer {
             if let Some(state) = self.tool_calls.get_mut(&call_id) {
                 state.live_display = Some(display.clone());
             }
-            let block = self.render_tool_history_block(&display);
+            let block = self.render_live_tool_block(&display);
             self.handle.set_block(block_id, block);
             changed = true;
         }

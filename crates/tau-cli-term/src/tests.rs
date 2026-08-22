@@ -789,6 +789,32 @@ fn submit_prompt_binding_submits_line() {
     assert_eq!(handle.get_buffer(), "");
 }
 
+/// Ctrl-V reaches the application toggle without consuming bracketed paste as
+/// key input or changing the current prompt draft.
+#[test]
+fn verbose_mode_binding_preserves_bracketed_paste() {
+    let (mut term, handle, _completion_data, input_tx) = new_test_term_with_data_and_bindings(
+        Vec::new(),
+        vec![("C-v".to_owned(), "verbose-mode-toggle".to_owned())],
+    );
+
+    send_key_with_modifiers(&input_tx, KeyCode::Char('v'), KeyModifiers::CONTROL);
+    assert!(matches!(
+        term.get_next_event().expect("verbose toggle action"),
+        Event::Action(action) if action == "verbose-mode-toggle"
+    ));
+    assert_eq!(handle.get_buffer(), "");
+
+    input_tx
+        .send(TestRawEvent::Paste("pasted\npayload".to_owned()))
+        .expect("bracketed paste");
+    assert!(matches!(
+        term.get_next_event().expect("paste event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "pasted\npayload");
+}
+
 #[test]
 fn submit_prompt_binding_accepts_completion_before_submit() {
     // With a completion preview active, submit-prompt accepts the
