@@ -63,6 +63,7 @@ pub(crate) fn run_print_tools(
             extension: extension_cli_overrides,
             extension_environment: Some(extension_environment),
             harness_config: harness_config_overrides,
+            memory_only_agent_store: true,
         },
         tau_harness::HarnessStorageMode::SessionEphemeral,
     )?;

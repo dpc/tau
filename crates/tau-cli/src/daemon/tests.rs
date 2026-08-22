@@ -291,6 +291,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
             extension: &[],
             extension_environment: None,
             harness_config: std::slice::from_ref(&override_),
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -312,6 +313,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -350,6 +352,7 @@ fn daemon_command_sets_and_clears_profile_env() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     };
@@ -385,6 +388,7 @@ fn daemon_command_clears_empty_extension_transport() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -422,6 +426,7 @@ fn daemon_command_forwards_public_extension_environment_separately() {
             extension: &cli,
             extension_environment: Some(&names),
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -457,6 +462,7 @@ fn daemon_command_clears_socket_activation_env() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -494,6 +500,7 @@ fn daemon_command_and_parent_path_share_runtime_instance_id() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -529,6 +536,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::SessionEphemeral,
     });
@@ -556,6 +564,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });
@@ -585,6 +594,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::MemoryOnly,
     });
@@ -596,6 +606,47 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
             .get_envs()
             .any(|(key, value)| key == tau_harness::EPHEMERAL_ENV && value.is_none())
     );
+}
+
+/// The preview-only agent-store marker must be set for diagnostics and cleared
+/// for both ordinary durable and global session-ephemeral launches.
+#[test]
+fn daemon_command_scopes_memory_only_agent_store_to_previews() {
+    for storage_mode in [
+        HarnessStorageMode::Durable,
+        HarnessStorageMode::SessionEphemeral,
+    ] {
+        let mut command = build_daemon_command(DaemonCommandSpec {
+            tau_binary: Path::new("tau"),
+            session_id: "session-1",
+            session_status: SessionLaunchStatus::New,
+            stdout: Stdio::null(),
+            stderr: Stdio::null(),
+            stdin: Stdio::null(),
+            startup_role: None,
+            cli_overrides: DaemonCliOverrides {
+                profile: None,
+                role: &[],
+                extension: &[],
+                extension_environment: None,
+                harness_config: &[],
+                memory_only_agent_store: false,
+            },
+            storage_mode,
+        });
+        command.env(tau_harness::MEMORY_ONLY_AGENT_STORE_ENV, "ambient");
+        configure_agent_store_mode(&mut command, false);
+        assert!(command.get_envs().any(|(key, value)| {
+            key == tau_harness::MEMORY_ONLY_AGENT_STORE_ENV && value.is_none()
+        }));
+    }
+
+    let mut preview = Command::new("tau");
+    configure_agent_store_mode(&mut preview, true);
+    assert!(preview.get_envs().any(|(key, value)| {
+        key == tau_harness::MEMORY_ONLY_AGENT_STORE_ENV
+            && value.and_then(std::ffi::OsStr::to_str) == Some("1")
+    }));
 }
 
 #[test]
@@ -614,6 +665,7 @@ fn daemon_command_uses_initial_ui_stdio() {
             extension: &[],
             extension_environment: None,
             harness_config: &[],
+            memory_only_agent_store: false,
         },
         storage_mode: HarnessStorageMode::Durable,
     });

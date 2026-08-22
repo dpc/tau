@@ -58,6 +58,9 @@ impl SessionLaunchStatus {
 pub const EPHEMERAL_ENV: &str = "TAU_EPHEMERAL";
 /// Selects harness-wide process-local storage for owned preview daemons.
 pub const MEMORY_ONLY_ENV: &str = "TAU_MEMORY_ONLY";
+/// Selects a process-local agent store without changing session or configured
+/// extension storage for owned diagnostic daemons.
+pub const MEMORY_ONLY_AGENT_STORE_ENV: &str = "TAU_MEMORY_ONLY_AGENT_STORE";
 
 /// Immutable harness-wide storage capability policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -803,6 +806,7 @@ pub fn run_daemon_with_internal_tools(
             initial_client: None,
             internal_tool_handlers,
             ignore_startup_environment: options.ignore_startup_environment,
+            memory_only_agent_store: false,
             project_root,
         },
         &mut initial_client_error_stream,
@@ -1362,6 +1366,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
                 initial_client,
                 internal_tool_handlers,
                 ignore_startup_environment: false,
+                memory_only_agent_store: std::env::var_os(MEMORY_ONLY_AGENT_STORE_ENV).is_some(),
                 project_root,
             },
             &mut initial_client_error_stream,

@@ -147,6 +147,124 @@ fn assert_no_durable_preview_artifacts(home: &Path) {
     assert_no_runtime_pairs(home);
 }
 
+#[cfg(unix)]
+fn state_tree_contents(root: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    fn visit(root: &Path, path: &Path, entries: &mut Vec<(std::path::PathBuf, Option<Vec<u8>>)>) {
+        let mut children = std::fs::read_dir(path)
+            .expect("read state tree")
+            .map(|entry| entry.expect("read state entry").path())
+            .collect::<Vec<_>>();
+        children.sort();
+        for child in children {
+            let relative = child
+                .strip_prefix(root)
+                .expect("state entry remains below root")
+                .to_path_buf();
+            if child.is_dir() {
+                entries.push((relative, None));
+                visit(root, &child, entries);
+            } else {
+                entries.push((
+                    relative,
+                    Some(std::fs::read(&child).expect("read state file")),
+                ));
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+#[cfg(unix)]
+fn make_tree_read_only(path: &Path) {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).expect("read tree for permission change") {
+            make_tree_read_only(&entry.expect("read permission entry").path());
+        }
+        std::fs::set_permissions(path, Permissions::from_mode(0o555))
+            .expect("make directory read-only");
+    } else {
+        std::fs::set_permissions(path, Permissions::from_mode(0o444)).expect("make file read-only");
+    }
+}
+
+/// Developer render commands must not create an agent store or change output
+/// when durable Tau state is recursively read-only.
+#[cfg(unix)]
+#[test]
+fn previews_run_unflagged_without_writable_agent_store() {
+    let home = TempDir::new().expect("temporary home");
+    let state = home.path().join(".state");
+    for directory in [
+        ".config",
+        ".cache",
+        ".data",
+        ".runtime",
+        "work",
+        ".state/tau/providers",
+        ".state/tau/ext/core-shell",
+        ".state/tau/secrets/ext/core-shell",
+    ] {
+        std::fs::create_dir_all(home.path().join(directory)).expect("create preview root");
+    }
+
+    let commands = ["print-prompt", "print-tools", "print-system-prompt"];
+    let baseline = commands.map(|command| {
+        let output = preview(&home, None, &["--role", "engineer", "dev", command]);
+        assert!(output.status.success(), "{command}: {:?}", output.stderr);
+        output.stdout
+    });
+    let agents = state.join("tau/agents");
+    if agents.exists() {
+        assert!(
+            std::fs::read_dir(&agents)
+                .expect("read baseline agent root")
+                .next()
+                .is_none(),
+            "baseline preview persisted an agent"
+        );
+        std::fs::remove_dir(&agents).expect("remove empty baseline agent root");
+    }
+    let state_before = state_tree_contents(&state);
+    make_tree_read_only(&state);
+
+    for (command, expected) in commands.into_iter().zip(baseline) {
+        let unflagged = preview(&home, None, &["--role", "engineer", "dev", command]);
+        assert!(
+            unflagged.status.success(),
+            "{command} without --ephemeral: {:?}",
+            unflagged.stderr
+        );
+        assert_eq!(unflagged.stdout, expected, "{command} output changed");
+
+        let explicit = preview(
+            &home,
+            None,
+            &["--ephemeral", "--role", "engineer", "dev", command],
+        );
+        assert!(
+            explicit.status.success(),
+            "{command} with --ephemeral: {:?}",
+            explicit.stderr
+        );
+        assert_eq!(
+            explicit.stdout, expected,
+            "{command} --ephemeral changed output"
+        );
+        assert_no_runtime_pairs(home.path());
+    }
+    assert_eq!(
+        state_tree_contents(&state),
+        state_before,
+        "diagnostic commands changed durable state"
+    );
+}
+
 /// Render previews do not create durable session/agent artifacts or leak
 /// runtime discovery pairs while ordinary configured extensions initialize
 /// their roots.

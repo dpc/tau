@@ -35,7 +35,12 @@ session-ephemeral mode suppresses only session-owned artifacts; memory-only
 mode replaces both semantic stores with process-local stores and disables every
 harness-managed persistent capability while preserving the ordinary event and
 extension lifecycle. Only the unique runtime discovery pair may exist while a
-memory-only daemon runs.
+memory-only daemon runs. Owned effective-prompt and tool-preview daemons combine
+session-ephemeral mode with a process-local agent store so their one preview
+agent cannot create durable state; provider and extension storage retain
+ordinary session-ephemeral semantics. The system-prompt preview remains fully
+memory-only. Normal durable and global session-ephemeral launches continue to
+use the durable agent store.
 
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, user-shell-report, prompt-fragment,

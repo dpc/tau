@@ -1019,6 +1019,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                             extension: &extension_cli_overrides,
                             extension_environment: None,
                             harness_config: &harness_config_overrides,
+                            memory_only_agent_store: false,
                         },
                         ephemeral,
                     )
@@ -1034,6 +1035,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                             extension: &extension_cli_overrides,
                             extension_environment: None,
                             harness_config: &harness_config_overrides,
+                            memory_only_agent_store: false,
                         },
                         ephemeral,
                     )

@@ -88,9 +88,10 @@ pub(crate) fn test_extension_name(value: impl AsRef<str>) -> tau_proto::Extensio
 #[cfg(feature = "provider-test-support")]
 pub use crate::daemon::run_embedded_message_with_test_provider;
 pub use crate::daemon::{
-    EPHEMERAL_ENV, EmbeddedOptions, HarnessStorageMode, InteractionOutcome, MEMORY_ONLY_ENV,
-    ServeOptions, SessionLaunchStatus, get_daemon_rendered_system_prompt,
-    get_daemon_rendered_tool_definitions, run_component, run_component_with_internal_tools,
+    EPHEMERAL_ENV, EmbeddedOptions, HarnessStorageMode, InteractionOutcome,
+    MEMORY_ONLY_AGENT_STORE_ENV, MEMORY_ONLY_ENV, ServeOptions, SessionLaunchStatus,
+    get_daemon_rendered_system_prompt, get_daemon_rendered_tool_definitions, run_component,
+    run_component_with_internal_tools,
     run_component_with_internal_tools_and_extension_cli_overrides,
     run_component_with_internal_tools_and_initial_ui_stdio, run_daemon,
     run_daemon_with_internal_tools, run_embedded_message, run_embedded_message_with_options,

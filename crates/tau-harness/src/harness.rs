@@ -2158,6 +2158,10 @@ pub(crate) struct HarnessStartupInputs {
     /// Whether startup ignores environment override and secret-source
     /// transports.
     pub(crate) ignore_startup_environment: bool,
+    /// Whether this diagnostic startup keeps all agent state process-local
+    /// while retaining the launch mode's ordinary extension storage
+    /// semantics.
+    pub(crate) memory_only_agent_store: bool,
     /// Absolute canonical project root captured for this harness startup.
     pub(crate) project_root: PathBuf,
 }
@@ -2213,6 +2217,9 @@ struct HarnessConstructionInputs {
     launch: HarnessSessionLaunch,
     /// Whether startup suppresses environment-backed secret sources.
     ignore_secret_source_environment: bool,
+    /// Whether the agent store is process-local independently of extension
+    /// storage.
+    memory_only_agent_store: bool,
     /// Absolute canonical project root captured for this harness startup.
     project_root: PathBuf,
 }
@@ -3973,6 +3980,7 @@ impl Harness {
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: false,
+                memory_only_agent_store: false,
                 project_root: std::env::current_dir()?.canonicalize()?,
             },
             &mut initial_client_error_stream,
@@ -4004,6 +4012,7 @@ impl Harness {
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: true,
+                memory_only_agent_store: false,
                 project_root: std::env::current_dir()?.canonicalize()?,
             },
             &mut initial_client_error_stream,
@@ -4047,6 +4056,7 @@ impl Harness {
             initial_client,
             internal_tool_handlers,
             ignore_startup_environment,
+            memory_only_agent_store,
             project_root,
         } = startup_inputs;
         let (mut harness, startup) = Self::build_configured_harness(
@@ -4057,6 +4067,7 @@ impl Harness {
             HarnessConstructionInputs {
                 launch,
                 ignore_secret_source_environment: ignore_startup_environment,
+                memory_only_agent_store,
                 project_root,
             },
         )?;
@@ -4165,12 +4176,20 @@ impl Harness {
         let HarnessConstructionInputs {
             launch,
             ignore_secret_source_environment,
+            memory_only_agent_store,
             project_root,
         } = construction;
         let startup_started_at = Instant::now();
+        if memory_only_agent_store && !launch.storage_mode.is_memory_only() {
+            std::fs::create_dir_all(&state_dir)?;
+        }
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening session store");
-        let (store, agent_store) =
-            Self::open_startup_stores(&state_dir, &sessions_dir, launch.storage_mode)?;
+        let (store, agent_store) = Self::open_startup_stores(
+            &state_dir,
+            &sessions_dir,
+            launch.storage_mode,
+            memory_only_agent_store,
+        )?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
         let secret_sources = if ignore_secret_source_environment {
             Default::default()
@@ -4263,13 +4282,14 @@ impl Harness {
         state_dir: &Path,
         sessions_dir: &Path,
         storage_mode: crate::HarnessStorageMode,
+        memory_only_agent_store: bool,
     ) -> Result<(SessionStore, AgentStore), HarnessError> {
         let store = if storage_mode.is_ephemeral() {
             SessionStore::open_ephemeral(sessions_dir)?
         } else {
             SessionStore::open_lazy(sessions_dir)?
         };
-        let agent_store = if storage_mode.is_memory_only() {
+        let agent_store = if storage_mode.is_memory_only() || memory_only_agent_store {
             AgentStore::open_memory_only(state_dir.join("agents"))
         } else {
             AgentStore::open_lazy(state_dir.join("agents"))?

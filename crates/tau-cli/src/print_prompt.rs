@@ -106,6 +106,7 @@ fn launch_render_daemon(
             extension: extension_cli_overrides,
             extension_environment: Some(extension_environment),
             harness_config: harness_config_overrides,
+            memory_only_agent_store: true,
         },
         storage_mode,
     )?;

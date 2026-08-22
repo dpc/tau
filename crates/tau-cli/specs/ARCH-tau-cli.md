@@ -283,8 +283,9 @@ and regression tests before they are emitted for ephemeral agents.
 configure ordinary extensions, and load one ephemeral preview agent through
 bounded context readiness. Session, preview-agent, journal, transcript, debug,
 and retention semantics remain process-local or omitted, so the commands create
-no resumable session or agent. Extensions retain ordinary User, Cache, Secret,
-direct-state, filesystem, network, and external-service reads and writes.
+no resumable session or agent and do not create or open the durable agent store.
+Extensions retain ordinary User, Cache, Secret, direct-state, filesystem,
+network, and external-service reads and writes.
 Both commands resolve one effective model/tool snapshot and do not call a
 provider. `print-system-prompt` retains the separate harness-wide MemoryOnly
 policy. Each owned preview runtime socket/discovery pair exists only while the

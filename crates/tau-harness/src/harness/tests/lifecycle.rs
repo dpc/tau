@@ -96,6 +96,7 @@ fn raw_secret_source_error_prevents_provider_start() {
                 initial_client: None,
                 internal_tool_handlers: Vec::new(),
                 ignore_startup_environment: false,
+                memory_only_agent_store: false,
                 project_root: tempdir.path().canonicalize().expect("project root"),
             },
             &mut initial_client_error_stream,

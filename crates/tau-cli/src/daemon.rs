@@ -414,6 +414,8 @@ pub(crate) struct DaemonCliOverrides<'a> {
     /// Parsed public extension environment to forward deterministically.
     pub(crate) extension_environment: Option<&'a [String]>,
     pub(crate) harness_config: &'a [tau_config::settings::HarnessConfigCliOverride],
+    /// Whether the owned child must keep agent storage process-local.
+    pub(crate) memory_only_agent_store: bool,
 }
 
 pub(crate) fn resolve_daemon(
@@ -466,6 +468,7 @@ fn start_daemon(
     } = output;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
+    let memory_only_agent_store = cli_overrides.memory_only_agent_store;
     let mut command = build_daemon_command(DaemonCommandSpec {
         tau_binary: &tau_binary,
         session_id,
@@ -477,6 +480,7 @@ fn start_daemon(
         cli_overrides,
         storage_mode,
     });
+    configure_agent_store_mode(&mut command, memory_only_agent_store);
     let runtime_instance_id = configure_runtime_instance(&mut command);
     let spawn_result = command.spawn();
 
@@ -505,6 +509,18 @@ fn start_daemon(
         initial_ui: Some(InitialUiStdio { stdin, stdout }),
         cleanup_runtime_pair_after_reap: matches!(storage_mode, HarnessStorageMode::MemoryOnly),
     })
+}
+
+/// Sets or explicitly clears the private preview-agent storage marker.
+///
+/// Clearing inherited input keeps ordinary durable and global
+/// session-ephemeral launches on the persistent agent store.
+fn configure_agent_store_mode(command: &mut Command, memory_only_agent_store: bool) {
+    if memory_only_agent_store {
+        command.env(tau_harness::MEMORY_ONLY_AGENT_STORE_ENV, "1");
+    } else {
+        command.env_remove(tau_harness::MEMORY_ONLY_AGENT_STORE_ENV);
+    }
 }
 
 /// Drains resumed stderr immediately, then appends only after the child creates
