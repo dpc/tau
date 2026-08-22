@@ -39,6 +39,7 @@ members = [
   "crates/tau-term-screen",
   "crates/tau-test-support",
   "crates/tau-themes",
+  "crates/tau-util-fs-err",
   "crates/tau-vcr",
 ]
 resolver = "2"
@@ -109,6 +110,7 @@ tau-supervisor = { path = "crates/tau-supervisor" }
 tau-term-screen = { path = "crates/tau-term-screen" }
 tau-test-support = { path = "crates/tau-test-support" }
 tau-themes = { path = "crates/tau-themes" }
+tau-util-fs-err = { path = "crates/tau-util-fs-err" }
 tau-vcr = { path = "crates/tau-vcr" }
 
 # External crates
@@ -151,6 +153,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
   "password",
 ] }
 dirs = { version = "6", default-features = false }
+fs-err = "=3.3.1"
 fs2 = { version = "0.4", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = [
   "sink",

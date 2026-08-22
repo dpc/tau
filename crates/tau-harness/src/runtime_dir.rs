@@ -1,7 +1,7 @@
 //! Daemon runtime directory management.
 //!
 //! Each discoverable harness daemon gets one socket plus one adjacent metadata
-//! file under `$XDG_RUNTIME_DIR/tau/harnesses/`:
+//! file under `<runtime-parent>/tau/harnesses/`:
 //!
 //! - `<pid>-<instance>.sock` — Unix socket for client connections
 //! - `<pid>-<instance>.json` — daemon metadata used for discovery
@@ -10,6 +10,11 @@
 //! verifies liveness. Running-session listing instead treats sockets as
 //! candidates and asks each responsive harness for its in-memory session
 //! identity.
+//!
+//! Normal processes select the ambient runtime parent from `XDG_RUNTIME_DIR`
+//! with the platform fallback below. One embedded operation may instead supply
+//! an explicit thread-scoped parent; it takes precedence for that operation and
+//! is restored after normal return or unwinding.
 
 use std::{
     collections as path_std_collections, fs as path_std_fs, io as path_std_io,
@@ -224,11 +229,13 @@ impl std::fmt::Display for FindHarnessForSessionError {
 
 impl std::error::Error for FindHarnessForSessionError {}
 
-/// Returns the root runtime directory for all tau daemon instances.
+/// Returns the effective Tau runtime root for the calling thread.
+///
+/// An explicit embedded-operation override takes precedence over the ambient
+/// XDG runtime parent and platform fallback.
 #[must_use]
 pub fn root_runtime_dir() -> PathBuf {
-    #[cfg(test)]
-    if let Some(dir) = test_runtime_dir_override() {
+    if let Some(dir) = runtime_dir_override() {
         return dir.join("tau");
     }
     dirs::runtime_dir()
@@ -246,32 +253,50 @@ pub fn root_runtime_dir() -> PathBuf {
         })
 }
 
-#[cfg(test)]
-fn test_runtime_dir_override() -> Option<PathBuf> {
-    TEST_RUNTIME_DIR.with(|dir| dir.borrow().clone())
+fn runtime_dir_override() -> Option<PathBuf> {
+    RUNTIME_DIR_OVERRIDE.with(|dir| dir.borrow().clone())
 }
 
-/// Test-only thread-scoped runtime root override.
-#[cfg(test)]
-pub(crate) struct RuntimeDirOverride;
+/// Restores the calling thread's previous runtime-directory override.
+pub(crate) struct RuntimeDirOverride {
+    /// Previous override restored when the embedded operation completes.
+    previous: Option<PathBuf>,
+}
 
-#[cfg(test)]
 impl Drop for RuntimeDirOverride {
     fn drop(&mut self) {
-        TEST_RUNTIME_DIR.with(|dir| *dir.borrow_mut() = None);
+        RUNTIME_DIR_OVERRIDE.with(|dir| *dir.borrow_mut() = self.previous.take());
     }
+}
+
+fn override_runtime_dir(path: &Path) -> RuntimeDirOverride {
+    let previous = RUNTIME_DIR_OVERRIDE.with(|dir| dir.borrow_mut().replace(path.to_path_buf()));
+    RuntimeDirOverride { previous }
+}
+
+/// Runs one embedded operation with an explicit thread-scoped runtime parent.
+///
+/// Nested scopes restore their predecessor after normal return or unwinding.
+pub(crate) fn with_runtime_dir<T>(path: Option<&Path>, operation: impl FnOnce() -> T) -> T {
+    let Some(path) = path else {
+        return operation();
+    };
+    let _scope = override_runtime_dir(path);
+    operation()
+}
+
+thread_local! {
+    static RUNTIME_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Installs a thread-scoped runtime root used by discovery tests.
 #[cfg(test)]
 pub(crate) fn override_test_runtime_dir(path: &Path) -> RuntimeDirOverride {
-    TEST_RUNTIME_DIR.with(|dir| *dir.borrow_mut() = Some(path.to_path_buf()));
-    RuntimeDirOverride
+    override_runtime_dir(path)
 }
 
 #[cfg(test)]
 thread_local! {
-    static TEST_RUNTIME_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     static TEST_CANCEL_AFTER_SESSION_METADATA_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -288,7 +313,7 @@ pub(crate) fn prepare_harnesses_dir() -> Result<PathBuf, std::io::Error> {
     ensure_private_runtime_dir(&root_dir)?;
     let harnesses_dir = root_dir.join(HARNESSES_DIR);
     ensure_private_runtime_dir(&harnesses_dir)?;
-    harnesses_dir.canonicalize()
+    tau_util_fs_err::canonicalize(harnesses_dir)
 }
 
 /// Returns the runtime path stem for one PID and process instance.
@@ -336,13 +361,13 @@ impl HarnessPaths {
     /// Writes the daemon metadata. Must be called after the socket is bound.
     pub fn write_metadata(&self) -> Result<(), std::io::Error> {
         let json = serde_json::to_vec_pretty(&self.metadata).map_err(path_std_io::Error::other)?;
-        std::fs::write(metadata_path(&self.path), json)
+        tau_util_fs_err::write(metadata_path(&self.path), json)
     }
 
     /// Removes the daemon socket and metadata.
     pub fn cleanup(&self) {
-        let _ = std::fs::remove_file(socket_path(&self.path));
-        let _ = std::fs::remove_file(metadata_path(&self.path));
+        let _ = tau_util_fs_err::remove_file(socket_path(&self.path));
+        let _ = tau_util_fs_err::remove_file(metadata_path(&self.path));
     }
 }
 
@@ -829,8 +854,8 @@ fn validate_session_id_for_metadata(
 }
 
 fn ensure_private_runtime_dir(path: &Path) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
+    tau_util_fs_err::create_dir_all(path)?;
+    let metadata = tau_util_fs_err::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Err(path_std_io::Error::new(
             path_std_io::ErrorKind::PermissionDenied,
@@ -870,7 +895,7 @@ fn ensure_private_runtime_dir_platform(
 
     let mode = metadata.permissions().mode() & 0o777;
     if mode != 0o700 {
-        std::fs::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))?;
+        tau_util_fs_err::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }

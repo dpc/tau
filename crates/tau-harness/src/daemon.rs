@@ -246,6 +246,11 @@ pub struct EmbeddedOptions {
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
     pub dirs: Option<tau_config::settings::TauDirs>,
+    /// Explicit process-runtime parent used only for this embedded operation.
+    ///
+    /// Supplying this keeps sockets and discovery metadata out of the ambient
+    /// user runtime directory without mutating process-global environment.
+    pub runtime_dir: Option<PathBuf>,
     /// Ignore all process-environment startup override transports.
     #[builder(default)]
     pub ignore_startup_environment: bool,
@@ -550,6 +555,32 @@ pub fn run_embedded_message_with_options(
 /// Runs one embedded interaction with harness-process tool handlers installed
 /// before the first agent and prompt are created.
 pub fn run_embedded_message_with_options_and_internal_tools(
+    state_dir: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+    options: EmbeddedOptions,
+    internal_tool_handlers: crate::InternalToolHandlers,
+) -> Result<InteractionOutcome, HarnessError> {
+    with_embedded_runtime_dir(options, |options| {
+        run_embedded_message_with_options_and_internal_tools_inner(
+            state_dir,
+            session_id,
+            message,
+            options,
+            internal_tool_handlers,
+        )
+    })
+}
+
+fn with_embedded_runtime_dir<T>(
+    options: EmbeddedOptions,
+    operation: impl FnOnce(EmbeddedOptions) -> T,
+) -> T {
+    let runtime_dir = options.runtime_dir.clone();
+    runtime_dir::with_runtime_dir(runtime_dir.as_deref(), || operation(options))
+}
+
+fn run_embedded_message_with_options_and_internal_tools_inner(
     state_dir: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
@@ -1405,7 +1436,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
 /// Resolves and validates the immutable directory identity advertised by a
 /// runtime harness.
 fn canonical_project_root(project_root: &Path) -> Result<PathBuf, HarnessError> {
-    let canonical = project_root.canonicalize()?;
+    let canonical = tau_util_fs_err::canonicalize(project_root)?;
     if !canonical.is_dir() {
         return Err(HarnessError::Participant(format!(
             "harness project root is not a directory: {}",

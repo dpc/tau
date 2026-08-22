@@ -37,6 +37,7 @@ tau-harness-tools.workspace = true
 tau-proto.workspace = true
 tau-socket.workspace = true
 tau-test-support.workspace = true
+tau-util-fs-err.workspace = true
 tau-vcr.workspace = true
 tempfile.workspace = true
 vt100.workspace = true

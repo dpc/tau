@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs::DirBuilder;
 use std::path::{Path, PathBuf};
+use std::{fmt, io};
 
 use tau_harness::{
     EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options_and_internal_tools,
@@ -11,6 +12,60 @@ use tau_harness::{
 use tempfile::TempDir;
 
 use crate::{ScenarioV1, ScenarioV2, sanitize_name};
+
+#[cfg(test)]
+mod tests;
+
+/// Failure to create a fixture temporary directory below the selected parent.
+#[derive(Debug)]
+struct FixtureTempDirError {
+    /// Parent below which `tempfile` attempted to create the directory.
+    parent: PathBuf,
+    /// Underlying `tempfile` filesystem failure.
+    source: io::Error,
+}
+
+impl fmt::Display for FixtureTempDirError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to create fixture temporary directory in parent {}: {}",
+            self.parent.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for FixtureTempDirError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn create_fixture_tempdir_in(parent: &Path) -> Result<TempDir, FixtureTempDirError> {
+    TempDir::new_in(parent).map_err(|source| FixtureTempDirError {
+        parent: parent.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    DirBuilder::new()
+        .mode(0o700)
+        .create(path)
+        .map_err(|source| {
+            io::Error::new(
+                source.kind(),
+                format!(
+                    "failed to create private fixture directory `{}`: {source}",
+                    path.display()
+                ),
+            )
+        })
+}
 
 /// Always-on hermetic fixture backed by supervised provider and tool
 /// subprocesses.
@@ -22,6 +77,8 @@ pub struct DeterministicFixture {
     config_dir: PathBuf,
     /// Isolated Tau state directory.
     state_dir: PathBuf,
+    /// Isolated process-runtime parent for sockets and discovery metadata.
+    runtime_dir: PathBuf,
     /// Durable harness session root.
     harness_state_dir: PathBuf,
     /// Synthetic provider observation trace.
@@ -433,10 +490,11 @@ impl DeterministicFixture {
             dummy_mode,
             status_policy,
         } = tool_surface;
-        let tempdir = TempDir::new()?;
+        let tempdir = create_fixture_tempdir_in(&tempfile::env::temp_dir())?;
         let root = tempdir.path().join(sanitize_name(name));
         let config_dir = root.join("config");
         let state_dir = root.join("state");
+        let runtime_dir = root.join("xdg-runtime");
         let harness_state_dir = root.join("harness-state");
         let artifacts_dir = root.join("artifacts");
         for private_root in [
@@ -446,24 +504,28 @@ impl DeterministicFixture {
             "xdg-cache",
             "xdg-runtime",
         ] {
-            std::fs::create_dir_all(root.join(private_root))?;
+            tau_util_fs_err::create_dir_all(root.join(private_root))?;
         }
-        std::fs::create_dir_all(&config_dir)?;
-        std::fs::create_dir_all(&state_dir)?;
-        std::fs::create_dir_all(&harness_state_dir)?;
-        std::fs::create_dir_all(&artifacts_dir)?;
+        tau_util_fs_err::create_dir_all(&config_dir)?;
+        tau_util_fs_err::create_dir_all(&state_dir)?;
+        tau_util_fs_err::create_dir_all(&harness_state_dir)?;
+        tau_util_fs_err::create_dir_all(&artifacts_dir)?;
         let shell_base = root.join("shell-base");
         let project = shell_base.join("project");
-        std::fs::create_dir_all(&project)?;
-        let shell_base = shell_base.canonicalize()?;
-        let project = project.canonicalize()?;
-        if shell_base.symlink_metadata()?.file_type().is_symlink()
-            || project.symlink_metadata()?.file_type().is_symlink()
+        tau_util_fs_err::create_dir_all(&project)?;
+        let shell_base = tau_util_fs_err::canonicalize(shell_base)?;
+        let project = tau_util_fs_err::canonicalize(project)?;
+        if tau_util_fs_err::symlink_metadata(&shell_base)?
+            .file_type()
+            .is_symlink()
+            || tau_util_fs_err::symlink_metadata(&project)?
+                .file_type()
+                .is_symlink()
         {
             return Err("core-shell scratch layout must not contain symlinks".into());
         }
         let outside_canary = root.join("outside-canary");
-        std::fs::write(&outside_canary, b"outside-canary:unchanged\n")?;
+        tau_util_fs_err::write(&outside_canary, b"outside-canary:unchanged\n")?;
         let trace_path = artifacts_dir.join("fake-provider.trace");
 
         let mut extensions = serde_json::Map::new();
@@ -514,10 +576,8 @@ impl DeterministicFixture {
                 "provider_context_raw_message": mode == FixtureMode::ProviderContextPlacement,
             });
             if dummy_mode == FixtureDummyMode::ExitOnceThenSuccess {
-                use std::os::unix::fs::DirBuilderExt;
-
                 let marker_root = root.join("exit-once-marker");
-                DirBuilder::new().mode(0o700).create(&marker_root)?;
+                create_private_directory(&marker_root)?;
                 dummy_config
                     .as_object_mut()
                     .expect("literal dummy config is an object")
@@ -679,17 +739,18 @@ impl DeterministicFixture {
             "extensions": extensions,
         });
         let config_bytes = serde_json::to_vec_pretty(&config)?;
-        std::fs::write(config_dir.join("harness.yaml"), &config_bytes)?;
-        std::fs::write(
+        tau_util_fs_err::write(config_dir.join("harness.yaml"), &config_bytes)?;
+        tau_util_fs_err::write(
             artifacts_dir.join("scenario.json"),
             serde_json::to_vec_pretty(&scenario)?,
         )?;
-        std::fs::write(artifacts_dir.join("harness-config.json"), config_bytes)?;
+        tau_util_fs_err::write(artifacts_dir.join("harness-config.json"), config_bytes)?;
 
         Ok(Self {
             tempdir: Some(tempdir),
             config_dir,
             state_dir,
+            runtime_dir,
             harness_state_dir,
             trace_path,
             expected_actions,
@@ -750,6 +811,7 @@ impl DeterministicFixture {
                     config_dir: Some(self.config_dir.clone()),
                     state_dir: Some(self.state_dir.clone()),
                 })
+                .runtime_dir(self.runtime_dir.clone())
                 .ignore_startup_environment(true)
                 .allowed_extensions(allowed_extensions)
                 .build(),
@@ -810,7 +872,7 @@ impl DeterministicFixture {
 
     /// Reads the bounded provider semantic trace.
     pub fn trace(&self) -> Result<String, std::io::Error> {
-        std::fs::read_to_string(&self.trace_path)
+        tau_util_fs_err::read_to_string(&self.trace_path)
     }
 
     /// Verifies the generated S1 main/worker role, model, and tool projection.
@@ -843,7 +905,7 @@ impl DeterministicFixture {
     pub fn assert_session_restore_multiple_worker_roles(
         &self,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        let config: serde_json::Value = serde_json::from_slice(&tau_util_fs_err::read(
             self.root().join("artifacts/harness-config.json"),
         )?)?;
         let agents = &config["agents"];
@@ -875,7 +937,7 @@ impl DeterministicFixture {
     pub fn assert_session_restore_interrupted_tool_roles(
         &self,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        let config: serde_json::Value = serde_json::from_slice(&tau_util_fs_err::read(
             self.root().join("artifacts/harness-config.json"),
         )?)?;
         let agents = &config["agents"];
@@ -905,7 +967,7 @@ impl DeterministicFixture {
     /// Returns an error when the generated role or extension configuration
     /// differs from the mixed-state fixture surface.
     pub fn assert_session_restore_mixed_roles(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        let config: serde_json::Value = serde_json::from_slice(&tau_util_fs_err::read(
             self.root().join("artifacts/harness-config.json"),
         )?)?;
         let agents = &config["agents"];
@@ -940,7 +1002,7 @@ impl DeterministicFixture {
         &self,
         main_tools: &[&str],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        let config: serde_json::Value = serde_json::from_slice(&tau_util_fs_err::read(
             self.root().join("artifacts/harness-config.json"),
         )?)?;
         let agents = &config["agents"];
@@ -999,7 +1061,7 @@ impl DeterministicFixture {
             .join("sessions")
             .join("deterministic-e2e-session")
             .join("events.jsonl");
-        let bytes = std::fs::read_to_string(path)?;
+        let bytes = tau_util_fs_err::read_to_string(path)?;
         Ok(tau_test_support::parse_published_trace_events(&bytes)?)
     }
 }
@@ -1031,7 +1093,7 @@ impl Drop for DeterministicFixture {
 }
 
 fn exact_binary(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let path = path.canonicalize()?;
+    let path = tau_util_fs_err::canonicalize(path)?;
     if !path.is_file() {
         return Err(format!("fixture binary is not a file: {}", path.display()).into());
     }

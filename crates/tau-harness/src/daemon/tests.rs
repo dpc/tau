@@ -13,6 +13,45 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Ensures the embedded-options seam applies its explicit runtime parent and
+/// restores ambient and nested roots after normal return and early exit.
+#[test]
+fn embedded_runtime_directory_scope_restores_after_return_and_early_exit() {
+    let ambient = crate::runtime_dir::root_runtime_dir();
+    let outer = TempDir::new().expect("outer runtime root");
+    let inner = TempDir::new().expect("inner runtime root");
+    let options = EmbeddedOptions::builder()
+        .runtime_dir(outer.path().to_path_buf())
+        .build();
+
+    with_embedded_runtime_dir(options.clone(), |_| {
+        assert_eq!(
+            crate::runtime_dir::root_runtime_dir(),
+            outer.path().join("tau")
+        );
+        crate::runtime_dir::with_runtime_dir(Some(inner.path()), || {
+            assert_eq!(
+                crate::runtime_dir::root_runtime_dir(),
+                inner.path().join("tau")
+            );
+        });
+        assert_eq!(
+            crate::runtime_dir::root_runtime_dir(),
+            outer.path().join("tau")
+        );
+    });
+    assert_eq!(crate::runtime_dir::root_runtime_dir(), ambient);
+
+    let early_exit = with_embedded_runtime_dir(options, |_| {
+        crate::runtime_dir::with_runtime_dir(Some(inner.path()), || {
+            Err::<(), _>("leave nested runtime scope")
+        })?;
+        Ok::<(), &str>(())
+    });
+    assert_eq!(early_exit, Err("leave nested runtime scope"));
+    assert_eq!(crate::runtime_dir::root_runtime_dir(), ambient);
+}
+
 /// Ensures the reusable embedded echo fixture does not discover caller-owned
 /// skills through the in-process shell extension.
 #[test]
@@ -389,7 +428,12 @@ fn drop_forwarder_with_timeout(forwarder: ListenerForwarder) {
 #[test]
 fn startup_error_is_sent_as_protocol_disconnect() {
     let (harness_end, ui_end) = UnixStream::pair().expect("stream pair");
-    let error = path_std_io::Error::other("missing startup setting");
+    let temp = TempDir::new().expect("temporary directory");
+    let failing_parent = temp.path().join("regular-file-parent");
+    std::fs::write(&failing_parent, b"not a directory").expect("create failing parent");
+    let metadata_path = failing_parent.join("daemon.json");
+    let error = tau_util_fs_err::write(&metadata_path, b"metadata")
+        .expect_err("metadata write below a regular file must fail");
 
     send_initial_client_startup_error(
         Some(InitialClientStartupErrorOutput::Stream(harness_end)),
@@ -406,7 +450,8 @@ fn startup_error_is_sent_as_protocol_disconnect() {
     };
     let reason = disconnect.reason.expect("disconnect reason");
     assert!(reason.contains("harness startup failed"));
-    assert!(reason.contains("missing startup setting"));
+    assert!(reason.contains("failed to create file"));
+    assert!(reason.contains(&metadata_path.display().to_string()));
 }
 
 /// Ensures daemon-owned startup failures after the initial UI has been accepted

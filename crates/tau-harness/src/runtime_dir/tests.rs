@@ -1,10 +1,61 @@
 use std::os::unix as path_std_os_unix;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::process::{Child, Command};
 
 use tempfile::TempDir;
 
 use super::*;
+
+/// Ensures low-level runtime scopes prepare separate private catalogs while two
+/// calling threads overlap.
+#[test]
+fn scoped_runtime_directories_do_not_cross_concurrent_threads() {
+    let first = TempDir::new().expect("first runtime root");
+    let second = TempDir::new().expect("second runtime root");
+    let first_path = first.path().to_path_buf();
+    let second_path = second.path().to_path_buf();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let mut releases = Vec::new();
+
+    let threads = [first_path, second_path].map(|path| {
+        let ready_tx = ready_tx.clone();
+        let (release_tx, release_rx) = mpsc::channel();
+        releases.push(release_tx);
+        std::thread::spawn(move || {
+            with_runtime_dir(Some(&path), || {
+                assert_eq!(root_runtime_dir(), path.join("tau"));
+                let harnesses = prepare_harnesses_dir().expect("private harness catalog");
+                assert!(harnesses.starts_with(&path));
+                assert_eq!(
+                    std::fs::metadata(&harnesses)
+                        .expect("harness catalog metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+                ready_tx.send(()).expect("report prepared catalog");
+                release_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("release overlapping runtime scope");
+                assert_eq!(root_runtime_dir(), path.join("tau"));
+            });
+        })
+    });
+    drop(ready_tx);
+
+    let first_ready = ready_rx.recv_timeout(Duration::from_secs(1));
+    let second_ready = ready_rx.recv_timeout(Duration::from_secs(1));
+    for release in releases {
+        let _ = release.send(());
+    }
+    for thread in threads {
+        thread.join().expect("runtime-root thread");
+    }
+    first_ready.expect("first catalog prepared");
+    second_ready.expect("second catalog prepared");
+}
 
 const TEST_DIRECTORY_ENTRY_LIMIT: usize = 3;
 

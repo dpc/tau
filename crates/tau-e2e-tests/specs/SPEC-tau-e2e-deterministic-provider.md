@@ -48,7 +48,9 @@ Only then does a named barrier release either ordinary text or parallel dummy
 calls. The target must observe the response, and for tool calls the complete
 aggregate, before both deferred inputs in exactly one successor prompt.
 
-The fixture uses fresh private config, state, session, and artifact directories.
+The fixture uses fresh private config, state, session, process-runtime, and
+artifact directories. Its embedded harness socket and discovery catalog remain
+below that process-runtime directory.
 It disables every unrelated built-in extension and normally enables only the
 no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled
 exception: the exact universal `component ext-shell` may expose only `workdir`

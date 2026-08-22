@@ -1554,6 +1554,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-err"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "fs2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5831,6 +5840,7 @@ dependencies = [
  "tau-proto",
  "tau-socket",
  "tau-test-support",
+ "tau-util-fs-err",
  "tau-vcr",
  "tempfile",
  "vt100",
@@ -6148,6 +6158,7 @@ dependencies = [
  "tau-session-inspect",
  "tau-skills",
  "tau-socket",
+ "tau-util-fs-err",
  "tempfile",
  "tracing",
 ]
@@ -6389,6 +6400,14 @@ version = "0.1.0"
 dependencies = [
  "json5",
  "serde",
+]
+
+[[package]]
+name = "tau-util-fs-err"
+version = "0.1.0"
+dependencies = [
+ "fs-err",
+ "tempfile",
 ]
 
 [[package]]

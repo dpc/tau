@@ -2685,8 +2685,8 @@ impl FakeState {
         let parent = path
             .parent()
             .ok_or_else(|| ClientError::handler("invalid cursor path"))?;
-        std::fs::create_dir_all(parent)
-            .map_err(|error| ClientError::handler(format!("create cursor directory: {error}")))?;
+        tau_util_fs_err::create_dir_all(parent)
+            .map_err(|error| ClientError::handler(error.to_string()))?;
         let tmp = path.with_extension("tmp");
         let scenario = self.v2()?;
         let checkpoint = CursorCheckpoint {
@@ -2715,14 +2715,13 @@ impl FakeState {
                 })
                 .collect(),
         };
-        std::fs::write(
+        tau_util_fs_err::write(
             &tmp,
             serde_json::to_vec(&checkpoint)
                 .map_err(|error| ClientError::handler(error.to_string()))?,
         )
-        .map_err(|error| ClientError::handler(format!("write cursor: {error}")))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|error| ClientError::handler(format!("commit cursor: {error}")))
+        .map_err(|error| ClientError::handler(error.to_string()))?;
+        tau_util_fs_err::rename(&tmp, path).map_err(|error| ClientError::handler(error.to_string()))
     }
 
     fn require_user_text(
@@ -3548,12 +3547,12 @@ impl ScenarioConfig {
                 child_agents: HashMap::new(),
             });
         };
-        match File::open(path) {
+        match tau_util_fs_err::File::open(path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
                 file.take(MAX_CHECKPOINT_BYTES + 1)
                     .read_to_end(&mut bytes)
-                    .map_err(|error| ClientError::handler(format!("read cursor: {error}")))?;
+                    .map_err(|error| ClientError::handler(error.to_string()))?;
                 if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
                     return Err(ClientError::handler(
                         "cursor checkpoint exceeds 65536 bytes",
@@ -3669,7 +3668,7 @@ impl ScenarioConfig {
                     child_agents: HashMap::new(),
                 })
             }
-            Err(error) => Err(ClientError::handler(format!("read cursor: {error}"))),
+            Err(error) => Err(ClientError::handler(error.to_string())),
         }
     }
 }

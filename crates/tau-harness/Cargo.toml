@@ -54,6 +54,7 @@ tau-proto.workspace = true
 tau-session-inspect.workspace = true
 tau-skills.workspace = true
 tau-socket.workspace = true
+tau-util-fs-err.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 

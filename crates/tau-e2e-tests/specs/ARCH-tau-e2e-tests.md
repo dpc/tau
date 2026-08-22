@@ -34,9 +34,10 @@ children; one fixed durable `UiCreateAgent` request creates the repair child so
 no fake grammar limit expands. Four checkpointed lane bindings, exact per-agent
 provider budgets, typed journals, and ID-keyed rosters enforce isolation across
 two no-input resumes.
-Generated configuration, durable session state,
-scenario data, provider trace, and extension stderr stay below a fresh private
-root. The provider accepts only strict inline `ScenarioV1` or `ScenarioV2`
+Generated configuration, durable session state, the embedded harness runtime
+socket/discovery catalog, scenario data, provider trace, and extension stderr
+stay below a fresh private root. The provider accepts only strict inline
+`ScenarioV1` or `ScenarioV2`
 configuration; V2 uses bounded exact-correlation lanes and clean-resume cursor
 checkpoints. It
 has no network, authentication, shell, child-process, prompt-control, or
