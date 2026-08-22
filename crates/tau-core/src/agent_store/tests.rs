@@ -857,7 +857,7 @@ fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
     assert!(matches!(error, AgentStoreError::InvalidSequence { .. }));
 }
 
-/// Inactive capture must acquire the exclusive lock before selecting EOF, so
+/// Inactive capture must acquire the shared lock before selecting EOF, so
 /// an append and writer release immediately before acquisition are included.
 #[test]
 fn journal_snapshot_selects_inactive_eof_after_lock_acquisition() {

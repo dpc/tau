@@ -1,7 +1,7 @@
 //! Stable, read-only snapshots of durable agent journals.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs as path_std_os_unix_fs;
@@ -24,7 +24,7 @@ pub struct AgentJournalLocks {
     agents_dir: std::path::PathBuf,
     /// Locked identities in lexical order.
     agent_ids: BTreeSet<AgentId>,
-    /// Exclusive lock handles retained for the snapshot lifetime.
+    /// Shared lock handles retained for the snapshot lifetime.
     _locks: Vec<File>,
 }
 
@@ -46,23 +46,8 @@ impl AgentJournalLocks {
         let mut locks = Vec::with_capacity(agent_ids.len());
         for agent_id in &agent_ids {
             let lock_path = agents_dir.join(agent_id.as_str()).join("lock");
-            let mut lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .map_err(|source| {
-                    if source.kind() == io::ErrorKind::NotFound {
-                        AgentStoreError::JournalMissing {
-                            path: lock_path.clone(),
-                        }
-                    } else {
-                        AgentStoreError::Open {
-                            path: lock_path.clone(),
-                            source,
-                        }
-                    }
-                })?;
-            if Fs2FileExt::try_lock_exclusive(&lock).is_err() {
+            let mut lock = open_existing_lock(&lock_path)?;
+            if Fs2FileExt::try_lock_shared(&lock).is_err() {
                 let mut holder = String::new();
                 let _ = lock.by_ref().take(4 * 1024).read_to_string(&mut holder);
                 return Err(AgentStoreError::Locked {
@@ -240,7 +225,7 @@ impl AgentJournalReader<'_> {
 impl AgentJournalSnapshot {
     /// Captures and validates finite committed prefixes for requested journals.
     ///
-    /// Inactive journals select EOF only after acquiring their exclusive lock.
+    /// Inactive journals select EOF only after acquiring their shared lock.
     /// A journal whose writer lock remains held uses its existing atomic,
     /// journal-bound checkpoint as the committed boundary. The snapshot retains
     /// each exact opened file identity and never waits for writer completion.
@@ -267,7 +252,7 @@ impl AgentJournalSnapshot {
             let lock = open_existing_lock(&lock_path)?;
             before_lock(agent_id);
             let journal_path = agent_dir.join("events.cbor");
-            let (journal, retained_lock) = match Fs2FileExt::try_lock_exclusive(&lock) {
+            let (journal, retained_lock) = match Fs2FileExt::try_lock_shared(&lock) {
                 Ok(()) => {
                     let file = open_existing_journal(&journal_path)?;
                     let covered_bytes = journal_len(&file, &journal_path)?;
@@ -404,13 +389,12 @@ impl AgentJournalSnapshot {
     }
 }
 
-/// Opens one existing lock file without creating or modifying it.
+/// Opens one existing lock file for read-only shared-lock synchronization.
+///
+/// Agent writers take exclusive locks, so a shared lock excludes them while
+/// allowing an immutable snapshot to avoid requesting filesystem write access.
 fn open_existing_lock(path: &Path) -> Result<File, AgentStoreError> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|source| missing_or_open(path, source))
+    File::open(path).map_err(|source| missing_or_open(path, source))
 }
 
 /// Opens one existing journal file without creating or modifying it.

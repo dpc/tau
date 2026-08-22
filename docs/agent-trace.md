@@ -25,7 +25,7 @@ A closed stdout pipe is a successful early consumer exit.
 
 Tau opens only existing lock, journal, and checkpoint files. It first attempts
 each selected lock nonblocking in lexical agent-ID order. For an inactive
-journal it acquires the exclusive lock before selecting the current EOF. When a
+journal it acquires a shared lock before selecting the current EOF. When a
 writer still holds the lock, Tau uses the existing atomic, journal-bound
 checkpoint to select the last published committed prefix. It retains each exact
 opened journal identity and strictly validates every selected prefix before

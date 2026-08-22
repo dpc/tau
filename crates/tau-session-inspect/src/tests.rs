@@ -1,5 +1,7 @@
 use std::io::Write as _;
 use std::{collections as path_std_collections, fs as path_std_fs, io as path_std_io};
+#[cfg(unix)]
+use std::{os::unix::fs::PermissionsExt as _, path::PathBuf};
 
 use opentelemetry_proto::tonic::collector::trace as path_opentelemetry_proto_tonic_collector_trace;
 use tau_proto::{
@@ -7,6 +9,63 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Restores fixture permissions if a recursively read-only trace test exits
+/// early.
+#[cfg(unix)]
+struct ReadOnlyTreeRestore {
+    /// Original Unix modes for every fixture path.
+    permissions: Vec<(PathBuf, u32)>,
+}
+
+#[cfg(unix)]
+impl ReadOnlyTreeRestore {
+    /// Removes write access from every existing fixture path.
+    fn make(root: &std::path::Path) -> path_std_io::Result<Self> {
+        let mut paths = Vec::new();
+        collect_paths(root, &mut paths)?;
+        let mut permissions = Vec::with_capacity(paths.len());
+        for path in &paths {
+            let mode = path_std_fs::metadata(path)?.permissions().mode();
+            permissions.push((path.clone(), mode));
+        }
+        let restore = Self { permissions };
+        for (path, mode) in &restore.permissions {
+            path_std_fs::set_permissions(path, path_std_fs::Permissions::from_mode(mode & !0o222))?;
+        }
+        Ok(restore)
+    }
+
+    /// Restores the fixture's original modes before its temporary directory
+    /// drops.
+    fn restore(&mut self) -> path_std_io::Result<()> {
+        while let Some((path, mode)) = self.permissions.last() {
+            path_std_fs::set_permissions(path, path_std_fs::Permissions::from_mode(*mode))?;
+            self.permissions.pop();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadOnlyTreeRestore {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// Collects `root` and every descendant before a test removes directory write
+/// access.
+#[cfg(unix)]
+fn collect_paths(root: &std::path::Path, paths: &mut Vec<PathBuf>) -> path_std_io::Result<()> {
+    paths.push(root.to_path_buf());
+    if root.is_dir() {
+        for entry in path_std_fs::read_dir(root)? {
+            collect_paths(&entry?.path(), paths)?;
+        }
+    }
+    Ok(())
+}
 
 fn export_trace(
     agents_dir: &std::path::Path,
@@ -1246,6 +1305,38 @@ fn agent_store_rejects_duplicate_terminal_before_trace_projection() {
         AgentTraceFormat::AgentPerformanceJsonl,
     )
     .expect("single terminal remains projectable");
+}
+
+/// Offline trace capture must retain writer synchronization without requesting
+/// write access to any existing agent-store artifact.
+#[cfg(unix)]
+#[test]
+fn agent_trace_exports_recursively_read_only_store() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-read-only").expect("agent id");
+    create_trace_agent(
+        temp.path(),
+        agent_id.as_str(),
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
+    append_trace_prompt(temp.path(), agent_id.as_str(), "immutable snapshot", 11);
+    let mut restore = ReadOnlyTreeRestore::make(temp.path()).expect("remove fixture write access");
+
+    let output = export_trace(
+        temp.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    )
+    .expect("offline trace from recursively read-only store");
+
+    assert!(
+        output.contains("immutable snapshot"),
+        "the actual trace path must export the read-only fixture"
+    );
+    restore.restore().expect("restore fixture permissions");
 }
 
 /// Trace preparation exports a lock-held committed prefix while rejecting
