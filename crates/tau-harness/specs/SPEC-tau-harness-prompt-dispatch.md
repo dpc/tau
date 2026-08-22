@@ -127,6 +127,11 @@ per-agent context;
 agents without `agent_start` omit the fragment from template data entirely.
 Role visibility is presentation-only: hidden roles remain available to explicit
 `agent_start` requests and retain their ordinary authorization and diagnostics.
+The same effective snapshot extends only the cloned provider-facing
+`agent_start` description with its sorted visible, available role names. This
+out-of-band discovery hint remains present when a custom system-prompt template
+omits prompt fragments; no visible names produces the unchanged base
+description.
 
 Tools tagged `provider-content:image` survive effective-tool filtering only
 when the selected route publishes image in both `input_modalities` and

@@ -29131,7 +29131,8 @@ impl Harness {
     ) -> Vec<tau_proto::ToolSpec> {
         let model_info = model.and_then(|model| self.provider_model_info.get(model));
         let supported_tool_types = model_info.map(|info| info.supported_tool_types.as_slice());
-        self.registry
+        let mut specs: Vec<_> = self
+            .registry
             .all_tool_providers()
             .into_iter()
             .filter(|provider| {
@@ -29165,7 +29166,27 @@ impl Harness {
                     )
             })
             .map(|provider| provider.tool.clone())
-            .collect()
+            .collect();
+        self.decorate_agent_start_descriptions(&mut specs);
+        specs
+    }
+
+    /// Add currently visible, model-available delegate role names to cloned
+    /// `agent_start` specs in an effective provider-facing snapshot.
+    fn decorate_agent_start_descriptions(&self, specs: &mut [tau_proto::ToolSpec]) {
+        let role_names = self.visible_available_delegate_role_names();
+        if role_names.is_empty() {
+            return;
+        }
+        let suffix = format!(". Roles: {}", role_names.join(", "));
+        for spec in specs
+            .iter_mut()
+            .filter(|spec| spec.name.as_str() == "agent_start")
+        {
+            if let Some(description) = &mut spec.description {
+                description.push_str(&suffix);
+            }
+        }
     }
 
     fn tool_model_visible_name<'a>(&self, spec: &'a tau_proto::ToolSpec) -> &'a ToolName {

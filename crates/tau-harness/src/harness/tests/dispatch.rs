@@ -860,6 +860,135 @@ fn hidden_delegate_roles_are_omitted_from_catalog_but_remain_explicitly_callable
     h.shutdown().expect("shutdown");
 }
 
+/// Effective `agent_start` snapshots expose only sorted visible roles. Hidden
+/// roles remain callable, while model-unavailable roles stay excluded from
+/// provider definitions and custom system-prompt templates.
+#[test]
+fn agent_start_definition_lists_visible_available_roles_without_prompt_catalog() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
+    let role = h.selected_role.clone();
+    h.available_roles.insert(
+        "alpha".to_owned(),
+        path_tau_config_settings::AgentRole::default(),
+    );
+    h.available_roles.insert(
+        "unavailable".to_owned(),
+        tau_config::settings::AgentRole {
+            model: Some("missing/model".into()),
+            ..Default::default()
+        },
+    );
+    h.available_roles
+        .get_mut("engineer-senior")
+        .expect("built-in senior role")
+        .visible = Some(false);
+    h.system_prompt_templates
+        .insert("no-fragments".to_owned(), "CUSTOM TEMPLATE".to_owned());
+    h.available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .prompt_override = Some("no-fragments".to_owned());
+
+    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, &role);
+    let specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+    let description = specs
+        .iter()
+        .find(|spec| spec.name.as_str() == "agent_start")
+        .and_then(|spec| spec.description.as_deref());
+    assert_eq!(
+        description,
+        Some("test agent_start. Roles: alpha, engineer, engineer-junior")
+    );
+    assert!(
+        !description
+            .expect("agent_start description")
+            .contains("unavailable")
+    );
+    assert!(
+        !description
+            .expect("agent_start description")
+            .contains("engineer-senior")
+    );
+    h.available_roles.insert(
+        "beta".to_owned(),
+        path_tau_config_settings::AgentRole::default(),
+    );
+    let specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+    let description = specs
+        .iter()
+        .find(|spec| spec.name.as_str() == "agent_start")
+        .and_then(|spec| spec.description.as_deref());
+    assert_eq!(
+        description,
+        Some("test agent_start. Roles: alpha, beta, engineer, engineer-junior")
+    );
+
+    let agent_id = crate::parse_agent_id(
+        h.create_durable_user_agent(h.current_session_id.clone(), &role)
+            .as_str(),
+    );
+    let system_prompt = h
+        .try_build_system_prompt_for_role_and_agent(
+            &role,
+            Some(&agent_id),
+            Some(&agent_id),
+            &specs,
+            model.as_ref(),
+            false,
+        )
+        .expect("render custom template");
+    assert_eq!(system_prompt, "CUSTOM TEMPLATE");
+
+    h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
+        .expect("submit prompt");
+    let provider_prompt = read_nth_prompt_created(&h, 0);
+    let provider_description = provider_prompt
+        .tools
+        .iter()
+        .find(|tool| tool.name.as_str() == "agent_start")
+        .and_then(|tool| tool.description.as_deref());
+    assert_eq!(provider_description, description);
+    let preview_description = h
+        .gather_tool_definitions_for_role(&role)
+        .into_iter()
+        .find(|tool| tool.name.as_str() == "agent_start")
+        .and_then(|tool| tool.description);
+    assert_eq!(preview_description.as_deref(), description);
+
+    h.available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .disable_tools
+        .push(ToolName::new("agent_start"));
+    assert!(
+        !h.gather_effective_tool_specs_for_role_model(&role, model.as_ref())
+            .iter()
+            .any(|spec| spec.name.as_str() == "agent_start")
+    );
+
+    for role in h.available_roles.values_mut() {
+        role.visible = Some(false);
+    }
+    h.available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .disable_tools
+        .retain(|tool| tool.as_str() != "agent_start");
+    let zero_visible_description = h
+        .gather_effective_tool_specs_for_role_model(&role, model.as_ref())
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "agent_start")
+        .and_then(|spec| spec.description);
+    assert_eq!(
+        zero_visible_description.as_deref(),
+        Some("test agent_start")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A first user prompt mints its durable agent identity lazily, so the delegate
 /// role context must be published before that prompt is rendered.
 #[test]

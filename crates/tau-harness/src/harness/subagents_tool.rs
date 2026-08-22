@@ -400,6 +400,51 @@ impl Harness {
     }
 
     pub(crate) fn publish_delegate_roles_context(&mut self) {
+        let roles: Vec<_> = self
+            .visible_available_delegate_roles()
+            .into_iter()
+            .map(|info| {
+                let description = info
+                    .role_description
+                    .as_deref()
+                    .filter(|description| !description.is_empty())
+                    .unwrap_or(&info.description);
+                serde_json::json!({
+                    "name": info.name,
+                    "description": description,
+                })
+            })
+            .collect();
+        let agent_ids: Vec<_> = self
+            .agents
+            .values()
+            .filter_map(|agent| agent.agent_id.clone())
+            .collect();
+        for agent_id in agent_ids {
+            self.agent_context.publish(
+                tau_proto::AgentId::parse(agent_id).expect("agent id"),
+                AgentContextKey::new("delegate_roles"),
+                crate::harness::harness_connection_id().clone(),
+                "harness".to_owned(),
+                AgentContextValue(serde_json::Value::Array(roles.clone())),
+            );
+        }
+    }
+
+    /// Return the visible delegate roles that can resolve to a current model.
+    ///
+    /// The built-in prompt catalog and provider-visible `agent_start`
+    /// description use this same selection.
+    pub(crate) fn visible_available_delegate_role_names(&self) -> Vec<String> {
+        self.visible_available_delegate_roles()
+            .into_iter()
+            .map(|info| info.name)
+            .collect()
+    }
+
+    /// Return the sorted visible delegate role catalog for the current model
+    /// registry.
+    fn visible_available_delegate_roles(&self) -> Vec<tau_proto::HarnessRoleInfo> {
         let mut roles: Vec<_> = crate::model::role_infos(
             &self.provider_model_info,
             &self.available_roles,
@@ -419,33 +464,9 @@ impl Harness {
             )
             .is_some()
         })
-        .map(|info| {
-            let description = info
-                .role_description
-                .as_deref()
-                .filter(|description| !description.is_empty())
-                .unwrap_or(&info.description);
-            serde_json::json!({
-                "name": info.name,
-                "description": description,
-            })
-        })
         .collect();
-        roles.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        let agent_ids: Vec<_> = self
-            .agents
-            .values()
-            .filter_map(|agent| agent.agent_id.clone())
-            .collect();
-        for agent_id in agent_ids {
-            self.agent_context.publish(
-                tau_proto::AgentId::parse(agent_id).expect("agent id"),
-                AgentContextKey::new("delegate_roles"),
-                crate::harness::harness_connection_id().clone(),
-                "harness".to_owned(),
-                AgentContextValue(serde_json::Value::Array(roles.clone())),
-            );
-        }
+        roles.sort_by(|a, b| a.name.cmp(&b.name));
+        roles
     }
 
     /// Reset retained wait correlation before dispatching a reused call ID.
