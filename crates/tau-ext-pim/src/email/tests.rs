@@ -3,6 +3,7 @@ use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections as path_std_collections, fs as path_std_fs, thread};
 
 use tau_proto::{
@@ -17,12 +18,28 @@ struct FramePair {
     writer: HarnessOutputWriter<BufWriter<UnixStream>>,
 }
 
-#[derive(Default)]
 struct FakeBackend {
     folders: BTreeMap<String, Vec<BackendFolder>>,
     messages: BTreeMap<(String, String), Vec<BackendMessage>>,
     sent: RefCell<Vec<OutgoingMessage>>,
     send_failure: Option<EmailSendFailure>,
+    recent_now: SystemTime,
+    recent_now_calls: RefCell<usize>,
+    recent_nows: RefCell<Vec<SystemTime>>,
+}
+
+impl Default for FakeBackend {
+    fn default() -> Self {
+        Self {
+            folders: BTreeMap::new(),
+            messages: BTreeMap::new(),
+            sent: RefCell::new(Vec::new()),
+            send_failure: None,
+            recent_now: UNIX_EPOCH,
+            recent_now_calls: RefCell::new(0),
+            recent_nows: RefCell::new(Vec::new()),
+        }
+    }
 }
 
 impl FakeBackend {
@@ -80,6 +97,7 @@ impl FakeBackend {
                 },
             ],
         );
+        fake.recent_now = unix_time("2026-05-25T00:00:00Z");
         fake
     }
 }
@@ -248,6 +266,12 @@ fn remove_flag(flags: &mut Vec<String>, flag: &str) {
 }
 
 impl EmailBackend for FakeBackend {
+    fn current_time(&self) -> SystemTime {
+        *self.recent_now_calls.borrow_mut() += 1;
+        self.recent_nows.borrow_mut().push(self.recent_now);
+        self.recent_now
+    }
+
     fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String> {
         Ok(self.folders.get(account).cloned().unwrap_or_default())
     }
@@ -587,6 +611,48 @@ fn email_action_invoke(invocation_id: &str) -> ActionInvoke {
 fn data_field<'a>(value: &'a CborValue, name: &str) -> &'a CborValue {
     let data = map_get(value, "data").expect("data");
     map_get(data, name).expect("field")
+}
+
+fn unix_time(value: &str) -> SystemTime {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .expect("test timestamp")
+        .into()
+}
+
+fn recent_message(uid: &str, date: &str) -> BackendMessage {
+    BackendMessage {
+        uid: uid.to_owned(),
+        uidvalidity: "uv1".to_owned(),
+        date: date.to_owned(),
+        from: "team@company.com".to_owned(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: format!("message {uid}"),
+        source_truncated: false,
+        body_text: String::new(),
+        flags: Vec::new(),
+        has_attachments: false,
+        attachments: Vec::new(),
+        message_id: None,
+        auth_results: vec![trusted_dkim_pass("company.com")],
+    }
+}
+
+fn listed_uids(result: &CborValue) -> Vec<String> {
+    let CborValue::Array(lines) = data_field(result, "messages") else {
+        panic!("recent result must have messages");
+    };
+    lines
+        .iter()
+        .map(|line| {
+            let CborValue::Text(line) = line else {
+                panic!("message row must be text");
+            };
+            line.split_once(' ')
+                .map(|(uid, _)| uid.to_owned())
+                .expect("message row must start with a uid")
+        })
+        .collect()
 }
 
 fn map_get<'a>(value: &'a CborValue, name: &str) -> Option<&'a CborValue> {
@@ -1694,6 +1760,136 @@ fn omitted_tool_scope_defaults_to_first_account_inbox_and_limit_100() {
     assert_eq!(
         data_field(&read, "folder"),
         &CborValue::Text("work/INBOX".to_owned())
+    );
+}
+
+/// Ensures a one-day recent listing is a rolling 24-hour window when the
+/// operation's local calendar date differs from the corresponding UTC date.
+#[test]
+fn recent_listing_uses_rolling_duration_across_local_and_utc_calendar_days() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut engine = engine(&temp);
+    engine.backend.recent_now = unix_time("2026-05-24T00:30:00+14:00");
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![
+            recent_message("old", "2026-05-22T10:29:59Z"),
+            recent_message("recent", "2026-05-22T10:30:01Z"),
+        ],
+    );
+
+    let result = engine.dispatch(EmailCommand::ListRecent {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 10,
+        cursor: None,
+        days: 1,
+    });
+
+    assert_eq!(listed_uids(&result), ["recent"]);
+}
+
+/// Ensures the exact cutoff is included and a multi-day listing filters stale
+/// candidates before applying its result limit or pagination cursor.
+#[test]
+fn recent_listing_includes_cutoff_before_limiting_multi_day_results() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut engine = engine(&temp);
+    engine.backend.recent_now = unix_time("2026-05-24T12:00:00Z");
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![
+            recent_message("old", "2026-05-21T11:59:59Z"),
+            recent_message("cutoff", "2026-05-21T12:00:00Z"),
+            recent_message("newer", "2026-05-23T12:00:00Z"),
+        ],
+    );
+
+    let first = engine.dispatch(EmailCommand::ListRecent {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 1,
+        cursor: None,
+        days: 3,
+    });
+    assert_eq!(listed_uids(&first), ["cutoff"]);
+    assert_eq!(text_field(&first, "next_cursor"), Some("1".to_owned()));
+
+    let second = engine.dispatch(EmailCommand::ListRecent {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 1,
+        cursor: text_field(&first, "next_cursor"),
+        days: 3,
+    });
+    assert_eq!(listed_uids(&second), ["newer"]);
+}
+
+/// Ensures the captured operation time is the inclusive upper bound, so mail
+/// that arrives after listing starts cannot enter that listing's window.
+#[test]
+fn recent_listing_excludes_messages_after_captured_now() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut engine = engine(&temp);
+    engine.backend.recent_now = unix_time("2026-05-24T12:00:00Z");
+    engine.backend.messages.insert(
+        ("work".to_owned(), "INBOX".to_owned()),
+        vec![
+            recent_message("at-now", "2026-05-24T12:00:00Z"),
+            recent_message("after-now", "2026-05-24T12:00:01Z"),
+        ],
+    );
+
+    let result = engine.dispatch(EmailCommand::ListRecent {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 10,
+        cursor: None,
+        days: 1,
+    });
+
+    assert_eq!(listed_uids(&result), ["at-now"]);
+}
+
+/// Ensures one operation reads its injected clock once and passes that same
+/// instant to the backend that forms both the server query and exact filter.
+#[test]
+fn recent_listing_captures_one_now_for_query_and_filtering() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut engine = engine(&temp);
+    let now = unix_time("2026-05-24T12:00:00Z");
+    engine.backend.recent_now = now;
+
+    let _ = engine.dispatch(EmailCommand::ListRecent {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 10,
+        cursor: None,
+        days: 2,
+    });
+
+    assert_eq!(*engine.backend.recent_now_calls.borrow(), 1);
+    assert_eq!(engine.backend.recent_nows.borrow().as_slice(), [now]);
+}
+
+/// Ensures a backend cannot silently omit a candidate that lacks a parseable
+/// internal timestamp while filtering the rolling duration.
+#[test]
+fn recent_listing_rejects_unusable_internal_timestamps() {
+    let result = paged_recent_messages(
+        vec![recent_message("bad-date", "not-a-timestamp")],
+        10,
+        0,
+        1,
+        unix_time("2026-05-24T12:00:00Z"),
+    );
+    let Err(error) = result else {
+        panic!("unusable internal timestamp must fail the listing");
+    };
+
+    assert_eq!(
+        error,
+        "invalid_data: IMAP message is missing a usable internal timestamp"
     );
 }
 

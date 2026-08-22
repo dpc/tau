@@ -37,13 +37,15 @@ use super::{
     AuthMethod, AuthenticationResultsEvidence, BackendAttachment, BackendFolder, BackendMessage,
     BackendMessagePage, EmailBackend, EmailOauth2Provider, EmailSendFailure, MessageFlagMutation,
     OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode, ValidatedAuthConfig,
-    ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig,
+    ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig, recent_cutoff,
 };
 use crate::google_oauth::{GoogleOauthClient, GoogleOauthSecretConfig};
 
 pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
 pub(super) const METADATA_HEADER_FETCH_MAX_BYTES: usize = 32 * 1024;
-const RECENT_SEARCH_FETCH_WINDOW: usize = 1000;
+const RECENT_SEARCH_FETCH_WINDOW: usize = 100;
+const RECENT_SEARCH_MAX_FETCH_REQUESTS: usize = 10;
+const RECENT_SEARCH_MAX_CANDIDATES: usize = 1000;
 pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER]<0.32768>)";
 pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str =
     "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.262144>)";
@@ -53,6 +55,54 @@ pub struct RealEmailBackend {
     accounts: BTreeMap<String, RealAccount>,
     runtime: Runtime,
     oauth: Arc<GoogleOauthClient>,
+}
+
+/// Bounds metadata requests and candidate rows while filling one recent-mail
+/// page.
+struct RecentSearchBudget {
+    /// Maximum sequential IMAP metadata fetches.
+    max_fetch_requests: usize,
+    /// Maximum candidate UIDs whose metadata may be fetched.
+    max_candidates: usize,
+    /// Metadata fetches consumed by this page.
+    fetch_requests: usize,
+    /// Candidate UIDs consumed by this page.
+    candidates: usize,
+}
+
+impl RecentSearchBudget {
+    /// Build a zero-consumption budget with the supplied provider bounds.
+    fn new(max_fetch_requests: usize, max_candidates: usize) -> Self {
+        Self {
+            max_fetch_requests,
+            max_candidates,
+            fetch_requests: 0,
+            candidates: 0,
+        }
+    }
+
+    /// Reserve the next bounded candidate range beginning at `start`.
+    fn next_fetch_end(&mut self, start: usize, total: usize) -> Result<usize, String> {
+        if self.max_fetch_requests <= self.fetch_requests {
+            return Err(
+                "IMAP recent listing exceeded the metadata fetch budget while filling filtered results"
+                    .to_owned(),
+            );
+        }
+        let remaining_candidates = self.max_candidates.saturating_sub(self.candidates);
+        if remaining_candidates == 0 {
+            return Err(
+                "IMAP recent listing exceeded the candidate-row budget while filling filtered results"
+                    .to_owned(),
+            );
+        }
+        let end = start
+            .saturating_add(RECENT_SEARCH_FETCH_WINDOW.min(remaining_candidates))
+            .min(total);
+        self.fetch_requests += 1;
+        self.candidates += end.saturating_sub(start);
+        Ok(end)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -194,12 +244,13 @@ impl EmailBackend for RealEmailBackend {
         limit: usize,
         offset: usize,
         days: u32,
+        now: SystemTime,
     ) -> Result<BackendMessagePage, String> {
         let account = self.account(account)?;
         let timeout_seconds = account.imap_config()?.timeout_seconds;
         let folder = folder.to_owned();
         self.block_with_timeout(timeout_seconds, async move {
-            list_recent_messages_page_async(&account, &folder, limit, offset, days).await
+            list_recent_messages_page_async(&account, &folder, limit, offset, days, now).await
         })
     }
 
@@ -519,6 +570,7 @@ async fn list_recent_messages_page_async(
     limit: usize,
     offset: usize,
     days: u32,
+    now: SystemTime,
 ) -> Result<BackendMessagePage, String> {
     if limit == 0 {
         return Ok(BackendMessagePage {
@@ -533,7 +585,8 @@ async fn list_recent_messages_page_async(
         .uid_validity
         .map(|value| value.to_string())
         .unwrap_or_default();
-    let since = imap_since_date(days)?;
+    let cutoff = recent_cutoff(now, days)?;
+    let since = imap_since_date(cutoff)?;
     let mut uids = session
         .uid_search(format!("SINCE {since}"))
         .await
@@ -542,67 +595,88 @@ async fn list_recent_messages_page_async(
         .collect::<Vec<_>>();
     uids.sort_unstable_by(|left, right| right.cmp(left));
     let total_matches = uids.len();
-    let fetch_start = offset.min(total_matches);
-    let fetch_end = offset
-        .saturating_add(limit)
-        .min(total_matches)
-        .min(fetch_start.saturating_add(RECENT_SEARCH_FETCH_WINDOW));
-    let page_uids = &uids[fetch_start..fetch_end];
-    if page_uids.is_empty() {
-        let _ = session.logout().await;
-        return Ok(BackendMessagePage {
-            messages: Vec::new(),
-            next_cursor: None,
-            truncated: false,
-        });
-    }
-    let uid_set = page_uids
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut fetches = session
-        .uid_fetch(uid_set, FETCH_METADATA_ITEMS)
-        .await
-        .map_err(imap_error)?;
     let mut messages = Vec::new();
-    while let Some(fetch) = fetches.try_next().await.map_err(imap_error)? {
-        let internal_timestamp = fetch
-            .internal_date()
-            .map(|date| date.timestamp())
-            .unwrap_or_default();
-        let uid = fetch.uid.unwrap_or(fetch.message);
-        messages.push((
-            internal_timestamp,
-            uid,
-            metadata_from_fetch(&fetch, &uidvalidity),
-        ));
+    let mut candidate_index = offset.min(total_matches);
+    let mut budget = RecentSearchBudget::new(
+        RECENT_SEARCH_MAX_FETCH_REQUESTS,
+        RECENT_SEARCH_MAX_CANDIDATES,
+    );
+    while candidate_index < total_matches && messages.len() < limit {
+        let fetch_start = candidate_index;
+        let fetch_end = budget.next_fetch_end(fetch_start, total_matches)?;
+        let uid_set = uids[candidate_index..fetch_end]
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut fetches = session
+            .uid_fetch(uid_set, FETCH_METADATA_ITEMS)
+            .await
+            .map_err(imap_error)?;
+        let mut batch = Vec::new();
+        while let Some(fetch) = fetches.try_next().await.map_err(imap_error)? {
+            let internal_date = fetch.internal_date().ok_or_else(|| {
+                "invalid_data: IMAP message is missing a usable internal timestamp".to_owned()
+            })?;
+            let internal_timestamp = SystemTime::from(internal_date);
+            let uid = fetch.uid.unwrap_or(fetch.message);
+            let candidate_index = uids[fetch_start..fetch_end]
+                .iter()
+                .position(|candidate_uid| *candidate_uid == uid)
+                .ok_or_else(|| {
+                    "invalid_data: IMAP server returned an unexpected message UID".to_owned()
+                })?
+                + fetch_start;
+            batch.push((
+                candidate_index,
+                internal_timestamp,
+                uid,
+                metadata_from_fetch(&fetch, &uidvalidity),
+            ));
+        }
+        drop(fetches);
+        batch.sort_unstable_by_key(|entry| entry.0);
+        let mut consumed_batch = true;
+        for (index, internal_timestamp, uid, message) in batch {
+            candidate_index = index.saturating_add(1);
+            if cutoff <= internal_timestamp && internal_timestamp <= now {
+                messages.push((internal_timestamp, uid, message));
+                if messages.len() == limit {
+                    consumed_batch = false;
+                    break;
+                }
+            }
+        }
+        if consumed_batch {
+            candidate_index = fetch_end;
+        }
     }
-    drop(fetches);
     let _ = session.logout().await;
 
     messages
         .sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-    let truncated = offset.saturating_add(limit) < total_matches;
-    let next_offset = offset.saturating_add(limit);
+    let truncated = candidate_index < total_matches;
     Ok(BackendMessagePage {
         messages: messages
             .into_iter()
             .take(limit)
             .map(|(_, _, message)| message)
             .collect(),
-        next_cursor: truncated.then(|| next_offset.to_string()),
+        next_cursor: truncated.then(|| candidate_index.to_string()),
         truncated,
     })
 }
 
-fn imap_since_date(days: u32) -> Result<String, String> {
-    let now_days = SystemTime::now()
+fn imap_since_date(cutoff: SystemTime) -> Result<String, String> {
+    let cutoff_days = cutoff
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "internal_error: system clock is before Unix epoch".to_owned())?
         .as_secs()
         / 86_400;
-    let since_days = now_days.saturating_sub(u64::from(days.saturating_sub(1)));
+    // IMAP `SINCE` accepts a server-calendar date rather than an instant. Start
+    // one UTC calendar day before the exact cutoff so any server-zone projection
+    // remains a superset; exact internal-timestamp filtering above owns results.
+    let since_days = cutoff_days.saturating_sub(1);
     let (year, month, day) = civil_date_from_unix_days(since_days as i64);
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

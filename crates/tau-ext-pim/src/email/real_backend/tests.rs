@@ -180,6 +180,50 @@ fn outgoing_message() -> OutgoingMessage {
     }
 }
 
+/// Ensures a rolling cutoff produces an early-enough IMAP calendar-date
+/// superset instead of restoring the old UTC-calendar-day duration semantics.
+#[test]
+fn recent_search_date_is_conservative_for_rolling_cutoff() {
+    let now: SystemTime = chrono::DateTime::parse_from_rfc3339("2026-05-24T00:30:00Z")
+        .expect("test timestamp")
+        .into();
+    let cutoff = recent_cutoff(now, 1).expect("cutoff");
+
+    assert_eq!(imap_since_date(cutoff).expect("IMAP date"), "22-May-2026");
+}
+
+/// Ensures stale candidates cannot force unbounded IMAP metadata requests or
+/// rows while a recent listing searches for a full filtered page.
+#[test]
+fn recent_search_budget_rejects_request_and_candidate_exhaustion() {
+    let mut request_budget = RecentSearchBudget::new(1, 1_000);
+    assert_eq!(
+        request_budget
+            .next_fetch_end(0, 101)
+            .expect("first fetch fits"),
+        100
+    );
+    let request_error = request_budget
+        .next_fetch_end(100, 101)
+        .expect_err("second fetch exceeds request budget");
+    assert!(request_error.contains("fetch budget"), "{request_error}");
+
+    let mut candidate_budget = RecentSearchBudget::new(10, 100);
+    assert_eq!(
+        candidate_budget
+            .next_fetch_end(0, 101)
+            .expect("first fetch fits"),
+        100
+    );
+    let candidate_error = candidate_budget
+        .next_fetch_end(100, 101)
+        .expect_err("second fetch exceeds candidate budget");
+    assert!(
+        candidate_error.contains("candidate-row budget"),
+        "{candidate_error}"
+    );
+}
+
 /// A server that reads the complete DATA block and then drops the connection
 /// exercises the real SMTP path's ambiguous acceptance boundary without sleeps.
 #[test]

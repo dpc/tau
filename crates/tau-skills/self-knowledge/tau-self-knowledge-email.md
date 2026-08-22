@@ -180,7 +180,7 @@ Advice:
 Incoming reads:
 
 - `email_list_folders` returns a `format` header plus one line per visible folder. Folder ids are opaque values to pass back exactly as returned to other email tools.
-- `email_list_recent` shows recent messages from IMAP internal-date search; omit `folder` to use the default folder. It returns a `format` header plus one line per message, redacts untrusted message details, and includes `access=full|preview|none`.
+- `email_list_recent(days=N)` shows messages whose IMAP internal timestamp falls in the inclusive rolling `N × 24 hour` window ending when the operation starts; omit `folder` to use the default folder. Tau uses a conservative IMAP date search, then exact-filters before limiting, so calendar boundaries do not omit qualifying messages. It returns a `format` header plus one line per message, redacts untrusted message details, and includes `access=full|preview|none`.
 - `email_read` returns full body content only when access is `full`, meaning policy passes or an exact incoming approval exists. Agent-visible read bodies are simplified and wrapped in `<external_unstrusted_message>...</external_unstrusted_message>`.
 - For `preview` access, `email_read` returns only a heavily stripped `body_preview`: HTML removed, links replaced with `LINK`, and only ASCII letters/digits, spaces, commas, and periods inside the wrapper. It does not ask the user for approval.
 - Use `email_request_access` for a preview/none message only when the preview or metadata justifies asking the user. Then use `:email in list`, `:email in open <id>`, and `:email in approve <id> [id...]`.

@@ -10,8 +10,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::rc as path_std_rc;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::DateTime;
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -2316,6 +2317,10 @@ pub enum EmailSendFailure {
 
 /// Minimal backend abstraction used by command handlers.
 pub trait EmailBackend {
+    /// Capture the current time for one recent-message listing operation.
+    fn current_time(&self) -> SystemTime {
+        SystemTime::now()
+    }
     /// List folders known to the backend for an account.
     fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String>;
     /// List messages known to the backend for an internal account/folder.
@@ -2331,18 +2336,19 @@ pub trait EmailBackend {
         let messages = self.list_messages(account, folder)?;
         paged_messages(messages, limit, offset)
     }
-    /// List one redaction-safe metadata page from messages whose IMAP internal
-    /// date is within the requested number of days.
+    /// List one redaction-safe metadata page whose IMAP internal timestamps are
+    /// within the rolling duration ending at `now`.
     fn list_recent_messages_page(
         &self,
         account: &str,
         folder: &str,
         limit: usize,
         offset: usize,
-        _days: u32,
+        days: u32,
+        now: SystemTime,
     ) -> Result<BackendMessagePage, String> {
         let messages = self.list_messages(account, folder)?;
-        paged_messages(messages, limit, offset)
+        paged_recent_messages(messages, limit, offset, days, now)
     }
     /// Fetch metadata needed for incoming policy checks without fetching the
     /// full body when the backend can support that.
@@ -3202,6 +3208,40 @@ fn paged_messages(
     })
 }
 
+/// Return the inclusive lower bound for a rolling recent-message duration.
+pub(super) fn recent_cutoff(now: SystemTime, days: u32) -> Result<SystemTime, String> {
+    now.checked_sub(Duration::from_secs(u64::from(days) * 24 * 60 * 60))
+        .ok_or_else(|| {
+            "internal_error: recent-message cutoff is before system time range".to_owned()
+        })
+}
+
+fn paged_recent_messages(
+    messages: Vec<BackendMessage>,
+    limit: usize,
+    offset: usize,
+    days: u32,
+    now: SystemTime,
+) -> Result<BackendMessagePage, String> {
+    let cutoff = recent_cutoff(now, days)?;
+    let messages = messages
+        .into_iter()
+        .filter_map(|message| {
+            let timestamp = DateTime::parse_from_rfc3339(&message.date)
+                .map_err(|_| {
+                    "invalid_data: IMAP message is missing a usable internal timestamp".to_owned()
+                })
+                .map(SystemTime::from);
+            match timestamp {
+                Ok(timestamp) if cutoff <= timestamp && timestamp <= now => Some(Ok(message)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paged_messages(messages, limit, offset)
+}
+
 fn format_folder_line(account_id: &str, folder: BackendFolder) -> CborValue {
     let flags = if folder.selectable {
         "selectable"
@@ -3648,6 +3688,7 @@ impl<B: EmailBackend> Engine<B> {
         cursor: Option<&str>,
         days: u32,
     ) -> CborValue {
+        let now = self.backend.current_time();
         self.list_messages(
             "list_recent",
             account_id,
@@ -3655,7 +3696,7 @@ impl<B: EmailBackend> Engine<B> {
             limit,
             cursor,
             |backend, account_id, folder, limit, offset| {
-                backend.list_recent_messages_page(account_id, folder, limit, offset, days)
+                backend.list_recent_messages_page(account_id, folder, limit, offset, days, now)
             },
         )
     }
@@ -5589,7 +5630,7 @@ fn email_common_arg_properties() -> serde_json::Value {
         "properties": {
             "folder": {"type": "string", "description": "Folder id from email_list_folders. Optional for folder-targeting commands; defaults to the default folder."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum messages to list. Optional; defaults to 100 and is capped at 100."},
-            "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "For email_list_recent, include messages with IMAP internal date in the last N calendar days. Optional; defaults to 7 and is capped at 365."},
+            "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "For email_list_recent, include messages whose IMAP internal timestamp falls within the inclusive rolling N × 24-hour window ending when the operation starts. Optional; defaults to 7 and is capped at 365."},
             "cursor": {"type": "string", "description": "Pagination cursor returned by email_list_recent."},
             "email_id": {"type": "string", "description": "Message id from email list results."},
             "uid": {"type": "string", "description": "Legacy message uid for the envelope email tool."},
@@ -5612,7 +5653,7 @@ fn email_command_properties(command: &str) -> serde_json::Value {
         "list_recent" => serde_json::json!({
             "folder": {"type": "string", "description": "Folder id from email_list_folders. Optional; defaults to the default folder."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum messages to return. Optional; defaults to 100."},
-            "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "Search messages from the last N days. Optional; defaults to 7."},
+            "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "Search messages in the inclusive rolling N × 24-hour window ending when the operation starts. Optional; defaults to 7."},
             "cursor": {"type": "string", "description": "Pagination cursor returned by email_list_recent."}
 
         }),
