@@ -11104,6 +11104,35 @@ fn render_compaction_block_styles_completed_status() {
     assert_eq!(ok.style, success_style);
 }
 
+/// Self-compaction metrics must use the generic neutral stats chip while only
+/// the terminal `ok` uses the success color.
+#[test]
+fn self_compaction_tool_row_styles_metrics_as_stats() {
+    let theme = cli_test_theme();
+    let display = EventRenderer::self_compaction_tool_use_state(
+        CompactionStatus::Success,
+        "~#110k → ~#27.7k (25%) ok".to_owned(),
+    );
+    let block = render_tool_block(&theme, &render_tool_use_state("compact", &display));
+    let cells = priority_header_cells(&block, 100);
+    let text: String = cells.iter().map(|cell| cell.ch).collect();
+    let metrics_start = text[..text.find("~#110k").expect("compaction metrics")]
+        .chars()
+        .count();
+    let ok_start = text[..text.rfind("ok").expect("terminal success status")]
+        .chars()
+        .count();
+
+    assert_eq!(
+        cells[metrics_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO)
+    );
+    assert_eq!(
+        cells[ok_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_SUCCESS)
+    );
+}
+
 #[test]
 fn render_empty_provider_response_placeholder_without_context_item() {
     let (_term, handle, vt) = setup(80, 24);
@@ -11222,7 +11251,10 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     }));
     sync(&handle);
     let compacted = vt.screen_text(100).join("\n");
-    assert!(compacted.contains("#226.2k → #4.5k (2%) ok"), "{compacted}");
+    assert!(
+        compacted.contains("#226.2k → #4.5k (2%) 0s ok"),
+        "{compacted}"
+    );
     assert!(!compacted.contains("complete"), "{compacted}");
 
     renderer.handle(&Event::ToolBackgroundResult(ToolBackgroundResult {

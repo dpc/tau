@@ -6547,15 +6547,7 @@ impl EventRenderer {
         };
         let mut display = render_tool_use_state(
             "compact",
-            &tau_proto::ToolUseState {
-                status: match status {
-                    CompactionStatus::Failure => tau_proto::ToolUseStatus::Error,
-                    CompactionStatus::Success => tau_proto::ToolUseStatus::Success,
-                    CompactionStatus::Progress => tau_proto::ToolUseStatus::InProgress,
-                },
-                status_text,
-                ..Default::default()
-            },
+            &Self::self_compaction_tool_use_state(status, status_text),
         );
         if let Some(duration) = Self::live_tool_duration(state) {
             Self::upsert_tool_duration_suffix(
@@ -6570,6 +6562,32 @@ impl EventRenderer {
             state.live_display = Some(display);
         }
         self.handle.redraw();
+    }
+
+    /// Separates standalone-compaction measurements from its terminal lifecycle
+    /// status so generic tool-row styling treats them as information chips.
+    pub(crate) fn self_compaction_tool_use_state(
+        status: CompactionStatus,
+        status_text: String,
+    ) -> tau_proto::ToolUseState {
+        let (status_text, info_chips) = match status {
+            CompactionStatus::Success => status_text
+                .strip_suffix(" ok")
+                .filter(|metrics| !metrics.is_empty())
+                .map(|metrics| ("ok".to_owned(), vec![metrics.to_owned()]))
+                .unwrap_or((status_text, Vec::new())),
+            CompactionStatus::Failure | CompactionStatus::Progress => (status_text, Vec::new()),
+        };
+        tau_proto::ToolUseState {
+            status: match status {
+                CompactionStatus::Failure => tau_proto::ToolUseStatus::Error,
+                CompactionStatus::Success => tau_proto::ToolUseStatus::Success,
+                CompactionStatus::Progress => tau_proto::ToolUseStatus::InProgress,
+            },
+            status_text,
+            info_chips,
+            ..Default::default()
+        }
     }
 
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
