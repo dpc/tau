@@ -287,13 +287,14 @@ fn decoded_output_count(writer: &SharedWriter) -> usize {
     count
 }
 
-/// A follower write failure must retire its cursor immediately and notify the
-/// harness control lane instead of waiting for eventual reader EOF.
+/// An initial-stdio UI follower failure must retire its cursor without
+/// overtaking an ordered detach request its independent ingress reader may
+/// hold.
 #[test]
-fn shared_follower_reports_writer_failure() {
+fn initial_stdio_follower_failure_waits_for_ingress_disconnect() {
     let log = EventLog::new();
     let (control_tx, control_rx) = mpsc::channel();
-    let writer_tx = spawn_writer_thread(FailingWriter, None);
+    let writer_tx = spawn_initial_stdio_writer_thread(FailingWriter, None);
     let connection_id = crate::test_connection_id("writer-failure");
     let mut sink = ChannelSink::new(
         &writer_tx,
@@ -302,6 +303,7 @@ fn shared_follower_reports_writer_failure() {
         connection_id.clone(),
     )
     .expect("configure follower");
+    let consumer = sink.handle();
     sink.send(tau_core::RoutedFrame::new(
         None,
         HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
@@ -313,13 +315,17 @@ fn shared_follower_reports_writer_failure() {
     ))
     .expect("admit frame");
 
-    assert!(matches!(
-        control_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(HarnessEvent::ReadFailed {
-            connection_id: failed,
-            ..
-        }) if failed == connection_id
-    ));
+    assert!(
+        consumer.wait_for_retirement(Duration::from_secs(1)),
+        "failing initial-stdio writer did not retire its consumer"
+    );
+    assert!(
+        matches!(
+            control_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected)
+        ),
+        "downlink failure must not overtake ingress detach/disconnect ordering"
+    );
 }
 
 /// Failing follower setup must roll back its registered generation so a closed

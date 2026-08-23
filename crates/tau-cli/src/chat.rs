@@ -226,9 +226,37 @@ impl RendererByteBudget {
 }
 
 struct UiConnection {
+    /// Harness-to-UI protocol stream.
     read_stream: Box<dyn Read + Send>,
+    /// Shared UI-to-harness protocol writer.
     writer: WriterHandle,
-    socket_shutdown_stream: Option<UnixStream>,
+    /// Transport-specific active read cancellation used before joining workers.
+    shutdown: UiTransportShutdown,
+}
+
+/// Active cancellation available for a UI transport's blocking read.
+enum UiTransportShutdown {
+    /// Parent endpoint paired with the harness's initial standard output.
+    InitialStdio(UnixStream),
+    /// Clone of an attached harness socket.
+    Socket(UnixStream),
+}
+
+impl UiTransportShutdown {
+    /// Returns the stream used to bound the admission handshake.
+    fn stream(&self) -> &UnixStream {
+        match self {
+            Self::InitialStdio(stream) | Self::Socket(stream) => stream,
+        }
+    }
+
+    /// Interrupts any blocking transport read before worker joins.
+    fn cancel(self) {
+        let stream = match self {
+            Self::InitialStdio(stream) | Self::Socket(stream) => stream,
+        };
+        let _ = stream.shutdown(Shutdown::Both);
+    }
 }
 
 fn connect_ui_transport(
@@ -239,12 +267,18 @@ fn connect_ui_transport(
     if let Some(initial_ui) = daemon.take_initial_ui_stdio() {
         tracing::debug!(target: "tau_cli::startup", "using harness stdio for initial UI connection");
         return Ok(UiConnection {
-            read_stream: Box::new(initial_ui.stdout),
+            read_stream: initial_ui.stdout,
             writer: Arc::new(Mutex::new(UiWriter::new(
                 initial_ui.stdin,
                 ui_io_meter.clone(),
             ))),
-            socket_shutdown_stream: None,
+            shutdown: UiTransportShutdown::InitialStdio(initial_ui.shutdown_stream.ok_or_else(
+                || {
+                    CliError::Participant(
+                        "owned harness initial UI transport cannot cancel reads".to_owned(),
+                    )
+                },
+            )?),
         });
     }
 
@@ -253,11 +287,11 @@ fn connect_ui_transport(
     let stream = UnixStream::connect(&socket_path)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "connected to harness daemon socket");
     let read_stream = stream.try_clone()?;
-    let socket_shutdown_stream = read_stream.try_clone()?;
+    let shutdown_stream = read_stream.try_clone()?;
     Ok(UiConnection {
         read_stream: Box::new(read_stream),
         writer: Arc::new(Mutex::new(UiWriter::new(stream, ui_io_meter.clone()))),
-        socket_shutdown_stream: Some(socket_shutdown_stream),
+        shutdown: UiTransportShutdown::Socket(shutdown_stream),
     })
 }
 
@@ -888,7 +922,7 @@ pub(crate) fn run_chat(
     let UiConnection {
         mut read_stream,
         writer,
-        socket_shutdown_stream,
+        shutdown,
     } = connect_ui_transport(&mut daemon, &ui_io_meter, startup_started_at)?;
 
     // UI connection handshake.
@@ -904,7 +938,7 @@ pub(crate) fn run_chat(
     let socket_reader_input = await_ui_session_admission(
         read_stream,
         session_id.clone(),
-        socket_shutdown_stream.as_ref(),
+        Some(shutdown.stream()),
         UI_SESSION_ADMISSION_TIMEOUT,
     )?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "verified UI session admission");
@@ -1396,6 +1430,7 @@ pub(crate) fn run_chat(
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
+    tracing::info!(target: "tau_cli::ui", "terminal UI input ready");
     let input_result = terminal_input_loop(
         &mut term,
         &writer,
@@ -1450,7 +1485,7 @@ pub(crate) fn run_chat(
 
     let reason = shutdown_ui_connection(
         writer,
-        socket_shutdown_stream,
+        shutdown,
         socket_reader,
         renderer_thread,
         exit,
@@ -1574,7 +1609,7 @@ impl InputLoopExit {
 
 fn shutdown_ui_connection(
     writer: WriterHandle,
-    socket_shutdown_stream: Option<UnixStream>,
+    shutdown: UiTransportShutdown,
     socket_reader: std::thread::JoinHandle<()>,
     renderer_thread: std::thread::JoinHandle<()>,
     exit: InputLoopExit,
@@ -1584,13 +1619,10 @@ fn shutdown_ui_connection(
     local_disconnect_started.store(true, Ordering::Release);
     send_ui_exit_frames(exit, &writer);
 
-    // Drop the writer, then explicitly shut down the extra stream clone kept
-    // by the main thread so the socket reader unblocks even if the daemon does
-    // not close promptly after the best-effort disconnect.
+    // Drop the writer, then actively cancel the read transport so the reader
+    // cannot wait on a daemon that intentionally survives detach.
     drop(writer);
-    if let Some(stream) = socket_shutdown_stream {
-        let _ = stream.shutdown(Shutdown::Both);
-    }
+    shutdown.cancel();
 
     join_ui_thread(socket_reader, "socket reader");
     join_ui_thread(renderer_thread, "renderer");

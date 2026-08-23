@@ -2,6 +2,8 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -25,8 +27,12 @@ const OWNED_DAEMON_EXIT_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 ///   daemon outlives us.
 /// - `Attached`: we joined a daemon someone else owns. Drop never touches it.
 pub(crate) struct InitialUiStdio {
-    pub(crate) stdin: std::process::ChildStdin,
-    pub(crate) stdout: std::process::ChildStdout,
+    /// Parent-side writer connected to the harness's standard input.
+    pub(crate) stdin: Box<dyn Write + Send>,
+    /// Parent-side reader connected to the harness's standard output.
+    pub(crate) stdout: Box<dyn Read + Send>,
+    /// Read-side endpoint retained so the UI can interrupt a blocking read.
+    pub(crate) shutdown_stream: Option<UnixStream>,
 }
 
 pub(crate) enum DaemonHandle {
@@ -508,13 +514,16 @@ fn start_daemon(
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
     let memory_only_agent_store = cli_overrides.memory_only_agent_store;
+    let (stdin_parent, stdin_child) = UnixStream::pair()?;
+    let (stdout_parent, stdout_child) = UnixStream::pair()?;
+    let stdout_shutdown_stream = stdout_parent.try_clone()?;
     let mut command = build_daemon_command(DaemonCommandSpec {
         tau_binary: &tau_binary,
         session_id,
         session_status,
-        stdout: Stdio::piped(),
+        stdout: Stdio::from(OwnedFd::from(stdout_child)),
         stderr,
-        stdin: Stdio::piped(),
+        stdin: Stdio::from(OwnedFd::from(stdin_child)),
         startup_role,
         cli_overrides,
         storage_mode,
@@ -535,18 +544,14 @@ fn start_daemon(
             .ok_or_else(|| CliError::Participant("missing harness stderr pipe".to_owned()))?;
         relay_stderr_after_lock_held_log(stderr, harness_log);
     }
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| CliError::Participant("missing harness stdin pipe".to_owned()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| CliError::Participant("missing harness stdout pipe".to_owned()))?;
     Ok(DaemonHandle::Owned {
         child: Some(child),
         harness_path,
-        initial_ui: Some(InitialUiStdio { stdin, stdout }),
+        initial_ui: Some(InitialUiStdio {
+            stdin: Box::new(stdin_parent),
+            stdout: Box::new(stdout_parent),
+            shutdown_stream: Some(stdout_shutdown_stream),
+        }),
         cleanup_runtime_pair_after_reap: matches!(storage_mode, HarnessStorageMode::MemoryOnly),
     })
 }

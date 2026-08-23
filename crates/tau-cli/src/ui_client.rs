@@ -233,7 +233,7 @@ pub(crate) fn connect_daemon_ui_client_with_timeout(
             initial_ui.stdin,
             client_name,
             expected_session_id,
-            None,
+            initial_ui.shutdown_stream,
             admission_timeout,
         )
     } else {

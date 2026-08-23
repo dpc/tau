@@ -23,7 +23,7 @@ use crate::extension::{
 use crate::harness::extensions::StartupDeadline;
 use crate::harness::provider_startup::{self, ProviderStartupSnapshot};
 use crate::harness::{
-    EXTENSION_RESTART_DELAY, HarnessSessionLaunch, HarnessStartupInputs,
+    ClientWriterFailure, EXTENSION_RESTART_DELAY, HarnessSessionLaunch, HarnessStartupInputs,
     MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES, PendingTool,
     PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
     extension_disconnected_tool_call_error_message, extension_restart_disabled_notice,
@@ -9484,6 +9484,7 @@ fn rejected_startup_handshake_flushes_disconnect_before_teardown() {
             },
             None,
             ConnectionOrigin::Socket,
+            ClientWriterFailure::Report,
         )
         .expect("accept startup client");
     let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
@@ -9546,6 +9547,7 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
             },
             None,
             ConnectionOrigin::Socket,
+            ClientWriterFailure::Report,
         )
         .expect("accept runtime client");
     let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
@@ -9610,6 +9612,7 @@ fn client_requested_disconnect_does_not_drain_stalled_writer() {
             },
             None,
             ConnectionOrigin::Socket,
+            ClientWriterFailure::Report,
         )
         .expect("accept runtime client");
     h.bus

@@ -628,7 +628,10 @@ fn spawn_reader_thread_inner(
 /// Cleanup ownership selected when a writer thread is spawned.
 enum WriterShutdown {
     /// Close only the transport stream.
-    CloseStream,
+    CloseStream {
+        /// Whether downlink failure immediately fails the whole connection.
+        report_failure: bool,
+    },
     /// Close child stdin, reap the child, and report completion.
     Supervised {
         /// Direct child owned exclusively by the writer until it is reaped.
@@ -810,7 +813,29 @@ pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
     protocol_io: Option<ProtocolIoMeter>,
 ) -> Sender<WriterCommand> {
-    let (tx, _) = spawn_writer_thread_inner(writer, WriterShutdown::CloseStream, protocol_io);
+    let (tx, _) = spawn_writer_thread_inner(
+        writer,
+        WriterShutdown::CloseStream {
+            report_failure: true,
+        },
+        protocol_io,
+    );
+    tx
+}
+
+/// Spawns a local UI writer whose independent ingress reader owns disconnect
+/// ordering and may still hold a detach request after downlink failure.
+pub(crate) fn spawn_initial_stdio_writer_thread(
+    writer: impl Write + Send + 'static,
+    protocol_io: Option<ProtocolIoMeter>,
+) -> Sender<WriterCommand> {
+    let (tx, _) = spawn_writer_thread_inner(
+        writer,
+        WriterShutdown::CloseStream {
+            report_failure: false,
+        },
+        protocol_io,
+    );
     tx
 }
 
@@ -931,7 +956,17 @@ fn spawn_writer_thread_inner(
                         log.acknowledge_egress(consumer, &pending);
                     }
                     log.retire_consumer_after_io(consumer);
-                    if writer_failed {
+                    // A local UI's ingress reader remains authoritative for
+                    // disconnect ordering: it may already hold a detach request
+                    // ahead of EOF while the downlink fails concurrently.
+                    // Supervised extensions retain writer-failure reporting
+                    // because their owned-child lifecycle has no independent
+                    // local-UI detach transition to preserve.
+                    let report_failure = match &shutdown {
+                        WriterShutdown::CloseStream { report_failure } => *report_failure,
+                        WriterShutdown::Supervised { .. } => true,
+                    };
+                    if writer_failed && report_failure {
                         let _ = failure_tx.send(HarnessEvent::ReadFailed {
                             connection_id,
                             error: "connection writer failed".to_owned(),
@@ -944,7 +979,7 @@ fn spawn_writer_thread_inner(
 
         // Channel closed or writer failed — run shutdown sequence.
         match shutdown {
-            WriterShutdown::CloseStream => {
+            WriterShutdown::CloseStream { .. } => {
                 // Drop the writer → closes the stream.
             }
             WriterShutdown::Supervised { child, completion } => {

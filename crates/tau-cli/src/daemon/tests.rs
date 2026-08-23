@@ -131,8 +131,9 @@ fn owned_daemon_drop_allows_disconnect_cleanup() {
         .spawn()
         .expect("spawn pipe-waiting child");
     let initial_ui = InitialUiStdio {
-        stdin: child.stdin.take().expect("child stdin"),
-        stdout: child.stdout.take().expect("child stdout"),
+        stdin: Box::new(child.stdin.take().expect("child stdin")),
+        stdout: Box::new(child.stdout.take().expect("child stdout")),
+        shutdown_stream: None,
     };
     let mut handle = DaemonHandle::Owned {
         child: Some(child),
@@ -170,8 +171,9 @@ fn owned_daemon_withheld_admission_times_out_and_cleans_up() {
         .spawn()
         .expect("spawn pipe-waiting child");
     let initial_ui = InitialUiStdio {
-        stdin: child.stdin.take().expect("child stdin"),
-        stdout: child.stdout.take().expect("child stdout"),
+        stdin: Box::new(child.stdin.take().expect("child stdin")),
+        stdout: Box::new(child.stdout.take().expect("child stdout")),
+        shutdown_stream: None,
     };
     let mut handle = DaemonHandle::Owned {
         child: Some(child),
@@ -208,8 +210,9 @@ fn owned_daemon_cleanup_has_forced_termination_fallback() {
         .spawn()
         .expect("spawn non-exiting child");
     let initial_ui = InitialUiStdio {
-        stdin: child.stdin.take().expect("child stdin"),
-        stdout: child.stdout.take().expect("child stdout"),
+        stdin: Box::new(child.stdin.take().expect("child stdin")),
+        stdout: Box::new(child.stdout.take().expect("child stdout")),
+        shutdown_stream: None,
     };
 
     stop_owned_daemon(&mut child, Some(initial_ui), Duration::ZERO);
@@ -237,8 +240,9 @@ fn diagnostic_owned_daemon_removes_runtime_pair_after_forced_reap() {
             .spawn()
             .expect("spawn non-exiting child");
         let initial_ui = InitialUiStdio {
-            stdin: child.stdin.take().expect("child stdin"),
-            stdout: child.stdout.take().expect("child stdout"),
+            stdin: Box::new(child.stdin.take().expect("child stdin")),
+            stdout: Box::new(child.stdout.take().expect("child stdout")),
+            shutdown_stream: None,
         };
         DaemonHandle::Owned {
             child: Some(child),

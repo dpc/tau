@@ -88,7 +88,6 @@ use crate::error::HarnessError;
 use crate::event::{
     ChannelSink, ComponentIngress, ComponentIngressCapacity, ComponentIngressSender,
     HarnessCommand, HarnessEvent, SUPERVISED_CLEANUP_GRACE, SynchronousSink, spawn_reader_thread,
-    spawn_writer_thread,
 };
 use crate::event_log::EventLog;
 #[cfg(any(test, feature = "echo-agent"))]
@@ -2141,6 +2140,15 @@ enum ClientMessageDisposition {
     Close,
     /// Drain the harness-authored terminal response before closing.
     CloseAfterReply,
+}
+
+/// Downlink-failure ownership selected when accepting a client transport.
+#[derive(Clone, Copy)]
+enum ClientWriterFailure {
+    /// Report downlink failure as an ordinary connection failure.
+    Report,
+    /// Let initial-stdio ingress preserve detach-before-EOF ordering.
+    AwaitIngress,
 }
 
 /// Initial UI transport owned by the harness process during startup.
@@ -11530,11 +11538,18 @@ impl Harness {
             write_stream,
             Some(shutdown_stream),
             ConnectionOrigin::Socket,
+            ClientWriterFailure::Report,
         )
     }
 
     pub(crate) fn accept_stdio_client(&mut self) -> Result<ConnectionId, HarnessError> {
-        self.accept_client_io(io::stdin(), io::stdout(), None, ConnectionOrigin::Socket)
+        self.accept_client_io(
+            io::stdin(),
+            io::stdout(),
+            None,
+            ConnectionOrigin::Socket,
+            ClientWriterFailure::AwaitIngress,
+        )
     }
 
     fn accept_client_io<R, W>(
@@ -11543,12 +11558,18 @@ impl Harness {
         write: W,
         socket_shutdown: Option<UnixStream>,
         origin: ConnectionOrigin,
+        writer_failure: ClientWriterFailure,
     ) -> Result<ConnectionId, HarnessError>
     where
         R: io::Read + Send + 'static,
         W: io::Write + Send + 'static,
     {
-        let writer_tx = spawn_writer_thread(write, None);
+        let writer_tx = match writer_failure {
+            ClientWriterFailure::Report => crate::event::spawn_writer_thread(write, None),
+            ClientWriterFailure::AwaitIngress => {
+                crate::event::spawn_initial_stdio_writer_thread(write, None)
+            }
+        };
         let conn_id = self.bus.reserve_connection_id();
         let sink = ChannelSink::new(
             &writer_tx,
