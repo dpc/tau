@@ -7004,10 +7004,8 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     h.shutdown().expect("shutdown");
 }
 
-/// Regression: a disconnect batch can contain a foreground call that completes
-/// the model's tool round plus a later background error. The foreground failure
-/// must not complete the agent turn and dispatch a follow-up until the
-/// background error from the same dead provider has also been recorded.
+/// A disconnect batch with foreground and background calls must finish in full
+/// before repairing a stale live projection and committing one successor.
 #[test]
 fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch() {
     let td = TempDir::new().expect("tempdir");
@@ -7089,6 +7087,12 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
             .turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
+    let AgentTurnState::ToolsRunning { remaining_calls } =
+        &mut h.agents.get_mut(&cid).expect("conversation").turn_state
+    else {
+        unreachable!("asserted tools-running state");
+    };
+    remaining_calls.push("stale-disconnect-projection".into());
 
     h.handle_disconnect(&crate::test_connection_id("conn-mixed-disconnect"));
 
@@ -7112,7 +7116,86 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
             .expect("post-disconnect follow-up prompt");
     assert!(foreground_error_seq < prompt_after_foreground_error_seq);
     assert!(background_error_seq < prompt_after_foreground_error_seq);
+    let successor = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::ProviderToolError(error)
+                if error.call_id.as_str() == "a-foreground-disconnect"
+        )),
+        1,
+        "disconnect repair must not duplicate the canonical foreground terminal"
+    );
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == successor.agent_prompt_id
+        )),
+        1,
+        "disconnect repair must commit one durable successor"
+    );
+    assert!(h.pending_agent_publish_completions.is_empty());
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A committed background placeholder closes the foreground round even though
+/// the real call remains live; stale runtime-only call entries must not strand
+/// that continuation or duplicate the canonical placeholder.
+#[test]
+fn background_placeholder_repairs_stale_foreground_projection() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let _tool = connect_test_tool(&mut h, "background-repair-tool");
+    h.registry.register(
+        &crate::test_connection_id("background-repair-tool"),
+        scheduled_test_tool_spec("background_repair", tau_proto::BackgroundSupport::Never),
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("start background repair".to_owned()),
+    )
+    .expect("dispatch prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_tool_response(
+        &prompt,
+        "background-repair-call",
+        "background_repair",
+        CborValue::Map(Vec::new()),
+    ))
+    .expect("dispatch tool");
+    let call_id: ToolCallId = "background-repair-call".into();
+    assert!(h.tool_turn.begin_backgrounding(&call_id));
+    h.observe_tool_backgrounded(&call_id);
+    let AgentTurnState::ToolsRunning { remaining_calls } =
+        &mut h.agents.get_mut(&cid).expect("agent").turn_state
+    else {
+        panic!("tool round must be running");
+    };
+    remaining_calls.push("stale-background-projection".into());
+
+    h.publish_synthetic_background_result(&call_id);
+
+    assert_eq!(background_placeholder_count(&h, call_id.as_str()), 1);
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        2,
+        "placeholder must start exactly one continuation"
+    );
+    let successor = read_nth_prompt_created(&h, 1);
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == successor.agent_prompt_id
+        )),
+        1,
+        "placeholder repair must commit one durable successor"
+    );
+    assert!(h.pending_agent_publish_completions.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -10442,6 +10525,264 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     assert!(saw_steered, "expected a AgentPromptSteered event");
     assert!(saw_next_round, "expected the next-round AgentPromptCreated");
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A watch notification received behind inference must activate after the
+/// terminal folds both the tool result and deferred message, even if the live
+/// tool projection retains a stale call absent from the durable round.
+#[test]
+fn watch_notification_folded_by_tool_terminal_starts_continuation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.tool_policy.default_shell_tool_style = Some(path_tau_config_settings::ShellToolStyle::Edit);
+
+    let watcher_cid = ensure_test_user_agent(&mut h);
+    let watched_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.dispatch_prompt_for_agent(
+        &watcher_cid,
+        PendingPrompt::user("start watcher tool round".to_owned()),
+    )
+    .expect("dispatch watcher prompt");
+    let initial = read_nth_prompt_created(&h, 0);
+    h.report_agent_work_status(
+        &watched_cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "changed while watcher inference runs".to_owned(),
+        )
+        .expect("valid status"),
+    )
+    .expect("publish watch notification");
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        1
+    );
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: initial.agent_prompt_id,
+        agent_id: initial.agent_id,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "watcher-tool-call".into(),
+            name: ToolName::new("edit"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(td.path().join("watched.txt").display().to_string()),
+                ),
+                (
+                    CborValue::Text("edits".to_owned()),
+                    CborValue::Array(vec![CborValue::Map(vec![
+                        (
+                            CborValue::Text("start_line".to_owned()),
+                            CborValue::Integer(1.into()),
+                        ),
+                        (
+                            CborValue::Text("end_line_exclusive".to_owned()),
+                            CborValue::Integer(1.into()),
+                        ),
+                        (
+                            CborValue::Text("newText".to_owned()),
+                            CborValue::Text("done".to_owned()),
+                        ),
+                        (
+                            CborValue::Text("context_line".to_owned()),
+                            CborValue::Text(String::new()),
+                        ),
+                    ])]),
+                ),
+            ]),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("dispatch watcher tool");
+    assert!(matches!(
+        h.agents[&watcher_cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+
+    drive_harness_until_call_completes(&mut h, "watcher-tool-call");
+
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        2,
+        "the first terminal must start a continuation containing the folded watch notification"
+    );
+    let continuation = read_nth_prompt_created(&h, 1);
+    let first_items = continuation.context.flatten();
+    let first_result = first_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ContextItem::ToolResult(result)
+                    if result.call_id.as_str() == "watcher-tool-call"
+            )
+        })
+        .expect("first tool result");
+    let first_watch = first_items
+        .iter()
+        .position(|item| {
+            text_part(item)
+                .is_some_and(|text| text.contains("changed while watcher inference runs"))
+        })
+        .expect("first folded watch status");
+    assert!(first_result < first_watch);
+    assert_eq!(
+        serde_json::to_string(&continuation.context)
+            .expect("serialize first continuation")
+            .matches("changed while watcher inference runs")
+            .count(),
+        1
+    );
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == "watcher-tool-call"
+        )),
+        1
+    );
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == continuation.agent_prompt_id
+        )),
+        1
+    );
+    assert!(h.pending_agent_publish_completions.is_empty());
+    h.report_agent_work_status(
+        &watched_cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "changed again while watcher inference runs".to_owned(),
+        )
+        .expect("valid status"),
+    )
+    .expect("publish second watch notification");
+    h.handle_provider_response_finished(provider_tool_response(
+        &continuation,
+        "watcher-second-tool-call",
+        "edit",
+        CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(td.path().join("watched-again.txt").display().to_string()),
+            ),
+            (
+                CborValue::Text("edits".to_owned()),
+                CborValue::Array(vec![CborValue::Map(vec![
+                    (
+                        CborValue::Text("start_line".to_owned()),
+                        CborValue::Integer(1.into()),
+                    ),
+                    (
+                        CborValue::Text("end_line_exclusive".to_owned()),
+                        CborValue::Integer(1.into()),
+                    ),
+                    (
+                        CborValue::Text("newText".to_owned()),
+                        CborValue::Text("done again".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("context_line".to_owned()),
+                        CborValue::Text(String::new()),
+                    ),
+                ])]),
+            ),
+        ]),
+    ))
+    .expect("dispatch second watcher tool");
+    let AgentTurnState::ToolsRunning { remaining_calls } =
+        &mut h.agents.get_mut(&watcher_cid).expect("watcher").turn_state
+    else {
+        panic!("second tool round must be running");
+    };
+    remaining_calls.push("stale-runtime-only-call".into());
+    drive_harness_until_call_completes(&mut h, "watcher-second-tool-call");
+    assert_eq!(
+        event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        3,
+        "the second terminal must not strand the next folded watch notification"
+    );
+    let second_continuation = read_nth_prompt_created(&h, 2);
+    let second_items = second_continuation.context.flatten();
+    let second_result = second_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ContextItem::ToolResult(result)
+                    if result.call_id.as_str() == "watcher-second-tool-call"
+            )
+        })
+        .expect("second tool result");
+    let second_watch = second_items
+        .iter()
+        .position(|item| {
+            text_part(item)
+                .is_some_and(|text| text.contains("changed again while watcher inference runs"))
+        })
+        .expect("second folded watch status");
+    assert!(second_result < second_watch);
+    assert_eq!(
+        serde_json::to_string(&second_continuation.context)
+            .expect("serialize second continuation")
+            .matches("changed again while watcher inference runs")
+            .count(),
+        1
+    );
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == second_continuation.agent_prompt_id
+        )),
+        1
+    );
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == "watcher-second-tool-call"
+        )),
+        1,
+        "repair must not duplicate the canonical terminal"
+    );
+    assert!(
+        h.pending_agent_publish_completions.is_empty(),
+        "successful repair must not retain a publication completion"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -19391,6 +19732,163 @@ fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
         1
     );
     h.shutdown().expect("shutdown");
+}
+
+/// Initial and post-tool normal/canceled terminals each own one durable outer
+/// finish and protected automatic-compaction start, with no retained
+/// completion.
+#[test]
+fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
+    for post_tool in [false, true] {
+        for canceled in [false, true] {
+            let td = TempDir::new().expect("tempdir");
+            let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+            enable_remote_compaction_for_test_model(&mut h);
+            let info = h
+                .provider_model_info
+                .get_mut(&"test/model".into())
+                .expect("test model");
+            info.supports_compaction = false;
+            info.supports_standalone_compaction = true;
+            let cid = ensure_test_user_agent(&mut h);
+            h.available_roles
+                .get_mut(&h.selected_role)
+                .expect("selected role")
+                .compactions
+                .insert(
+                    "owned-terminal-matrix".to_owned(),
+                    tau_config::settings::CompactionPolicy {
+                        threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(1),
+                        enable: true,
+                        when: tau_config::settings::ContextPolicyWhen {
+                            at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                            statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                        },
+                    },
+                );
+            {
+                let agent = h.agents.get_mut(&cid).expect("agent");
+                agent.context_input_tokens = Some(100);
+                agent.context_usage_model = Some("test/model".into());
+                agent.context_usage_head = agent.head;
+            }
+            h.dispatch_prompt_for_agent(
+                &cid,
+                PendingPrompt::user(format!("matrix post_tool={post_tool} canceled={canceled}")),
+            )
+            .expect("dispatch initial inference");
+            let initial = read_nth_prompt_created(&h, 0);
+            let terminal_prompt = if post_tool {
+                h.handle_provider_response_finished(provider_tool_response(
+                    &initial,
+                    "matrix-tool",
+                    "self_info",
+                    CborValue::Map(Vec::new()),
+                ))
+                .expect("finish matrix tool round");
+                read_nth_prompt_created(&h, 1)
+            } else {
+                initial
+            };
+            if canceled {
+                h.finalize_canceled_in_flight_prompt(&cid);
+            } else {
+                let mut response = provider_text_response(
+                    &terminal_prompt.agent_prompt_id,
+                    terminal_prompt.agent_id.clone(),
+                    "done",
+                );
+                response.usage = Some(tau_proto::ProviderTokenUsage {
+                    prompt_sent_tokens: 250,
+                    response_received_tokens: 1,
+                    ..Default::default()
+                });
+                h.handle_provider_response_finished(response)
+                    .expect("finish matrix inference");
+            }
+
+            let records = h
+                .agent_store
+                .agent_events(terminal_prompt.agent_id.as_str())
+                .expect("durable records");
+            let terminals = records
+                .iter()
+                .filter_map(|record| match &record.event {
+                    Event::ProviderResponseFinished(response)
+                        if response.agent_prompt_id == terminal_prompt.agent_prompt_id =>
+                    {
+                        Some(&record.event)
+                    }
+                    Event::AgentPromptTerminated(terminated)
+                        if terminated.agent_prompt_id == terminal_prompt.agent_prompt_id =>
+                    {
+                        Some(&record.event)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                terminals.len(),
+                1,
+                "post_tool={post_tool} canceled={canceled}"
+            );
+            let decision = match terminals[0] {
+                Event::ProviderResponseFinished(response) if !canceled => response
+                    .automatic_compaction_decision
+                    .as_ref()
+                    .expect("ordinary terminal owns decision"),
+                Event::AgentPromptTerminated(terminated) if canceled => terminated
+                    .automatic_compaction_decision
+                    .as_ref()
+                    .expect("canceled terminal owns decision"),
+                Event::ProviderResponseFinished(_) | Event::AgentPromptTerminated(_) => {
+                    panic!(
+                        "terminal variant disagrees with post_tool={post_tool} canceled={canceled}"
+                    )
+                }
+                _ => unreachable!("filtered canonical terminal"),
+            };
+            let transaction_id = &decision.transaction_id;
+            let finishes = records
+                .iter()
+                .filter_map(|record| match &record.event {
+                    Event::AgentOuterTurnFinished(finished)
+                        if finished.outer_turn_id == decision.outer_turn_id =>
+                    {
+                        Some(finished)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                finishes.len(),
+                1,
+                "post_tool={post_tool} canceled={canceled}"
+            );
+            assert_eq!(
+                finishes[0].automatic_compaction_decision.as_ref(),
+                Some(transaction_id),
+                "post_tool={post_tool} canceled={canceled}"
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| matches!(
+                        &record.event,
+                        Event::AgentStandaloneCompactionStarted(started)
+                            if &started.transaction_id == transaction_id
+                    ))
+                    .count(),
+                1,
+                "post_tool={post_tool} canceled={canceled}"
+            );
+            assert!(
+                h.pending_agent_publish_completions.is_empty(),
+                "post_tool={post_tool} canceled={canceled}"
+            );
+            h.shutdown().expect("shutdown");
+        }
+    }
 }
 
 /// The legacy CLI threshold remains a compound edit: it updates inline/reactive

@@ -8652,6 +8652,7 @@ impl Harness {
             } else {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
+                self.repair_closed_foreground_tool_turn(&cid, call_id);
             }
         }
     }
@@ -8677,6 +8678,7 @@ impl Harness {
         self.drain_pending_tool_invocations_or_report();
         for (completed_call_id, completed_cid) in completed {
             self.maybe_complete_agent_turn_for(&completed_cid, completed_call_id.as_str());
+            self.repair_closed_foreground_tool_turn(&completed_cid, &completed_call_id);
         }
         self.drain_publish_idle_dispatches();
         self.try_advance_queue();
@@ -32958,11 +32960,14 @@ impl Harness {
 
     pub(crate) fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
         let owner = self.tool_agents.get(call_id).cloned();
-        if let Some(cid) = owner {
-            self.emit_agent_stats_updated(&cid);
+        if let Some(cid) = owner.as_ref() {
+            self.emit_agent_stats_updated(cid);
         }
         self.drain_pending_tool_invocations_or_report();
         self.maybe_complete_agent_turn(call_id);
+        if let Some(cid) = owner {
+            self.repair_closed_foreground_tool_turn(&cid, &ToolCallId::from(call_id));
+        }
         self.try_advance_queue();
     }
 
@@ -33431,6 +33436,48 @@ impl Harness {
             // steered prompts are queued behind one interceptor.
             self.dispatch_activation_after_publish_idle(cid);
         }
+    }
+
+    /// Repair a stale runtime tool projection after the durable branch and all
+    /// live call owners agree that the foreground round has closed.
+    ///
+    /// The synthetic one-call `ToolsRunning` state is intentional:
+    /// [`Harness::maybe_complete_agent_turn_for`] owns the complete
+    /// continuation seam, including reminders, compaction, wakes, steers,
+    /// and retained publications. Setting `Idle` directly would bypass
+    /// those obligations.
+    fn repair_closed_foreground_tool_turn(
+        &mut self,
+        cid: &AgentId,
+        completed_call_id: &ToolCallId,
+    ) {
+        let projected_running = self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| matches!(agent.turn_state, AgentTurnState::ToolsRunning { .. }));
+        let live_foreground_call = self
+            .tool_agents
+            .iter()
+            .any(|(call_id, owner)| owner == cid && !self.tool_turn.is_backgrounded(call_id));
+        if !projected_running
+            || live_foreground_call
+            || self.agent_has_open_foreground_tool_round(cid)
+        {
+            return;
+        }
+
+        tracing::warn!(
+            target: "tau_harness",
+            conversation_id = %cid,
+            call_id = %completed_call_id,
+            "repairing closed foreground tool round left in the runtime projection"
+        );
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.turn_state = AgentTurnState::ToolsRunning {
+                remaining_calls: vec![completed_call_id.clone()],
+            };
+        }
+        self.maybe_complete_agent_turn_for(cid, completed_call_id.as_str());
     }
 
     /// Fold one pending Working reminder into the complete foreground
