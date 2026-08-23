@@ -544,28 +544,6 @@ fn reject_attach_startup_overrides(
     Ok(())
 }
 
-fn reject_attach_extension_environment(environment_names: &[String]) -> Result<(), CliError> {
-    if environment_names.is_empty() {
-        return Ok(());
-    }
-    Err(CliError::Participant(format!(
-        "`tau attach` cannot apply {} to an already-running daemon",
-        tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV
-    )))
-}
-
-fn reject_attach_tau_state_access_environment(
-    tau_state_access: Option<tau_config::settings::TauStateAccess>,
-) -> Result<(), CliError> {
-    if tau_state_access.is_none() {
-        return Ok(());
-    }
-    Err(CliError::Participant(format!(
-        "`tau attach` cannot apply {} to an already-running daemon",
-        tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV
-    )))
-}
-
 fn reject_ephemeral_incompatible(
     ephemeral: bool,
     startup_mode: &StartupMode,
@@ -738,19 +716,26 @@ pub fn main_with_args() -> std::process::ExitCode {
 pub fn main_with_args_and_components(components: &[Component]) -> std::process::ExitCode {
     use std::process::ExitCode;
 
-    use clap::Parser;
+    use clap::{CommandFactory, FromArgMatches};
 
     let run = || -> Result<(), CliError> {
         let role_cli_overrides = parse_role_cli_overrides(std::env::args_os());
         let extension_cli_overrides = parse_extension_cli_overrides(std::env::args_os());
         let mut harness_config_overrides = parse_harness_config_cli_overrides(std::env::args_os())
             .map_err(CliError::Participant)?;
+        let clap_command = cli::Cli::command();
+        let clap_matches = clap_command.get_matches();
+        let profile_was_explicitly_selected = matches!(
+            clap_matches.value_source("profile"),
+            Some(clap::parser::ValueSource::CommandLine)
+        );
         let cli::Cli {
             version,
             harness,
             run,
             command,
-        } = cli::Cli::parse();
+        } = cli::Cli::from_arg_matches(&clap_matches)
+            .expect("arguments accepted by Cli::command must parse as Cli");
         let provider_alias_environment =
             std::env::var_os(tau_config::settings::TAU_PROVIDER_ALIASES_ENV);
         let model_alias_environment = std::env::var_os(tau_config::settings::TAU_MODEL_ALIASES_ENV);
@@ -789,6 +774,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             &command,
             DispatchCommand::Other(cli::Command::Component { name, .. }) if name == "harness"
         );
+        let attaching = matches!(
+            &command,
+            DispatchCommand::Startup {
+                mode: StartupMode::Attach(_),
+                ..
+            }
+        );
         let dump_initial_prompt = matches!(
             &command,
             DispatchCommand::Other(cli::Command::Dev {
@@ -799,8 +791,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             reject_model_reference_alias_inputs(
                 ModelReferenceAliasInputPresence {
                     provider_environment: !direct_harness_component
+                        && !attaching
                         && alias_input_presence.provider_environment,
                     model_environment: !direct_harness_component
+                        && !attaching
                         && alias_input_presence.model_environment,
                     ..alias_input_presence
                 },
@@ -815,10 +809,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         }
         let alias_config_overrides = tau_config::settings::model_reference_alias_config_overrides(
             tau_config::settings::ModelReferenceAliasSources {
-                provider_environment: (!direct_harness_component)
+                provider_environment: (!direct_harness_component && !attaching)
                     .then_some(provider_alias_environment)
                     .flatten(),
-                model_environment: (!direct_harness_component)
+                model_environment: (!direct_harness_component && !attaching)
                     .then_some(model_alias_environment)
                     .flatten(),
                 provider_cli: &harness.provider_alias,
@@ -835,17 +829,19 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             reject_harness_config_overrides(&harness_config_overrides, "attach")?;
             reject_attach_startup_overrides(
                 args.prompt_stdin,
-                harness.profile.is_some()
-                    || std::env::var_os(tau_config::settings::TAU_PROFILE_ENV).is_some(),
+                profile_was_explicitly_selected,
                 harness.role.as_deref(),
                 &role_cli_overrides,
                 &extension_cli_overrides,
             )?;
         }
-        let profile_was_explicitly_selected = harness.profile.is_some()
+        let profile_was_selected = profile_was_explicitly_selected
             || std::env::var_os(tau_config::settings::TAU_PROFILE_ENV).is_some();
         let reads_extension_environment = match &command {
-            DispatchCommand::Startup { .. } => true,
+            DispatchCommand::Startup {
+                mode: StartupMode::New | StartupMode::Resume(_),
+                ..
+            } => true,
             DispatchCommand::Other(cli::Command::Dev {
                 command:
                     cli::DevCommand::PrintPrompt { .. }
@@ -864,22 +860,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         } else {
             Vec::new()
         };
-        let tau_state_access_environment = if reads_extension_environment {
+        if reads_extension_environment {
             tau_config::settings::parse_tau_state_access_env(std::env::var_os(
                 tau_config::settings::TAU_EXTENSION_TAU_STATE_ACCESS_ENV,
             ))
-            .map_err(|error| CliError::Participant(error.to_string()))?
-        } else {
-            None
-        };
+            .map_err(|error| CliError::Participant(error.to_string()))?;
+        }
         match &command {
-            DispatchCommand::Startup {
-                mode: StartupMode::Attach(_),
-                ..
-            } => {
-                reject_attach_extension_environment(&environment_extension_names)?;
-                reject_attach_tau_state_access_environment(tau_state_access_environment)?;
-            }
             DispatchCommand::Startup { .. }
             | DispatchCommand::Other(cli::Command::Dev {
                 command:
@@ -922,7 +909,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command: cli::DevCommand::Tmux { .. },
             }) => {
                 reject_dev_tmux_startup_overrides(
-                    profile_was_explicitly_selected.then_some("explicit"),
+                    profile_was_selected.then_some("selected"),
                     harness.role.as_deref(),
                     &role_cli_overrides,
                     &extension_cli_overrides,

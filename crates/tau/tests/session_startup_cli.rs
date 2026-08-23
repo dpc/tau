@@ -55,3 +55,109 @@ fn public_cli_preserves_omitted_resume_mode_with_ephemeral() {
             .contains("--ephemeral cannot be combined with `tau resume`")
     );
 }
+
+/// Ambient launch-only configuration must not prevent attaching to an existing
+/// daemon, because attachment reuses the daemon's already accepted settings.
+/// This inventory covers every public launch override environment currently
+/// consumed by the Tau CLI, so a future attach validation must update this
+/// deliberate boundary.
+#[test]
+fn public_attach_ignores_all_ambient_launch_override_environments() {
+    const AMBIENT_LAUNCH_OVERRIDES: &[(&str, &str)] = &[
+        ("TAU_PROFILE", ""),
+        ("TAU_ENABLE_EXTENSIONS", ","),
+        ("TAU_EXTENSION_TAU_STATE_ACCESS", "not-a-mode"),
+        ("TAU_PROVIDER_ALIASES", "{"),
+        ("TAU_MODEL_ALIASES", "{"),
+    ];
+
+    for (variable, value) in AMBIENT_LAUNCH_OVERRIDES {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = tau_command(&temp)
+            .env(variable, value)
+            .arg("attach")
+            .output()
+            .expect("run public tau");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            !output.status.success(),
+            "{variable} must reach attach resolution"
+        );
+        assert!(
+            stderr.contains("no running sessions are available to attach"),
+            "{variable} must not alter attach dispatch: {stderr}"
+        );
+        assert!(
+            !stderr.contains("cannot apply"),
+            "{variable} must be ignored rather than rejected: {stderr}"
+        );
+    }
+}
+
+/// Explicit launch flags remain errors during attach even though the matching
+/// ambient launch-only environments are ignored, preventing a caller from
+/// believing an existing daemon was reconfigured.
+#[test]
+fn public_attach_rejects_explicit_launch_override_flags() {
+    for (arguments, variable, value, expected) in [
+        (
+            &["--profile", "focused", "attach"][..],
+            "TAU_PROFILE",
+            "",
+            "`tau attach` cannot apply --profile",
+        ),
+        (
+            &["--enable-extension", "std-pim", "attach"][..],
+            "TAU_ENABLE_EXTENSIONS",
+            ",",
+            "extension enable/disable overrides",
+        ),
+        (
+            &["--provider-alias", "default=work", "attach"][..],
+            "TAU_PROVIDER_ALIASES",
+            "{",
+            "--provider-alias can only be used",
+        ),
+        (
+            &["--model-alias", "fast=provider/model", "attach"][..],
+            "TAU_MODEL_ALIASES",
+            "{",
+            "--model-alias can only be used",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = tau_command(&temp)
+            .env(variable, value)
+            .args(arguments)
+            .output()
+            .expect("run public tau");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(!output.status.success(), "{arguments:?} must fail");
+        assert!(
+            stderr.contains(expected),
+            "{arguments:?} must retain its explicit rejection over poisoned {variable}: {stderr}"
+        );
+    }
+}
+
+/// Profile environment selection remains active for a command that launches a
+/// scratch Tau process, preventing attach's exemption from leaking into other
+/// launcher paths.
+#[test]
+fn public_dev_tmux_still_rejects_ambient_profile_selection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = tau_command(&temp)
+        .env("TAU_PROFILE", "focused")
+        .args(["dev", "tmux", "start"])
+        .output()
+        .expect("run public tau");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("cannot use a configuration profile"),
+        "{stderr}"
+    );
+}

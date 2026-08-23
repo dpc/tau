@@ -1007,8 +1007,9 @@ fn legacy_config_path_is_rejected() {
     );
 }
 
-/// Attach mode connects to an existing daemon, so startup role/extension
-/// overrides must fail instead of pretending to reconfigure that daemon.
+/// Attach mode connects to an existing daemon, so explicit startup
+/// role/extension/profile overrides must fail instead of pretending to
+/// reconfigure that daemon.
 #[test]
 fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
     let role_overrides = [path_tau_config_settings::RoleCliOverride::Enable(
@@ -1044,7 +1045,7 @@ fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
         .expect("prompt-stdin uses --role for the submitted prompt");
 
     let profile_error = super::reject_attach_startup_overrides(false, true, None, &[], &[])
-        .expect_err("attach cannot apply environment-selected profile");
+        .expect_err("attach cannot apply explicitly selected profile");
     assert!(profile_error.to_string().contains("cannot apply --profile"));
 }
 
@@ -1182,16 +1183,6 @@ fn long_help_documents_extension_environment() {
     let help = String::from_utf8(output).expect("help is UTF-8");
     assert!(help.contains("TAU_ENABLE_EXTENSIONS=NAME[,NAME...]"));
     assert!(help.contains("CLI enable/disable flags win"));
-}
-
-/// Ensures attaching rejects a nonempty public startup override while an empty
-/// environment remains a no-op.
-#[test]
-fn attach_rejects_public_extension_environment() {
-    super::reject_attach_extension_environment(&[]).expect("empty environment is allowed");
-    let error = super::reject_attach_extension_environment(&["std-pim".to_owned()])
-        .expect_err("nonempty environment must be rejected");
-    assert!(error.to_string().contains("TAU_ENABLE_EXTENSIONS"));
 }
 
 /// Proves the outer `tau dev tmux` dispatcher refuses startup overrides that
