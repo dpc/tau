@@ -3,7 +3,7 @@
 `tau-ext-swarm` publishes one Tau session to one pinned Tau Swarm Iroh peer. It
 folds replay through `session.replay_complete` before publishing, routes remote
 prompts and blocker answers through Tau's canonical internal-prompt path, and
-registers the agent-scoped `blocker` and `update` tools. They are disabled
+registers the agent-scoped `task_info`, `task_blocker`, and `task_update` tools. They are disabled
 by default even when the extension runs; opt selected roles into their shared
 `swarm` tool group:
 
@@ -14,10 +14,12 @@ agents:
       enable_tool_groups: [swarm]
 ```
 
-Use `enable_tools: [blocker]` or `enable_tools: [update]` to expose only
-one tool. These are unprefixed instance names. With `tool_prefix: work`, use
-the final names `work_swarm`, `work_blocker`, and `work_update` in role
-policy instead.
+Use `enable_tools: [task_info]`, `[task_blocker]`, or `[task_update]` to expose
+only one tool. The old `blocker` and `update` names are not aliases. These are
+unprefixed instance names. With `tool_prefix: work`, use `work_swarm`,
+`work_task_info`, `work_task_blocker`, or `work_task_update` in role policy.
+Task IDs have no owner: any loaded agent granted `task_info` may replace
+metadata for any valid task ID in its current session.
 
 ## Configuration
 
@@ -50,6 +52,7 @@ extensions:
         blocker_bytes: 4194304
         update_entries: 256
         update_bytes: 8388608
+        task_info_entries: 4096
         change_history_entries: 4096
         change_history_bytes: 33554432
         publication_bytes: 8388608
@@ -83,6 +86,7 @@ and end alphanumeric, and otherwise use only alphanumeric, `.`, `_`, or `-`.
 | `limits.blocker_bytes` | 4 MiB | 256 KiB..=4 MiB |
 | `limits.update_entries` | 256 | 1..=4,096 |
 | `limits.update_bytes` | 8 MiB | 256 KiB..=64 MiB |
+| `limits.task_info_entries` | 4,096 | 1..=4,096 |
 | `limits.change_history_entries` | 4,096 | 1..=65,536 |
 | `limits.change_history_bytes` | 32 MiB | 1..=128 MiB |
 | `limits.publication_bytes` | 8 MiB | 1..=8 MiB |
@@ -102,19 +106,21 @@ without resubmitting Tau work.
 Command IDs form one no-eviction namespace across prompts and blocker answers.
 Their byte limit counts retained request and cached textual-result UTF-8 bytes.
 Blocker limits apply to each owner's full current process-memory history. Update
-limits cover the unacknowledged immutable outbox. Change-history limits count
+limits cover the unacknowledged immutable outbox. Task metadata retains at most
+`limits.task_info_entries` current values and 8 MiB of aggregate canonical
+task-ID, title, and description bytes. Change-history limits count
 logical UTF-8 fields; `publication_bytes` separately bounds each encoded change
 and current encoded snapshot. Falling behind retained changes forces a new
 snapshot. Projection overflow or malformed lifecycle replay invalidates and
 clears the projection; mutating tools reject until a new session replay rebuilds
 it. A terminal worker or panic unwind likewise makes publication health
 indeterminate immediately; panic-abort builds terminate the extension process.
-The `blocker` and `update` tools then reject before mutation rather than
+The `task_info`, `task_blocker`, and `task_update` tools then reject before mutation rather than
 reporting success for state that no live worker can publish.
 
-All command deduplication, blocker history, updates, and acknowledgements live
+All command deduplication, task metadata, blocker history, updates, and acknowledgements live
 only in extension process memory. Iroh reconnect within that process preserves
-them. Session switches clear session-specific blocker history, updates, and
+them. Session switches clear session-specific task metadata, blocker history, updates, and
 acknowledgements but retain the process command table. Extension restart clears
 all of them. The extension generates one Tau Swarm application-incarnation ID at
 process startup and retains it across ordinary reconnects. A replacement process
@@ -123,18 +129,20 @@ state owned by the old process.
 
 ## Verification
 
-Unit tests deterministically cover strict config and secret resolution,
-projection snapshots/history/update immutability, command terminal caching and
-application-level command deduplication, replay/error/invalidation folds, owner and lifecycle
-gates, blocker tool/accepted-answer/deduplication, update cutoff/acknowledgement
-and capacity reuse, session switching, and synchronized reconnect resnapshot. A real `TauExtensionRunner`
-test verifies paired historical/live startup selectors. A hermetic fake Swarm
-transport drives the real reconnecting client through credential
-authentication, indeterminate retry, and terminal rejection. A concrete
-`IrohConnector` test verifies that expected-peer mismatch fails before network
-connection. A test-only exact `tau-swarm-core` 0.3.0 dependency runs the real
-published Iroh server through authentication, declaration, snapshot publication,
-remote prompt dispatch, and direct application loopback. A composed
+Unit tests cover strict config, exact tool names/group/prefixes and no aliases,
+task-info schema and canonicalization, transactional entry/content/encoded
+bounds, shared revision order, coherent snapshot/live views, cancellation-safe
+change waits, session switching, and reconnect convergence after an
+indeterminate live submission. Existing focused coverage retains blocker and
+update lifecycle, acknowledgement, replay, and capacity invariants. A real
+`TauExtensionRunner` test verifies registration and paired historical/live
+startup selectors. A hermetic fake Swarm transport drives credential
+authentication, indeterminate retry, terminal rejection, and complete
+resnapshot. A concrete `IrohConnector` test verifies peer mismatch fails before
+network connection. The exact `tau-swarm-core` 0.4.0 dev dependency runs
+the real published Iroh server through v0 authentication, declaration, task-info
+snapshot/restart omission, remote prompt dispatch, and direct application
+loopback. A composed
 `TauExtensionRunner` vertical additionally drives Configure, replay boundaries,
 worker startup, published snapshot observation, transient internal-prompt
 emission, matching canonical Tau submission, and the accepted remote result.

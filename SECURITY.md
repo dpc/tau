@@ -192,7 +192,7 @@ an accepted internal-prompt request produces one canonical prompt fact with the
 authenticated configured extension name, never a request-supplied name. CLI
 attribution escapes that bounded name as visible metadata and does not create a
 second transport message or model activation.
-The built-in Swarm `blocker` tool has a narrower presentation boundary: the
+The built-in Swarm `task_blocker` tool has a narrower presentation boundary: the
 CLI permits only its finite `add`, `cancel`, or `list` action discriminant from
 the start arguments, and strips all other start, progress, and terminal display
 fields in compact and full modes. Missing, malformed, or unknown actions fail
@@ -1176,8 +1176,15 @@ weaken endpoint identity verification.
 
 Remote prompts and blocker answers reach agents only through Tau's canonical
 internal-prompt path. The extension retains command deduplication, blocker
-history, and unacknowledged updates in process memory under configured bounds.
-Tau Swarm 0.2.0 binds commands and active lifecycle state to a collision-resistant
+history, unacknowledged updates, and replaceable current task metadata in process
+memory under configured bounds. Task metadata accepts at most 4,096 current
+entries and 8 MiB of aggregate canonical task-ID, title, and description bytes;
+the authenticated Swarm peer independently enforces the same ceilings.
+Task IDs have no ownership model. Ordinary Tau role tool policy is the whole
+grant boundary: any loaded agent granted `task_info` may replace metadata for
+any valid task ID in its current session. Revisit this authority boundary if
+task ownership or narrower grants are introduced.
+Tau Swarm binds commands and active lifecycle state to a collision-resistant
 extension-process incarnation. Ordinary reconnects and session switches retain
 the process command table; a replacement process declares a fresh incarnation,
 so the server fences ambiguous old commands and supersedes old active lifecycle
@@ -1186,10 +1193,16 @@ no-eviction command table and deny later remote commands until process restart. 
 configured bounds can exhaust extension memory; they are operator trust and
 capacity choices rather than untrusted local-IPC hardening boundaries.
 
+Ordinary Iroh reconnect retains current task metadata. A session switch or
+extension-process restart loses it; the fresh process's complete snapshot
+converges the peer by omitting the old incarnation's metadata. Revisit this
+accepted non-durability if task metadata gains journaling, persistence, or
+different session/process lifecycle ownership.
+
 Each Swarm worker generation owns publication authority. Worker return or panic
 unwind retires that authority synchronously before any optional terminal
 notice; panic-abort builds terminate the extension process instead.
-`blocker` add/cancel and `update` serialize their full admission and mutation
+`task_info`, `task_blocker` add/cancel, and `task_update` serialize their full admission and mutation
 sections against retirement; after retirement they fail before changing
 process-memory state or reporting success. Revisit this synchronization when
 changing worker lifecycle, mutating tool paths, health ownership, or terminal

@@ -106,3 +106,29 @@ fn accepts_corrected_state_byte_extrema() {
     .validate()
     .expect("maximum command bytes");
 }
+
+/// Local task-info retention may be lowered but can never exceed the shared
+/// protocol ceiling, preventing Tau from constructing a peer-invalid snapshot.
+#[test]
+fn task_info_entry_limit_cannot_exceed_protocol_maximum() {
+    Limits {
+        task_info_entries: 1,
+        ..Limits::default()
+    }
+    .validate()
+    .expect("minimum task-info entries");
+    Limits {
+        task_info_entries: 4_096,
+        ..Limits::default()
+    }
+    .validate()
+    .expect("maximum task-info entries");
+    for task_info_entries in [0, 4_097] {
+        Limits {
+            task_info_entries,
+            ..Limits::default()
+        }
+        .validate()
+        .expect_err("out-of-range task-info entries");
+    }
+}

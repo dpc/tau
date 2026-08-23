@@ -31,10 +31,10 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     )
 }
 
-fn blocker_started(call_id: &str, action: &str) -> tau_proto::ToolStarted {
+fn blocker_started(tool_name: &str, call_id: &str, action: &str) -> tau_proto::ToolStarted {
     tau_proto::ToolStarted {
         call_id: call_id.into(),
-        tool_name: tau_proto::ToolName::new("blocker"),
+        tool_name: tau_proto::ToolName::new(tool_name),
         arguments: tau_proto::CborValue::Map(vec![
             (
                 tau_proto::CborValue::Text("action".to_owned()),
@@ -50,10 +50,10 @@ fn blocker_started(call_id: &str, action: &str) -> tau_proto::ToolStarted {
     }
 }
 
-fn blocker_result(call_id: &str) -> tau_proto::ToolResultDisplay {
+fn blocker_result(tool_name: &str, call_id: &str) -> tau_proto::ToolResultDisplay {
     tau_proto::ToolResultDisplay {
         call_id: call_id.into(),
-        tool_name: tau_proto::ToolName::new("blocker"),
+        tool_name: tau_proto::ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
         kind: tau_proto::ToolResultKind::Final,
         display: Some(tau_proto::ToolUseState {
@@ -64,11 +64,11 @@ fn blocker_result(call_id: &str) -> tau_proto::ToolResultDisplay {
     }
 }
 
-fn blocker_error(call_id: &str) -> tau_proto::ToolError {
+fn blocker_error(tool_name: &str, call_id: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
         presentation: Default::default(),
         call_id: call_id.into(),
-        tool_name: tau_proto::ToolName::new("blocker"),
+        tool_name: tau_proto::ToolName::new(tool_name),
         tool_type: tau_proto::ToolType::Function,
         message: "private blocker failure".to_owned(),
         details: None,
@@ -363,110 +363,112 @@ fn background_terminal_handlers_normalize_status() {
 /// lifecycle, without exposing other structured invocation or terminal fields.
 #[test]
 fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
-    let mut renderer = renderer_for_agent_id_tests();
+    for tool_name in ["task_blocker", "work_task_blocker"] {
+        let mut renderer = renderer_for_agent_id_tests();
 
-    let add = blocker_started("blocker-add", "add");
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolStarted(add),
-        tau_proto::UnixMicros::new(1),
-        1,
-    );
-    assert_eq!(
-        rendered_tool_header(
-            renderer.tool_calls["blocker-add"]
-                .live_display
-                .as_ref()
-                .expect("live blocker display"),
-        ),
-        "blocker add 0s pending"
-    );
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
-            call_id: "blocker-add".into(),
-            tool_name: tau_proto::ToolName::new("blocker"),
-            message: Some("private progress message".to_owned()),
-            progress: None,
-            display: Some(tau_proto::ToolUseState {
-                args: "private progress descriptor".to_owned(),
-                mode: "private mode".to_owned(),
-                info_chips: vec!["private progress chip".to_owned()],
-                payload: Some(tau_proto::ToolUsePayload::Text {
-                    text: "private progress payload".to_owned(),
+        let add = blocker_started(tool_name, "blocker-add", "add");
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolStarted(add),
+            tau_proto::UnixMicros::new(1),
+            1,
+        );
+        assert_eq!(
+            rendered_tool_header(
+                renderer.tool_calls["blocker-add"]
+                    .live_display
+                    .as_ref()
+                    .expect("live blocker display"),
+            ),
+            format!("{tool_name} add 0s pending")
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
+                call_id: "blocker-add".into(),
+                tool_name: tau_proto::ToolName::new(tool_name),
+                message: Some("private progress message".to_owned()),
+                progress: None,
+                display: Some(tau_proto::ToolUseState {
+                    args: "private progress descriptor".to_owned(),
+                    mode: "private mode".to_owned(),
+                    info_chips: vec!["private progress chip".to_owned()],
+                    payload: Some(tau_proto::ToolUsePayload::Text {
+                        text: "private progress payload".to_owned(),
+                    }),
+                    ..Default::default()
                 }),
-                ..Default::default()
             }),
-        }),
-        tau_proto::UnixMicros::new(2),
-        2,
-    );
-    let progress_header = rendered_tool_header(
-        renderer.tool_calls["blocker-add"]
-            .live_display
-            .as_ref()
-            .expect("progress blocker display"),
-    );
-    assert!(progress_header.starts_with("blocker add "));
-    assert!(progress_header.ends_with(" pending"));
-    assert!(!progress_header.contains("private"));
-    assert!(
-        !rendered_tool_block_text(
+            tau_proto::UnixMicros::new(2),
+            2,
+        );
+        let progress_header = rendered_tool_header(
             renderer.tool_calls["blocker-add"]
                 .live_display
                 .as_ref()
                 .expect("progress blocker display"),
-        )
-        .contains("private")
-    );
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolError(blocker_error("blocker-add")),
-        tau_proto::UnixMicros::new(3),
-        3,
-    );
+        );
+        assert!(progress_header.starts_with(&format!("{tool_name} add ")));
+        assert!(progress_header.ends_with(" pending"));
+        assert!(!progress_header.contains("private"));
+        assert!(
+            !rendered_tool_block_text(
+                renderer.tool_calls["blocker-add"]
+                    .live_display
+                    .as_ref()
+                    .expect("progress blocker display"),
+            )
+            .contains("private")
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolError(blocker_error(tool_name, "blocker-add")),
+            tau_proto::UnixMicros::new(3),
+            3,
+        );
 
-    let cancel = blocker_started("blocker-cancel", "cancel");
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolStarted(cancel),
-        tau_proto::UnixMicros::new(4),
-        4,
-    );
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
-            presentation: Default::default(),
-            call_id: "blocker-cancel".into(),
-            tool_name: tau_proto::ToolName::new("blocker"),
-            tool_type: tau_proto::ToolType::Function,
-            display: None,
-        }),
-        tau_proto::UnixMicros::new(5),
-        5,
-    );
+        let cancel = blocker_started(tool_name, "blocker-cancel", "cancel");
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolStarted(cancel),
+            tau_proto::UnixMicros::new(4),
+            4,
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
+                presentation: Default::default(),
+                call_id: "blocker-cancel".into(),
+                tool_name: tau_proto::ToolName::new(tool_name),
+                tool_type: tau_proto::ToolType::Function,
+                display: None,
+            }),
+            tau_proto::UnixMicros::new(5),
+            5,
+        );
 
-    let list = blocker_started("blocker-list", "list");
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolStarted(list),
-        tau_proto::UnixMicros::new(6),
-        6,
-    );
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolResultDisplay(blocker_result("blocker-list")),
-        tau_proto::UnixMicros::new(7),
-        7,
-    );
+        let list = blocker_started(tool_name, "blocker-list", "list");
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolStarted(list),
+            tau_proto::UnixMicros::new(6),
+            6,
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolResultDisplay(blocker_result(tool_name, "blocker-list")),
+            tau_proto::UnixMicros::new(7),
+            7,
+        );
 
-    let headers = renderer
-        .tool_history
-        .iter()
-        .map(|entry| rendered_tool_header(&entry.display))
-        .collect::<Vec<_>>();
-    assert!(headers[0].starts_with("blocker add 0s err: failed"));
-    assert!(headers[1].starts_with("blocker cancel 0s cancelled"));
-    assert_eq!(headers[2], "blocker list 0s ok");
-    assert!(
-        renderer
+        let headers = renderer
             .tool_history
             .iter()
-            .all(|entry| !rendered_tool_block_text(&entry.display).contains("private"))
-    );
+            .map(|entry| rendered_tool_header(&entry.display))
+            .collect::<Vec<_>>();
+        assert!(headers[0].starts_with(&format!("{tool_name} add 0s err: failed")));
+        assert!(headers[1].starts_with(&format!("{tool_name} cancel 0s cancelled")));
+        assert_eq!(headers[2], format!("{tool_name} list 0s ok"));
+        assert!(
+            renderer
+                .tool_history
+                .iter()
+                .all(|entry| !rendered_tool_block_text(&entry.display).contains("private"))
+        );
+    }
 }
 
 /// An invalid blocker action fails closed through terminal rendering rather
@@ -474,29 +476,30 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
 /// header.
 #[test]
 fn malformed_blocker_action_hides_all_descriptor_payloads() {
-    let mut renderer = renderer_for_agent_id_tests();
-    let started = blocker_started("malformed-blocker", "delete");
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolStarted(started),
-        tau_proto::UnixMicros::new(1),
-        1,
-    );
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolResultDisplay(blocker_result("malformed-blocker")),
-        tau_proto::UnixMicros::new(2),
-        2,
-    );
-
-    let header = rendered_tool_header(
-        &renderer
-            .tool_history
-            .last()
-            .expect("completed malformed blocker")
-            .display,
-    );
-    assert_eq!(header, "blocker 0s ok");
-    assert!(!header.contains("private"));
-    assert!(!header.contains("unrelated"));
+    for tool_name in ["task_blocker", "work_task_blocker"] {
+        let mut renderer = renderer_for_agent_id_tests();
+        let started = blocker_started(tool_name, "malformed-blocker", "delete");
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolStarted(started),
+            tau_proto::UnixMicros::new(1),
+            1,
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolResultDisplay(blocker_result(tool_name, "malformed-blocker")),
+            tau_proto::UnixMicros::new(2),
+            2,
+        );
+        let header = rendered_tool_header(
+            &renderer
+                .tool_history
+                .last()
+                .expect("completed malformed blocker")
+                .display,
+        );
+        assert_eq!(header, format!("{tool_name} 0s ok"));
+        assert!(!header.contains("private"));
+        assert!(!header.contains("unrelated"));
+    }
 }
 
 /// Missing, non-text, duplicate, and container action values must all fail
@@ -522,10 +525,24 @@ fn blocker_action_descriptor_rejects_ambiguous_or_invalid_arguments() {
         tau_proto::CborValue::Array(vec![tau_proto::CborValue::Text("add".to_owned())]),
     ];
 
-    for arguments in invalid_arguments {
-        let mut started = blocker_started("invalid-action", "add");
-        started.arguments = arguments;
-        assert!(super::blocker_action_descriptor(&started).is_none());
+    for tool_name in ["task_blocker", "work_task_blocker"] {
+        for arguments in &invalid_arguments {
+            let mut started = blocker_started(tool_name, "invalid-action", "add");
+            started.arguments = arguments.clone();
+            assert!(super::blocker_action_descriptor(&started).is_none());
+        }
+    }
+}
+
+/// Prefix recognition includes only the new structural name, never the removed
+/// exact legacy alias or unrelated lookalikes.
+#[test]
+fn blocker_name_recognition_excludes_legacy_aliases() {
+    for name in ["task_blocker", "work_task_blocker"] {
+        assert!(super::is_blocker_tool_name(name));
+    }
+    for name in ["blocker", "_task_blocker", "task_blocker_extra"] {
+        assert!(!super::is_blocker_tool_name(name));
     }
 }
 
@@ -533,32 +550,34 @@ fn blocker_action_descriptor_rejects_ambiguous_or_invalid_arguments() {
 /// terminal, so the safe action label remains available after completion.
 #[test]
 fn reconstructed_blocker_start_preserves_action_for_replayed_completion() {
-    let mut renderer = renderer_for_agent_id_tests();
-    let started = blocker_started("replayed-blocker", "list");
-    let owner = started.agent_id.clone();
-    let event = tau_proto::Event::ToolStarted(started);
+    for tool_name in ["task_blocker", "work_task_blocker"] {
+        let mut renderer = renderer_for_agent_id_tests();
+        let started = blocker_started(tool_name, "replayed-blocker", "list");
+        let owner = started.agent_id.clone();
+        let event = tau_proto::Event::ToolStarted(started);
 
-    renderer.handle_reconstructed_tool_start_socket_delivery(
-        &event,
-        &owner,
-        tau_proto::UnixMicros::new(10),
-        10,
-    );
-    renderer.handle_socket_delivery(
-        &tau_proto::Event::ToolResultDisplay(blocker_result("replayed-blocker")),
-        tau_proto::UnixMicros::new(11),
-        11,
-    );
+        renderer.handle_reconstructed_tool_start_socket_delivery(
+            &event,
+            &owner,
+            tau_proto::UnixMicros::new(10),
+            10,
+        );
+        renderer.handle_socket_delivery(
+            &tau_proto::Event::ToolResultDisplay(blocker_result(tool_name, "replayed-blocker")),
+            tau_proto::UnixMicros::new(11),
+            11,
+        );
 
-    assert_eq!(
-        renderer
-            .tool_history
-            .last()
-            .expect("completed replayed blocker")
-            .display
-            .args,
-        "list"
-    );
+        assert_eq!(
+            renderer
+                .tool_history
+                .last()
+                .expect("completed replayed blocker")
+                .display
+                .args,
+            "list"
+        );
+    }
 }
 
 /// Queued-prompt layout receives fixed-size source windows even for arbitrarily

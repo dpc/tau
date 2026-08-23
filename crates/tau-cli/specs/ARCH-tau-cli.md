@@ -72,7 +72,8 @@ the CLI reads their start arguments solely to retain the configured `timeout`
 (or the shell provider's 300-second default) and renders their duration chip as
 `elapsed/timeout`s. It does not interpret any other shell argument or alter
 generic tool-header behavior.
-The bundled Swarm `blocker` tool is the narrow exception to otherwise generic
+The bundled Swarm `task_blocker` tool, including a structurally prefixed name
+such as `work_task_blocker`, is the narrow exception to otherwise generic
 tool-header projection: its structured start argument contributes only the
 validated `add`, `cancel`, or `list` action label. The CLI retains that safe
 label through progress, terminal, replay, and cold-attach reconstruction, while

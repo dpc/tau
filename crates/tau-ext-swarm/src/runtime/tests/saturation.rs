@@ -13,7 +13,7 @@ use tau_swarm_api::{
 };
 use tau_swarm_client::{Application, ErrorKind};
 use tau_swarm_client_api::DeliverPromptRequest;
-use tau_swarm_client_api::v4::PromptRequest;
+use tau_swarm_client_api::v0::PromptRequest;
 use tokio::sync::{Mutex as TokioMutex, Notify, mpsc as path_tokio_mpsc};
 
 use super::super::*;

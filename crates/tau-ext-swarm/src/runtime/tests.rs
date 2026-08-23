@@ -197,7 +197,8 @@ fn replay_error_invalidates_projection() {
 }
 
 /// A session-start lifecycle event owns the incarnation reset and clears old
-/// projected agents, blockers, updates, and pending loopbacks before replay.
+/// projected agents, task metadata, blockers, updates, and pending loopbacks
+/// before replay.
 #[test]
 fn session_switch_clears_incarnation_state_before_replay() {
     let mut state = SwarmRuntime::new();
@@ -221,6 +222,15 @@ fn session_switch_clears_incarnation_state_before_replay() {
             source_timestamp: tau_swarm_api::Timestamp(1),
         })
         .expect("old update");
+    state
+        .projection
+        .blocking_lock()
+        .upsert_task_info(tau_swarm_api::TaskInfo {
+            task_id: tau_swarm_api::TaskId::new("task"),
+            title: tau_swarm_api::TaskTitle::new("Title").expect("title"),
+            description: None,
+        })
+        .expect("old task info");
     state
         .blocker_history
         .lock()
@@ -265,6 +275,15 @@ fn session_switch_clears_incarnation_state_before_replay() {
     assert!(state.blocker_history.lock().expect("history").is_empty());
     assert!(state.pending.lock().expect("pending").is_empty());
     assert_eq!(state.projection.blocking_lock().update_usage(), (0, 0));
+    assert!(
+        state
+            .projection
+            .blocking_lock()
+            .snapshot()
+            .snapshot
+            .task_info
+            .is_empty()
+    );
     for stale in [
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: "old".parse().expect("session ID"),
@@ -315,7 +334,7 @@ fn session_switch_clears_incarnation_state_before_replay() {
     assert!(state.agents.is_empty());
 }
 
-/// Stats and watch replacement folds preserve a canonical v4 work status in
+/// Stats and watch replacement folds preserve a canonical v0 work status in
 /// each published snapshot, and unload removes that agent from current Swarm
 /// state.
 #[test]
@@ -436,10 +455,10 @@ fn stats_watches_and_unload_converge_projection() {
     );
 }
 
-/// Converts every valid Tau phase to the corresponding v4 Swarm state and
+/// Converts every valid Tau phase to the corresponding v0 Swarm state and
 /// rejects malformed snapshots before they can be published.
 #[test]
-fn work_status_conversion_enforces_v4_invariants() {
+fn work_status_conversion_enforces_v0_invariants() {
     let valid = [
         (
             tau_proto::SessionAgentWorkStatus::default(),
@@ -481,7 +500,7 @@ fn work_status_conversion_enforces_v4_invariants() {
                 Some("waiting task".to_owned()),
             )
             .expect("valid status"),
-            // Swarm v4 has no corresponding self-reported status phase.
+            // Swarm v0 has no corresponding self-reported status phase.
             tau_swarm_api::AgentWorkStatus::Working {
                 task_name: tau_swarm_api::TaskName::new("waiting task").expect("valid task name"),
             },

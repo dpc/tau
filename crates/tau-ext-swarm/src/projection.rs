@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, VecDeque};
 
 use tau_swarm_api::{
     Agent, AgentId, BlockerId, BlockerPublication, BlockerRevisionNumber, SessionChange,
-    SessionSnapshot, UpdatePublication,
+    SessionSnapshot, TaskId, TaskInfo, UpdatePublication, task_info_bytes,
 };
 use tau_swarm_client::{ChangeBatch, PublicationRevision, RevisionedSnapshot};
-use tau_swarm_client_api::v4 as path_tau_swarm_client_api_v4;
+use tau_swarm_client_api::v0 as path_tau_swarm_client_api_v0;
 
 /// Coherent, bounded in-memory projection of the current Tau session.
 #[derive(Debug)]
@@ -16,6 +16,8 @@ pub(crate) struct SessionProjection {
     blockers: BTreeMap<BlockerId, BlockerPublication>,
     /// Immutable updates waiting for Swarm acknowledgement.
     updates: BTreeMap<tau_swarm_api::UpdateId, (PublicationRevision, UpdatePublication)>,
+    /// Replaceable current task metadata keyed by exact task identity.
+    task_info: BTreeMap<TaskId, TaskInfo>,
     /// Monotonic publication revision.
     revision: PublicationRevision,
     /// Retained changes paired with their resulting revision.
@@ -28,6 +30,8 @@ pub(crate) struct SessionProjection {
     change_bytes: usize,
     /// Maximum encoded current snapshot or individual change.
     publication_bytes: usize,
+    /// Maximum current task metadata entries.
+    task_info_capacity: usize,
 }
 
 impl SessionProjection {
@@ -38,12 +42,14 @@ impl SessionProjection {
             agents: BTreeMap::new(),
             blockers: BTreeMap::new(),
             updates: BTreeMap::new(),
+            task_info: BTreeMap::new(),
             revision: PublicationRevision(0),
             changes: VecDeque::new(),
             capacity,
             byte_capacity: usize::MAX,
             change_bytes: 0,
             publication_bytes: usize::MAX,
+            task_info_capacity: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
         }
     }
 
@@ -55,27 +61,38 @@ impl SessionProjection {
         self
     }
 
+    /// Applies the configured local task-info entry ceiling.
+    #[must_use]
+    pub fn with_task_info_limit(mut self, task_info_entries: usize) -> Self {
+        self.task_info_capacity = task_info_entries;
+        self
+    }
+
     /// Inserts or replaces an agent and publishes the replacement.
     pub fn upsert_agent(&mut self, agent: Agent) -> Result<(), &'static str> {
         let old = self.agents.insert(agent.id.clone(), agent.clone());
-        if self.publication_bytes < self.snapshot_encoded_len()? {
-            match old {
-                Some(old) => {
-                    self.agents.insert(old.id.clone(), old);
-                }
-                None => {
-                    self.agents.remove(&agent.id);
-                }
+        let snapshot_length = self.snapshot_encoded_len();
+        match old {
+            Some(old) => {
+                self.agents.insert(old.id.clone(), old);
             }
+            None => {
+                self.agents.remove(&agent.id);
+            }
+        }
+        if self.publication_bytes < snapshot_length? {
             return Err("snapshot exceeds publication byte limit");
         }
-        self.publish(SessionChange::UpsertAgent(agent))
+        self.publish(SessionChange::UpsertAgent(agent.clone()))?;
+        self.agents.insert(agent.id.clone(), agent);
+        Ok(())
     }
 
     /// Removes an agent and publishes the removal when it existed.
     pub fn remove_agent(&mut self, id: &AgentId) -> Result<(), &'static str> {
-        if self.agents.remove(id).is_some() {
+        if self.agents.contains_key(id) {
             self.publish(SessionChange::RemoveAgent(id.clone()))?;
+            self.agents.remove(id);
         }
         Ok(())
     }
@@ -91,18 +108,21 @@ impl SessionProjection {
         let old = self
             .blockers
             .insert(blocker.blocker_id.clone(), blocker.clone());
-        if self.publication_bytes < self.snapshot_encoded_len()? {
-            match old {
-                Some(old) => {
-                    self.blockers.insert(old.blocker_id.clone(), old);
-                }
-                None => {
-                    self.blockers.remove(&blocker.blocker_id);
-                }
+        let snapshot_length = self.snapshot_encoded_len();
+        match old {
+            Some(old) => {
+                self.blockers.insert(old.blocker_id.clone(), old);
             }
+            None => {
+                self.blockers.remove(&blocker.blocker_id);
+            }
+        }
+        if self.publication_bytes < snapshot_length? {
             return Err("snapshot exceeds publication byte limit");
         }
-        self.publish(SessionChange::OpenBlocker(blocker))
+        self.publish(SessionChange::OpenBlocker(blocker.clone()))?;
+        self.blockers.insert(blocker.blocker_id.clone(), blocker);
+        Ok(())
     }
 
     /// Cancels an active blocker and publishes its removal.
@@ -111,12 +131,13 @@ impl SessionProjection {
         id: &BlockerId,
         reason: Option<String>,
     ) -> Result<(), &'static str> {
-        if let Some(blocker) = self.blockers.remove(id) {
+        if let Some(blocker) = self.blockers.get(id) {
             self.publish(SessionChange::CancelBlocker {
                 blocker_id: id.clone(),
                 revision: blocker.revision,
                 reason,
             })?;
+            self.blockers.remove(id);
         }
         Ok(())
     }
@@ -183,6 +204,44 @@ impl SessionProjection {
         (self.updates.len(), bytes)
     }
 
+    /// Atomically installs and publishes complete current task metadata.
+    ///
+    /// An exact replacement is a no-op. Admission and encoding checks complete
+    /// before the history and map commit, so failure changes neither.
+    pub fn upsert_task_info(&mut self, info: TaskInfo) -> Result<(), &'static str> {
+        if self.task_info.get(&info.task_id) == Some(&info) {
+            return Ok(());
+        }
+        let old = self.task_info.get(&info.task_id);
+        if old.is_none() && self.task_info_capacity <= self.task_info.len() {
+            return Err("task info entry limit is full");
+        }
+        task_info_bytes(
+            self.task_info
+                .values()
+                .filter(|current| current.task_id != info.task_id)
+                .chain(std::iter::once(&info)),
+        )
+        .map_err(|_| "task info byte limit is full")?;
+
+        let old = self.task_info.insert(info.task_id.clone(), info.clone());
+        let snapshot_length = self.snapshot_encoded_len();
+        match old {
+            Some(old) => {
+                self.task_info.insert(old.task_id.clone(), old);
+            }
+            None => {
+                self.task_info.remove(&info.task_id);
+            }
+        }
+        if self.publication_bytes < snapshot_length? {
+            return Err("snapshot exceeds publication byte limit");
+        }
+        self.publish(SessionChange::UpsertTaskInfo(info.clone()))?;
+        self.task_info.insert(info.task_id.clone(), info);
+        Ok(())
+    }
+
     /// Returns a coherent snapshot and revision.
     #[must_use]
     pub fn snapshot(&self) -> RevisionedSnapshot {
@@ -191,6 +250,7 @@ impl SessionProjection {
             snapshot: SessionSnapshot {
                 agents: self.agents.values().cloned().collect(),
                 active_blockers: self.blockers.values().cloned().collect(),
+                task_info: self.task_info.values().cloned().collect(),
             },
         }
     }
@@ -225,12 +285,19 @@ impl SessionProjection {
             return Err("change exceeds publication byte limit");
         }
         let bytes = change_logical_bytes(&change)?;
-        self.revision.0 = self.revision.0.saturating_add(1);
-        self.change_bytes = self
+        let revision = PublicationRevision(
+            self.revision
+                .0
+                .checked_add(1)
+                .ok_or("publication revision exhausted")?,
+        );
+        let change_bytes = self
             .change_bytes
             .checked_add(bytes)
             .ok_or("change byte accounting overflow")?;
-        self.changes.push_back((self.revision, change, bytes));
+        self.revision = revision;
+        self.change_bytes = change_bytes;
+        self.changes.push_back((revision, change, bytes));
         while self.capacity < self.changes.len() || self.byte_capacity < self.change_bytes {
             if let Some((_, _, bytes)) = self.changes.pop_front() {
                 self.change_bytes = self.change_bytes.saturating_sub(bytes);
@@ -243,7 +310,7 @@ impl SessionProjection {
         let wire = tau_swarm_client_api::SubmitSnapshotRequest {
             snapshot: self.snapshot().snapshot.into(),
         };
-        bincode::encode_to_vec(wire, bincode::config::standard())
+        bincode::encode_to_vec(wire, tau_swarm_client_api::BINCODE_CONFIG)
             .map(|encoded| encoded.len())
             .map_err(|_| "snapshot encoding failed")
     }
@@ -282,6 +349,11 @@ fn change_logical_bytes(change: &SessionChange) -> Result<usize, &'static str> {
         .into_iter()
         .flatten()
         .collect(),
+        SessionChange::UpsertTaskInfo(info) => vec![
+            info.task_id.as_str(),
+            info.title.as_str(),
+            info.description.as_ref().map_or("", |value| value.as_str()),
+        ],
     };
     strings.into_iter().try_fold(0_usize, |total, value| {
         total
@@ -293,9 +365,9 @@ fn change_logical_bytes(change: &SessionChange) -> Result<usize, &'static str> {
 fn change_encoded_len(change: SessionChange) -> Result<usize, &'static str> {
     let wire = tau_swarm_client_api::SubmitChangeRequest {
         sequence: 0,
-        change: path_tau_swarm_client_api_v4::SessionChange::from(change),
+        change: path_tau_swarm_client_api_v0::SessionChange::from(change),
     };
-    bincode::encode_to_vec(wire, bincode::config::standard())
+    bincode::encode_to_vec(wire, tau_swarm_client_api::BINCODE_CONFIG)
         .map(|encoded| encoded.len())
         .map_err(|_| "change encoding failed")
 }

@@ -131,7 +131,7 @@ cannot recover the exact announced batch.
 The bundled `std-swarm` instance is disabled by default and optional
 (`require: false`). See the [authoritative configuration, bounds, retry, and
 process-memory semantics](../crates/tau-ext-swarm/README.md). The extension
-registers the agent-scoped `blocker` action tool and `update`, but neither
+registers the agent-scoped `task_info`, `task_blocker`, and `task_update` tools, but none
 is model-visible by default even after the extension starts. Opt in deliberately
 for selected roles:
 
@@ -142,10 +142,10 @@ agents:
       enable_tool_groups: [swarm]
 ```
 
-Use `enable_tools: [blocker]` or `enable_tools: [update]` for one exact
-tool instead. These are unprefixed instance names. If the extension uses
-`tool_prefix: work`, use the final names `work_swarm`, `work_blocker`, and
-`work_update` in role policy instead.
+Use `enable_tools: [task_info]`, `[task_blocker]`, or `[task_update]` for one
+exact tool instead. The old names do not remain as aliases. If the extension
+uses `tool_prefix: work`, use `work_swarm`, `work_task_info`,
+`work_task_blocker`, or `work_task_update` in role policy.
 
 
 

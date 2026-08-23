@@ -6314,18 +6314,18 @@ dependencies = [
 
 [[package]]
 name = "tau-swarm-api"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e711761f4294261fc457e26207af8670ac0891613096283ce9efc54586253544"
+checksum = "0af266111b6cce6c38c76d6ed8171932210037c9462dbee5a96ccb01d8ea37a9"
 dependencies = [
  "getrandom 0.4.3",
 ]
 
 [[package]]
 name = "tau-swarm-client"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f5ae4be95bef00b045ae8cca9903bd3e48c45615f5239913473ba11bb1b4919"
+checksum = "02aa0c1c337817faf375f69e9effeee9810cd04b6b0c9449cdfa0e6218cdf63b"
 dependencies = [
  "async-trait",
  "tau-swarm-api",
@@ -6335,9 +6335,9 @@ dependencies = [
 
 [[package]]
 name = "tau-swarm-client-api"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f9a842a059444d63009113bf15501ebbd879889f0807258b6df5b25fcb336e0"
+checksum = "a543d9b165cccff0d3c42718f2c338e5511d419c51f3c511b65ef1773a79a191"
 dependencies = [
  "bincode",
  "tau-swarm-api",
@@ -6345,18 +6345,18 @@ dependencies = [
 
 [[package]]
 name = "tau-swarm-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38150c6d1c3c6d9795d7f70b64eed0ea37b37fb4adcf0e309a4f88d5aac95231"
+checksum = "37ff658b3579548010a2e3ecae3cb2b37ee4c4bf37f949fb653d6f9497e340e9"
 dependencies = [
  "tau-swarm-api",
 ]
 
 [[package]]
 name = "tau-swarm-iroh"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "447d7415681e19b53f83dc288bdbc32851c74761e26625a469fed75847632f0a"
+checksum = "3411bc50fcac249657dfdcccd762b8e1029dfccfee621bfcb95e09ed983e0735"
 dependencies = [
  "async-trait",
  "iroh",

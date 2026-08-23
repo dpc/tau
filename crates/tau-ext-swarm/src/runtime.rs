@@ -182,10 +182,12 @@ impl SwarmRuntime {
             .as_ref()
             .map_or(4_096, |config| config.limits.change_history_entries);
         let projection = if let Some(config) = &self.config {
-            SessionProjection::new(capacity).with_byte_limits(
-                config.limits.change_history_bytes,
-                config.limits.publication_bytes,
-            )
+            SessionProjection::new(capacity)
+                .with_byte_limits(
+                    config.limits.change_history_bytes,
+                    config.limits.publication_bytes,
+                )
+                .with_task_info_limit(config.limits.task_info_entries)
         } else {
             SessionProjection::new(capacity)
         };
@@ -264,10 +266,12 @@ impl SwarmRuntime {
             .as_ref()
             .map_or(4_096, |config| config.limits.change_history_entries);
         let projection = if let Some(config) = &self.config {
-            SessionProjection::new(capacity).with_byte_limits(
-                config.limits.change_history_bytes,
-                config.limits.publication_bytes,
-            )
+            SessionProjection::new(capacity)
+                .with_byte_limits(
+                    config.limits.change_history_bytes,
+                    config.limits.publication_bytes,
+                )
+                .with_task_info_limit(config.limits.task_info_entries)
         } else {
             SessionProjection::new(capacity)
         };
@@ -586,10 +590,12 @@ fn handle_configure(cx: RawConfigureContext<'_, SwarmRuntime>) -> Result<(), Cli
         .map_err(ClientError::handler)?;
     cx.state.handle = Some(cx.handle());
     cx.state.projection = Arc::new(path_tokio_sync::Mutex::new(
-        SessionProjection::new(config.limits.change_history_entries).with_byte_limits(
-            config.limits.change_history_bytes,
-            config.limits.publication_bytes,
-        ),
+        SessionProjection::new(config.limits.change_history_entries)
+            .with_byte_limits(
+                config.limits.change_history_bytes,
+                config.limits.publication_bytes,
+            )
+            .with_task_info_limit(config.limits.task_info_entries),
     ));
     cx.state.config = Some(config);
     let limits = &cx.state.config.as_ref().expect("installed config").limits;
@@ -739,7 +745,7 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
     Ok(())
 }
 
-/// Converts Tau's canonical work-status snapshot into the validated Swarm v4
+/// Converts Tau's canonical work-status snapshot into the validated Swarm v0
 /// domain representation.
 fn swarm_work_status(
     status: &tau_proto::SessionAgentWorkStatus,
@@ -760,7 +766,7 @@ fn swarm_work_status(
         tau_proto::AgentWorkStatusPhase::Blocked => Ok(AgentWorkStatus::Blocked {
             task_name: task_name(status.title())?,
         }),
-        // Swarm v4 has no matching work-status phase. Its orthogonal activity
+        // Swarm v0 has no matching work-status phase. Its orthogonal activity
         // remains independently derived from Tau's runtime state.
         tau_proto::AgentWorkStatusPhase::Waiting => Ok(AgentWorkStatus::Working {
             task_name: task_name(status.title())?,

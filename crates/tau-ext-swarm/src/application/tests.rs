@@ -6,12 +6,13 @@ use async_trait::async_trait;
 use iroh::endpoint as path_iroh_endpoint;
 use tau_swarm_api::{
     Agent, AgentActivity, AgentNavigationMode, AgentWorkStatus, ApplicationIncarnationId,
-    CorrelationId, DeliveryOutcome, Hostname, PromptRequest, SessionId,
+    CorrelationId, DeliveryOutcome, Hostname, PromptRequest, SessionChange, SessionId, TaskId,
+    TaskInfo, TaskTitle,
 };
 use tau_swarm_client::{
     Backoff, Connector, ErrorKind, ExpectedPeer, IncomingCommand, SessionTransport,
 };
-use tau_swarm_client_api::v4::{BlockerAnswerKind, PromptRequest as WirePromptRequest};
+use tau_swarm_client_api::v0::{BlockerAnswerKind, PromptRequest as WirePromptRequest};
 use tau_swarm_client_api::{
     AuthenticateRequest, AuthenticateResponse, CURRENT_PROTOCOL_VERSION, Credential, CredentialId,
     DeclareSessionRequest, DeclareSessionResponse, Secret, SubmitChangeRequest,
@@ -66,6 +67,39 @@ fn application(
     )
     .with_command_policy(Duration::from_millis(25), 8, 16 * 1024);
     (Arc::new(application), prompt_rx, blocker_rx)
+}
+
+/// Dropping a level-triggered changes wait consumes no revision; a later task
+/// metadata mutation remains observable from the same cut.
+#[tokio::test]
+async fn cancelled_changes_wait_does_not_consume_task_info() {
+    let (application, _, _) = application(true);
+    let cut = application.snapshot().await.expect("snapshot").revision;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), application.changes_after(cut))
+            .await
+            .is_err(),
+        "unchanged projection should keep waiting"
+    );
+    application
+        .projection
+        .lock()
+        .await
+        .upsert_task_info(TaskInfo {
+            task_id: TaskId::new("task"),
+            title: TaskTitle::new("Title").expect("task title"),
+            description: None,
+        })
+        .expect("task metadata");
+    application.changed.notify_waiters();
+    let batch = application
+        .changes_after(cut)
+        .await
+        .expect("retained task metadata");
+    assert!(matches!(
+        batch.changes.as_slice(),
+        [SessionChange::UpsertTaskInfo(info)] if info.task_id == TaskId::new("task")
+    ));
 }
 
 /// Admission charges the command table, queued/pending loopback copies,
@@ -408,7 +442,11 @@ impl SessionTransport for ResnapshotTransport {
         &self,
         _request: AuthenticateRequest,
     ) -> ClientResult<AuthenticateResponse> {
-        Ok(AuthenticateResponse::Accepted(CURRENT_PROTOCOL_VERSION))
+        assert_eq!(
+            CURRENT_PROTOCOL_VERSION,
+            tau_swarm_client_api::ProtocolVersion(0)
+        );
+        Ok(AuthenticateResponse::Accepted)
     }
 
     async fn declare(
@@ -474,8 +512,8 @@ async fn swarm_transport_reconnects_only_indeterminate_failures() {
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
-/// A transport loss after synchronization establishes a new generation and
-/// installs a fresh complete snapshot before serving it.
+/// An indeterminate live task-info submission reconnects and converges through
+/// a fresh complete snapshot retained by the same extension process.
 #[tokio::test]
 async fn synchronized_reconnect_installs_fresh_snapshot() {
     let (application, _, _) = application(true);
@@ -518,13 +556,10 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
         .projection
         .lock()
         .await
-        .upsert_agent(Agent {
-            id: AgentId::new("second"),
-            name: "Second".into(),
-            activity: AgentActivity::Running,
-            navigation_mode: AgentNavigationMode::Active,
-            watches: BTreeSet::new(),
-            work_status: AgentWorkStatus::Unreported,
+        .upsert_task_info(TaskInfo {
+            task_id: TaskId::new("task"),
+            title: TaskTitle::new("Current title").expect("task title"),
+            description: None,
         })
         .expect("new projection head");
     let expected_after = SubmitSnapshotRequest {
@@ -582,6 +617,16 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
         .expect("client endpoint");
     let connector = IrohConnector::new(client_endpoint.clone(), server.addr());
     let (initial_application, mut prompts, _) = application(true);
+    initial_application
+        .projection
+        .lock()
+        .await
+        .upsert_task_info(TaskInfo {
+            task_id: TaskId::new("restart-ephemeral"),
+            title: TaskTitle::new("Lost on restart").expect("task title"),
+            description: None,
+        })
+        .expect("initial task metadata");
     let client = tau_swarm_client::Client::new(
         initial_application,
         incarnation(1),
@@ -597,6 +642,9 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
             view.identity == session
                 && view.connection == tau_swarm_core::ConnectionState::Synchronized
                 && view.agents.contains_key(&AgentId::new("agent"))
+                && view
+                    .task_info
+                    .contains_key(&TaskId::new("restart-ephemeral"))
         }) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -674,6 +722,7 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
             view.identity == session
                 && view.application_incarnation_id == incarnation(2)
                 && view.connection == tau_swarm_core::ConnectionState::Synchronized
+                && view.task_info.is_empty()
         }) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

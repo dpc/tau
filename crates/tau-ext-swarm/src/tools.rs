@@ -9,8 +9,8 @@ use tau_proto::{
     CborValue, ToolResult, ToolResultKind, ToolSpec, ToolType, ToolUseState, ToolUseStatus,
 };
 use tau_swarm_api::{
-    BlockerId, BlockerPublication, BlockerRevisionNumber, TaskId, Timestamp, UpdateId,
-    UpdatePublication,
+    BlockerId, BlockerPublication, BlockerRevisionNumber, TaskDescription, TaskId, TaskInfo,
+    TaskTitle, Timestamp, UpdateId, UpdatePublication,
 };
 
 use crate::runtime::SwarmRuntime;
@@ -18,10 +18,14 @@ use crate::runtime::SwarmRuntime;
 /// Logical tool group shared by Tau Swarm's model-visible tools.
 pub const TOOL_GROUP_NAME: &str = "swarm";
 
+/// Public name of Tau Swarm's task metadata tool.
+const TASK_INFO_TOOL_NAME: &str = "task_info";
 /// Public name of Tau Swarm's immutable status-update tool.
-const UPDATE_TOOL_NAME: &str = "update";
+const TASK_UPDATE_TOOL_NAME: &str = "task_update";
+/// Public name of Tau Swarm's blocker lifecycle tool.
+const TASK_BLOCKER_TOOL_NAME: &str = "task_blocker";
 
-/// One process-memory blocker record exposed by `blocker(action="list")`.
+/// One process-memory blocker record exposed by `task_blocker(action="list")`.
 #[derive(Clone)]
 pub(crate) struct BlockerRecord {
     /// Stable random identifier.
@@ -95,7 +99,7 @@ pub(crate) enum BlockerState {
     Cancelled,
 }
 
-/// Strict tagged operation accepted by the agent-scoped `blocker` tool.
+/// Strict tagged operation accepted by the agent-scoped `task_blocker` tool.
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum BlockerArgs {
@@ -124,7 +128,7 @@ enum BlockerArgs {
     List {},
 }
 
-/// Strict immutable payload accepted by `update`.
+/// Strict immutable payload accepted by `task_update`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateArgs {
@@ -137,19 +141,54 @@ struct UpdateArgs {
     task_id: Option<String>,
 }
 
-/// Registers Tau Swarm's agent-scoped blocker and update tools.
+/// Strict replacement payload accepted by `task_info`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskInfoArgs {
+    /// Exact opaque task identity.
+    task_id: String,
+    /// Human-readable title, canonicalized by trimming Unicode whitespace.
+    title: String,
+    /// Optional description; missing and null both clear the prior description.
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Registers Tau Swarm's agent-scoped task tools.
 pub(crate) fn register(builder: &mut ExtensionBuilder<SwarmRuntime>) {
     builder
         .scoped_tool(
-            tau_proto::ToolName::new("blocker"),
+            tau_proto::ToolName::new(TASK_INFO_TOOL_NAME),
+            |_| Ok(declaration(task_info_spec())),
+            handle_task_info,
+        )
+        .scoped_tool(
+            tau_proto::ToolName::new(TASK_BLOCKER_TOOL_NAME),
             |_| Ok(declaration(blocker_spec())),
             handle_blocker,
         )
         .scoped_tool(
-            tau_proto::ToolName::new(UPDATE_TOOL_NAME),
+            tau_proto::ToolName::new(TASK_UPDATE_TOOL_NAME),
             |_| Ok(declaration(update_spec())),
             handle_update,
         );
+}
+
+fn task_info_spec() -> ToolSpec {
+    common_spec(
+        TASK_INFO_TOOL_NAME,
+        "Replace the current process-memory title and optional description for a Tau Swarm task.",
+        serde_json::json!({
+            "type":"object",
+            "properties":{
+                "task_id":{"type":"string","maxLength":128},
+                "title":{"type":"string","maxLength":160},
+                "description":{"type":["string","null"],"maxLength":16384}
+            },
+            "required":["task_id","title"],
+            "additionalProperties":false
+        }),
+    )
 }
 
 fn declaration(tool: ToolSpec) -> tau_proto::ToolRegistrationDeclared {
@@ -184,7 +223,7 @@ fn common_spec(name: &str, description: &str, parameters: serde_json::Value) -> 
 
 fn blocker_spec() -> ToolSpec {
     common_spec(
-        "blocker",
+        TASK_BLOCKER_TOOL_NAME,
         "Manage this agent's process-memory Tau Swarm blockers. add accepts {action,title,description,recommended_answer?,task_id?} and returns {status:\"active\",blocker_id,revision:1}; cancel accepts {action,blocker_id,reason?} and returns the cancelled record; list accepts only {action} and returns this agent's active, answered, and cancelled records in opening order.",
         serde_json::json!({
             "type":"object",
@@ -205,7 +244,7 @@ fn blocker_spec() -> ToolSpec {
 
 fn update_spec() -> ToolSpec {
     common_spec(
-        UPDATE_TOOL_NAME,
+        TASK_UPDATE_TOOL_NAME,
         "Publish an immutable process-memory status update to Tau Swarm.",
         serde_json::json!({
             "type":"object",
@@ -430,6 +469,55 @@ fn handle_update(cx: ToolContext<'_, SwarmRuntime>) -> Result<(), ClientError> {
         Ok(value) => report_json(&cx, value),
         Err(error) => report_error(&cx, error),
     }
+}
+
+fn handle_task_info(cx: ToolContext<'_, SwarmRuntime>) -> Result<(), ClientError> {
+    let args = match decode::<TaskInfoArgs>(&cx.invoke().arguments) {
+        Ok(args) => args,
+        Err(error) => return report_error(&cx, error),
+    };
+    let owner = cx.invoke().agent_id.as_str().to_owned();
+    let result = replace_task_info(cx.state, &owner, args);
+    match result {
+        Ok(value) => report_json(&cx, value),
+        Err(error) => report_error(&cx, error),
+    }
+}
+
+fn replace_task_info(
+    state: &mut SwarmRuntime,
+    owner: &str,
+    args: TaskInfoArgs,
+) -> Result<serde_json::Value, String> {
+    let health = state.worker_health.clone();
+    let _authority = health.mutation_authority()?;
+    require_valid_owner(state, owner)?;
+    let info = canonicalize_task_info(args)?;
+    state
+        .projection
+        .blocking_lock()
+        .upsert_task_info(info.clone())
+        .map_err(str::to_owned)?;
+    state.changed.notify_waiters();
+    Ok(serde_json::json!({
+        "task_id": info.task_id.as_str(),
+        "title": info.title.as_str(),
+        "description": info.description.as_ref().map(TaskDescription::as_str),
+    }))
+}
+
+fn canonicalize_task_info(args: TaskInfoArgs) -> Result<TaskInfo, String> {
+    let task_id = TaskId::new(args.task_id);
+    tau_swarm_api::validate_task_id(&task_id).map_err(|error| error.to_string())?;
+    Ok(TaskInfo {
+        task_id,
+        title: TaskTitle::new(args.title).map_err(|error| error.to_string())?,
+        description: args
+            .description
+            .map(TaskDescription::new)
+            .transpose()
+            .map_err(|error| error.to_string())?,
+    })
 }
 
 fn add_update(

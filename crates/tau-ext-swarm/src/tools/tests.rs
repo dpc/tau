@@ -9,12 +9,13 @@ use tau_proto::{
 };
 use tau_swarm_api::{Agent, AgentActivity, AgentNavigationMode, AgentWorkStatus};
 use tau_swarm_client::Application;
-use tau_swarm_client_api::v4::BlockerAnswerKind;
+use tau_swarm_client_api::v0::BlockerAnswerKind;
 use tau_swarm_client_api::{AnswerBlockerRequest, AnswerBlockerResponse};
 use tokio::sync as path_tokio_sync;
 
 use super::*;
 use crate::application::SwarmApplication;
+use crate::projection::SessionProjection;
 use crate::worker_health::WorkerHealth;
 
 /// Minimal runner used to exercise the production Swarm tool handlers.
@@ -32,12 +33,16 @@ impl TauExtension for ToolTestExtension {
     }
 }
 
-/// Ensures Tau Swarm exposes the public `update` name, never the retired
-/// `swarm_update` name, while keeping both public tools disabled until a role
-/// opts into their shared group or exact names.
+/// Ensures Tau Swarm exposes exactly the three task-family public names, with
+/// no legacy aliases, and keeps them disabled until ordinary role policy grants
+/// their shared group or exact names.
 #[test]
 fn swarm_tools_are_grouped_and_disabled_by_default() {
-    for (expected_name, tool) in [("blocker", blocker_spec()), ("update", update_spec())] {
+    for (expected_name, tool) in [
+        ("task_info", task_info_spec()),
+        ("task_update", update_spec()),
+        ("task_blocker", blocker_spec()),
+    ] {
         assert_eq!(tool.name.as_str(), expected_name);
         assert_eq!(
             tool.model_visible_name
@@ -55,8 +60,51 @@ fn swarm_tools_are_grouped_and_disabled_by_default() {
             Some(TOOL_GROUP_NAME)
         );
     }
-    assert_eq!(UPDATE_TOOL_NAME, "update");
-    assert_ne!(UPDATE_TOOL_NAME, "swarm_update");
+    assert_eq!(TASK_INFO_TOOL_NAME, "task_info");
+    assert_eq!(TASK_UPDATE_TOOL_NAME, "task_update");
+    assert_eq!(TASK_BLOCKER_TOOL_NAME, "task_blocker");
+    assert!(!["update", "blocker", "swarm_update"].contains(&TASK_UPDATE_TOOL_NAME));
+}
+
+/// The actual extension registration surface contains only the approved names;
+/// retired `update` and `blocker` calls cannot route through hidden aliases.
+#[test]
+fn extension_registers_no_legacy_tool_aliases() {
+    let mut input = Vec::new();
+    HarnessOutputWriter::new(&mut input)
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            config: tau_proto::CborValue::Null,
+            instance_name: tau_proto::ExtensionName::parse("swarm-tool-test")
+                .expect("instance name"),
+            tool_prefix: None,
+            state_dir: None,
+            secrets: BTreeMap::new(),
+            settings_files: Default::default(),
+        }))
+        .expect("configure");
+    let mut output = Vec::new();
+    TauExtensionRunner::new(ToolTestExtension)
+        .run(Cursor::new(input), &mut output, SwarmRuntime::new())
+        .expect("tool runner");
+    let mut names = std::iter::from_fn({
+        let mut reader = HarnessInputReader::new(output.as_slice());
+        move || reader.read_message().transpose()
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .expect("tool output")
+    .into_iter()
+    .filter_map(|frame| match frame {
+        HarnessInputMessage::Emit(emit) => match *emit.event {
+            Event::ToolRegistrationDeclared(declaration) => {
+                Some(declaration.tool.name.as_str().to_owned())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["task_blocker", "task_info", "task_update"]);
 }
 
 /// Ensures instance prefixes qualify the Swarm tool and group policy names
@@ -73,8 +121,17 @@ fn swarm_tool_declarations_apply_instance_prefixes() {
     };
     let scope = tau_client::ToolNameScope::from_configure(&configure);
     for (expected_tool, expected_group, declaration) in [
-        ("work_blocker", "work_swarm", declaration(blocker_spec())),
-        ("work_update", "work_swarm", declaration(update_spec())),
+        (
+            "work_task_info",
+            "work_swarm",
+            declaration(task_info_spec()),
+        ),
+        (
+            "work_task_blocker",
+            "work_swarm",
+            declaration(blocker_spec()),
+        ),
+        ("work_task_update", "work_swarm", declaration(update_spec())),
     ] {
         let declaration = scope
             .scope_registration(declaration)
@@ -88,6 +145,218 @@ fn swarm_tool_declarations_apply_instance_prefixes() {
             Some(expected_group)
         );
     }
+}
+
+/// Tool schema advertises strict nullable replacement semantics while leaving
+/// authoritative byte and scalar validation to runtime.
+#[test]
+fn task_info_schema_is_strict_and_nullable() {
+    let parameters = task_info_spec().parameters.expect("parameters");
+    assert_eq!(
+        parameters["required"],
+        serde_json::json!(["task_id", "title"])
+    );
+    assert_eq!(parameters["additionalProperties"], false);
+    assert_eq!(
+        parameters["properties"]["description"]["type"],
+        serde_json::json!(["string", "null"])
+    );
+    assert_eq!(parameters["properties"]["task_id"]["maxLength"], 128);
+    assert_eq!(parameters["properties"]["title"]["maxLength"], 160);
+    assert_eq!(parameters["properties"]["description"]["maxLength"], 16_384);
+}
+
+/// Task metadata canonicalization trims only the title, treats missing/null as
+/// description clearing, and preserves opaque task and description whitespace.
+#[test]
+fn task_info_canonicalizes_exactly_the_approved_fields() {
+    let canonical = canonicalize_task_info(TaskInfoArgs {
+        task_id: " task ".into(),
+        title: "\u{2003}Canonical title\u{2003}".into(),
+        description: Some("\tline one\nline two ".into()),
+    })
+    .expect("valid metadata");
+    assert_eq!(canonical.task_id.as_str(), " task ");
+    assert_eq!(canonical.title.as_str(), "Canonical title");
+    assert_eq!(
+        canonical.description.as_ref().map(TaskDescription::as_str),
+        Some("\tline one\nline two ")
+    );
+
+    let cleared = canonicalize_task_info(
+        serde_json::from_value::<TaskInfoArgs>(serde_json::json!({
+            "task_id": "task",
+            "title": "title",
+            "description": null
+        }))
+        .expect("null description"),
+    )
+    .expect("cleared metadata");
+    assert_eq!(cleared.description, None);
+    let omitted = canonicalize_task_info(
+        serde_json::from_value::<TaskInfoArgs>(serde_json::json!({
+            "task_id": "task",
+            "title": "title"
+        }))
+        .expect("omitted description"),
+    )
+    .expect("omitted description clears");
+    assert_eq!(omitted.description, None);
+}
+
+/// Runtime validation counts UTF-8 bytes, rejects U+2028/U+2029 and forbidden
+/// controls, and does not accept an empty description as a clearing alias.
+#[test]
+fn task_info_enforces_byte_and_scalar_contract() {
+    let valid = |task_id: String, title: String, description: Option<String>| {
+        canonicalize_task_info(TaskInfoArgs {
+            task_id,
+            title,
+            description,
+        })
+    };
+    assert!(valid("é".repeat(64), "é".repeat(80), Some("é".repeat(8_192))).is_ok());
+    assert!(valid("é".repeat(65), "title".into(), None).is_err());
+    assert!(valid("task".into(), "é".repeat(81), None).is_err());
+    assert!(valid("task".into(), "title".into(), Some("é".repeat(8_193))).is_err());
+    assert!(valid("task".into(), "title".into(), Some(String::new())).is_err());
+    for forbidden in ['\0', '\r', '\u{2028}', '\u{2029}'] {
+        assert!(valid(format!("task{forbidden}"), "title".into(), None).is_err());
+        assert!(valid("task".into(), format!("title{forbidden}"), None).is_err());
+        assert!(
+            valid(
+                "task".into(),
+                "title".into(),
+                Some(format!("body{forbidden}"))
+            )
+            .is_err()
+        );
+    }
+}
+
+/// Any loaded agent granted `task_info` may replace any exact task ID, and
+/// success returns the canonical installed value rather than the raw arguments.
+#[test]
+fn task_info_uses_agent_grant_not_task_ownership() {
+    let mut state = configured_runtime();
+    state
+        .projection
+        .blocking_lock()
+        .upsert_agent(Agent {
+            id: tau_swarm_api::AgentId::new("other"),
+            name: "Other".into(),
+            activity: AgentActivity::Waiting,
+            navigation_mode: AgentNavigationMode::Active,
+            watches: BTreeSet::new(),
+            work_status: AgentWorkStatus::Unreported,
+        })
+        .expect("second invoking agent");
+    let first = replace_task_info(
+        &mut state,
+        "agent",
+        TaskInfoArgs {
+            task_id: "task".into(),
+            title: " First ".into(),
+            description: Some("details".into()),
+        },
+    )
+    .expect("first agent metadata");
+    assert_eq!(
+        first,
+        serde_json::json!({
+            "task_id":"task",
+            "title":"First",
+            "description":"details"
+        })
+    );
+    let replacement = replace_task_info(
+        &mut state,
+        "other",
+        TaskInfoArgs {
+            task_id: "task".into(),
+            title: "Replacement".into(),
+            description: None,
+        },
+    )
+    .expect("other agent replacement");
+    assert_eq!(
+        replacement,
+        serde_json::json!({
+            "task_id":"task",
+            "title":"Replacement",
+            "description":null
+        })
+    );
+    assert_eq!(
+        state
+            .projection
+            .blocking_lock()
+            .snapshot()
+            .snapshot
+            .task_info
+            .len(),
+        1
+    );
+}
+
+/// Tool-level entry-capacity failure leaves the canonical installed metadata,
+/// revision, and live history unchanged, while replacement at the ceiling fits.
+#[test]
+fn task_info_tool_capacity_failure_is_transactional() {
+    let mut state = configured_runtime();
+    state
+        .config
+        .as_mut()
+        .expect("config")
+        .limits
+        .task_info_entries = 1;
+    *state.projection.blocking_lock() = SessionProjection::new(8).with_task_info_limit(1);
+    state
+        .projection
+        .blocking_lock()
+        .upsert_agent(Agent {
+            id: tau_swarm_api::AgentId::new("agent"),
+            name: "Agent".into(),
+            activity: AgentActivity::Waiting,
+            navigation_mode: AgentNavigationMode::Active,
+            watches: BTreeSet::new(),
+            work_status: AgentWorkStatus::Unreported,
+        })
+        .expect("owner projection");
+    replace_task_info(
+        &mut state,
+        "agent",
+        TaskInfoArgs {
+            task_id: "task".into(),
+            title: "First".into(),
+            description: None,
+        },
+    )
+    .expect("first");
+    replace_task_info(
+        &mut state,
+        "agent",
+        TaskInfoArgs {
+            task_id: "task".into(),
+            title: "Replacement".into(),
+            description: None,
+        },
+    )
+    .expect("replacement at ceiling");
+    let before = state.projection.blocking_lock().snapshot();
+    assert!(
+        replace_task_info(
+            &mut state,
+            "agent",
+            TaskInfoArgs {
+                task_id: "second".into(),
+                title: "Second".into(),
+                description: None,
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(state.projection.blocking_lock().snapshot(), before);
 }
 
 fn configured_runtime() -> SwarmRuntime {
@@ -125,7 +394,7 @@ fn configured_runtime() -> SwarmRuntime {
     state
 }
 
-/// Worker termination makes both mutating tools fail before changing the
+/// Worker termination makes all three mutating tools fail before changing the
 /// projection or blocker history, so no successful local state can outlive its
 /// sole publisher.
 #[test]
@@ -174,9 +443,24 @@ fn terminal_worker_rejects_mutations_without_changing_state() {
             &mut state,
             "agent",
             UpdateArgs {
-                title: "update".into(),
+                title: "task_update".into(),
                 description: "description".into(),
                 task_id: None,
+            },
+        ),
+        Err(
+            "Tau Swarm owner is unavailable until successful replay has a live publication worker"
+                .into()
+        )
+    );
+    assert_eq!(
+        replace_task_info(
+            &mut state,
+            "agent",
+            TaskInfoArgs {
+                task_id: "task".into(),
+                title: "Title".into(),
+                description: None,
             },
         ),
         Err(
@@ -190,12 +474,12 @@ fn terminal_worker_rejects_mutations_without_changing_state() {
 }
 
 /// A routed call received after worker death emits only an authoritative tool
-/// error for both mutating tools, never a successful terminal.
+/// error for all three mutating tools, never a successful terminal.
 #[test]
 fn terminal_worker_cannot_report_successful_tool_results() {
     for (name, arguments) in [
         (
-            "blocker",
+            "task_blocker",
             serde_json::json!({
                 "action": "add",
                 "title": "blocked",
@@ -203,10 +487,17 @@ fn terminal_worker_cannot_report_successful_tool_results() {
             }),
         ),
         (
-            "update",
+            "task_update",
             serde_json::json!({
-                "title": "update",
+                "title": "task_update",
                 "description": "description"
+            }),
+        ),
+        (
+            "task_info",
+            serde_json::json!({
+                "task_id": "task",
+                "title": "Title"
             }),
         ),
     ] {
@@ -299,7 +590,7 @@ fn blocker_actions_reject_cross_action_fields() {
 fn cancellation_rejects_reserved_answer() {
     let mut state = configured_runtime();
     let publication = BlockerPublication {
-        blocker_id: BlockerId::new("blocker"),
+        blocker_id: BlockerId::new("task_blocker"),
         revision: BlockerRevisionNumber(1),
         owner: tau_swarm_api::AgentId::new("agent"),
         title: "title".into(),
@@ -318,7 +609,7 @@ fn cancellation_rejects_reserved_answer() {
         .lock()
         .expect("history")
         .push(BlockerRecord {
-            blocker_id: BlockerId::new("blocker"),
+            blocker_id: BlockerId::new("task_blocker"),
             revision: BlockerRevisionNumber(1),
             owner: tau_swarm_api::AgentId::new("agent"),
             title: "title".into(),
@@ -332,7 +623,7 @@ fn cancellation_rejects_reserved_answer() {
             reserved_answer_bytes: 1,
         });
     assert_eq!(
-        cancel_blocker(&mut state, "agent", "blocker".into(), None),
+        cancel_blocker(&mut state, "agent", "task_blocker".into(), None),
         Err("blocker answer is already pending".into())
     );
 }
@@ -342,7 +633,7 @@ fn cancellation_rejects_reserved_answer() {
 #[test]
 fn owner_history_budget_includes_pending_answer_reservations() {
     let record = BlockerRecord {
-        blocker_id: BlockerId::new("blocker"),
+        blocker_id: BlockerId::new("task_blocker"),
         revision: BlockerRevisionNumber(1),
         owner: tau_swarm_api::AgentId::new("agent"),
         title: "title".into(),

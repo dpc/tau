@@ -193,7 +193,7 @@ fn register_swarm_tools(harness: &mut Harness, prefix: Option<&str>) {
         name: ToolGroupName::new(scoped_name("swarm")),
         prompt_fragment: None,
     };
-    for name in ["blocker", "update"] {
+    for name in ["task_info", "task_update", "task_blocker"] {
         harness.registry.register_with_prompt_fragment(
             &crate::test_connection_id("swarm"),
             ToolRegistration {
@@ -478,8 +478,9 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
     let default_tools = default
         .harness
         .gather_effective_tool_specs_for_role_model(ROLE, default.harness.selected_model.as_ref());
-    assert!(!default_tools.iter().any(|tool| tool.name == "blocker"));
-    assert!(!default_tools.iter().any(|tool| tool.name == "update"));
+    assert!(!default_tools.iter().any(|tool| tool.name == "task_info"));
+    assert!(!default_tools.iter().any(|tool| tool.name == "task_update"));
+    assert!(!default_tools.iter().any(|tool| tool.name == "task_blocker"));
 
     let mut group_enabled = policy_harness(
         &[],
@@ -495,14 +496,16 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
             ROLE,
             group_enabled.harness.selected_model.as_ref(),
         );
-    assert!(group_tools.iter().any(|tool| tool.name == "blocker"));
-    assert!(group_tools.iter().any(|tool| tool.name == "update"));
-    assert!(!group_tools.iter().any(|tool| tool.name == "swarm_update"));
+    assert!(group_tools.iter().any(|tool| tool.name == "task_info"));
+    assert!(group_tools.iter().any(|tool| tool.name == "task_update"));
+    assert!(group_tools.iter().any(|tool| tool.name == "task_blocker"));
+    assert!(!group_tools.iter().any(|tool| tool.name == "update"));
+    assert!(!group_tools.iter().any(|tool| tool.name == "blocker"));
 
     let mut exact_enabled = policy_harness(
         &[],
         AgentRole {
-            enable_tools: vec![ToolName::new("blocker")],
+            enable_tools: vec![ToolName::new("task_info")],
             ..AgentRole::default()
         },
     );
@@ -513,8 +516,9 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
             ROLE,
             exact_enabled.harness.selected_model.as_ref(),
         );
-    assert!(exact_tools.iter().any(|tool| tool.name == "blocker"));
-    assert!(!exact_tools.iter().any(|tool| tool.name == "update"));
+    assert!(exact_tools.iter().any(|tool| tool.name == "task_info"));
+    assert!(!exact_tools.iter().any(|tool| tool.name == "task_update"));
+    assert!(!exact_tools.iter().any(|tool| tool.name == "task_blocker"));
 
     let mut prefixed = policy_harness(
         &[],
@@ -530,13 +534,17 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
     assert!(
         prefixed_tools
             .iter()
-            .any(|tool| tool.name == "work_blocker")
+            .any(|tool| tool.name == "work_task_info")
     );
-    assert!(prefixed_tools.iter().any(|tool| tool.name == "work_update"));
     assert!(
-        !prefixed_tools
+        prefixed_tools
             .iter()
-            .any(|tool| tool.name == "work_swarm_update")
+            .any(|tool| tool.name == "work_task_update")
+    );
+    assert!(
+        prefixed_tools
+            .iter()
+            .any(|tool| tool.name == "work_task_blocker")
     );
 }
 

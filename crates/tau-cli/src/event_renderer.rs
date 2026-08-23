@@ -56,7 +56,7 @@ pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
 const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 
 const AGENT_START_TOOL_NAME: &str = "agent_start";
-const BLOCKER_TOOL_NAME: &str = "blocker";
+const BLOCKER_TOOL_NAME: &str = "task_blocker";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
 static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
     path_std_sync::OnceLock::new();
@@ -147,7 +147,7 @@ impl BlockerAction {
 /// reasons. The action discriminant alone distinguishes the operation without
 /// displaying any of that payload.
 fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Option<BlockerAction> {
-    if started.tool_name.as_str() != BLOCKER_TOOL_NAME {
+    if !is_blocker_tool_name(started.tool_name.as_str()) {
         return None;
     }
     let CborValue::Map(entries) = &started.arguments else {
@@ -172,6 +172,15 @@ fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Option<Blocker
         };
     }
     action
+}
+
+/// Recognizes the bundled Swarm blocker name with an optional structural
+/// extension-instance prefix, but never its removed legacy alias.
+fn is_blocker_tool_name(name: &str) -> bool {
+    name == BLOCKER_TOOL_NAME
+        || name
+            .strip_suffix("_task_blocker")
+            .is_some_and(|prefix| !prefix.is_empty())
 }
 
 /// Returns the effective timeout for a built-in shell invocation.
@@ -7605,7 +7614,7 @@ impl EventRenderer {
         {
             return;
         }
-        let is_blocker = started.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let is_blocker = is_blocker_tool_name(started.tool_name.as_str());
         let blocker_action = blocker_action_descriptor(started);
         let effective_shell_timeout = effective_shell_timeout(started);
         let mut display = pending_tool_call_display(started.tool_name.as_str());
@@ -7981,7 +7990,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let is_blocker = prior.is_blocker || result.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let is_blocker = prior.is_blocker || is_blocker_tool_name(result.tool_name.as_str());
         let mut display = if is_blocker {
             render_tool_use_state(
                 &result.tool_name,
@@ -8041,7 +8050,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let is_blocker = prior.is_blocker || result.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let is_blocker = prior.is_blocker || is_blocker_tool_name(result.tool_name.as_str());
         let mut display = if is_blocker {
             render_tool_use_state(
                 &result.tool_name,
@@ -8134,7 +8143,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let is_blocker = prior.is_blocker || error.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let is_blocker = prior.is_blocker || is_blocker_tool_name(error.tool_name.as_str());
         let mut display = if is_blocker {
             render_tool_use_state(
                 &error.tool_name,
@@ -8181,7 +8190,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let is_blocker = prior.is_blocker || error.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let is_blocker = prior.is_blocker || is_blocker_tool_name(error.tool_name.as_str());
         let mut display = if is_blocker {
             render_tool_use_state(
                 &error.tool_name,
@@ -8249,7 +8258,7 @@ impl EventRenderer {
         let descriptor =
             normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::Cancelled);
         let mut display = render_tool_use_state(&cancelled.tool_name, &descriptor);
-        let is_blocker = prior.is_blocker || cancelled.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let is_blocker = prior.is_blocker || is_blocker_tool_name(cancelled.tool_name.as_str());
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(

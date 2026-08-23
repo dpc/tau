@@ -287,7 +287,8 @@ Compact trace formats provide a semantic assistant/tool/message timeline in JSON
 
 The optional `std-swarm` extension publishes a replay-coherent live session
 overview to an identity-pinned Tau Swarm peer. It accepts correlated prompts
-and blocker answers and provides agent-scoped blocker/update tools. Command
-deduplication, blocker history, updates, and acknowledgements are
+and blocker answers and provides agent-scoped `task_info`, `task_update`, and
+`task_blocker` tools. Command deduplication, replaceable task metadata, blocker
+history, updates, and acknowledgements are
 process-memory-only and reset on session switch or extension restart.
 See [Configuring extensions: Tau Swarm](docs/extensions.md#tau-swarm).

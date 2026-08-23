@@ -99,6 +99,8 @@ pub(crate) struct Limits {
     pub update_entries: usize,
     /// Logical bytes retained by updates.
     pub update_bytes: usize,
+    /// Maximum current task-info entries.
+    pub task_info_entries: usize,
     /// Retained projection changes.
     pub change_history_entries: usize,
     /// Logical bytes retained by changes.
@@ -122,6 +124,7 @@ impl Default for Limits {
             blocker_bytes: 4 * 1024 * 1024,
             update_entries: 256,
             update_bytes: 8 * 1024 * 1024,
+            task_info_entries: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
             change_history_entries: 4_096,
             change_history_bytes: 32 * 1024 * 1024,
             publication_bytes: 8 * 1024 * 1024,
@@ -245,6 +248,12 @@ impl Limits {
             self.update_bytes,
             256 * 1024,
             64 * 1024 * 1024,
+        )?;
+        range_usize(
+            "limits.task_info_entries",
+            self.task_info_entries,
+            1,
+            tau_swarm_api::MAX_TASK_INFO_ENTRIES,
         )?;
         range_usize(
             "limits.change_history_entries",
