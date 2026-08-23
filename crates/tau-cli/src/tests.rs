@@ -8115,6 +8115,128 @@ fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
     assert!(vt.screen_contains(80, "important config error"));
 }
 
+/// Compact mode hides accepted informational and warning notices but preserves
+/// critical diagnostics and restores the retained notices after a hidden-agent
+/// transcript round trip.
+#[test]
+fn compact_mode_reprojects_retained_notices_without_hiding_critical_errors() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+
+    for (kind, message, level, always_show) in [
+        (
+            "test.info",
+            "status reminder",
+            tau_proto::NoticeLevel::Info,
+            false,
+        ),
+        (
+            "test.warning",
+            "mandatory warning",
+            tau_proto::NoticeLevel::Warning,
+            true,
+        ),
+        (
+            "test.error",
+            "critical harness error",
+            tau_proto::NoticeLevel::Critical,
+            false,
+        ),
+    ] {
+        renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: kind.into(),
+            message: message.into(),
+            level,
+            always_show,
+        }));
+    }
+    sync(&handle);
+    for visible in [
+        "status reminder",
+        "mandatory warning",
+        "critical harness error",
+    ] {
+        assert!(vt.screen_contains(80, visible));
+    }
+
+    renderer.toggle_verbose_mode();
+    renderer.switch_agent("worker".to_owned());
+    renderer.switch_agent("main".to_owned());
+    sync(&handle);
+    for hidden in ["status reminder", "mandatory warning"] {
+        assert!(!vt.screen_contains(80, hidden));
+    }
+    assert!(vt.screen_contains(80, "critical harness error"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    for restored in [
+        "status reminder",
+        "mandatory warning",
+        "critical harness error",
+    ] {
+        assert!(vt.screen_contains(80, restored));
+    }
+}
+
+/// A new session discards compact-hidden no-agent notices, so toggling verbose
+/// later cannot revive transcript state from the previous session.
+#[test]
+fn new_session_discards_compact_hidden_no_agent_notices() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice::new(
+        "test.info",
+        "old no-agent notice",
+        tau_proto::NoticeLevel::Info,
+    )));
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "old no-agent notice"));
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("new-session"),
+        reason: SessionStartReason::New,
+    }));
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "old no-agent notice"));
+}
+
+/// Locally synthesized manual-compaction acceptance notices follow the same
+/// compact projection even when their target agent is currently hidden.
+#[test]
+fn compact_mode_reprojects_hidden_target_manual_compaction_notice() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.toggle_verbose_mode();
+    renderer.switch_agent("worker".to_owned());
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        self_compaction_requested("cr-hidden-notice", "call-hidden-notice"),
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "accepted compaction request"));
+
+    renderer.toggle_verbose_mode();
+    renderer.switch_agent("main".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Agent main accepted compaction request"));
+}
+
 /// The interactive renderer preserves one directed tree notice as ordered,
 /// distinct lines, including anchor spacing and the selected-head marker.
 #[test]

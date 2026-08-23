@@ -191,9 +191,10 @@ output. The resulting behavior is specified by
 
 The process-local verbose-mode flag is a top-level projection over those
 retained presentation models. Verbose mode preserves the configured `show-*`
-rendering. Compact mode replaces thinking, terminal tool history/summaries, and
-turn stats with position-stable empty blocks while projecting each live tool as
-one identity/status row without payload. Terminal tool outcomes remove the live
+rendering. Compact mode replaces thinking, terminal tool history/summaries,
+turn stats, and non-critical harness notices with position-stable empty blocks
+while projecting each live tool as one identity/status row without payload.
+Critical harness notices remain visible. Terminal tool outcomes remove the live
 row through the ordinary lifecycle path. Switching modes re-renders retained
 blocks and does not mutate `CliState`, protocol events, journals, or model
 context.

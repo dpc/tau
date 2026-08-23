@@ -280,7 +280,9 @@ pub struct HarnessNotice {
     /// Severity or verbosity level.
     #[serde(default)]
     pub level: NoticeLevel,
-    /// Whether UI filters must show this non-critical notice.
+    /// Whether UI notice-level filters must show this non-critical notice.
+    ///
+    /// A UI may still apply a separate presentation-only transcript projection.
     #[serde(default, skip_serializing_if = "is_false")]
     pub always_show: bool,
 }

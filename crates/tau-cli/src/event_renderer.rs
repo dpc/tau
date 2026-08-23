@@ -577,6 +577,9 @@ pub(crate) struct EventRenderer {
     /// Durable message blocks and payloads, kept so `:set show-messages`
     /// can re-render the current transcript retroactively.
     message_history: Vec<MessageBlockEntry>,
+    /// Accepted harness notices retained for reversible verbose-mode
+    /// projection.
+    notice_history: Vec<NoticeBlockEntry>,
     /// Typed harness-internal prompt blocks retained for `:set
     /// show-internal-prompts` reprojection.
     internal_prompt_history: Vec<InternalPromptBlockEntry>,
@@ -780,6 +783,8 @@ struct AgentUiState {
     turn_stats_history: Vec<TurnStatsBlockEntry>,
     tool_history: Vec<ToolBlockEntry>,
     message_history: Vec<MessageBlockEntry>,
+    /// Harness notices retained for reversible verbose-mode reprojection.
+    notice_history: Vec<NoticeBlockEntry>,
     /// Typed harness-internal prompt projection slots owned by this transcript.
     internal_prompt_history: Vec<InternalPromptBlockEntry>,
     current_context_percent: Option<u8>,
@@ -955,6 +960,15 @@ struct MessageBlockEntry {
     event: Event,
     /// Session whose metadata may supplement this immutable message event.
     session_id: Option<tau_proto::SessionId>,
+}
+
+/// One harness notice retained for reversible transcript reprojection.
+struct NoticeBlockEntry {
+    /// Position-stable terminal block for the accepted notice.
+    block_id: tau_cli_term::BlockId,
+    /// Notice payload, including its severity, retained without protocol
+    /// mutation.
+    notice: tau_proto::HarnessNotice,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1932,6 +1946,7 @@ impl EventRenderer {
             turn_stats_history: Vec::new(),
             tool_history: Vec::new(),
             message_history: Vec::new(),
+            notice_history: Vec::new(),
             internal_prompt_history: Vec::new(),
             state_dirs,
             current_model: None,
@@ -2666,6 +2681,7 @@ impl EventRenderer {
             turn_stats_history: std::mem::take(&mut self.turn_stats_history),
             tool_history: std::mem::take(&mut self.tool_history),
             message_history: std::mem::take(&mut self.message_history),
+            notice_history: std::mem::take(&mut self.notice_history),
             internal_prompt_history: std::mem::take(&mut self.internal_prompt_history),
             current_context_percent: self.current_context_percent.take(),
             current_context_input_tokens: self.current_context_input_tokens.take(),
@@ -2721,6 +2737,7 @@ impl EventRenderer {
         self.turn_stats_history = state.turn_stats_history;
         self.tool_history = state.tool_history;
         self.message_history = state.message_history;
+        self.notice_history = state.notice_history;
         self.internal_prompt_history = state.internal_prompt_history;
         self.current_context_percent = state.current_context_percent;
         self.current_context_input_tokens = state.current_context_input_tokens;
@@ -3454,6 +3471,12 @@ impl EventRenderer {
             let block = self.render_turn_stats_entry(entry);
             self.handle.set_block(entry.block_id, block);
         }
+        for entry in &self.notice_history {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_harness_notice_block(&entry.notice),
+            );
+        }
         for entry in &self.internal_prompt_history {
             self.handle.set_block(
                 entry.block_id,
@@ -3585,6 +3608,32 @@ impl EventRenderer {
             || level.visible_at(self.notice_level)
     }
 
+    /// Renders retained harness notices according to the local transcript mode.
+    ///
+    /// Compact mode retains critical diagnostics while hiding every
+    /// lower-severity notice, including mandatory warnings. The original
+    /// notice stays in [`Self::notice_history`] so verbose mode can restore
+    /// it in place.
+    fn render_harness_notice_block(
+        &self,
+        notice: &tau_proto::HarnessNotice,
+    ) -> tau_cli_term::StyledBlock {
+        if self.verbose_mode || notice.level == tau_proto::NoticeLevel::Critical {
+            render_harness_notice(&self.theme, notice)
+        } else {
+            Self::empty_block()
+        }
+    }
+
+    /// Adds one threshold-accepted harness notice to the retained transcript.
+    fn retain_harness_notice(&mut self, label: &'static str, notice: tau_proto::HarnessNotice) {
+        let block_id = self
+            .handle
+            .print_output(label, self.render_harness_notice_block(&notice));
+        self.notice_history
+            .push(NoticeBlockEntry { block_id, notice });
+    }
+
     fn set_show_tools(&mut self, show_tools: tau_config::settings::ShowTools) {
         if self.show_tools == show_tools {
             return;
@@ -3709,6 +3758,7 @@ impl EventRenderer {
         self.turn_stats_history.clear();
         self.tool_history.clear();
         self.message_history.clear();
+        self.notice_history.clear();
         self.internal_prompt_history.clear();
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
@@ -8701,8 +8751,7 @@ impl EventRenderer {
             }
             Event::HarnessNotice(info) => {
                 if info.visible_at(self.notice_level) {
-                    self.handle
-                        .print_output("harness-notice", render_harness_notice(&self.theme, info));
+                    self.retain_harness_notice("harness-notice", info.clone());
                 }
                 true
             }
@@ -8717,10 +8766,7 @@ impl EventRenderer {
                     tau_proto::NoticeLevel::Info,
                 );
                 if notice.visible_at(self.notice_level) {
-                    self.handle.print_output(
-                        "manual-compaction-requested",
-                        render_harness_notice(&self.theme, &notice),
-                    );
+                    self.retain_harness_notice("manual-compaction-requested", notice);
                 }
                 true
             }
