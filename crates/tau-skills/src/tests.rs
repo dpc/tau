@@ -756,8 +756,8 @@ fn load_from_dirs_skips_oversized_unclosed_frontmatter() {
     }));
 }
 
-/// Embedded self-knowledge must remain discoverable in deterministic order with
-/// the documented hidden/prompt visibility and task-specific guidance.
+/// The self-knowledge overview is the sole default prompt entry, while its
+/// indexed onboarding guide remains available by exact name.
 #[test]
 fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     let skills = built_in_skills();
@@ -793,6 +793,12 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-e2e-testing",
         ]
     );
+    let advertised: Vec<&str> = skills
+        .iter()
+        .filter(|skill| skill.add_to_prompt)
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(advertised, ["tau-self-knowledge"]);
 
     let skill = skills
         .iter()
@@ -871,7 +877,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .iter()
         .find(|skill| skill.name == "tau-self-knowledge-introduction")
         .expect("built-in introduction skill");
-    assert!(introduction.add_to_prompt);
+    assert!(!introduction.add_to_prompt);
     for required in [
         "one selected topic",
         "show_introduction_notice: false",

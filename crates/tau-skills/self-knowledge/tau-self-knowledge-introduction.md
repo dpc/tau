@@ -1,7 +1,7 @@
 ---
 name: tau-self-knowledge-introduction
 description: Introduce and onboard the user to Tau conversationally, including practical setup, customization, isolation, and community choices.
-advertise: true
+advertise: false
 ---
 
 # Introduce the user to Tau
