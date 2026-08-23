@@ -175,7 +175,7 @@ whose nodes are ancestors of its selected-branch watermark.
 If provider and extension initialization instead settles with no available
 models, the harness retires the same materialized selected-branch wakes plus any
 pending replay activation without committing an inference checkpoint or creating
-provider work. One always-show actionable provider-configuration failure covers
+provider work. One Alert-purpose actionable provider-configuration failure covers
 the coalesced activation for that agent. Off-branch wakes remain dormant and
 owned; a later model publication permits new message activations and any
 subsequently selected dormant wake to use ordinary dispatch.

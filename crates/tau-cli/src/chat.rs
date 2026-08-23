@@ -393,14 +393,14 @@ fn format_ui_io_stats(meter: &UiIoMeter) -> String {
 fn handle_debug_show_ui_event_stats_command_text(
     text: &str,
     meter: &UiIoMeter,
-    mut system_info: impl FnMut(&str),
+    mut command_feedback: impl FnMut(&str),
 ) -> bool {
     if text == ":debug-show-ui-event-stats" {
-        system_info(&format_ui_io_stats(meter));
+        command_feedback(&format_ui_io_stats(meter));
         return true;
     }
     if text.starts_with(":debug-show-ui-event-stats ") {
-        system_info(":debug-show-ui-event-stats takes no arguments");
+        command_feedback(":debug-show-ui-event-stats takes no arguments");
         return true;
     }
     false
@@ -1998,7 +1998,7 @@ impl LocalTerminalOutput {
         self.theme = theme;
     }
 
-    fn system_info(&self, message: &str) {
+    fn command_feedback(&self, message: &str) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
@@ -2051,7 +2051,7 @@ trait RecordedLineHandlers {
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError>;
     fn handle_dynamic_action(&mut self, text: &str) -> CommandOutcome;
     fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit>;
-    fn system_info(&mut self, message: &str);
+    fn command_feedback(&mut self, message: &str);
 }
 
 /// Side effects driven by submitted-line orchestration.
@@ -2323,7 +2323,7 @@ fn apply_ephemeral_staging_command(
     text: &str,
     has_selected_agent: bool,
     pending: &mut PendingNewAgentOptions,
-    mut system_info: impl FnMut(&str),
+    mut command_feedback: impl FnMut(&str),
 ) -> bool {
     if text != ":ephemeral" && !text.starts_with(":ephemeral ") {
         return false;
@@ -2333,11 +2333,11 @@ fn apply_ephemeral_staging_command(
     };
     let rest = rest.trim();
     if !rest.is_empty() && !matches!(rest, "on" | "off") || text.split_whitespace().count() > 2 {
-        system_info(":ephemeral [on|off]");
+        command_feedback(":ephemeral [on|off]");
         return true;
     }
     if has_selected_agent {
-        system_info("Use :new first; :ephemeral controls only the next new agent.");
+        command_feedback("Use :new first; :ephemeral controls only the next new agent.");
         return true;
     }
     match rest {
@@ -2350,9 +2350,9 @@ fn apply_ephemeral_staging_command(
         _ => unreachable!("validated above"),
     }
     if pending.ephemeral() {
-        system_info("next agent will be ephemeral (forgotten when this daemon exits)");
+        command_feedback("next agent will be ephemeral (forgotten when this daemon exits)");
     } else {
-        system_info("next agent will be persistent");
+        command_feedback("next agent will be persistent");
     }
     true
 }
@@ -2436,7 +2436,7 @@ impl<'a> TerminalInputSession<'a> {
             }
             _ => self
                 .output
-                .system_info(&format!("binding: unknown application action `{action}`")),
+                .command_feedback(&format!("binding: unknown application action `{action}`")),
         }
         Ok(())
     }
@@ -2476,7 +2476,7 @@ impl<'a> TerminalInputSession<'a> {
         if let Some(command) = parse_agent_picker_command(text) {
             match command {
                 Ok(filter) => self.pick_agent(filter)?,
-                Err(message) => self.output.system_info(message),
+                Err(message) => self.output.command_feedback(message),
             }
             return Ok(CommandOutcome::Continue);
         }
@@ -2511,7 +2511,7 @@ impl<'a> TerminalInputSession<'a> {
                 self.term.handle().redraw();
                 self.update_draft();
             }
-            Err(message) => self.output.system_info(&message),
+            Err(message) => self.output.command_feedback(&message),
         }
         true
     }
@@ -2532,7 +2532,7 @@ impl<'a> TerminalInputSession<'a> {
             text,
             self.selected_agent_id().is_some(),
             &mut self.pending_new_agent_options,
-            |message| self.output.system_info(message),
+            |message| self.output.command_feedback(message),
         )
     }
 
@@ -2602,7 +2602,7 @@ impl<'a> TerminalInputSession<'a> {
             .strip_prefix(":retry")
             .is_some_and(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
         {
-            self.output.system_info("usage: :retry");
+            self.output.command_feedback("usage: :retry");
             return Ok(CommandOutcome::Continue);
         }
         if let Some(exit) = handle_ui_detach_command_text(text, self.writer) {
@@ -2625,11 +2625,11 @@ impl<'a> TerminalInputSession<'a> {
         match (subcommand, extra) {
             (Some("new"), None) => self.start_new_session(),
             (None, None) => {
-                self.output.system_info(":session new");
+                self.output.command_feedback(":session new");
                 Ok(())
             }
             _ => {
-                self.output.system_info(":session new");
+                self.output.command_feedback(":session new");
                 Ok(())
             }
         }
@@ -2690,7 +2690,7 @@ impl<'a> TerminalInputSession<'a> {
             self.selected_side_agent_id(),
             text,
             self.writer,
-            |message| self.output.system_info(message),
+            |message| self.output.command_feedback(message),
         )
     }
 
@@ -2704,7 +2704,7 @@ impl<'a> TerminalInputSession<'a> {
         }
         if text.starts_with(":compact ") {
             self.output
-                .system_info(":compact forces a compaction pass and takes no arguments");
+                .command_feedback(":compact forces a compaction pass and takes no arguments");
             return true;
         }
         false
@@ -2720,7 +2720,7 @@ impl<'a> TerminalInputSession<'a> {
             return true;
         }
         if text.starts_with(":fast ") {
-            self.output.system_info(":fast toggles Fast mode");
+            self.output.command_feedback(":fast toggles Fast mode");
             return true;
         }
         false
@@ -2753,7 +2753,7 @@ impl<'a> TerminalInputSession<'a> {
         }
         if text.starts_with(":verbose-mode-toggle ") {
             self.output
-                .system_info(":verbose-mode-toggle takes no arguments");
+                .command_feedback(":verbose-mode-toggle takes no arguments");
             return true;
         }
         false
@@ -2766,7 +2766,8 @@ impl<'a> TerminalInputSession<'a> {
             return true;
         }
         if text.starts_with(":session-stats ") {
-            self.output.system_info(":session-stats takes no arguments");
+            self.output
+                .command_feedback(":session-stats takes no arguments");
             return true;
         }
         false
@@ -2775,11 +2776,11 @@ impl<'a> TerminalInputSession<'a> {
     /// Handles the no-argument local version command and invalid variants.
     fn handle_version_command(&self, text: &str) -> bool {
         if text == ":version" {
-            self.output.system_info(&crate::version_label());
+            self.output.command_feedback(&crate::version_label());
             return true;
         }
         if text.starts_with(":version ") {
-            self.output.system_info(":version takes no arguments");
+            self.output.command_feedback(":version takes no arguments");
             return true;
         }
         false
@@ -2791,13 +2792,13 @@ impl<'a> TerminalInputSession<'a> {
             let provider = provider.trim();
             if !provider.is_empty() {
                 let output = &self.output;
-                run_provider_auth(provider, &|message| output.system_info(message));
+                run_provider_auth(provider, &|message| output.command_feedback(message));
             }
             return true;
         }
         if text == ":provider-auth" {
             let output = &self.output;
-            run_provider_auth("", &|message| output.system_info(message));
+            run_provider_auth("", &|message| output.command_feedback(message));
             return true;
         }
         false
@@ -2832,7 +2833,7 @@ impl<'a> TerminalInputSession<'a> {
         if text == ":set" || text.starts_with(":set ") {
             let output = &self.output;
             handle_set_command(text, &self.ctx.renderer_tx, &|message| {
-                output.system_info(message);
+                output.command_feedback(message);
             });
             return true;
         }
@@ -2847,13 +2848,13 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_debug_show_ui_event_stats_command(&self, text: &str) -> bool {
         handle_debug_show_ui_event_stats_command_text(text, &self.ctx.ui_io_meter, |message| {
-            self.output.system_info(message);
+            self.output.command_feedback(message);
         })
     }
 
     fn handle_debug_show_event_stats_command(&self, text: &str) -> bool {
         handle_debug_show_event_stats_command_text(text, self.writer, |usage| {
-            self.output.system_info(usage);
+            self.output.command_feedback(usage);
         })
     }
 
@@ -2866,13 +2867,13 @@ impl<'a> TerminalInputSession<'a> {
                 .collect::<Vec<_>>()
                 .join(", ");
             self.output
-                .system_info(&format!(":theme <name>; available: {names}"));
+                .command_feedback(&format!(":theme <name>; available: {names}"));
             return;
         }
         let theme = match crate::theme::select_theme_for_command(&self.ctx.dirs, name) {
             Ok(theme) => theme,
             Err(error) => {
-                self.output.system_info(&format!(":theme: {error}"));
+                self.output.command_feedback(&format!(":theme: {error}"));
                 return;
             }
         };
@@ -2896,7 +2897,7 @@ impl<'a> TerminalInputSession<'a> {
             theme: theme.clone(),
         });
         self.output
-            .system_info(&format!("theme set to `{name}` for this UI"));
+            .command_feedback(&format!("theme set to `{name}` for this UI"));
     }
 
     fn handle_agent_command(&mut self, text: &str) {
@@ -2909,7 +2910,7 @@ impl<'a> TerminalInputSession<'a> {
                     .unwrap_or_else(|| "none".to_owned());
                 let known_agents = self.ctx.routing.known_agents();
                 let active_count = self.ctx.routing.active_count();
-                self.output.system_info(&format!(
+                self.output.command_feedback(&format!(
                     ":agent <new|switch|suspend|resume|auto|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
                     known_agents.join(", ")
                 ));
@@ -2922,7 +2923,7 @@ impl<'a> TerminalInputSession<'a> {
             Ok(AgentCommandEffect::SetDisplayName(request)) => {
                 self.send_agent_display_name_request(request);
             }
-            Err(message) => self.output.system_info(&message),
+            Err(message) => self.output.command_feedback(&message),
         }
     }
 
@@ -2931,14 +2932,14 @@ impl<'a> TerminalInputSession<'a> {
             self.agent_is_known(agent_id)
         }) {
             Ok(request) => self.send_agent_display_name_request(request),
-            Err(message) => self.output.system_info(&message),
+            Err(message) => self.output.command_feedback(&message),
         }
     }
 
     fn send_agent_display_name_request(&self, request: AgentDisplayNameRequest) {
         let event = request.event(self.session_id);
         if send_event(self.writer, &event).is_ok() {
-            self.output.system_info(&format!(
+            self.output.command_feedback(&format!(
                 "requested agent {} display name set to: {}",
                 request.agent_id.as_str(),
                 request.display_name
@@ -2949,13 +2950,13 @@ impl<'a> TerminalInputSession<'a> {
     fn handle_new_alias(&mut self, text: &str) {
         match new_alias_command_effect(text) {
             NewAliasCommandEffect::StartNewAgent { role } => self.handle_agent_new(role),
-            NewAliasCommandEffect::Usage(usage) => self.output.system_info(usage),
+            NewAliasCommandEffect::Usage(usage) => self.output.command_feedback(usage),
         }
     }
 
     fn handle_suspend_alias(&self, text: &str) {
         if text.trim() != ":suspend" {
-            self.output.system_info(":suspend");
+            self.output.command_feedback(":suspend");
             return;
         }
         self.handle_agent_suspend(None);
@@ -2963,7 +2964,7 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_resume_alias(&self, text: &str) {
         if text.trim() != ":resume" {
-            self.output.system_info(":resume");
+            self.output.command_feedback(":resume");
             return;
         }
         self.handle_agent_resume(None);
@@ -3019,7 +3020,7 @@ impl<'a> TerminalInputSession<'a> {
     fn handle_agent_suspend(&self, target: Option<&str>) {
         if let Some(agent_id) =
             handle_agent_suspend_command(&self.ctx.routing, target, &|message| {
-                self.output.system_info(message);
+                self.output.command_feedback(message);
             })
         {
             self.send_agent_navigation_mode_request(
@@ -3031,7 +3032,7 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_agent_resume(&self, target: Option<&str>) {
         if let Some(agent_id) = handle_agent_resume_command(&self.ctx.routing, target, &|message| {
-            self.output.system_info(message);
+            self.output.command_feedback(message);
         }) {
             self.send_agent_navigation_mode_request(
                 agent_id,
@@ -3071,10 +3072,10 @@ impl<'a> TerminalInputSession<'a> {
                             let _ = send_event(self.writer, &event);
                         } else {
                             self.output
-                                .system_info(&format!("next agent model set to {model}"));
+                                .command_feedback(&format!("next agent model set to {model}"));
                         }
                     }
-                    Err(error) => self.output.system_info(&error.to_string()),
+                    Err(error) => self.output.command_feedback(&error.to_string()),
                 }
             }
             return true;
@@ -3099,10 +3100,10 @@ impl<'a> TerminalInputSession<'a> {
                 );
                 let _ = send_event(self.writer, &event);
             }
-            Ok(None) => self.output.system_info(
+            Ok(None) => self.output.command_feedback(
                 ":role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools] [value]",
             ),
-            Err(error) => self.output.system_info(&error),
+            Err(error) => self.output.command_feedback(&error),
         }
     }
 
@@ -3116,7 +3117,7 @@ impl<'a> TerminalInputSession<'a> {
             Ok(Some(invocation)) => invocation,
             Ok(None) => return CommandOutcome::NotHandled,
             Err(error) => {
-                self.output.system_info(&error);
+                self.output.command_feedback(&error);
                 return CommandOutcome::Continue;
             }
         };
@@ -3242,7 +3243,7 @@ impl<'a> TerminalInputSession<'a> {
                 .agent_in_progress
                 .load(path_std_sync_atomic::Ordering::Relaxed)
         {
-            self.output.system_info(EOF_DURING_AGENT_NOTICE);
+            self.output.command_feedback(EOF_DURING_AGENT_NOTICE);
             return None;
         }
 
@@ -3299,7 +3300,7 @@ impl<'a> TerminalInputSession<'a> {
             self.writer,
             &self.ctx.current_role_state,
             action,
-            &|message| output.system_info(message),
+            &|message| output.command_feedback(message),
         );
     }
 
@@ -3354,7 +3355,8 @@ impl<'a> TerminalInputSession<'a> {
         match resolution {
             AgentPickerResolution::NoChange => {}
             AgentPickerResolution::Notice(message) => {
-                self.output.system_info(&format!("agent-picker: {message}"));
+                self.output
+                    .command_feedback(&format!("agent-picker: {message}"));
             }
             AgentPickerResolution::Fatal(message) => {
                 return Err(CliError::ForegroundOwnershipUnconfirmed(message));
@@ -3401,7 +3403,7 @@ impl<'a> TerminalInputSession<'a> {
                 self.writer,
                 &self.ctx.current_role_state,
                 &self.ctx.roles_available,
-                &|message| output.system_info(message),
+                &|message| output.command_feedback(message),
             )
         } else {
             cycle_role_in_groups(
@@ -3410,7 +3412,7 @@ impl<'a> TerminalInputSession<'a> {
                 &self.ctx.role_group_memory,
                 &groups,
                 false,
-                &|message| output.system_info(message),
+                &|message| output.command_feedback(message),
             )
         };
         if let Some(role) = selected {
@@ -3442,7 +3444,7 @@ impl<'a> TerminalInputSession<'a> {
             &self.ctx.role_group_memory,
             &groups,
             true,
-            &|message| output.system_info(message),
+            &|message| output.command_feedback(message),
         ) {
             self.pending_new_agent_options.stage_role(role);
         }
@@ -3609,8 +3611,8 @@ impl RecordedLineHandlers for TerminalInputSession<'_> {
         TerminalInputSession::submit_prompt(self, text)
     }
 
-    fn system_info(&mut self, message: &str) {
-        self.output.system_info(message);
+    fn command_feedback(&mut self, message: &str) {
+        self.output.command_feedback(message);
     }
 }
 
@@ -4101,7 +4103,7 @@ fn handle_recorded_line_with_handlers(
                 if let Some(action) = leading_command_token(text)
                     && !is_harness_prompt_command(action)
                 {
-                    handlers.system_info(&format!("unknown command `{action}`"));
+                    handlers.command_feedback(&format!("unknown command `{action}`"));
                     Ok(None)
                 } else {
                     Ok(handlers.submit_prompt(text))

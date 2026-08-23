@@ -8,7 +8,7 @@ fn info(message: &str) -> Event {
         kind: "test.info".to_owned(),
         message: message.to_owned(),
         level: tau_proto::NoticeLevel::Info,
-        always_show: false,
+        purpose: tau_proto::NoticePurpose::Diagnostic,
     })
 }
 

@@ -59,7 +59,13 @@ Type `:` as the first non-whitespace character to enter command mode and open co
 
 `:theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
 
-`:set notice-level <critical|warning|info|debug|trace>` controls which harness/UI notices this UI shows. The default is `info`; `warning` hides routine lifecycle chatter such as extension ready messages; `debug` and `trace` show progressively noisier developer-oriented notices. Critical and mandatory notices such as extension configuration errors remain visible even with restrictive thresholds.
+`:set notice-level <critical|warning|info|debug|trace>` controls which
+diagnostic harness/UI notices this UI shows. The default is `info`; `warning`
+hides routine lifecycle chatter such as extension ready messages, while `debug`
+and `trace` show progressively noisier developer detail. Direct command responses,
+alerts such as extension configuration errors, and critical notices remain
+visible at every threshold. Compact mode additionally hides all diagnostics,
+including model-facing internal prompts even when `show-internal-prompts` is on.
 
 ## Prompt history and editing
 
@@ -77,7 +83,7 @@ Compact mode is a stricter top-level filter. It hides all thinking and turn
 statistics. Completed historical tools and results disappear; each currently
 running tool remains as exactly one payload-free line naming the tool, and that
 line disappears on success, error, or cancellation. User and agent messages,
-critical notices, prompt input, navigation, watched activity, and other
+direct responses, alerts, critical notices, prompt input, navigation, watched activity, and other
 user-facing UI remain available.
 
 Switching back restores the retained verbose transcript and the prior `:set`

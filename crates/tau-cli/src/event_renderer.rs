@@ -589,6 +589,8 @@ pub(crate) struct EventRenderer {
     /// Accepted harness notices retained for reversible verbose-mode
     /// projection.
     notice_history: Vec<NoticeBlockEntry>,
+    /// Typed lifecycle diagnostics retained for reversible projection.
+    diagnostic_history: Vec<DiagnosticBlockEntry>,
     /// Typed harness-internal prompt blocks retained for `:set
     /// show-internal-prompts` reprojection.
     internal_prompt_history: Vec<InternalPromptBlockEntry>,
@@ -668,7 +670,7 @@ pub(crate) struct EventRenderer {
     /// Whether typed harness-internal prompt facts are visible in the
     /// transcript.
     show_internal_prompts: bool,
-    /// Harness/UI notice visibility threshold.
+    /// Verbose-mode visibility threshold for diagnostic notices.
     notice_level: tau_proto::NoticeLevel,
     /// Whether to show an indicator when prompt input rows are hidden.
     show_prompt_scroll_indicator: bool,
@@ -794,6 +796,8 @@ struct AgentUiState {
     message_history: Vec<MessageBlockEntry>,
     /// Harness notices retained for reversible verbose-mode reprojection.
     notice_history: Vec<NoticeBlockEntry>,
+    /// Typed lifecycle diagnostics retained for reversible projection.
+    diagnostic_history: Vec<DiagnosticBlockEntry>,
     /// Typed harness-internal prompt projection slots owned by this transcript.
     internal_prompt_history: Vec<InternalPromptBlockEntry>,
     current_context_percent: Option<u8>,
@@ -980,6 +984,80 @@ struct NoticeBlockEntry {
     notice: tau_proto::HarnessNotice,
 }
 
+/// One typed lifecycle diagnostic retained for reversible projection.
+struct DiagnosticBlockEntry {
+    /// Position-stable terminal block.
+    block_id: tau_cli_term::BlockId,
+    /// Diagnostic verbosity threshold.
+    level: tau_proto::NoticeLevel,
+    /// Typed data used to render with the current theme.
+    projection: DiagnosticProjection,
+}
+
+/// Typed lifecycle diagnostic data retained independently of theme.
+enum DiagnosticProjection {
+    /// Process-local startup banner.
+    Banner,
+    /// Extension lifecycle status.
+    ExtensionStatus {
+        /// Stable extension name.
+        extension_name: tau_proto::ExtensionName,
+        /// Closed lifecycle state.
+        status: ExtensionLifecycleStatus,
+    },
+    /// UI state directory announcement.
+    UiDir {
+        /// Announced directory path.
+        path: std::path::PathBuf,
+    },
+    /// Session directory announcement.
+    SessionDir {
+        /// Canonical announcement payload.
+        event: tau_proto::HarnessSessionDir,
+    },
+    /// Startup configuration profile selection.
+    ConfigProfile {
+        /// Display form of the selected profile.
+        selection: String,
+    },
+    /// Per-agent context discovery summary.
+    AgentContextInitialized {
+        /// Canonical discovery payload.
+        event: tau_proto::HarnessAgentContextInitialized,
+        /// Skills omitted from the advertised subset.
+        unadvertised_count: usize,
+    },
+    /// Extension per-agent context readiness.
+    ExtensionContextReady {
+        /// Agent whose context became ready.
+        agent_id: tau_proto::AgentId,
+    },
+}
+
+/// Closed extension lifecycle states rendered as diagnostics.
+enum ExtensionLifecycleStatus {
+    /// Extension process is starting.
+    Starting,
+    /// Extension is ready.
+    Ready,
+    /// Extension exited.
+    Exited,
+    /// Extension remained ready across a session reset.
+    Kept,
+}
+
+impl ExtensionLifecycleStatus {
+    /// Returns the stable presentation word for this lifecycle state.
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Exited => "exited",
+            Self::Kept => "kept",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageRenderMode {
     Hidden,
@@ -1000,10 +1078,32 @@ struct ThinkingBlockEntry {
 struct InternalPromptBlockEntry {
     /// Position-stable terminal block for this canonical prompt fact.
     block_id: tau_cli_term::BlockId,
-    /// Authenticated source stamped on the canonical prompt fact.
-    submission_source: tau_proto::PromptSubmissionSource,
-    /// Canonical prompt payload.
-    text: String,
+    /// Typed presentation data retained without changing the durable prompt.
+    projection: InternalPromptProjection,
+}
+
+/// Typed human projection of one model-facing internal prompt.
+enum InternalPromptProjection {
+    /// A generic prompt whose authenticated source controls its verbose
+    /// subfilter.
+    SourceAware {
+        /// Authenticated source stamped on the canonical prompt fact.
+        submission_source: tau_proto::PromptSubmissionSource,
+        /// Canonical prompt payload.
+        text: String,
+    },
+    /// A typed context-size advisory.
+    ContextSizeAlert {
+        /// Canonical advisory text.
+        text: String,
+    },
+    /// A typed timer wakeup.
+    TimerWakeup {
+        /// Stable timer identifier.
+        timer_id: String,
+        /// Optional canonical wakeup text.
+        text: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1956,6 +2056,7 @@ impl EventRenderer {
             tool_history: Vec::new(),
             message_history: Vec::new(),
             notice_history: Vec::new(),
+            diagnostic_history: Vec::new(),
             internal_prompt_history: Vec::new(),
             state_dirs,
             current_model: None,
@@ -2691,6 +2792,7 @@ impl EventRenderer {
             tool_history: std::mem::take(&mut self.tool_history),
             message_history: std::mem::take(&mut self.message_history),
             notice_history: std::mem::take(&mut self.notice_history),
+            diagnostic_history: std::mem::take(&mut self.diagnostic_history),
             internal_prompt_history: std::mem::take(&mut self.internal_prompt_history),
             current_context_percent: self.current_context_percent.take(),
             current_context_input_tokens: self.current_context_input_tokens.take(),
@@ -2747,6 +2849,7 @@ impl EventRenderer {
         self.tool_history = state.tool_history;
         self.message_history = state.message_history;
         self.notice_history = state.notice_history;
+        self.diagnostic_history = state.diagnostic_history;
         self.internal_prompt_history = state.internal_prompt_history;
         self.current_context_percent = state.current_context_percent;
         self.current_context_input_tokens = state.current_context_input_tokens;
@@ -3486,10 +3589,16 @@ impl EventRenderer {
                 self.render_harness_notice_block(&entry.notice),
             );
         }
+        for entry in &self.diagnostic_history {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_diagnostic_projection(entry.level, &entry.projection),
+            );
+        }
         for entry in &self.internal_prompt_history {
             self.handle.set_block(
                 entry.block_id,
-                self.render_source_aware_prompt_block(&entry.submission_source, &entry.text),
+                self.render_internal_prompt_projection(&entry.projection),
             );
         }
         self.rerender_live_thinking();
@@ -3584,7 +3693,7 @@ impl EventRenderer {
         for entry in &self.internal_prompt_history {
             self.handle.set_block(
                 entry.block_id,
-                self.render_source_aware_prompt_block(&entry.submission_source, &entry.text),
+                self.render_internal_prompt_projection(&entry.projection),
             );
         }
         self.invalidate_for_retroactive_toggle();
@@ -3596,6 +3705,7 @@ impl EventRenderer {
             return;
         }
         self.notice_level = notice_level;
+        self.rerender_visible_for_current_settings();
         self.save_cli_state();
     }
 
@@ -3611,36 +3721,93 @@ impl EventRenderer {
 
     /// Applies the UI-owned threshold and override policy from
     /// `SPEC-tau-cli-notice-filtering`.
-    fn notice_visible(&self, level: tau_proto::NoticeLevel, always_show: bool) -> bool {
+    fn notice_visible(
+        &self,
+        purpose: tau_proto::NoticePurpose,
+        level: tau_proto::NoticeLevel,
+    ) -> bool {
         level == tau_proto::NoticeLevel::Critical
-            || always_show
-            || level.visible_at(self.notice_level)
+            || matches!(
+                purpose,
+                tau_proto::NoticePurpose::Response | tau_proto::NoticePurpose::Alert
+            )
+            || (self.verbose_mode && level.visible_at(self.notice_level))
     }
 
     /// Renders retained harness notices according to the local transcript mode.
     ///
-    /// Compact mode retains critical diagnostics while hiding every
-    /// lower-severity notice, including mandatory warnings. The original
-    /// notice stays in [`Self::notice_history`] so verbose mode can restore
-    /// it in place.
+    /// Compact mode shows responses, alerts, and critical notices while hiding
+    /// other diagnostics. The original notice stays in
+    /// [`Self::notice_history`] so verbose mode can restore it in place.
     fn render_harness_notice_block(
         &self,
         notice: &tau_proto::HarnessNotice,
     ) -> tau_cli_term::StyledBlock {
-        if self.verbose_mode || notice.level == tau_proto::NoticeLevel::Critical {
+        if self.notice_visible(notice.purpose, notice.level) {
             render_harness_notice(&self.theme, notice)
         } else {
             Self::empty_block()
         }
     }
 
-    /// Adds one threshold-accepted harness notice to the retained transcript.
+    /// Adds one harness notice to the retained transcript.
     fn retain_harness_notice(&mut self, label: &'static str, notice: tau_proto::HarnessNotice) {
         let block_id = self
             .handle
             .print_output(label, self.render_harness_notice_block(&notice));
         self.notice_history
             .push(NoticeBlockEntry { block_id, notice });
+    }
+
+    /// Retains one typed lifecycle diagnostic for compact/verbose reprojection.
+    fn retain_diagnostic_block(
+        &mut self,
+        label: &'static str,
+        level: tau_proto::NoticeLevel,
+        projection: DiagnosticProjection,
+    ) {
+        let rendered = self.render_diagnostic_projection(level, &projection);
+        let block_id = self.handle.print_output(label, rendered);
+        self.diagnostic_history.push(DiagnosticBlockEntry {
+            block_id,
+            level,
+            projection,
+        });
+    }
+
+    /// Renders one typed lifecycle diagnostic with current theme and
+    /// visibility.
+    fn render_diagnostic_projection(
+        &self,
+        level: tau_proto::NoticeLevel,
+        projection: &DiagnosticProjection,
+    ) -> tau_cli_term::StyledBlock {
+        if !self.notice_visible(tau_proto::NoticePurpose::Diagnostic, level) {
+            return Self::empty_block();
+        }
+        match projection {
+            DiagnosticProjection::Banner => {
+                tau_cli_term::StyledBlock::new(build_banner(&self.theme))
+            }
+            DiagnosticProjection::ExtensionStatus {
+                extension_name,
+                status,
+            } => extension_status_block(&self.theme, extension_name.as_str(), status.as_str()),
+            DiagnosticProjection::UiDir { path } => ui_dir_block(&self.theme, path),
+            DiagnosticProjection::SessionDir { event } => {
+                session_status_block(&self.theme, &event.path, "/", event.status.as_str())
+            }
+            DiagnosticProjection::ConfigProfile { selection } => {
+                config_profile_selection_block(&self.theme, selection)
+            }
+            DiagnosticProjection::AgentContextInitialized {
+                event,
+                unadvertised_count,
+            } => agent_context_initialized_block(&self.theme, event, *unadvertised_count),
+            DiagnosticProjection::ExtensionContextReady { agent_id } => {
+                crate::tool_render::agent_context_ready_block(&self.theme, agent_id)
+            }
+        }
     }
 
     fn set_show_tools(&mut self, show_tools: tau_config::settings::ShowTools) {
@@ -3768,6 +3935,7 @@ impl EventRenderer {
         self.tool_history.clear();
         self.message_history.clear();
         self.notice_history.clear();
+        self.diagnostic_history.clear();
         self.internal_prompt_history.clear();
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
@@ -3802,19 +3970,22 @@ impl EventRenderer {
     }
 
     fn render_session_preamble(&mut self) {
-        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-            return;
-        }
-        self.handle.print_output(
+        self.retain_diagnostic_block(
             "banner",
-            tau_cli_term::StyledBlock::new(build_banner(&self.theme)),
+            tau_proto::NoticeLevel::Info,
+            DiagnosticProjection::Banner,
         );
-        let mut extensions: Vec<_> = self.ready_extensions.iter().collect();
+        let mut extensions: Vec<_> = self.ready_extensions.iter().cloned().collect();
         extensions.sort();
         for extension_name in extensions {
-            self.handle.print_output(
+            self.retain_diagnostic_block(
                 "extension-kept",
-                extension_status_block(&self.theme, extension_name, "kept"),
+                tau_proto::NoticeLevel::Info,
+                DiagnosticProjection::ExtensionStatus {
+                    extension_name: tau_proto::ExtensionName::parse(extension_name)
+                        .expect("ready extension names were validated on intake"),
+                    status: ExtensionLifecycleStatus::Kept,
+                },
             );
         }
     }
@@ -6218,8 +6389,17 @@ impl EventRenderer {
             Some(tau_proto::InternalPromptKind::ContextSizeAlert) => {}
             None => return false,
         }
-        let block = self.context_size_alert_block(text);
-        self.handle.print_output("context-size-alert", block);
+        let projection = InternalPromptProjection::ContextSizeAlert {
+            text: text.to_owned(),
+        };
+        let block_id = self.handle.print_output(
+            "context-size-alert",
+            self.render_internal_prompt_projection(&projection),
+        );
+        self.internal_prompt_history.push(InternalPromptBlockEntry {
+            block_id,
+            projection,
+        });
         true
     }
 
@@ -6235,8 +6415,18 @@ impl EventRenderer {
         let Some((timer_id, _fire_count)) = timer_wakeup_ctx(ctx_id) else {
             return false;
         };
-        let block = self.timer_wakeup_block(timer_id, text);
-        self.handle.print_output("timer-wakeup", block);
+        let projection = InternalPromptProjection::TimerWakeup {
+            timer_id: timer_id.to_owned(),
+            text: text.map(str::to_owned),
+        };
+        let block_id = self.handle.print_output(
+            "timer-wakeup",
+            self.render_internal_prompt_projection(&projection),
+        );
+        self.internal_prompt_history.push(InternalPromptBlockEntry {
+            block_id,
+            projection,
+        });
         true
     }
 
@@ -6262,8 +6452,10 @@ impl EventRenderer {
                 );
                 self.internal_prompt_history.push(InternalPromptBlockEntry {
                     block_id,
-                    submission_source: submission_source.clone(),
-                    text: text.to_owned(),
+                    projection: InternalPromptProjection::SourceAware {
+                        submission_source: submission_source.clone(),
+                        text: text.to_owned(),
+                    },
                 });
                 true
             }
@@ -6287,12 +6479,40 @@ impl EventRenderer {
                     tau_proto::visible_escape_metadata(name.as_str())
                 ),
             ),
-            tau_proto::PromptSubmissionSource::HarnessInternal if self.show_internal_prompts => {
+            tau_proto::PromptSubmissionSource::HarnessInternal
+                if self.verbose_mode && self.show_internal_prompts =>
+            {
                 self.internal_notice_block(text)
             }
             tau_proto::PromptSubmissionSource::HarnessInternal
             | tau_proto::PromptSubmissionSource::HumanUi
             | tau_proto::PromptSubmissionSource::Legacy => Self::empty_block(),
+        }
+    }
+
+    /// Renders one retained model-facing prompt projection under current UI
+    /// settings.
+    fn render_internal_prompt_projection(
+        &self,
+        projection: &InternalPromptProjection,
+    ) -> tau_cli_term::StyledBlock {
+        if !self.notice_visible(
+            tau_proto::NoticePurpose::Diagnostic,
+            tau_proto::NoticeLevel::Info,
+        ) {
+            return Self::empty_block();
+        }
+        match projection {
+            InternalPromptProjection::SourceAware {
+                submission_source,
+                text,
+            } => self.render_source_aware_prompt_block(submission_source, text),
+            InternalPromptProjection::ContextSizeAlert { text } => {
+                self.context_size_alert_block(text)
+            }
+            InternalPromptProjection::TimerWakeup { timer_id, text } => {
+                self.timer_wakeup_block(timer_id, text.as_deref())
+            }
         }
     }
 
@@ -8666,17 +8886,18 @@ impl EventRenderer {
     }
 
     fn handle_extension_starting(&mut self, starting: &tau_proto::ExtensionStarting) {
-        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-            return;
-        }
         let owner = self.current_extension_block_owner();
         if matches!(owner, UiSnapshotOwner::NoAgent) {
             self.preserve_on_fresh_agent_switch = true;
         }
-        let block = extension_status_block(&self.theme, &starting.extension_name, "starting");
+        let projection = DiagnosticProjection::ExtensionStatus {
+            extension_name: starting.extension_name.clone(),
+            status: ExtensionLifecycleStatus::Starting,
+        };
+        let rendered = self.render_diagnostic_projection(tau_proto::NoticeLevel::Info, &projection);
         let id = self.handle.new_block(
             format!("extension-starting:{}", starting.instance_id),
-            block,
+            rendered,
         );
         self.handle.push_above_active(id);
         self.handle.redraw();
@@ -8687,58 +8908,55 @@ impl EventRenderer {
                 owner,
             },
         );
+        self.diagnostic_history.push(DiagnosticBlockEntry {
+            block_id: id,
+            level: tau_proto::NoticeLevel::Info,
+            projection,
+        });
     }
 
     fn handle_extension_ready(&mut self, ready: &tau_proto::ExtensionReady) {
-        let removed_starting = if let Some(state) = self.extension_blocks.remove(&ready.instance_id)
-        {
+        if let Some(state) = self.extension_blocks.remove(&ready.instance_id) {
             self.handle.remove_block(state.block_id);
-            true
-        } else {
-            false
-        };
+            self.diagnostic_history
+                .retain(|entry| entry.block_id != state.block_id);
+        }
         self.ready_extensions
             .insert(ready.extension_name.to_string());
-        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-            if removed_starting {
-                self.handle.redraw();
-            }
-            return;
-        }
-        self.handle.print_output(
+        self.retain_diagnostic_block(
             "extension-ready",
-            extension_status_block(&self.theme, &ready.extension_name, "ready"),
+            tau_proto::NoticeLevel::Info,
+            DiagnosticProjection::ExtensionStatus {
+                extension_name: ready.extension_name.clone(),
+                status: ExtensionLifecycleStatus::Ready,
+            },
         );
     }
 
     fn handle_extension_exited(&mut self, exited: &tau_proto::ExtensionExited) {
-        let removed_starting =
-            if let Some(state) = self.extension_blocks.remove(&exited.instance_id) {
-                self.handle.remove_block(state.block_id);
-                true
-            } else {
-                false
-            };
-        self.ready_extensions.remove(exited.extension_name.as_str());
-        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-            if removed_starting {
-                self.handle.redraw();
-            }
-            return;
+        if let Some(state) = self.extension_blocks.remove(&exited.instance_id) {
+            self.handle.remove_block(state.block_id);
+            self.diagnostic_history
+                .retain(|entry| entry.block_id != state.block_id);
         }
-        self.handle.print_output(
+        self.ready_extensions.remove(exited.extension_name.as_str());
+        self.retain_diagnostic_block(
             "extension-exited",
-            extension_status_block(&self.theme, &exited.extension_name, "exited"),
+            tau_proto::NoticeLevel::Info,
+            DiagnosticProjection::ExtensionStatus {
+                extension_name: exited.extension_name.clone(),
+                status: ExtensionLifecycleStatus::Exited,
+            },
         );
     }
 
     fn handle_extension_context_ready(&mut self, ready: &tau_proto::ExtensionContextReady) {
-        if !self.notice_visible(tau_proto::NoticeLevel::Debug, false) {
-            return;
-        }
-        self.handle.print_output(
+        self.retain_diagnostic_block(
             "extension-context-ready",
-            crate::tool_render::agent_context_ready_block(&self.theme, &ready.agent_id),
+            tau_proto::NoticeLevel::Debug,
+            DiagnosticProjection::ExtensionContextReady {
+                agent_id: ready.agent_id.clone(),
+            },
         );
     }
 
@@ -8759,14 +8977,12 @@ impl EventRenderer {
                 true
             }
             Event::HarnessNotice(info) => {
-                if info.visible_at(self.notice_level) {
-                    self.retain_harness_notice("harness-notice", info.clone());
-                }
+                self.retain_harness_notice("harness-notice", info.clone());
                 true
             }
             Event::AgentManualCompactionRequested(requested) => {
                 self.register_self_compaction_tool(requested);
-                let notice = tau_proto::HarnessNotice::new(
+                let notice = tau_proto::HarnessNotice::diagnostic(
                     tau_proto::notice_kind::HARNESS_NOTICE,
                     format!(
                         "Agent {} accepted compaction request for {} ({})",
@@ -8774,9 +8990,7 @@ impl EventRenderer {
                     ),
                     tau_proto::NoticeLevel::Info,
                 );
-                if notice.visible_at(self.notice_level) {
-                    self.retain_harness_notice("manual-compaction-requested", notice);
-                }
+                self.retain_harness_notice("manual-compaction-requested", notice);
                 true
             }
             Event::AgentManualCompactionRequestFailed(failed) => {
@@ -8852,16 +9066,17 @@ impl EventRenderer {
                 true
             }
             Event::HarnessSessionDir(session_dir) => {
-                if self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-                    self.handle_harness_session_dir(session_dir);
-                }
+                self.handle_harness_session_dir(session_dir);
                 true
             }
             Event::HarnessUiDir(ui_dir) => {
-                if self.notice_visible(tau_proto::NoticeLevel::Info, false) {
-                    self.handle
-                        .print_output("ui-dir", ui_dir_block(&self.theme, &ui_dir.path));
-                }
+                self.retain_diagnostic_block(
+                    "ui-dir",
+                    tau_proto::NoticeLevel::Info,
+                    DiagnosticProjection::UiDir {
+                        path: ui_dir.path.clone(),
+                    },
+                );
                 true
             }
             Event::HarnessModelsAvailable(models) => {
@@ -8879,34 +9094,36 @@ impl EventRenderer {
 
     /// Print one initialization discovery summary into the active transcript.
     fn print_agent_context_initialized(
-        &self,
+        &mut self,
         initialized: &tau_proto::HarnessAgentContextInitialized,
     ) {
-        self.handle.print_output(
+        self.retain_diagnostic_block(
             "agent-context-initialized",
-            agent_context_initialized_block(
-                &self.theme,
-                initialized,
-                self.skill_state
+            tau_proto::NoticeLevel::Info,
+            DiagnosticProjection::AgentContextInitialized {
+                event: initialized.clone(),
+                unadvertised_count: self
+                    .skill_state
                     .unadvertised_count(&initialized.listed_skills),
-            ),
+            },
         );
     }
 
     fn handle_harness_session_dir(&mut self, session_dir: &tau_proto::HarnessSessionDir) {
-        self.handle.print_output(
+        self.retain_diagnostic_block(
             "session-dir",
-            session_status_block(
-                &self.theme,
-                &session_dir.path,
-                "/",
-                session_dir.status.as_str(),
-            ),
+            tau_proto::NoticeLevel::Info,
+            DiagnosticProjection::SessionDir {
+                event: session_dir.clone(),
+            },
         );
         if let Some(selection) = self.startup_profile_selection.as_ref() {
-            self.handle.print_output(
+            self.retain_diagnostic_block(
                 "config-profile-selection",
-                config_profile_selection_block(&self.theme, &selection.to_string()),
+                tau_proto::NoticeLevel::Info,
+                DiagnosticProjection::ConfigProfile {
+                    selection: selection.to_string(),
+                },
             );
         }
     }

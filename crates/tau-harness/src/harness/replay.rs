@@ -373,7 +373,7 @@ impl Harness {
                     "running shell snapshot omitted {omitted} route(s) because attach catch-up is bounded"
                 ),
                 level: tau_proto::NoticeLevel::Warning,
-                always_show: true,
+                purpose: tau_proto::NoticePurpose::Alert,
             });
             if selectors.contains(&EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)) {
                 self.send_catch_up_event(client_id, None, notice);
@@ -563,7 +563,7 @@ impl Harness {
                 kind: tau_proto::notice_kind::HARNESS_REPLAY_ERROR.to_owned(),
                 message: message.to_owned(),
                 level: tau_proto::NoticeLevel::Warning,
-                always_show: true,
+                purpose: tau_proto::NoticePurpose::Alert,
             }),
         );
     }

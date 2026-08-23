@@ -215,7 +215,7 @@ fn event_bus_buffers_only_publish_time_live_matches() {
         kind: "test".to_owned(),
         message: "buffer me".to_owned(),
         level: NoticeLevel::Info,
-        always_show: false,
+        purpose: tau_proto::NoticePurpose::Diagnostic,
     });
     bus.publish(HarnessOutputMessage::deliver_live(
         tau_proto::UnixMicros::new(1),
@@ -255,7 +255,7 @@ fn event_bus_releases_catch_up_when_historical_selectors_are_cleared() {
         kind: "test".to_owned(),
         message: "release me".to_owned(),
         level: NoticeLevel::Info,
-        always_show: false,
+        purpose: tau_proto::NoticePurpose::Diagnostic,
     });
     bus.publish(HarnessOutputMessage::deliver_live(
         tau_proto::UnixMicros::new(2),

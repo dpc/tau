@@ -1453,7 +1453,7 @@ fn shell_completions_are_not_starved_by_ready_harness_input() {
                 kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
                 message: format!("flood-{i}"),
                 level: NoticeLevel::Info,
-                always_show: false,
+                purpose: tau_proto::NoticePurpose::Diagnostic,
             }),
         ));
     }

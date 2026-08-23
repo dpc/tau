@@ -1,13 +1,35 @@
 # SPEC-tau-cli-notice-filtering: Notice filtering
 
-Harness/UI notices are filtered in the terminal UI, not at the harness emission site. The default threshold is `info`; `:set notice-level <level>` and persisted `cli.json` `notice_level` change what routine notices a UI renders. Critical notices and `always_show` warning diagnostics remain visible regardless of threshold. UI special-casing must use the stable `harness.notice.kind` field rather than parsing notice text.
+## Record justification
 
-Compact transcript mode is a second, local projection over retained notices.
-It hides every non-critical notice, including `always_show` warnings, without
-discarding the retained payload; changing back to verbose mode restores those
-notices at their original transcript positions. Critical notices remain visible
-in both modes. This projection does not affect harness emission, protocol
-delivery, journals, or model context.
+Notice purpose and filtering span protocol payloads, harness producers and
+routing, typed CLI event projections, retained transcript state, and persisted UI
+settings, so no one local artifact can own the complete contract.
+
+Harness/UI notices carry a presentation purpose orthogonal to severity and
+provenance. `response` is exact feedback for an explicit action by the receiving
+UI, `alert` is an unsolicited condition the user must see or may need to act on,
+and `diagnostic` is ambient lifecycle, developer detail, or a human projection of
+model control. UI policy must use this purpose rather than parsing notice text or
+inferring meaning from its carrier or `kind`.
+
+Compact transcript mode shows responses and alerts and hides diagnostics.
+Verbose mode always shows responses and alerts, while `:set notice-level
+<level>` and persisted `cli.json` `notice_level` filter diagnostics. Critical
+notices remain defensively visible in either mode regardless of purpose.
+Changing modes or diagnostic settings reprojects retained blocks at their
+original transcript positions.
+
+Model-facing status reminders, context-size advisories, timer wakeups, and other
+internal-prompt projections are diagnostics. Compact mode dominates
+`show-internal-prompts`, so enabling that subfilter cannot reveal them until the
+UI returns to verbose mode. These presentation projections do not affect prompt
+facts, model context, harness emission, protocol delivery, or journals.
+
+Requester-directed responses are live-only and delivered only to the initiating
+UI. Configured extensions cannot assign notice purpose: routine extension notice
+requests always become diagnostics, while the harness owns alert paths such as
+extension configuration errors.
 
 Successful manual-compaction acceptance and start are routine `info` lifecycle
 notices and use ordinary status styling. Pre-start and transaction failures

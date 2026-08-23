@@ -393,6 +393,8 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
 /// Proves a second public CLI attached only after a correlated provider hold is
 /// ready presents the same selected agent, then both terminals settle after one
 /// exact cancellation while typed stats prove the running-to-idle transition.
+/// Requester-directed cancellation feedback stays on the side observer that
+/// initiated the action rather than being broadcast to either terminal.
 #[test]
 fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -460,8 +462,6 @@ fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
     peer_navigation::wait_for_canceled_hold(&mut observer, &prompt, deadline)?;
     peer_navigation::assert_hold_reaped(&fixture, &prompt)?;
     peer_navigation::wait_for_selected_idle(&mut observer, &agent_id, &prompt, deadline)?;
-    original.wait_for("cancelling current prompt", deadline)?;
-    attached.wait_for("cancelling current prompt", deadline)?;
     let original_idle = original.wait_ready_for(agent_id.as_str(), deadline)?;
     let attached_idle = attached.wait_ready_for(agent_id.as_str(), deadline)?;
     peer_navigation::assert_exact_canceled_hold_facts(&observer.events, &prompt)?;

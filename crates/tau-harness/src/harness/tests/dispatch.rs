@@ -1115,7 +1115,8 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
                 && failed.stage == tau_proto::AgentPromptFailureStage::Submission
     )));
     assert!(h.replayable_harness_notices.iter().any(|notice| {
-        notice.always_show && notice.message.contains("until its template is repaired")
+        notice.purpose == tau_proto::NoticePurpose::Alert
+            && notice.message.contains("until its template is repaired")
     }));
     assert_eq!(
         h.replayable_harness_notices
@@ -1317,7 +1318,8 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
         crate::agent::ActivationDispatchState::None
     ));
     assert!(h.replayable_harness_notices.iter().any(|notice| {
-        notice.always_show && notice.message.contains("until its template is repaired")
+        notice.purpose == tau_proto::NoticePurpose::Alert
+            && notice.message.contains("until its template is repaired")
     }));
     let meta: tau_core::SessionMeta =
         serde_json::from_slice(&path_std_fs::read(meta_path).expect("read session manifest"))
@@ -1826,15 +1828,18 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let raw = "  hello <world> & 雪\nnext  ";
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: raw.to_owned(),
-        agent_id: agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("ui-existing".to_owned()),
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: raw.to_owned(),
+            agent_id: agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("ui-existing".to_owned()),
+        },
+    )
     .expect("submit existing-agent UI prompt");
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -4304,7 +4309,7 @@ fn invalid_tool_example_registration_is_rejected_with_notice() {
         event,
         Event::HarnessNotice(notice)
             if notice.level == tau_proto::NoticeLevel::Critical
-                && notice.always_show
+                && notice.purpose == tau_proto::NoticePurpose::Alert
                 && notice.message.contains("Rejected tool registration")
                 && notice.message.contains("invalid example `bad`")
                 && notice.message.contains("$.path: expected string")
@@ -4494,7 +4499,7 @@ fn loop_guard_provider_repetition_response_queues_pivot_then_blocks() {
         event,
         Event::HarnessNotice(notice)
             if notice.level == tau_proto::NoticeLevel::Warning
-                && notice.always_show
+                && notice.purpose == tau_proto::NoticePurpose::Alert
                 && notice.message.contains("Loop guard stopped automatic continuation")
     )));
 }
@@ -7558,11 +7563,14 @@ fn cancel_publishes_tool_cancel_request() {
     })
     .expect("tool call routed");
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -7792,11 +7800,14 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
             "queued user prompt to discard".to_owned(),
         ));
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
 
     let completion_prompt = background_completion_prompt(&call_id);
     assert_eq!(
@@ -7907,11 +7918,14 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cancel_cid, vec![call_id.clone()]);
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&cancel_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&cancel_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
 
     assert!(
         h.agents[&cancel_cid].pending_prompts.iter().any(|prompt| {
@@ -8014,11 +8028,14 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     ));
     assert!(h.agents[&cid].pending_prompts.is_empty());
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
 
     assert_eq!(background_error_count(&h, bg_call_id.as_str()), 1);
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -8262,11 +8279,14 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
     assert!(h.tool_turn.is_backgrounded(&call_id));
 
     seed_tools_running(&mut h, &parent_cid, vec![call_id.clone()]);
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&parent_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&parent_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
 
     assert_eq!(background_error_count(&h, call_id.as_str()), 1);
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -8399,11 +8419,14 @@ fn cancel_clears_active_wait_state() {
     )
     .expect("register cancellation interceptor");
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
     assert!(h.agents[&cid].pending_cancel.is_some());
     assert!(h.tool_agents.contains_key(&target_call_id));
     assert!(h.tool_agents.contains_key(&wait_call_id));
@@ -8476,11 +8499,14 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: None,
+        },
+    );
 
     assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
     assert!(h.agents[&cid].in_flight_prompt.is_none());
@@ -8580,11 +8606,14 @@ fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
     };
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: Some(spid.clone()),
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: Some(spid.clone()),
+        },
+    );
 
     assert!(matches!(
         &h.agents[&cid].activation_dispatch,
@@ -8629,11 +8658,14 @@ fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
     };
     h.prompt_agents.insert(canceled_id.clone(), cid.clone());
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
-        agent_prompt_id: Some(canceled_id),
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+            agent_prompt_id: Some(canceled_id),
+        },
+    );
 
     assert!(matches!(
         &h.agents[&cid].activation_dispatch,
@@ -10299,15 +10331,18 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     ));
 
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "redirect".to_owned(),
-        agent_id,
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "redirect".to_owned(),
+            agent_id,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("submit interactive UI prompt");
     assert_eq!(
         h.agents.get(&cid).expect("default").pending_prompts.len(),
@@ -12898,7 +12933,11 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         .expect("selected role")
         .compaction = Some(path_tau_config_settings::RoleCompaction::Threshold(1200));
 
-    h.handle_compact_request(test_session_id("s1"), Some(&target_agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&target_agent_id),
+    );
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -13793,14 +13832,17 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
     h.available_models.push(alternate.clone());
     h.provider_model_routes.insert(alternate.clone(), route);
     h.provider_model_info.insert(alternate.clone(), info);
-    h.handle_ui_agent_model_select(tau_proto::UiAgentModelSelect {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: h.agents[&cid]
-            .agent_id
-            .as_deref()
-            .map(crate::parse_agent_id),
-        model: alternate,
-    })
+    h.handle_ui_agent_model_select(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiAgentModelSelect {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: h.agents[&cid]
+                .agent_id
+                .as_deref()
+                .map(crate::parse_agent_id),
+            model: alternate,
+        },
+    )
     .expect("select alternate model");
     assert_eq!(h.agents[&cid].context_input_tokens, None);
     assert_eq!(h.agents[&cid].context_usage_head, None);
@@ -13860,10 +13902,13 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
             adjustment: tau_proto::UiRoleSettingAdjustment::Increase(one),
         },
     ] {
-        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-            role: role.clone(),
-            action,
-        })
+        h.handle_ui_role_update(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiRoleUpdate {
+                role: role.clone(),
+                action,
+            },
+        )
         .expect("apply relative role update");
     }
     let updated_role = h.available_roles.get(&role).expect("updated role");
@@ -13886,10 +13931,13 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
             adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(far),
         },
     ] {
-        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-            role: role.clone(),
-            action,
-        })
+        h.handle_ui_role_update(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiRoleUpdate {
+                role: role.clone(),
+                action,
+            },
+        )
         .expect("saturate role setting downward");
     }
     let updated_role = h.available_roles.get(&role).expect("updated role");
@@ -13911,10 +13959,13 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
             adjustment: tau_proto::UiRoleSettingAdjustment::Increase(far),
         },
     ] {
-        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-            role: role.clone(),
-            action,
-        })
+        h.handle_ui_role_update(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiRoleUpdate {
+                role: role.clone(),
+                action,
+            },
+        )
         .expect("saturate role setting upward");
     }
     let updated_role = h.available_roles.get(&role).expect("updated role");
@@ -13947,10 +13998,13 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
             adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(one),
         },
     ] {
-        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-            role: role.clone(),
-            action,
-        })
+        h.handle_ui_role_update(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiRoleUpdate {
+                role: role.clone(),
+                action,
+            },
+        )
         .expect("adjust the model-clamped role setting");
     }
     let updated_role = h.available_roles.get(&role).expect("updated role");
@@ -14025,12 +14079,15 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
     h.provider_model_routes.insert(alternate.clone(), route);
     h.provider_model_info.insert(alternate.clone(), info);
 
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role: role.clone(),
-        action: tau_proto::UiRoleUpdateAction::SetModel {
-            model: Some(alternate.clone()),
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action: tau_proto::UiRoleUpdateAction::SetModel {
+                model: Some(alternate.clone()),
+            },
         },
-    })
+    )
     .expect("set role model");
     assert_eq!(h.agents[&cid].context_input_tokens, None);
     assert_eq!(h.agents[&cid].context_usage_head, None);
@@ -14051,10 +14108,13 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         conv.context_cached_tokens = Some(400);
         conv.context_percent_used = Some(80);
     }
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role: role.clone(),
-        action: tau_proto::UiRoleUpdateAction::Delete,
-    })
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action: tau_proto::UiRoleUpdateAction::Delete,
+        },
+    )
     .expect("delete role override");
     assert_eq!(h.agents[&cid].context_input_tokens, None);
 
@@ -14067,12 +14127,15 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         conv.context_cached_tokens = Some(350);
         conv.context_percent_used = Some(70);
     }
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role,
-        action: tau_proto::UiRoleUpdateAction::SetModel {
-            model: Some(alternate),
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role,
+            action: tau_proto::UiRoleUpdateAction::SetModel {
+                model: Some(alternate),
+            },
         },
-    })
+    )
     .expect("set role model under explicit agent override");
     assert_eq!(h.agents[&cid].context_input_tokens, Some(700));
     assert_eq!(
@@ -14155,7 +14218,11 @@ fn standalone_compaction_boundary_with_measurements(
         agent.context_usage_head = baseline_head.or(agent.head);
     }
 
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let prompt = read_nth_prompt_created(&h, 0);
     let mut response = standalone_compaction_success_response(&prompt, "summary");
     response.usage = usage;
@@ -14241,7 +14308,11 @@ fn manual_standalone_compact_installs_one_boundary() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
 
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(
         prompt.operation,
@@ -15088,7 +15159,11 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
-    h.handle_compact_request(test_session_id("s1"), Some("main"));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some("main"),
+    );
     assert_eq!(
         read_nth_prompt_created(&h, 0).operation,
         tau_proto::PromptOperation::StandaloneCompaction
@@ -15118,11 +15193,14 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
         h.handle_provider_response_finished(context_overflow_response(&inference))
             .expect("start recovery");
         compact = read_nth_prompt_created(&h, 1);
-        h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-            session_id: test_session_id("s1"),
-            target_agent_id: Some(crate::parse_agent_id(&agent_id)),
-            agent_prompt_id: Some(compact.agent_prompt_id.clone()),
-        });
+        h.handle_cancel_prompt(
+            crate::harness::harness_connection_id(),
+            &tau_proto::UiCancelPrompt {
+                session_id: test_session_id("s1"),
+                target_agent_id: Some(crate::parse_agent_id(&agent_id)),
+                agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+            },
+        );
         h.handle_provider_response_finished(context_overflow_response(&compact))
             .expect("discard late response");
         assert_eq!(
@@ -16133,7 +16211,11 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
 
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let compact = read_nth_prompt_created(&h, 0);
     h.publish_for_agent(
         &cid,
@@ -16196,7 +16278,11 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
 
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let compact = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -16286,7 +16372,11 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         matches!(event, Event::AgentStandaloneCompactionFailed(failed)
             if serde_json::to_string(&failed).expect("serialize failure").contains("secret provider detail"))
     }));
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let starts: Vec<_> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -16500,7 +16590,11 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         agent.context_cached_tokens = Some(21);
         agent.context_usage_model = Some("test/model".into());
         agent.context_usage_head = head;
-        h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(&agent_id),
+        );
         let compact = read_nth_prompt_created(&h, 0);
         let context_before = (
             h.agents[&cid].context_input_tokens,
@@ -16647,7 +16741,11 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let compact = read_nth_prompt_created(&h, 0);
     let replacement = ContextItem::Compaction(tau_proto::OpaqueProviderItem::with_raw_json(
         CborValue::Map(vec![]),
@@ -16749,7 +16847,11 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         info.supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
         agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-        h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(&agent_id),
+        );
         let compact = read_nth_prompt_created(&h, 0);
         compact_prompt_id = compact.agent_prompt_id.clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
@@ -16915,7 +17017,11 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
             ctx_id: None,
         }),
     );
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let retry_compact = read_nth_prompt_created(&h, 1);
     h.handle_provider_response_finished(provider_text_response(
         &retry_compact.agent_prompt_id,
@@ -19320,12 +19426,15 @@ fn legacy_role_threshold_update_preserves_named_compaction_siblings() {
             },
         },
     );
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role: role_name.clone(),
-        action: tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
-            compaction_threshold: Some(120_000),
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role: role_name.clone(),
+            action: tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
+                compaction_threshold: Some(120_000),
+            },
         },
-    })
+    )
     .expect("update threshold");
 
     let role = &h.available_roles[&role_name];
@@ -19607,16 +19716,19 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         h.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(crate::parse_agent_id(&agent_id)),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(crate::parse_agent_id(&agent_id)),
+            agent_prompt_id: None,
+        },
+    );
     assert!(matches!(
         h.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
-    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+    assert!(!event_log_events(&h).into_iter().any(|event| matches!(
         event,
         Event::HarnessNotice(notice) if notice.message == "no active turn to cancel"
     )));
@@ -19631,7 +19743,11 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         1,
         "new input must not implicitly retry or clear the block"
     );
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let starts: Vec<_> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -19717,7 +19833,11 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
-    resumed.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    resumed.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     let successor = event_log_events(&resumed)
         .into_iter()
         .filter_map(|event| match event {
@@ -19776,7 +19896,11 @@ fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
         }),
     );
 
-    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     assert_eq!(
         event_log_events(&h)
             .into_iter()
@@ -19833,7 +19957,11 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
-    resumed.handle_compact_request(test_session_id("s1"), Some(&agent_id));
+    resumed.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(&agent_id),
+    );
     assert_eq!(
         event_log_events(&resumed)
             .into_iter()
@@ -25113,7 +25241,11 @@ fn manual_compaction_cancels_sole_input_wait_before_starting() {
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
 
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
 
     let events = event_log_events(&h);
     let cancelled = events
@@ -25172,7 +25304,14 @@ fn successful_wait_preemption_installs_replacement_before_queued_activation() {
     seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    let (requesting_ui_id, mut requesting_ui) = super::lifecycle::connect_socket_ui(&mut h);
+    let (_observer_id, mut observer) = super::lifecycle::connect_socket_ui(&mut h);
+    let baseline_log_len = event_log_events(&h).len();
+    h.handle_compact_request(
+        &requesting_ui_id,
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
     let compact_prompt = read_nth_prompt_created(&h, 0);
 
     assert_eq!(
@@ -25225,6 +25364,17 @@ fn successful_wait_preemption_installs_replacement_before_queued_activation() {
         .collect();
     assert!(continuation_text.contains(&"replacement summary".to_owned()));
     assert!(continuation_text.contains(&crate::internal_envelope::frame("queued after compact"),));
+    super::lifecycle::assert_no_message(&mut requesting_ui);
+    super::lifecycle::assert_no_message(&mut observer);
+    assert!(
+        event_log_events(&h)[baseline_log_len..]
+            .iter()
+            .all(|event| !matches!(
+                event,
+                Event::HarnessNotice(notice)
+                    if notice.purpose == tau_proto::NoticePurpose::Response
+            ))
+    );
 }
 
 /// A second compact request while cancellation is intercepted must coalesce
@@ -25255,8 +25405,16 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
     )
     .expect("register cancellation interceptor");
 
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
     assert!(
         !event_log_events(&h)
             .iter()
@@ -25315,13 +25473,20 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
         })),
     )
     .expect("register cancellation interceptor");
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
 
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: test_session_id("s1"),
-        target_agent_id: Some(agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
     h.handle_extension_event(
         "wait-explicit-cancel-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -25365,7 +25530,11 @@ fn session_rollover_while_wait_preemption_is_parked_never_compacts() {
         })),
     )
     .expect("register cancellation interceptor");
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
 
     h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("roll over session");
@@ -25406,7 +25575,11 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     )
     .expect("register cancellation interceptor");
 
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
     let journal = h
         .state_dir
         .join("agents")
@@ -25432,7 +25605,11 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     assert!(h.input_wait_pending_for(&cid));
     std::fs::remove_dir(&journal).expect("remove journal blocker");
     std::fs::rename(&backup, &journal).expect("restore journal");
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
     h.handle_extension_event(
         "wait-append-failure-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -25491,7 +25668,11 @@ fn manual_compaction_preserves_cancelled_wait_correlation() {
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install provider-declared wait");
 
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
 
     let events: Vec<_> = h
         .agent_store
@@ -25549,7 +25730,11 @@ fn manual_compaction_rejects_already_terminalizing_wait() {
         },
     );
 
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
 
     assert!(h.input_wait_pending_for(&cid));
     assert!(!event_log_events(&h).iter().any(|event| {
@@ -25572,7 +25757,11 @@ fn manual_inline_compaction_cancels_sole_input_wait_first() {
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
 
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
 
     let events = event_log_events(&h);
     let cancelled = events
@@ -26587,15 +26776,18 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "fresh worker turn".to_owned(),
-        agent_id: worker_agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "fresh worker turn".to_owned(),
+            agent_id: worker_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("submit fresh worker turn");
     assert_eq!(
         h.agent_navigation_modes.get(&worker_agent_id),
@@ -26753,15 +26945,18 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "fresh after terminal cut".to_owned(),
-        agent_id: worker_agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "fresh after terminal cut".to_owned(),
+            agent_id: worker_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("submit fresh worker turn");
     let fresh_prompt_id = h.agents[&worker_cid]
         .in_flight_prompt
@@ -26845,15 +27040,18 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
                 .iter()
                 .any(|(prompt_id, cid)| cid == &worker_cid && prompt_id != &first_prompt_id)
         );
-        h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-            literal: false,
-            session_id: test_session_id("s1"),
-            text: "keep coordinating".to_owned(),
-            agent_id: parent_agent_id.clone(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        })
+        h.handle_authenticated_ui_prompt_submitted(
+            crate::harness::harness_connection_id(),
+            UiPromptSubmitted {
+                literal: false,
+                session_id: test_session_id("s1"),
+                text: "keep coordinating".to_owned(),
+                agent_id: parent_agent_id.clone(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            },
+        )
         .expect("leave coordinator interrupted");
         h.shutdown().expect("shutdown continuation cut");
         (worker_agent_id, parent_agent_id)
@@ -27002,15 +27200,18 @@ fn cold_restore_classifies_unroutable_extension_worker_as_unavailable() {
             .expect("start extension worker");
         let worker_cid = ext_query_cid(&h, "external-query").expect("worker");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
-        h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-            literal: false,
-            session_id: test_session_id("s1"),
-            text: "keep coordinating".to_owned(),
-            agent_id: parent_agent_id.clone(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        })
+        h.handle_authenticated_ui_prompt_submitted(
+            crate::harness::harness_connection_id(),
+            UiPromptSubmitted {
+                literal: false,
+                session_id: test_session_id("s1"),
+                text: "keep coordinating".to_owned(),
+                agent_id: parent_agent_id.clone(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            },
+        )
         .expect("leave coordinator interrupted");
         h.shutdown().expect("shutdown interrupted worker");
         (worker_agent_id, parent_agent_id)
@@ -27379,15 +27580,18 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
     resumed
-        .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-            literal: false,
-            session_id: test_session_id("s1"),
-            text: "fresh after compaction failure".to_owned(),
-            agent_id: worker_agent_id.clone(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        })
+        .handle_authenticated_ui_prompt_submitted(
+            crate::harness::harness_connection_id(),
+            UiPromptSubmitted {
+                literal: false,
+                session_id: test_session_id("s1"),
+                text: "fresh after compaction failure".to_owned(),
+                agent_id: worker_agent_id.clone(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            },
+        )
         .expect("submit fresh worker turn");
     assert!(
         resumed.agents[&worker_cid]
@@ -30047,11 +30251,14 @@ fn explicit_display_name_equal_to_role_survives_restore() {
         let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer-junior");
         let agent_id = crate::parse_agent_id(cid.as_str());
 
-        h.handle_ui_set_agent_display_name(tau_proto::UiSetAgentDisplayName {
-            session_id: h.current_session_id.clone(),
-            agent_id: agent_id.clone(),
-            display_name: "engineer-junior".to_owned(),
-        })
+        h.handle_ui_set_agent_display_name(
+            crate::harness::harness_connection_id(),
+            tau_proto::UiSetAgentDisplayName {
+                session_id: h.current_session_id.clone(),
+                agent_id: agent_id.clone(),
+                display_name: "engineer-junior".to_owned(),
+            },
+        )
         .expect("set explicit display name");
         assert_eq!(
             h.agents
@@ -31997,15 +32204,18 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
         "replay must not queue the historical status as fresh model input"
     );
     resumed
-        .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-            literal: false,
-            session_id: test_session_id("s1"),
-            text: "continue after restart".to_owned(),
-            agent_id: crate::parse_agent_id(&watcher_id),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        })
+        .handle_authenticated_ui_prompt_submitted(
+            crate::harness::harness_connection_id(),
+            UiPromptSubmitted {
+                literal: false,
+                session_id: test_session_id("s1"),
+                text: "continue after restart".to_owned(),
+                agent_id: crate::parse_agent_id(&watcher_id),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            },
+        )
         .expect("activate restored watcher");
     let prompt = read_nth_prompt_created(&resumed, 0);
     let context = serde_json::to_string(&prompt.context).expect("serialize prompt context");
@@ -38210,7 +38420,11 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
-    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(agent_id.as_str()),
+    );
     let compact = read_nth_prompt_created(&h, 0);
     assert!(
         compact
@@ -38477,15 +38691,18 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: h.current_session_id.clone(),
-        text: "please continue <now>&</now> >".to_owned(),
-        agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.current_session_id.clone(),
+            text: "please continue <now>&</now> >".to_owned(),
+            agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("prompt submitted");
 
     assert!(session_agent_message_sent_events(&h).is_empty());
@@ -38555,15 +38772,18 @@ fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: h.current_session_id.clone(),
-        text: background_completion_prompt(&ToolCallId::from("call-1")),
-        agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
-        message_class: tau_proto::PromptMessageClass::Internal,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.current_session_id.clone(),
+            text: background_completion_prompt(&ToolCallId::from("call-1")),
+            agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("internal prompt submitted");
 
     assert!(
@@ -38626,15 +38846,18 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         tau_proto::AgentNavigationMode::Suspended,
     );
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: h.current_session_id.clone(),
-        text: "queued follow-up".to_owned(),
-        agent_id: watched_agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.current_session_id.clone(),
+            text: "queued follow-up".to_owned(),
+            agent_id: watched_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("prompt queued");
 
     assert!(
@@ -39517,15 +39740,18 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
         1
     );
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: test_session_id("s1"),
-        text: "fresh child turn".to_owned(),
-        agent_id: child_agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: "fresh child turn".to_owned(),
+            agent_id: child_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("submit fresh child turn");
     let fresh_prompt_id = h
         .agents
@@ -40094,15 +40320,18 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         }),
     )
     .expect("set mode before reconnect");
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: h.current_session_id.clone(),
-        text: "resume before reconnect".to_owned(),
-        agent_id: agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("navigation-reconnect".to_owned()),
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.current_session_id.clone(),
+            text: "resume before reconnect".to_owned(),
+            agent_id: agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("navigation-reconnect".to_owned()),
+        },
+    )
     .expect("accepted prompt before reconnect");
     assert_eq!(
         h.agent_navigation_modes.get(&agent_id),

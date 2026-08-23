@@ -3337,7 +3337,7 @@ fn validate_event_rejects_non_agent_transcript_event() {
     assert_eq!(
         validation_error(
             &tree,
-            Event::HarnessNotice(tau_proto::HarnessNotice::new(
+            Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
                 "test",
                 "not an agent transcript event",
                 tau_proto::NoticeLevel::Info,

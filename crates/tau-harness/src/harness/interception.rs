@@ -611,7 +611,8 @@ fn mandatory_harness_notice(event: &Event) -> bool {
     matches!(
         event,
         Event::HarnessNotice(info)
-            if info.always_show || info.level == tau_proto::NoticeLevel::Critical
+            if info.purpose == tau_proto::NoticePurpose::Alert
+                || info.level == tau_proto::NoticeLevel::Critical
     )
 }
 
@@ -659,7 +660,7 @@ fn sanitize_harness_notice_replacement(original: &Event, replacement: &mut Event
     {
         replacement.kind.clone_from(&original.kind);
         replacement.level = original.level;
-        replacement.always_show = original.always_show;
+        replacement.purpose = original.purpose;
     }
 }
 

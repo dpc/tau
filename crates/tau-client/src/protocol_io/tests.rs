@@ -44,7 +44,7 @@ fn protocol_io_input_message_key_uses_extension_notice_request_name() {
 #[test]
 fn protocol_io_output_message_key_uses_harness_notice_name() {
     let message =
-        HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice::new(
+        HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
             tau_proto::notice_kind::EXTENSION_NOTICE,
             "reconnecting",
             tau_proto::NoticeLevel::Warning,

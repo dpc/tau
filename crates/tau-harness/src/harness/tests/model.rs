@@ -468,7 +468,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
         );
     }
     assert!(warning.message.contains("(and 2 more)"));
-    assert!(!warning.always_show);
+    assert_eq!(warning.purpose, tau_proto::NoticePurpose::Diagnostic);
 
     let hostile_id = ModelId::from(format!(
         "shared/line\nseparator\u{2028}bidi\u{202e}mark\u{200f}{}",
@@ -903,11 +903,10 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     h.try_advance_queue();
 
     assert!(!h.has_ready_message_wake_on_selected_branch(&cid));
-    assert!(
-        h.replayable_harness_notices
-            .iter()
-            .any(|notice| { notice.always_show && notice.message.contains("tau provider list") })
-    );
+    assert!(h.replayable_harness_notices.iter().any(|notice| {
+        notice.purpose == tau_proto::NoticePurpose::Alert
+            && notice.message.contains("tau provider list")
+    }));
     assert!(
         event_log_events(&h)
             .iter()
@@ -1384,12 +1383,15 @@ agents:
     let literal_runtime: ModelId = "subscription/current"
         .parse()
         .expect("literal runtime model");
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role: role.clone(),
-        action: tau_proto::UiRoleUpdateAction::SetModel {
-            model: Some(literal_runtime.clone()),
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action: tau_proto::UiRoleUpdateAction::SetModel {
+                model: Some(literal_runtime.clone()),
+            },
         },
-    })
+    )
     .expect("apply literal runtime role edit");
     assert_eq!(
         h.available_roles[&role].model.as_ref(),
@@ -1995,17 +1997,23 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
     let role = h.selected_role.clone();
     std::fs::write(&config_path, "agents: [malformed\n").expect("invalidate source after startup");
 
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role: role.clone(),
-        action: tau_proto::UiRoleUpdateAction::SetEffort {
-            effort: Some(Effort::High),
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action: tau_proto::UiRoleUpdateAction::SetEffort {
+                effort: Some(Effort::High),
+            },
         },
-    })
+    )
     .expect("apply runtime role override");
-    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
-        role: role.clone(),
-        action: tau_proto::UiRoleUpdateAction::Delete,
-    })
+    h.handle_ui_role_update(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action: tau_proto::UiRoleUpdateAction::Delete,
+        },
+    )
     .expect("reset role to accepted startup baseline");
     assert_eq!(h.available_roles[&role].effort, Some(Effort::Low));
 

@@ -980,7 +980,7 @@ fn config_with_unknown_field() -> HarnessOutputMessage {
 }
 
 fn notice(text: &str) -> Event {
-    Event::HarnessNotice(HarnessNotice::new("test", text, NoticeLevel::Info))
+    Event::HarnessNotice(HarnessNotice::diagnostic("test", text, NoticeLevel::Info))
 }
 
 fn outbound_event(text: &str) -> Event {

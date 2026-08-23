@@ -116,7 +116,7 @@ history or replay.
 Dedicated configured-extension notice requests are handled inline and converted
 to harness-authored `extension.notice` events. The request carries only message
 and level; the harness caps critical to warning and fixes source, kind,
-`always_show = false`, and live-only publication. The resulting event uses ordinary
+`purpose = diagnostic`, and live-only publication. The resulting event uses ordinary
 interception, commit, and live broadcast but never semantic persistence or
 replay. Debug JSONL and protocol metering retain the raw
 `message.extension_notice_request` input separately from the later published
@@ -139,9 +139,8 @@ may rewrite text on the sanctioned prompt-text events without changing agent
 id, message class, or originator. A submitted or steered prompt tagged
 `internal_kind=context_size_alert` or `background_tool_completion` additionally
 protects its tag and text so durable history retains the exact harness-authored
-alert or lifecycle notice. Mandatory `harness.notice`
-diagnostics (critical notices
-and `always_show` warnings such as extension config errors) are replayable,
+alert or lifecycle notice. Mandatory `harness.notice` alerts (and critical
+notices regardless of purpose) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
 

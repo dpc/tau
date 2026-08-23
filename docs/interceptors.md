@@ -120,7 +120,7 @@ projections. Canonical external `message.*` facts are also protected; their
 peer-authored `message.*_reported` inputs remain ordinarily interceptable. Treat
 `crates/tau-harness/src/harness/interception.rs` as the source of truth for that
 list. Individual harness call sites can also mark a publish as must-pass, as
-mandatory warning/critical `harness.notice` diagnostics do.
+mandatory `harness.notice` alerts and critical notices do.
 
 ### Pass unchanged
 
@@ -137,7 +137,7 @@ Later interceptors and final subscribers usually see the modified event. The
 replacement must have the same event type as the original; if it does not, the
 harness logs a warning and falls back to the original event. Some same-type
 replacements are also rejected to preserve immutable facts. For mandatory
-warning/critical `harness.notice` diagnostics, immutable prompt lifecycle facts,
+`harness.notice` alerts and critical notices, immutable prompt lifecycle facts,
 `provider.response_finished`, terminal tool completion facts including the
 payload-free result display projections, session
 lifecycle/membership facts, `agent.started`, and harness-owned agent message

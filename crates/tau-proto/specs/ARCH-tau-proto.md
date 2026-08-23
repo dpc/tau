@@ -19,7 +19,7 @@ remain to be implemented.
 Configured extensions request user-visible diagnostics with the dedicated
 `extension_notice_request` input message carrying only `message` and `level`.
 The request is not an event and cannot set publication metadata; the harness
-creates the resulting live-only `harness.notice`. See
+creates the resulting live-only diagnostic `harness.notice`. See
 [SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 
 Tool lifecycle uses distinct transient peer declarations
@@ -301,7 +301,7 @@ and the directed notice response remain harness concerns.
 authorized effect is local connection control rather than event publication.
 `ui_tree_request` is a flat message carrying the session and optional target
 agent; the harness returns its rendered tree only to the requesting UI as one
-multiline notice. `ui.navigate_tree` remains a distinct state-changing event.
+live-only response notice. `ui.navigate_tree` remains a distinct state-changing event.
 
 `agent.stats_updated` remains a transient complete runtime snapshot. Its
 `estimated_api_cost` is self-only; its defaulted

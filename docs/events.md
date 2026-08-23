@@ -52,10 +52,10 @@ for control of the emit/intercept pipeline.
 
 - **`harness.notice`** — A free-form notice from the harness for the user.
   Notices include `kind` (stable machine-readable type), `message`, `level`
-  (`critical`, `warning`, `info`, `debug`, or `trace`), and optional
-   `always_show`. UIs filter notices locally by their configured notice-level;
-   critical and `always_show` notices remain visible at that threshold. A UI may
-   apply an additional presentation-only transcript projection. Current first-party kinds
+  (`critical`, `warning`, `info`, `debug`, or `trace`), and `purpose`
+  (`response`, `alert`, or `diagnostic`). Compact UIs show responses and alerts
+  and hide diagnostics; verbose UIs apply their notice-level threshold only to
+  diagnostics. Critical notices remain defensively visible. Current first-party kinds
   include `extension.config_error`, `extension.optional_skipped`,
   `extension.notice` for harness-authored notices derived from configured-extension
   requests,

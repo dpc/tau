@@ -52,7 +52,8 @@ Internal prompt facts use their typed `submission_source` at the same live or
 replay position. `Extension { name }` renders once as an attributed message;
 typed `HarnessInternal` renders its plain payload in the dedicated
 `system.internal_notice` style only when the default-off
-`show_internal_prompts` setting is enabled; `Legacy` stays hidden. The built-in
+`show_internal_prompts` setting is enabled in verbose mode; compact mode still
+hides it. `Legacy` stays hidden. The built-in
 themes italicize this style. Typed watch-provider notifications use the same
 compact notice presentation without a textual provenance label or the
 provider-only outer envelope. Live and initial-snapshot notifications use the
@@ -63,8 +64,10 @@ and legacy text remains verbatim. Replay and live rendering use the same
 projection. See
 [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md) for
 the corresponding typed message classification.
-The `internal_kind=context_size_alert` presentation takes precedence and always
-renders its exact text once. Missing tags, `ctx_id`, and prompt text never
+The `internal_kind=context_size_alert` presentation takes precedence and renders
+its exact text once in verbose mode. Timer provenance likewise renders its typed
+wakeup summary only in verbose mode. Both remain model-facing facts when compact
+mode suppresses their human diagnostic projection. Missing tags, `ctx_id`, and prompt text never
 imply trusted provenance or special presentation. This behavior is confirmed by
 [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 The `internal_kind=background_tool_completion` lifecycle notice never

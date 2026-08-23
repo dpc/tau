@@ -99,7 +99,7 @@ fn every_configured_extension_kind_gets_harness_authored_sanitized_output() {
             Event::HarnessNotice(notice)
                 if notice.message == format!("notice-{index}")
                     && notice.level == tau_proto::NoticeLevel::Warning
-                    && !notice.always_show
+                    && notice.purpose == tau_proto::NoticePurpose::Diagnostic
         ));
     }
     let delivered = observer.lock().expect("observer");
@@ -216,7 +216,7 @@ fn legacy_extension_notice_emit_is_denied() {
                     kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
                     message: "legacy".to_owned(),
                     level: tau_proto::NoticeLevel::Info,
-                    always_show: false,
+                    purpose: tau_proto::NoticePurpose::Diagnostic,
                 }),
                 false,
             ),
@@ -273,7 +273,7 @@ fn output_uses_ordinary_transient_interception_and_broadcast() {
             if notice.kind == tau_proto::notice_kind::EXTENSION_NOTICE
                 && notice.message == "original"
                 && notice.level == tau_proto::NoticeLevel::Debug
-                && !notice.always_show
+                && notice.purpose == tau_proto::NoticePurpose::Diagnostic
     ));
 
     harness
@@ -285,7 +285,7 @@ fn output_uses_ordinary_transient_interception_and_broadcast() {
                         kind: "spoofed.kind".to_owned(),
                         message: "rewritten".to_owned(),
                         level: tau_proto::NoticeLevel::Critical,
-                        always_show: true,
+                        purpose: tau_proto::NoticePurpose::Alert,
                     },
                 )))),
             })),
@@ -299,7 +299,7 @@ fn output_uses_ordinary_transient_interception_and_broadcast() {
                 && notice.kind == tau_proto::notice_kind::EXTENSION_NOTICE
                 && notice.message == "rewritten"
                 && notice.level == tau_proto::NoticeLevel::Debug
-                && !notice.always_show
+                && notice.purpose == tau_proto::NoticePurpose::Diagnostic
     ));
     assert!(observer.lock().expect("observer").iter().any(|routed| {
         routed.source_id.as_deref() == Some(HARNESS_CONNECTION_ID)

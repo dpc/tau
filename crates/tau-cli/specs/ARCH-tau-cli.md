@@ -193,12 +193,13 @@ output. The resulting behavior is specified by
 The process-local verbose-mode flag is a top-level projection over those
 retained presentation models. Verbose mode preserves the configured `show-*`
 rendering. Compact mode replaces thinking, terminal tool history/summaries,
-turn stats, and non-critical harness notices with position-stable empty blocks
-while projecting each live tool as one identity/status row without payload.
-Critical harness notices remain visible. Terminal tool outcomes remove the live
+turn stats, and diagnostic notices with position-stable empty blocks while
+projecting each live tool as one identity/status row without payload. Responses,
+alerts, and critical notices remain visible. Terminal tool outcomes remove the live
 row through the ordinary lifecycle path. Switching modes re-renders retained
 blocks and does not mutate `CliState`, protocol events, journals, or model
 context.
+See [SPEC-tau-cli-notice-filtering](SPEC-tau-cli-notice-filtering.md).
 
 The visible, hidden, and no-agent presentation models and retroactive-render
 caches retain accepted transcript data until an explicit new-session reset or

@@ -552,7 +552,7 @@ fn existing_agent_load_reseeds_creator_cost_topology() {
     let child = tau_proto::AgentId::parse("child").expect("test child id");
     let started = |agent_id: tau_proto::AgentId, creator| {
         Event::AgentStarted(tau_proto::AgentStarted {
-            agent_id,
+            agent_id: agent_id.clone(),
             creator,
             parent_agent: None,
             role: "engineer".to_owned(),
@@ -611,7 +611,7 @@ fn existing_agent_load_reseeds_creator_cost_topology() {
 fn sparse_cold_restore_attaches_pending_creator_subtree_once() {
     fn started(agent_id: tau_proto::AgentId, creator: Option<tau_proto::AgentCreator>) -> Event {
         Event::AgentStarted(tau_proto::AgentStarted {
-            agent_id,
+            agent_id: agent_id.clone(),
             creator,
             parent_agent: None,
             role: "engineer".to_owned(),
@@ -1258,7 +1258,7 @@ fn insert_extension_entry_with_meter(
     h.extensions.order.push(connection_id);
 }
 
-fn connect_socket_ui(
+pub(super) fn connect_socket_ui(
     h: &mut Harness,
 ) -> (
     tau_proto::ConnectionId,
@@ -1286,7 +1286,7 @@ fn read_notice<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) -> tau_pro
     notice.clone()
 }
 
-fn assert_no_message<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) {
+pub(super) fn assert_no_message<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) {
     match reader.read_message() {
         Err(tau_proto::DecodeError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
         Ok(None) => {}
@@ -1349,7 +1349,7 @@ fn tree_request_returns_one_directed_multiline_notice() {
     let notice = read_notice(&mut requesting_ui);
     assert_eq!(notice.kind, tau_proto::notice_kind::HARNESS_NOTICE);
     assert_eq!(notice.level, tau_proto::NoticeLevel::Info);
-    assert!(!notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
     assert_eq!(
         notice.message,
         concat!(
@@ -1378,6 +1378,157 @@ fn tree_request_returns_one_directed_multiline_notice() {
     assert_eq!(entries[0]["event_name"], "<message>");
     assert_eq!(entries[0]["event"]["message"], "ui_tree_request");
     assert_eq!(entries[0]["event"]["payload"]["session_id"], "s1");
+}
+
+/// UI command rejections remain live-only responses to the initiating UI and
+/// never enter publication history or another attached UI's stream.
+#[test]
+fn ui_command_response_is_requester_only_and_not_logged() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
+    let (observer_id, mut observer) = connect_socket_ui(&mut h);
+    let baseline_seq = h.event_log.next_seq();
+
+    h.handle_client_ui_event(
+        &requesting_ui_id,
+        Event::UiRoleSelect(tau_proto::UiRoleSelect {
+            role: "missing-role".to_owned(),
+        }),
+    )
+    .expect("handle role selection");
+
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert!(notice.message.contains("unknown role"));
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+
+    h.handle_client_ui_event(
+        &requesting_ui_id,
+        Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            literal: true,
+            session_id: test_session_id("stale-session"),
+            text: "rejected prompt".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            agent_id: crate::parse_agent_id("missing-agent"),
+            ctx_id: Some("rejected-prompt".to_owned()),
+        }),
+    )
+    .expect("handle prompt rejection");
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert!(
+        notice
+            .message
+            .contains("prompt for `stale-session` rejected")
+    );
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+
+    h.handle_client_ui_event(
+        &requesting_ui_id,
+        Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: test_session_id("stale-session"),
+            target_agent_id: None,
+            agent_prompt_id: None,
+        }),
+    )
+    .expect("handle cancel rejection");
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert!(notice.message.contains("stale session"));
+    assert_no_message(&mut requesting_ui);
+    assert_no_message(&mut observer);
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+
+    h.agents.get_mut(&cid).expect("loaded agent").pending_cancel =
+        Some(crate::agent::PendingCancel {
+            requester_client_id: requesting_ui_id.clone(),
+            reason: "cancelled by user".to_owned(),
+        });
+    h.handle_client_ui_event(
+        &observer_id,
+        Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(agent_id),
+            agent_prompt_id: None,
+        }),
+    )
+    .expect("handle duplicate cancel rejection");
+    let notice = read_notice(&mut observer);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert!(notice.message.contains("already pending"));
+    assert_eq!(
+        h.agents[&cid]
+            .pending_cancel
+            .as_ref()
+            .expect("original cancellation retained")
+            .requester_client_id,
+        requesting_ui_id
+    );
+    assert_no_message(&mut requesting_ui);
+}
+
+/// Deferred compaction cleanup reports its terminal rejection only to the
+/// retained requester and never publishes or replays that response.
+#[test]
+fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
+    let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
+    let (_observer_id, mut observer) = connect_socket_ui(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait_call_id = ToolCallId::from("wait-call");
+    h.pending_ui_compactions_after_wait.insert(
+        cid.clone(),
+        crate::harness::PendingUiCompactionAfterWait {
+            session_generation: h.current_session_generation,
+            agent_id: agent_id.clone(),
+            wait_call_id: wait_call_id.clone(),
+            requester_client_id: requesting_ui_id.clone(),
+        },
+    );
+    h.tool_agents.insert(wait_call_id.clone(), cid.clone());
+    let baseline_seq = h.event_log.next_seq();
+
+    h.rollback_failed_wait_compaction_terminal(&Event::ToolCancelled(tau_proto::ToolCancelled {
+        presentation: Default::default(),
+        call_id: wait_call_id,
+        tool_name: tau_proto::ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        display: None,
+    }));
+
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert!(notice.message.contains("could not be committed"));
+    assert_no_message(&mut requesting_ui);
+    assert_no_message(&mut observer);
+    assert_eq!(h.event_log.next_seq(), baseline_seq);
+
+    h.pending_ui_compactions_after_wait.insert(
+        cid.clone(),
+        crate::harness::PendingUiCompactionAfterWait {
+            session_generation: h.current_session_generation,
+            agent_id,
+            wait_call_id: ToolCallId::from("wait-unload"),
+            requester_client_id: requesting_ui_id,
+        },
+    );
+    let logged_before_unload = event_log_events(&h).len();
+    h.remove_agent_after_prompt_closure(&cid);
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert!(notice.message.contains("target agent unloaded"));
+    assert_no_message(&mut observer);
+    assert!(
+        event_log_events(&h)[logged_before_unload..]
+            .iter()
+            .all(|event| !matches!(event, Event::HarnessNotice(_)))
+    );
 }
 
 /// Startup intake preserves tree request handling without treating the request
@@ -1819,7 +1970,7 @@ fn debug_event_stats_request_is_directed_to_requesting_ui() {
     .expect("request stats through runtime router");
 
     let notice = read_notice(&mut requesting_ui);
-    assert!(notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
     assert!(
         notice
             .message
@@ -1864,7 +2015,7 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
         .expect("request stats");
 
     let notice = read_notice(&mut ui);
-    assert!(notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
     assert!(notice.message.contains("message.hello:"));
     assert!(notice.message.contains("extension -> harness:"));
 }
@@ -1913,7 +2064,7 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
         panic!("expected one directed harness notice: {frames:?}");
     };
     assert_eq!(notice.kind, tau_proto::notice_kind::UI_COMMAND_ERROR);
-    assert!(notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
     assert_eq!(
         notice.message,
         "extension event stats are only available to attached local UIs"
@@ -2153,7 +2304,7 @@ fn debug_event_stats_request_ignores_disconnected_extension_entry() {
         .expect("request stats");
 
     let notice = read_notice(&mut ui);
-    assert!(notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
     assert!(notice.message.contains("live.event: 64B count=1"));
     assert!(!notice.message.contains("stale.event"));
 }
@@ -2185,7 +2336,7 @@ fn debug_event_stats_request_rejects_ambiguous_live_extension_name() {
         .expect("request stats");
 
     let notice = read_notice(&mut ui);
-    assert!(notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
     assert!(
         notice
             .message
@@ -2751,7 +2902,7 @@ fn provider_startup_missing_declaration_suppresses_stale_credential() {
         |event| matches!(
             event,
             Event::HarnessNotice(notice)
-                if notice.always_show
+                if notice.purpose == tau_proto::NoticePurpose::Alert
                     && notice.level == tau_proto::NoticeLevel::Warning
                     && notice.message.contains("deepseek")
                     && !notice.message.contains("stale-secret")
@@ -3115,7 +3266,7 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message.contains("extension config-bad-ext rejected its config")
                     && info.message.contains("unknown field `enforce_ro_mode`")
         )
@@ -3138,7 +3289,7 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
         Some(Event::HarnessNotice(info))
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message.contains("extension config-bad-ext rejected its config")
                 && info.message.contains("unknown field `enforce_ro_mode`")
     )));
@@ -3554,7 +3705,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message == "optional extension optional-config-bad-ext did not initialize"
         )
     ));
@@ -3583,7 +3734,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
         Some(Event::HarnessNotice(info))
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "optional extension optional-config-bad-ext did not initialize"
     )));
 }
@@ -3671,7 +3822,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message.contains("failed to spawn configured extension instance")
                     && info.message.contains("`command` executable")
                     && info.message.contains('…')
@@ -3711,7 +3862,7 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message == "optional extension optional-pre-ready-drop did not initialize"
         )
     ));
@@ -3732,7 +3883,7 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
         Some(Event::HarnessNotice(info))
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "optional extension optional-pre-ready-drop did not initialize"
     )));
 }
@@ -3764,7 +3915,7 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message == "optional extension optional-timeout-ext did not initialize"
         )
     ));
@@ -3785,7 +3936,7 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
         Some(Event::HarnessNotice(info))
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "optional extension optional-timeout-ext did not initialize"
     )));
 }
@@ -4113,7 +4264,7 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message == "optional extension optional-diagnostic did not initialize"
         )
     ));
@@ -4134,7 +4285,7 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
         Some(Event::HarnessNotice(info))
             if info.level == tau_proto::NoticeLevel::Warning
                 && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "optional extension optional-diagnostic did not initialize"
     )));
 }
@@ -4164,7 +4315,7 @@ fn state_access_startup_diagnostic_uses_dedicated_notice_kind() {
             Event::HarnessNotice(info)
                 if info.level == tau_proto::NoticeLevel::Warning
                     && info.kind == tau_proto::notice_kind::EXTENSION_STATE_ACCESS
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message.contains("core-shell")
         )
     ));
@@ -4186,7 +4337,7 @@ fn harness_failure_notice_is_mandatory_warning() {
             Event::HarnessNotice(info)
                 if info.kind == tau_proto::notice_kind::HARNESS_FAILURE
                     && info.level == tau_proto::NoticeLevel::Warning
-                    && info.always_show
+                    && info.purpose == tau_proto::NoticePurpose::Alert
                     && info.message == "failed to dispatch queued prompt: boom"
         )
     ));
@@ -8924,7 +9075,7 @@ fn crashing_supervised_tool_uses_fake_clock_and_stops_after_three_restarts() {
         })
         .collect::<Vec<_>>();
     assert_eq!(disable_notices.len(), 1);
-    assert!(disable_notices[0].always_show);
+    assert_eq!(disable_notices[0].purpose, tau_proto::NoticePurpose::Alert);
     assert_eq!(disable_notices[0].level, tau_proto::NoticeLevel::Warning);
     assert!(disable_notices[0].message.len() <= MAX_EXTENSION_RESTART_NOTICE_BYTES);
     h.shutdown().expect("shutdown");
@@ -9051,7 +9202,7 @@ fn nonreading_child_is_reaped_before_delayed_replacement() {
                 kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
                 message: "x".repeat(2 * 1024 * 1024),
                 level: tau_proto::NoticeLevel::Info,
-                always_show: false,
+                purpose: tau_proto::NoticePurpose::Diagnostic,
             })),
         )
         .expect("queue blocking frame");
@@ -9121,7 +9272,7 @@ fn shutdown_reaps_nonreading_supervised_children_and_joins_writers() {
                     kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
                     message: "x".repeat(2 * 1024 * 1024),
                     level: tau_proto::NoticeLevel::Info,
-                    always_show: false,
+                    purpose: tau_proto::NoticePurpose::Diagnostic,
                 })),
             )
             .expect("queue large frame");
@@ -9424,7 +9575,7 @@ fn introduction_notice_is_enabled_directed_and_process_local() {
         "Welcome to Tau! Ask your model to introduce you to Tau."
     );
     assert_eq!(notice.level, tau_proto::NoticeLevel::Info);
-    assert!(!notice.always_show);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Diagnostic);
     assert_eq!(
         h.replayable_harness_notices.len(),
         replayable_notices_before
@@ -10472,11 +10623,22 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
         )
     }));
     h.selected_model = Some("changed/model".into());
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
+    let (_observer_id, mut observer) = connect_socket_ui(&mut h);
+    let cancel_baseline = h.event_log.next_seq();
+    h.handle_cancel_prompt(
+        &requesting_ui_id,
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
+    let notice = read_notice(&mut requesting_ui);
+    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
+    assert_eq!(notice.message, "cancelling current prompt");
+    assert_no_message(&mut observer);
+    assert_eq!(h.event_log.next_seq(), cancel_baseline);
     assert!(
         h.agents
             .values()
@@ -10766,11 +10928,14 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
             .as_ref()
             .map(|pending| pending.event.name())
     );
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
     let journal_path = td
         .path()
         .join("agents")
@@ -12381,11 +12546,14 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
         restored.agents[&cid].output_length_continuation,
         crate::agent::OutputLengthContinuationState::Active(_)
     ));
-    restored.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: restored.current_session_id.clone(),
-        target_agent_id: Some(source_agent_id.clone()),
-        agent_prompt_id: Some(descendant_prompt_id.clone()),
-    });
+    restored.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: restored.current_session_id.clone(),
+            target_agent_id: Some(source_agent_id.clone()),
+            agent_prompt_id: Some(descendant_prompt_id.clone()),
+        },
+    );
     let records = restored
         .agent_store
         .agent_events(source_agent_id.as_str())
@@ -12455,11 +12623,14 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
     h.handle_provider_response_finished(super::dispatch::context_overflow_response(&successor))
         .expect("park rejection");
     assert!(h.pending_intercept.is_some());
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: Some(successor.agent_prompt_id.clone()),
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: Some(successor.agent_prompt_id.clone()),
+        },
+    );
     h.handle_extension_event(
         "reactive-rejection-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -12705,11 +12876,14 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
         h.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionStarted(_))
     ));
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: Some(successor.agent_prompt_id.clone()),
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: Some(successor.agent_prompt_id.clone()),
+        },
+    );
     h.handle_extension_event(
         "staged-transaction",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -12721,11 +12895,14 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
         h.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionFailed(_))
     ));
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: Some(successor.agent_prompt_id),
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: Some(successor.agent_prompt_id),
+        },
+    );
     h.handle_extension_event(
         "staged-transaction",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -13044,11 +13221,14 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
         h.pending_intercept.is_some(),
         "local Failed terminal is parked"
     );
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
     h.handle_extension_event(
         "length-created-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -13170,11 +13350,14 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
         h.pending_intercept.is_some(),
         "synthetic failure prompt-start is parked"
     );
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
     h.handle_extension_event(
         "length-failure-race",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -13282,11 +13465,14 @@ fn output_length_real_terminal_race_cancels_with_exact_accounting() {
             .map(|status| &status.state),
         Some(tau_proto::AgentWatchProviderState::TerminalIncomplete { .. })
     ));
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
     assert!(
         h.agents[&source_cid].pending_prompts.is_empty()
             && !h.agents[&source_cid].pending_replay_activation,
@@ -13461,11 +13647,14 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
             .map(|status| &status.state),
         Some(tau_proto::AgentWatchProviderState::TerminalIncomplete { .. })
     ));
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
 
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
@@ -13631,11 +13820,14 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
             Some(Event::ToolRequest(request)) if request.call_id == "cancelled-successor-call"
         )
     }));
-    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: h.current_session_id.clone(),
-        target_agent_id: Some(source.agent_id.clone()),
-        agent_prompt_id: None,
-    });
+    h.handle_cancel_prompt(
+        crate::harness::harness_connection_id(),
+        &tau_proto::UiCancelPrompt {
+            session_id: h.current_session_id.clone(),
+            target_agent_id: Some(source.agent_id.clone()),
+            agent_prompt_id: None,
+        },
+    );
     h.handle_extension_event(
         "length-tool-terminal-race",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {

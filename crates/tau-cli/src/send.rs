@@ -230,6 +230,7 @@ fn read_tree_result(reader: &mut crate::ui_client::UiInputReader) -> Result<Stri
             HarnessOutputMessage::Deliver(delivery) => {
                 if let Event::HarnessNotice(notice) = delivery.into_event()
                     && notice.kind == tau_proto::notice_kind::HARNESS_NOTICE
+                    && notice.purpose == tau_proto::NoticePurpose::Response
                 {
                     return Ok(notice.message);
                 }

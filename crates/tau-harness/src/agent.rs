@@ -369,6 +369,9 @@ pub(crate) enum AgentTurnState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingCancel {
+    /// UI that initiated this cancellation.
+    pub(crate) requester_client_id: tau_proto::ConnectionId,
+    /// Canonical cancellation reason.
     pub(crate) reason: String,
 }
 

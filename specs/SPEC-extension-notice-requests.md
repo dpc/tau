@@ -22,7 +22,7 @@ interception and broadcast with:
 - `kind = "extension.notice"`;
 - the exact requested message;
 - the requested level, capped from critical to warning; and
-- `always_show = false`.
+- `purpose = "diagnostic"`.
 
 The harness owns the output source and publication metadata. Interceptors may
 drop it or replace only its message under ordinary notice policy. It creates no
@@ -31,4 +31,5 @@ metering may observe the input and resulting output separately.
 
 Generic peer event emission never authorizes extension-authored
 `harness.notice`. `ConfigError` remains a separate mandatory startup and
-lifecycle path and must not be used for routine notices.
+lifecycle alert path and must not be used for routine notices. Extensions cannot
+promote routine requests to `response` or `alert`.

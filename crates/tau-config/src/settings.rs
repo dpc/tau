@@ -245,7 +245,7 @@ pub struct CliSettings {
     pub show_messages: ShowMessages,
     /// Whether to render harness-internal prompt facts in the transcript.
     pub show_internal_prompts: bool,
-    /// Default notice visibility threshold for harness/UI notices.
+    /// Default verbose-mode visibility threshold for diagnostic notices.
     pub notice_level: tau_proto::NoticeLevel,
     /// Deprecated compatibility setting for old routine status visibility.
     pub show_status: ShowStatus,
@@ -370,7 +370,7 @@ pub struct CliState {
     /// Whether to render typed harness-internal prompt facts. Controlled by
     /// `:set show-internal-prompts <on|off>`.
     pub show_internal_prompts: bool,
-    /// Notice visibility threshold. Controlled by
+    /// Verbose-mode diagnostic visibility threshold, controlled by
     /// `:set notice-level <critical|warning|info|debug|trace>`.
     pub notice_level: tau_proto::NoticeLevel,
     /// Deprecated compatibility setting for old routine status visibility.

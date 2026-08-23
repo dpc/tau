@@ -127,7 +127,7 @@ impl RecordedLineHandlers for TestRecordedLineHandlers {
         None
     }
 
-    fn system_info(&mut self, message: &str) {
+    fn command_feedback(&mut self, message: &str) {
         self.outputs.push(format!("notice:{message}"));
     }
 }
@@ -207,7 +207,7 @@ impl RecordedLineHandlers for SensitiveSubmissionHandlers {
         None
     }
 
-    fn system_info(&mut self, message: &str) {
+    fn command_feedback(&mut self, message: &str) {
         self.presentation.push(message.to_owned());
     }
 }
@@ -464,7 +464,7 @@ impl RecordedLineHandlers for TestTreeCommandHandlers {
             }
             Ok(None) => Ok(CommandOutcome::NotHandled),
             Err(message) => {
-                self.system_info(message);
+                self.command_feedback(message);
                 Ok(CommandOutcome::Continue)
             }
         }
@@ -479,7 +479,7 @@ impl RecordedLineHandlers for TestTreeCommandHandlers {
         None
     }
 
-    fn system_info(&mut self, message: &str) {
+    fn command_feedback(&mut self, message: &str) {
         self.outputs.push(format!("notice:{message}"));
     }
 }
@@ -558,7 +558,7 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
         None
     }
 
-    fn system_info(&mut self, message: &str) {
+    fn command_feedback(&mut self, message: &str) {
         self.outputs.push(format!("notice:{message}"));
     }
 }
@@ -678,7 +678,7 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
         None
     }
 
-    fn system_info(&mut self, message: &str) {
+    fn command_feedback(&mut self, message: &str) {
         self.outputs.push(format!("notice:{message}"));
     }
 }

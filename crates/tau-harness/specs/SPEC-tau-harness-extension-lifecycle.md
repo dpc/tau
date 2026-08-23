@@ -133,7 +133,7 @@ byte quotas, retain global input order, release after Ready and the global
 barrier, and disappear on disconnect before release. Unconfigured or disconnected
 origins are silently denied; an illegal-phase request follows the normal protocol
 failure path. The handler caps `critical` to `warning` and creates a harness-sourced,
-live-only `extension.notice` with `always_show = false`. The result then crosses
+live-only `extension.notice` with `purpose = diagnostic`. The result then crosses
 ordinary interception and broadcasts to every current matching subscriber. A
 publisher disconnect after inline handling does not cancel a parked
 harness-authored output. Generic extension `Emit(harness.notice)` remains denied,

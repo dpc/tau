@@ -270,7 +270,7 @@ impl NoticeLevel {
     }
 }
 
-/// A user-facing notice from the harness.
+/// Textual Tau/UI output from the harness.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessNotice {
     /// Stable machine-readable notice kind used by UIs for special casing.
@@ -280,29 +280,64 @@ pub struct HarnessNotice {
     /// Severity or verbosity level.
     #[serde(default)]
     pub level: NoticeLevel,
-    /// Whether UI notice-level filters must show this non-critical notice.
-    ///
-    /// A UI may still apply a separate presentation-only transcript projection.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub always_show: bool,
+    /// Why this notice exists from the user's perspective.
+    pub purpose: NoticePurpose,
+}
+
+/// Why a textual Tau/UI notice exists from the user's perspective.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticePurpose {
+    /// Exact feedback for an explicit action by the receiving UI.
+    Response,
+    /// An unsolicited condition the user must see or may need to act on.
+    Alert,
+    /// Ambient lifecycle, developer detail, or a projection of model control.
+    Diagnostic,
 }
 
 impl HarnessNotice {
-    /// Creates a harness notice with filtering controlled only by its level.
+    /// Creates exact feedback for an explicit action by the receiving UI.
     #[must_use]
-    pub fn new(kind: impl Into<String>, message: impl Into<String>, level: NoticeLevel) -> Self {
+    pub fn response(
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        level: NoticeLevel,
+    ) -> Self {
         Self {
             kind: kind.into(),
             message: message.into(),
             level,
-            always_show: false,
+            purpose: NoticePurpose::Response,
         }
     }
 
-    /// Returns true when this notice should be shown for `threshold`.
+    /// Creates an unsolicited condition the user must see or may need to act
+    /// on.
     #[must_use]
-    pub fn visible_at(&self, threshold: NoticeLevel) -> bool {
-        self.level == NoticeLevel::Critical || self.always_show || self.level.visible_at(threshold)
+    pub fn alert(kind: impl Into<String>, message: impl Into<String>, level: NoticeLevel) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+            level,
+            purpose: NoticePurpose::Alert,
+        }
+    }
+
+    /// Creates ambient lifecycle, developer detail, or model-control
+    /// projection.
+    #[must_use]
+    pub fn diagnostic(
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        level: NoticeLevel,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+            level,
+            purpose: NoticePurpose::Diagnostic,
+        }
     }
 }
 

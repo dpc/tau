@@ -248,7 +248,7 @@ pub const SETTINGS: &[SettingDef] = &[
     },
     SettingDef {
         name: "notice-level",
-        description: "Harness/UI notice visibility threshold",
+        description: "Verbose diagnostic notice visibility threshold",
         value_hint: "critical|warning|info|debug|trace",
         values: NOTICE_LEVEL_VALUES,
         validate: |value| validate_list(value, NOTICE_LEVEL_VALUES),

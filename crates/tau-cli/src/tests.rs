@@ -2722,12 +2722,59 @@ fn source_aware_internal_prompt_projection_and_toggle_are_exactly_once() {
     assert!(!enabled.contains("legacy internal payload"));
     assert!(!enabled.contains("human internal payload"));
 
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "harness submitted payload"));
+    assert!(!vt.screen_contains(100, "harness steered payload"));
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "harness submitted payload"));
+    assert!(vt.screen_contains(100, "harness steered payload"));
+
     renderer.apply_setting("show-internal-prompts", "off");
     sync(&handle);
     assert!(!vt.screen_contains(100, "harness submitted payload"));
     assert!(!vt.screen_contains(100, "harness steered payload"));
     assert!(vt.screen_contains(100, "extension submitted payload"));
     assert!(vt.screen_contains(100, "extension steered payload"));
+}
+
+/// The real untyped `AgentPromptSteered` carrier used by work-status reminders
+/// remains model-visible while compact mode suppresses only its human
+/// projection.
+#[test]
+fn compact_mode_dominates_status_reminder_internal_prompt_subfilter() {
+    let (_term, handle, vt) = setup(120, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.apply_setting("show-internal-prompts", "on");
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "Set your status to `working` before continuing substantive tool work.".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(120, "Set your status to `working`"));
+
+    renderer.apply_setting("notice-level", "warning");
+    sync(&handle);
+    assert!(!vt.screen_contains(120, "Set your status to `working`"));
+    renderer.apply_setting("notice-level", "info");
+    sync(&handle);
+    assert!(vt.screen_contains(120, "Set your status to `working`"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(120, "Set your status to `working`"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(120, "Set your status to `working`"));
 }
 
 /// A new session must discard hidden prompt slots before block identifiers are
@@ -2805,6 +2852,15 @@ fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation
     );
     assert_eq!(lines.matches("context alert exact once").count(), 1);
     assert!(!lines.contains("[tau-internal]: Timer `special` fired: exact once"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "Timer `special` woke this agent"));
+    assert!(!vt.screen_contains(100, "context alert exact once"));
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Timer `special` woke this agent"));
+    assert!(vt.screen_contains(100, "context alert exact once"));
 }
 
 /// Replayed Submitted and Steered facts retain their per-agent source-aware
@@ -3189,7 +3245,7 @@ fn compaction_lifecycle_notice_uses_info_style() {
     let theme = cli_test_theme();
     let lifecycle = render_harness_notice(
         &theme,
-        &tau_proto::HarnessNotice::new(
+        &tau_proto::HarnessNotice::diagnostic(
             tau_proto::notice_kind::HARNESS_NOTICE,
             "Starting compaction request cr-35-0 for reviewer-sOqj (ct-35)",
             tau_proto::NoticeLevel::Info,
@@ -5024,7 +5080,7 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
         kind: "startup".into(),
         message: "startup output adopted by first agent".into(),
         level: tau_proto::NoticeLevel::Info,
-        always_show: true,
+        purpose: tau_proto::NoticePurpose::Alert,
     }));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
@@ -8078,7 +8134,7 @@ fn new_session_clears_session_ui_state() {
 /// `notice-level=warning` hides routine informational chatter while mandatory
 /// warnings such as configuration errors still reach the UI.
 #[test]
-fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
+fn warning_notice_level_hides_diagnostics_but_keeps_alerts() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -8091,7 +8147,7 @@ fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
         kind: "test.info".into(),
         message: "routine lifecycle note".into(),
         level: tau_proto::NoticeLevel::Info,
-        always_show: false,
+        purpose: tau_proto::NoticePurpose::Diagnostic,
     }));
     sync(&handle);
     assert!(!vt.screen_contains(80, "routine lifecycle note"));
@@ -8100,15 +8156,14 @@ fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
         kind: "test.warning".into(),
         message: "important config error".into(),
         level: tau_proto::NoticeLevel::Warning,
-        always_show: true,
+        purpose: tau_proto::NoticePurpose::Alert,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "important config error"));
 }
 
-/// Compact mode hides accepted informational and warning notices but preserves
-/// critical diagnostics and restores the retained notices after a hidden-agent
-/// transcript round trip.
+/// Compact mode hides diagnostics, preserves responses and alerts, and restores
+/// diagnostics after a hidden-agent transcript round trip.
 #[test]
 fn compact_mode_reprojects_retained_notices_without_hiding_critical_errors() {
     let (_term, handle, vt) = setup(80, 24);
@@ -8119,31 +8174,31 @@ fn compact_mode_reprojects_retained_notices_without_hiding_critical_errors() {
     );
     renderer.switch_agent("main".to_owned());
 
-    for (kind, message, level, always_show) in [
+    for (kind, message, level, purpose) in [
         (
             "test.info",
             "status reminder",
             tau_proto::NoticeLevel::Info,
-            false,
+            tau_proto::NoticePurpose::Diagnostic,
         ),
         (
             "test.warning",
             "mandatory warning",
             tau_proto::NoticeLevel::Warning,
-            true,
+            tau_proto::NoticePurpose::Alert,
         ),
         (
             "test.error",
             "critical harness error",
             tau_proto::NoticeLevel::Critical,
-            false,
+            tau_proto::NoticePurpose::Diagnostic,
         ),
     ] {
         renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
             kind: kind.into(),
             message: message.into(),
             level,
-            always_show,
+            purpose,
         }));
     }
     sync(&handle);
@@ -8159,9 +8214,8 @@ fn compact_mode_reprojects_retained_notices_without_hiding_critical_errors() {
     renderer.switch_agent("worker".to_owned());
     renderer.switch_agent("main".to_owned());
     sync(&handle);
-    for hidden in ["status reminder", "mandatory warning"] {
-        assert!(!vt.screen_contains(80, hidden));
-    }
+    assert!(!vt.screen_contains(80, "status reminder"));
+    assert!(vt.screen_contains(80, "mandatory warning"));
     assert!(vt.screen_contains(80, "critical harness error"));
 
     renderer.toggle_verbose_mode();
@@ -8185,7 +8239,7 @@ fn new_session_discards_compact_hidden_no_agent_notices() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice::new(
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
         "test.info",
         "old no-agent notice",
         tau_proto::NoticeLevel::Info,
@@ -8238,6 +8292,9 @@ fn tree_notice_renders_multiline_result_without_reformatting() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    renderer.switch_agent("main".to_owned());
+    renderer.toggle_verbose_mode();
+    renderer.apply_setting("notice-level", "critical");
     let expected = crate::test_support::TREE_PREVIEW_PARITY_NOTICE
         .lines()
         .collect::<Vec<_>>();
@@ -8246,7 +8303,7 @@ fn tree_notice_renders_multiline_result_without_reformatting() {
         kind: tau_proto::notice_kind::HARNESS_NOTICE.into(),
         message: crate::test_support::TREE_PREVIEW_PARITY_NOTICE.into(),
         level: tau_proto::NoticeLevel::Info,
-        always_show: false,
+        purpose: tau_proto::NoticePurpose::Response,
     }));
     sync(&handle);
 
@@ -8280,7 +8337,7 @@ fn tree_notice_renders_multiline_result_without_reformatting() {
 }
 
 #[test]
-fn critical_notice_level_keeps_always_show_harness_failure() {
+fn critical_notice_level_keeps_harness_failure_alert() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -8293,7 +8350,7 @@ fn critical_notice_level_keeps_always_show_harness_failure() {
         kind: tau_proto::notice_kind::HARNESS_FAILURE.into(),
         message: "failed to dispatch queued prompt: boom".into(),
         level: tau_proto::NoticeLevel::Warning,
-        always_show: true,
+        purpose: tau_proto::NoticePurpose::Alert,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "failed to dispatch queued prompt: boom"));
@@ -8326,6 +8383,49 @@ fn warning_notice_level_hides_routine_extension_status() {
 
     assert!(!vt.screen_contains(80, "extension core-shell"));
 }
+
+/// Compact mode hides typed lifecycle diagnostics and restores their original
+/// position when verbose mode returns.
+#[test]
+fn compact_mode_reprojects_extension_lifecycle_diagnostic() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("main".to_owned());
+    renderer.toggle_verbose_mode();
+    renderer.handle(&Event::ExtensionReady(ExtensionReady {
+        instance_id: 1.into(),
+        extension_name: tau_proto::ExtensionName::parse("core-shell")
+            .expect("test identifier must satisfy its grammar"),
+        pid: Some(123),
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension core-shell"));
+
+    renderer.switch_agent("worker".to_owned());
+    renderer.switch_agent("main".to_owned());
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension core-shell"));
+
+    renderer.apply_setting("notice-level", "warning");
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension core-shell"));
+    renderer.apply_setting("notice-level", "info");
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension core-shell"));
+
+    let themed =
+        tau_themes::Theme::parse(r#"{ styles: { "extension.lifecycle": { fg: "red" } } }"#)
+            .expect("theme parses");
+    renderer.apply_theme(themed);
+    sync(&handle);
+    assert_rendered_ansi_foreground(&vt, 80, "extension core-shell", 9);
+}
+
 #[test]
 fn new_session_preserves_role_status() {
     let (_term, handle, vt) = setup(80, 24);

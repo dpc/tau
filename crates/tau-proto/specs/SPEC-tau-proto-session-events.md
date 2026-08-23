@@ -63,7 +63,12 @@ on the original branch.
 
 ## Harness notices
 
-`harness.notice` carries a stable `kind`, a user-facing `message`, a `NoticeLevel`, and optional `always_show`. Treat `kind` values as protocol identifiers: UIs may special-case them, so do not derive them from unstable connection ids or free-form message text. `critical` notices and `always_show` warnings represent mandatory diagnostics; the harness must keep emitting them even if a UI filters routine notices locally.
+`harness.notice` carries a stable `kind`, a user-facing `message`, a
+`NoticeLevel`, and `purpose = response | alert | diagnostic`. Purpose states why
+the notice exists from the user's perspective and remains orthogonal to severity
+and provenance. Treat `kind` values as protocol identifiers; do not derive them
+from unstable connection ids or free-form message text, and do not infer purpose
+from message prose. Critical notices remain defensively must-see.
 
 ## Session directory status
 

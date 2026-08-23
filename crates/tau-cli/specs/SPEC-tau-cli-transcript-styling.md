@@ -74,6 +74,8 @@ content: agent-to-agent and external messages use `■`, harness-authored
 structured status updates use `▤`, and harness or local UI notices use `□`.
 These markers apply equally when the renderer folds live delivery, restored
 history, or a retained hidden transcript.
+`□` means textual Tau/UI output; it does not encode visibility, severity, or
+whether the text also enters model context.
 
 Session/UI directory announcements and agent-context initialization are
 structured status updates. Extension lifecycle rows, disconnects, and

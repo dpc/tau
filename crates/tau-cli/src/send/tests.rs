@@ -169,11 +169,21 @@ fn headless_tree_result_reads_one_multiline_notice() {
     harness_writer
         .write_message(&HarnessOutputMessage::deliver_live(
             tau_proto::UnixMicros::now(),
+            Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
+                tau_proto::notice_kind::HARNESS_NOTICE,
+                "concurrent diagnostic",
+                tau_proto::NoticeLevel::Info,
+            )),
+        ))
+        .expect("write concurrent diagnostic");
+    harness_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::now(),
             Event::HarnessNotice(tau_proto::HarnessNotice {
                 kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
                 message: TREE_PREVIEW_PARITY_NOTICE.to_owned(),
                 level: tau_proto::NoticeLevel::Info,
-                always_show: false,
+                purpose: tau_proto::NoticePurpose::Response,
             }),
         ))
         .expect("write tree result");

@@ -310,7 +310,7 @@ fn initial_stdio_follower_failure_waits_for_ingress_disconnect() {
             kind: "test".to_owned(),
             message: "fail".to_owned(),
             level: tau_proto::NoticeLevel::Info,
-            always_show: false,
+            purpose: tau_proto::NoticePurpose::Diagnostic,
         })),
     ))
     .expect("admit frame");
@@ -375,7 +375,7 @@ fn retired_shared_generation_is_not_reported_as_directed_delivery() {
         kind: "test".to_owned(),
         message: "first".to_owned(),
         level: tau_proto::NoticeLevel::Info,
-        always_show: false,
+        purpose: tau_proto::NoticePurpose::Diagnostic,
     }));
     let first = bus
         .send_to(&connection_id, None, frame.clone())
@@ -461,7 +461,7 @@ fn shared_channel_sink_catch_up_barrier_freezes_targets_independently() {
             kind: "test".to_owned(),
             message: message.to_owned(),
             level: tau_proto::NoticeLevel::Info,
-            always_show: false,
+            purpose: tau_proto::NoticePurpose::Diagnostic,
         }))
     };
     bus.publish(notice("frozen"));
@@ -629,7 +629,7 @@ fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
                 kind: tau_proto::notice_kind::HARNESS_NOTICE.to_owned(),
                 message: "x".repeat(2 * 1024 * 1024),
                 level: tau_proto::NoticeLevel::Info,
-                always_show: false,
+                purpose: tau_proto::NoticePurpose::Diagnostic,
             }),
         )))
         .expect("queue blocking frame");

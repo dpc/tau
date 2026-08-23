@@ -4206,7 +4206,7 @@ fn interception_cannot_modify_mandatory_harness_notice() {
                     kind: "test.info".to_owned(),
                     message: String::new(),
                     level: tau_proto::NoticeLevel::Info,
-                    always_show: false,
+                    purpose: tau_proto::NoticePurpose::Diagnostic,
                 },
             )))),
         })),
@@ -4243,7 +4243,7 @@ fn interception_cannot_modify_critical_harness_notice() {
     h.emit_notice(
         "test.critical",
         tau_proto::NoticeLevel::Critical,
-        true,
+        tau_proto::NoticePurpose::Alert,
         "critical failure",
     );
     h.handle_extension_event(
@@ -4254,7 +4254,7 @@ fn interception_cannot_modify_critical_harness_notice() {
                     kind: "test.info".to_owned(),
                     message: "downgraded".to_owned(),
                     level: tau_proto::NoticeLevel::Info,
-                    always_show: false,
+                    purpose: tau_proto::NoticePurpose::Diagnostic,
                 },
             )))),
         })),
@@ -4270,7 +4270,7 @@ fn interception_cannot_modify_critical_harness_notice() {
         Event::HarnessNotice(info)
             if info.level == tau_proto::NoticeLevel::Critical
                 && info.kind == "test.critical"
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "critical failure"
     ));
 }
@@ -4293,7 +4293,7 @@ fn interception_cannot_drop_critical_harness_notice() {
     h.emit_notice(
         "test.critical",
         tau_proto::NoticeLevel::Critical,
-        true,
+        tau_proto::NoticePurpose::Alert,
         "critical failure",
     );
     h.handle_extension_event(
@@ -4313,7 +4313,7 @@ fn interception_cannot_drop_critical_harness_notice() {
         Event::HarnessNotice(info)
             if info.level == tau_proto::NoticeLevel::Critical
                 && info.kind == "test.critical"
-                && info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Alert
                 && info.message == "critical failure"
     ));
 }
@@ -4342,7 +4342,7 @@ fn interception_cannot_escalate_non_mandatory_harness_notice() {
                     kind: tau_proto::notice_kind::EXTENSION_CONFIG_ERROR.to_owned(),
                     message: "edited message".to_owned(),
                     level: tau_proto::NoticeLevel::Critical,
-                    always_show: true,
+                    purpose: tau_proto::NoticePurpose::Alert,
                 },
             )))),
         })),
@@ -4358,7 +4358,7 @@ fn interception_cannot_escalate_non_mandatory_harness_notice() {
         Event::HarnessNotice(info)
             if info.level == tau_proto::NoticeLevel::Info
                 && info.kind == tau_proto::notice_kind::HARNESS_NOTICE
-                && !info.always_show
+                && info.purpose == tau_proto::NoticePurpose::Diagnostic
                 && info.message == "edited message"
     ));
 }
@@ -4603,7 +4603,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
             kind: "test.info".to_owned(),
             message: "second".to_owned(),
             level: tau_proto::NoticeLevel::Info,
-            always_show: false,
+            purpose: tau_proto::NoticePurpose::Diagnostic,
         }),
     );
     // Neither has committed yet — interception is in flight on the
@@ -5280,15 +5280,18 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     )
     .expect("register interceptor");
 
-    h.handle_authenticated_ui_prompt_submitted(tau_proto::UiPromptSubmitted {
-        literal: false,
-        session_id: h.current_session_id.clone(),
-        text: "park me".to_owned(),
-        agent_id: parsed_agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiPromptSubmitted {
+            literal: false,
+            session_id: h.current_session_id.clone(),
+            text: "park me".to_owned(),
+            agent_id: parsed_agent_id.clone(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
     .expect("accept visible prompt");
 
     assert!(h.pending_intercept.is_some(), "prompt remains parked");

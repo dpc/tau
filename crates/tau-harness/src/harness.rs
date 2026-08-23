@@ -3238,6 +3238,8 @@ struct PendingUiCompactionAfterWait {
     agent_id: tau_proto::AgentId,
     /// Wait call whose terminal must close the foreground round.
     wait_call_id: ToolCallId,
+    /// UI that must receive any deferred action response.
+    requester_client_id: tau_proto::ConnectionId,
 }
 
 struct CancelTarget {
@@ -7057,11 +7059,21 @@ impl Harness {
         if pending.wait_call_id != cancelled.call_id {
             return;
         }
-        self.pending_ui_compactions_after_wait.remove(&cid);
+        self.reject_pending_ui_compaction(
+            &cid,
+            "compaction canceled because wait cancellation could not be committed",
+        );
         self.pending_terminal_observations
             .remove(&cancelled.call_id);
         self.rollback_manual_compaction_wait_claim(&cid, &cancelled.call_id);
         self.process_input_wait_deadlines(Instant::now());
+    }
+
+    /// Removes one deferred UI compaction and reports why it cannot continue.
+    fn reject_pending_ui_compaction(&mut self, cid: &AgentId, message: &'static str) {
+        if let Some(pending) = self.pending_ui_compactions_after_wait.remove(cid) {
+            self.send_ui_error_response(&pending.requester_client_id, message);
+        }
     }
 
     /// Require an exact live `AwaitingCheckpoint` owner for every delayed
@@ -12397,7 +12409,7 @@ impl Harness {
         self.emit_notice(
             tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
             tau_proto::NoticeLevel::Critical,
-            true,
+            tau_proto::NoticePurpose::Alert,
             &message,
         );
         false
@@ -12564,7 +12576,7 @@ impl Harness {
                 self.emit_notice(
                     tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
                     tau_proto::NoticeLevel::Critical,
-                    true,
+                    tau_proto::NoticePurpose::Alert,
                     &format!("Rejected tool registration from `{source_id}`: {error}"),
                 );
             }
@@ -13353,7 +13365,7 @@ impl Harness {
             self.emit_notice(
                 tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
                 tau_proto::NoticeLevel::Critical,
-                true,
+                tau_proto::NoticePurpose::Alert,
                 &format!("Rejected tool registration from `{name}`: {error}"),
             );
             if required {
@@ -13633,7 +13645,7 @@ impl Harness {
             self.emit_notice(
                 tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
                 tau_proto::NoticeLevel::Critical,
-                true,
+                tau_proto::NoticePurpose::Alert,
                 &format!("extension `{name}` disconnected after protocol failure: {message}"),
             );
             self.handle_disconnect(source_id);
@@ -13941,7 +13953,7 @@ impl Harness {
                 self.emit_notice(
                     tau_proto::notice_kind::EXTENSION_CONFIG_ERROR,
                     tau_proto::NoticeLevel::Warning,
-                    true,
+                    tau_proto::NoticePurpose::Alert,
                     &format!(
                         "extension {name} rejected its config: {}\ncheck \
                          `extensions.{name}.config` and `extensions.{name}.secrets` in harness.yaml; \
@@ -16270,7 +16282,7 @@ impl Harness {
         self.emit_notice(
             tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
             tau_proto::NoticeLevel::Critical,
-            true,
+            tau_proto::NoticePurpose::Alert,
             &format!(
                 "Rejected tool unregistration from `{source_id}`: `{}` is not owned by this extension",
                 unregister.tool_name
@@ -16785,12 +16797,11 @@ impl Harness {
         };
         self.enqueue_publish(
             Some(crate::harness::harness_connection_id()),
-            Event::HarnessNotice(tau_proto::HarnessNotice {
-                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-                message: request.message,
+            Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
+                tau_proto::notice_kind::EXTENSION_NOTICE,
+                request.message,
                 level,
-                always_show: false,
-            }),
+            )),
             false,
             false,
             None,
@@ -17102,17 +17113,17 @@ impl Harness {
     ) -> Result<(bool, Option<Event>), HarnessError> {
         match event {
             Event::UiRoleSelect(select) => self
-                .handle_ui_role_select(select)
+                .handle_ui_role_select(client_id, select)
                 .map(|keep_going| (keep_going, None)),
             Event::UiAgentModelSelect(select) => self
-                .handle_ui_agent_model_select(select)
+                .handle_ui_agent_model_select(client_id, select)
                 .map(|keep_going| (keep_going, None)),
             Event::UiRoleUpdate(req) => self
-                .handle_ui_role_update(req)
+                .handle_ui_role_update(client_id, req)
                 .map(|keep_going| (keep_going, None)),
             Event::UiPromptSubmitted(prompt) => {
                 if self.is_attached_socket_ui(client_id) {
-                    self.handle_authenticated_ui_prompt_submitted(prompt)
+                    self.handle_authenticated_ui_prompt_submitted(client_id, prompt)
                         .map(|keep_going| (keep_going, None))
                 } else {
                     Ok((true, None))
@@ -17143,7 +17154,7 @@ impl Harness {
                 }
             }
             Event::UiSetAgentDisplayName(req) => self
-                .handle_ui_set_agent_display_name(req)
+                .handle_ui_set_agent_display_name(client_id, req)
                 .map(|keep_going| (keep_going, None)),
             Event::UiNavigateTree(req) => self
                 .handle_ui_navigate_tree(client_id, req)
@@ -17152,7 +17163,7 @@ impl Harness {
                 .handle_ui_compact_request(client_id, req)
                 .map(|keep_going| (keep_going, None)),
             Event::UiCancelPrompt(req) => {
-                self.handle_cancel_prompt(&req);
+                self.handle_cancel_prompt(client_id, &req);
                 Ok((true, None))
             }
             Event::UiRetryPrompt(req) => {
@@ -17369,7 +17380,7 @@ impl Harness {
                 client_id,
                 tau_proto::notice_kind::UI_COMMAND_ERROR,
                 tau_proto::NoticeLevel::Info,
-                true,
+                tau_proto::NoticePurpose::Response,
                 "extension event stats are only available to attached local UIs".to_owned(),
             );
             return;
@@ -17417,7 +17428,7 @@ impl Harness {
             client_id,
             kind,
             tau_proto::NoticeLevel::Info,
-            true,
+            tau_proto::NoticePurpose::Response,
             message,
         );
     }
@@ -17427,17 +17438,52 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         kind: &str,
         level: tau_proto::NoticeLevel,
-        always_show: bool,
+        purpose: tau_proto::NoticePurpose,
         message: String,
     ) {
-        let event = Event::HarnessNotice(tau_proto::HarnessNotice {
-            kind: kind.to_owned(),
-            message,
-            level,
-            always_show,
+        let event = Event::HarnessNotice(match purpose {
+            tau_proto::NoticePurpose::Response => {
+                tau_proto::HarnessNotice::response(kind, message, level)
+            }
+            tau_proto::NoticePurpose::Alert => {
+                tau_proto::HarnessNotice::alert(kind, message, level)
+            }
+            tau_proto::NoticePurpose::Diagnostic => {
+                tau_proto::HarnessNotice::diagnostic(kind, message, level)
+            }
         });
         let frame = HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::now(), event);
         let _ = self.bus.send_to(client_id, None, frame);
+    }
+
+    /// Sends exact live-only feedback to the UI that initiated an action.
+    fn send_ui_response(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        message: impl Into<String>,
+    ) {
+        self.send_direct_harness_notice(
+            client_id,
+            tau_proto::notice_kind::HARNESS_NOTICE,
+            tau_proto::NoticeLevel::Info,
+            tau_proto::NoticePurpose::Response,
+            message.into(),
+        );
+    }
+
+    /// Sends a live-only command rejection to the UI that initiated an action.
+    fn send_ui_error_response(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        message: impl Into<String>,
+    ) {
+        self.send_direct_harness_notice(
+            client_id,
+            tau_proto::notice_kind::UI_COMMAND_ERROR,
+            tau_proto::NoticeLevel::Warning,
+            tau_proto::NoticePurpose::Response,
+            message.into(),
+        );
     }
 
     /// Sends the process-local onboarding hint only to the spawning interactive
@@ -17455,7 +17501,7 @@ impl Harness {
             client_id,
             tau_proto::notice_kind::HARNESS_INTRODUCTION,
             tau_proto::NoticeLevel::Info,
-            false,
+            tau_proto::NoticePurpose::Diagnostic,
             "Welcome to Tau! Ask your model to introduce you to Tau.".to_owned(),
         );
     }
@@ -17478,6 +17524,7 @@ impl Harness {
 
     fn handle_ui_role_select(
         &mut self,
+        client_id: &tau_proto::ConnectionId,
         select: tau_proto::UiRoleSelect,
     ) -> Result<bool, HarnessError> {
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::PolicyChanged);
@@ -17487,15 +17534,7 @@ impl Harness {
                 .get(&select.role)
                 .map(|reason| reason.message.clone())
                 .unwrap_or_else(|| format!("unknown role: {}", select.role));
-            self.publish_event(
-                None,
-                Event::HarnessNotice(tau_proto::HarnessNotice {
-                    kind: tau_proto::notice_kind::UI_COMMAND_ERROR.to_owned(),
-                    message,
-                    level: tau_proto::NoticeLevel::Info,
-                    always_show: false,
-                }),
-            );
+            self.send_ui_error_response(client_id, message);
             return Ok(true);
         }
 
@@ -17504,14 +17543,9 @@ impl Harness {
         self.reconcile_selected_model_with_available();
         self.reconcile_agent_context_usage_models();
         if self.selected_model.is_none() {
-            self.publish_event(
-                None,
-                Event::HarnessNotice(tau_proto::HarnessNotice {
-                    kind: tau_proto::notice_kind::MODEL_SELECTION.to_owned(),
-                    message: format!("role `{}` has no available model", select.role),
-                    level: tau_proto::NoticeLevel::Info,
-                    always_show: false,
-                }),
+            self.send_ui_error_response(
+                client_id,
+                format!("role `{}` has no available model", select.role),
             );
         }
         self.publish_current_model_state();
@@ -17523,11 +17557,12 @@ impl Harness {
 
     fn handle_ui_agent_model_select(
         &mut self,
+        client_id: &tau_proto::ConnectionId,
         select: tau_proto::UiAgentModelSelect,
     ) -> Result<bool, HarnessError> {
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ModelChanged);
         if !self.available_models.contains(&select.model) {
-            self.emit_info(&format!("unknown model: {}", select.model));
+            self.send_ui_error_response(client_id, format!("unknown model: {}", select.model));
             return Ok(true);
         }
         let cid = if let Some(target_agent_id) = select.target_agent_id.as_deref() {
@@ -17547,7 +17582,7 @@ impl Harness {
             }
         };
         let Some(cid) = cid else {
-            self.emit_info(":model: no selected agent to update");
+            self.send_ui_error_response(client_id, ":model: no selected agent to update");
             return Ok(true);
         };
         let previous_usage_model = self
@@ -17555,11 +17590,11 @@ impl Harness {
             .get(&cid)
             .and_then(|conv| conv.context_usage_model.clone());
         let Some(conv) = self.agents.get_mut(&cid) else {
-            self.emit_info(":model: selected agent is not loaded");
+            self.send_ui_error_response(client_id, ":model: selected agent is not loaded");
             return Ok(true);
         };
         if conv.session_id != select.session_id {
-            self.emit_info(":model: selected agent is not in this session");
+            self.send_ui_error_response(client_id, ":model: selected agent is not in this session");
             return Ok(true);
         }
         conv.model_override = Some(select.model.clone());
@@ -17571,29 +17606,34 @@ impl Harness {
         if previous_usage_model.as_ref() != Some(&select.model) {
             self.clear_agent_context_usage(&cid);
         }
-        self.emit_info(&format!(
-            "agent `{agent_name}` model set to {}",
-            select.model
-        ));
+        self.send_ui_response(
+            client_id,
+            format!("agent `{agent_name}` model set to {}", select.model),
+        );
         Ok(true)
     }
+
     fn handle_ui_role_update(
         &mut self,
+        client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiRoleUpdate,
     ) -> Result<bool, HarnessError> {
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::PolicyChanged);
         if let Some(reason) = self.disabled_role_reasons.get(&req.role) {
-            self.emit_info(&format!(
-                ":role: role `{}` is disabled by configuration: {}",
-                req.role, reason.message
-            ));
+            self.send_ui_error_response(
+                client_id,
+                format!(
+                    ":role: role `{}` is disabled by configuration: {}",
+                    req.role, reason.message
+                ),
+            );
             return Ok(true);
         }
         let mut selected_role_changed = false;
         let selected_was_empty = self.selected_model.is_none();
         match req.action {
             tau_proto::UiRoleUpdateAction::Delete => {
-                selected_role_changed = self.handle_ui_role_delete(req.role)?;
+                selected_role_changed = self.handle_ui_role_delete(client_id, req.role)?;
             }
             action => {
                 if let Some(next_role) = self.role_after_update(&req.role, action) {
@@ -17628,7 +17668,11 @@ impl Harness {
         Ok(true)
     }
 
-    fn handle_ui_role_delete(&mut self, role_name: String) -> Result<bool, HarnessError> {
+    fn handle_ui_role_delete(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        role_name: String,
+    ) -> Result<bool, HarnessError> {
         let was_selected = self.selected_role == role_name;
         let previous_override = self.role_overrides.remove(&role_name);
         let configured_role = self
@@ -17650,7 +17694,7 @@ impl Harness {
             if let Some(role) = previous_override {
                 self.role_overrides.insert(role_name.clone(), role);
             }
-            self.emit_info(":role: cannot delete the last role");
+            self.send_ui_error_response(client_id, ":role: cannot delete the last role");
             return Ok(false);
         }
         if was_selected {
@@ -17686,7 +17730,11 @@ impl Harness {
         if request.activation_kind == Some(tau_proto::InternalPromptActivationKind::Timer) {
             prompt.source = path_crate_agent::PendingPromptSource::Timer;
         }
-        self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
+        if let PromptSubmission::Rejected { reason } =
+            self.submit_prompt_to_agent(session_id, &agent_id, prompt)?
+        {
+            self.emit_info(&format!("extension prompt submit rejected: {reason}"));
+        }
         Ok(())
     }
 
@@ -17711,6 +17759,7 @@ impl Harness {
 
     fn handle_authenticated_ui_prompt_submitted(
         &mut self,
+        client_id: &tau_proto::ConnectionId,
         prompt: tau_proto::UiPromptSubmitted,
     ) -> Result<bool, HarnessError> {
         let agent_id = prompt.agent_id.to_string();
@@ -17719,7 +17768,10 @@ impl Harness {
         let text = if is_user_interaction && !prompt.literal {
             match self.expand_user_skill_command(&prompt.agent_id, &prompt.text) {
                 Ok(text) => text,
-                Err(_) => return Ok(true),
+                Err(message) => {
+                    self.send_ui_error_response(client_id, message);
+                    return Ok(true);
+                }
             }
         } else {
             prompt.text.clone()
@@ -17765,6 +17817,9 @@ impl Harness {
             }
         }
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
+        if let PromptSubmission::Rejected { reason } = &submission {
+            self.send_ui_error_response(client_id, reason.clone());
+        }
         debug_assert_eq!(
             matches!(submission, PromptSubmission::Rejected { .. }),
             !will_accept
@@ -17898,24 +17953,28 @@ impl Harness {
 
     fn handle_ui_set_agent_display_name(
         &mut self,
+        client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiSetAgentDisplayName,
     ) -> Result<bool, HarnessError> {
         if req.session_id != self.current_session_id {
-            self.emit_info(&format!(
-                "harness is bound to session `{}`; agent-name request for `{}` rejected",
-                self.current_session_id.as_str(),
-                req.session_id.as_str()
-            ));
+            self.send_ui_error_response(
+                client_id,
+                format!(
+                    "harness is bound to session `{}`; agent-name request for `{}` rejected",
+                    self.current_session_id.as_str(),
+                    req.session_id.as_str()
+                ),
+            );
             return Ok(true);
         }
         let display_name = normalize_display_name(Some(&req.display_name));
         let Some(display_name) = display_name else {
-            self.emit_info("agent display name must not be empty");
+            self.send_ui_error_response(client_id, "agent display name must not be empty");
             return Ok(true);
         };
         let agent_id = req.agent_id.to_string();
         let Some(cid) = self.agent_routes.get(&agent_id).cloned() else {
-            self.emit_info(&format!("unknown agent: {agent_id}"));
+            self.send_ui_error_response(client_id, format!("unknown agent: {agent_id}"));
             return Ok(true);
         };
         if let Some(conv) = self.agents.get_mut(&cid) {
@@ -17937,6 +17996,15 @@ impl Harness {
         req: tau_proto::UiSwitchSession,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
+        if req.new_session_id == self.current_session_id
+            && !matches!(req.reason, tau_proto::SessionStartReason::New)
+        {
+            self.send_ui_error_response(
+                client_id,
+                format!("already on session `{}`", req.new_session_id.as_str()),
+            );
+            return Ok(true);
+        }
         self.switch_session(req.new_session_id, req.reason)?;
         Ok(true)
     }
@@ -17957,20 +18025,21 @@ impl Harness {
             client_id,
             tau_proto::notice_kind::HARNESS_NOTICE,
             tau_proto::NoticeLevel::Info,
-            false,
+            tau_proto::NoticePurpose::Response,
             message,
         );
     }
 
     fn handle_ui_navigate_tree(
         &mut self,
-        _client_id: &tau_proto::ConnectionId,
+        client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiNavigateTree,
     ) -> Result<bool, HarnessError> {
         // Validate the requested target against *this* harness's bound
         // session before publishing. The durable branch-state fact is
         // agent-owned (`agent.head_moved`), not the UI-scoped request.
         if let Some((cid, agent_id, head)) = self.validate_navigate_tree_target(
+            client_id,
             &req.session_id,
             req.target_agent_id.as_deref(),
             req.target,
@@ -17980,7 +18049,10 @@ impl Harness {
                 None,
                 Event::AgentHeadMoved(tau_proto::AgentHeadMoved { agent_id, head }),
             );
-            self.emit_info(&format!("navigated to {}", format_agent_head(head)));
+            self.send_ui_response(
+                client_id,
+                format!("navigated to {}", format_agent_head(head)),
+            );
         }
         Ok(true)
     }
@@ -17991,7 +18063,7 @@ impl Harness {
         req: tau_proto::UiCompactRequest,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
-        self.handle_compact_request(req.session_id, req.target_agent_id.as_deref());
+        self.handle_compact_request(client_id, req.session_id, req.target_agent_id.as_deref());
         Ok(true)
     }
 
@@ -18163,16 +18235,27 @@ impl Harness {
         );
     }
 
-    fn handle_cancel_prompt(&mut self, req: &UiCancelPrompt) {
+    fn handle_cancel_prompt(&mut self, client_id: &tau_proto::ConnectionId, req: &UiCancelPrompt) {
         if req.session_id != self.current_session_id {
+            self.send_ui_error_response(client_id, "cancel request is for a stale session");
             return;
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(req.target_agent_id.as_deref())
         else {
+            self.send_ui_error_response(client_id, "cancel request targets an unknown agent");
             return;
         };
+        let Some(conv) = self.agents.get_mut(&cid) else {
+            self.send_ui_error_response(client_id, "cancel request targets an unloaded agent");
+            return;
+        };
+        if conv.pending_cancel.is_some() {
+            self.send_ui_error_response(client_id, "cancellation is already pending");
+            return;
+        }
         self.cancel_pending_context_claim(&cid);
         let Some(conv) = self.agents.get_mut(&cid) else {
+            self.send_ui_error_response(client_id, "cancel request targets an unloaded agent");
             return;
         };
         let output_length_pending = matches!(
@@ -18183,14 +18266,16 @@ impl Harness {
                 | path_crate_agent::OutputLengthContinuationState::Active(_)
         );
         if matches!(conv.turn_state, AgentTurnState::Idle) && !output_length_pending {
-            self.emit_info("no active turn to cancel");
+            self.send_ui_error_response(client_id, "no active turn to cancel");
             return;
         }
         let prompt_id = conv.in_flight_prompt.clone();
         conv.pending_cancel = Some(PendingCancel {
+            requester_client_id: client_id.clone(),
             reason: "cancelled by user".to_owned(),
         });
         let _ = conv;
+        self.send_ui_response(client_id, "cancelling current prompt");
         self.fail_pending_initial_prompts(
             &cid,
             tau_proto::AgentPromptFailureStage::Canceled,
@@ -18523,7 +18608,6 @@ impl Harness {
             }
             AgentTurnState::AgentThinking { .. } => {
                 self.finalize_canceled_in_flight_prompt(cid);
-                self.emit_info("cancelling current prompt");
                 if self
                     .agents
                     .get(cid)
@@ -18534,7 +18618,10 @@ impl Harness {
                 self.try_advance_queue();
             }
             AgentTurnState::ToolsRunning { remaining_calls } => {
-                self.pending_ui_compactions_after_wait.remove(cid);
+                self.reject_pending_ui_compaction(
+                    cid,
+                    "compaction canceled by a competing turn cancellation",
+                );
                 let mut cancelled_calls = remaining_calls;
                 cancelled_calls.extend(self.tool_turn.backgrounded_calls_for(cid));
                 cancelled_calls.sort();
@@ -18552,6 +18639,12 @@ impl Harness {
     }
 
     fn finalize_cancelled_tool_turn(&mut self, cid: &AgentId) {
+        let requester = self.agents.get(cid).and_then(|agent| {
+            agent
+                .pending_cancel
+                .as_ref()
+                .map(|pending| pending.requester_client_id.clone())
+        });
         self.fail_pending_initial_prompts(
             cid,
             tau_proto::AgentPromptFailureStage::Canceled,
@@ -18569,7 +18662,9 @@ impl Harness {
             conv.in_flight_prompt = None;
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
-        self.emit_info("cancelled current turn");
+        if let Some(requester) = requester {
+            self.send_ui_response(&requester, "cancelled current turn");
+        }
         if self.agents.get(cid).is_some_and(|agent| {
             agent
                 .pending_prompts
@@ -20650,7 +20745,7 @@ impl Harness {
         self.emit_notice(
             tau_proto::notice_kind::HARNESS_FAILURE,
             tau_proto::NoticeLevel::Warning,
-            true,
+            tau_proto::NoticePurpose::Alert,
             message,
         );
     }
@@ -20659,7 +20754,7 @@ impl Harness {
         self.emit_notice(
             tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
             tau_proto::NoticeLevel::Warning,
-            true,
+            tau_proto::NoticePurpose::Alert,
             message,
         );
     }
@@ -20668,7 +20763,7 @@ impl Harness {
         self.emit_notice(
             tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED,
             tau_proto::NoticeLevel::Warning,
-            true,
+            tau_proto::NoticePurpose::Alert,
             message,
         );
     }
@@ -20683,7 +20778,7 @@ impl Harness {
                     self.emit_notice(
                         tau_proto::notice_kind::EXTENSION_STATE_ACCESS,
                         tau_proto::NoticeLevel::Warning,
-                        true,
+                        tau_proto::NoticePurpose::Alert,
                         &diagnostic.message,
                     );
                 }
@@ -20692,39 +20787,46 @@ impl Harness {
     }
 
     fn emit_info_with_level(&mut self, message: &str, level: tau_proto::NoticeLevel) {
-        let (kind, always_show) = if matches!(
+        let (kind, purpose) = if matches!(
             level,
             tau_proto::NoticeLevel::Critical | tau_proto::NoticeLevel::Warning
         ) {
-            (tau_proto::notice_kind::HARNESS_INTERNAL_WARNING, true)
+            (
+                tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                tau_proto::NoticePurpose::Alert,
+            )
         } else {
-            (tau_proto::notice_kind::HARNESS_NOTICE, false)
+            (
+                tau_proto::notice_kind::HARNESS_NOTICE,
+                tau_proto::NoticePurpose::Diagnostic,
+            )
         };
-        self.emit_notice(kind, level, always_show, message);
+        self.emit_notice(kind, level, purpose, message);
     }
 
     fn emit_notice(
         &mut self,
         kind: &str,
         level: tau_proto::NoticeLevel,
-        always_show: bool,
+        purpose: tau_proto::NoticePurpose,
         message: &str,
     ) {
-        let always_show = always_show || level == tau_proto::NoticeLevel::Critical;
         let notice = tau_proto::HarnessNotice {
             kind: kind.to_owned(),
             message: message.to_owned(),
             level,
-            always_show,
+            purpose,
         };
-        if always_show {
+        let is_alert =
+            purpose == tau_proto::NoticePurpose::Alert || level == tau_proto::NoticeLevel::Critical;
+        if is_alert {
             self.replayable_harness_notices.push(notice.clone());
         }
         self.enqueue_publish(
             Some(crate::harness::harness_connection_id()),
             Event::HarnessNotice(notice),
             true,
-            always_show,
+            is_alert,
             None,
         );
     }
@@ -21915,20 +22017,28 @@ impl Harness {
         );
     }
 
-    fn handle_compact_request(&mut self, session_id: SessionId, target_agent_id: Option<&str>) {
+    fn handle_compact_request(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        session_id: SessionId,
+        target_agent_id: Option<&str>,
+    ) {
         if session_id != self.current_session_id {
-            self.emit_info(&format!(
-                "cannot compact session `{session_id}` in this harness; active session is `{}`",
-                self.current_session_id
-            ));
+            self.send_ui_error_response(
+                client_id,
+                format!(
+                    "cannot compact session `{session_id}` in this harness; active session is `{}`",
+                    self.current_session_id
+                ),
+            );
             return;
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(target_agent_id) else {
-            self.emit_info("unknown agent for compaction");
+            self.send_ui_error_response(client_id, "unknown agent for compaction");
             return;
         };
         let Some(agent) = self.agents.get(&cid) else {
-            self.emit_info("target user agent is missing");
+            self.send_ui_error_response(client_id, "target user agent is missing");
             return;
         };
         if agent.terminating
@@ -21938,15 +22048,18 @@ impl Harness {
                     | crate::agent::ActivationDispatchState::Blocked { .. }
             )
         {
-            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            self.send_ui_error_response(
+                client_id,
+                "cannot compact while a prompt or tool turn is in flight",
+            );
             return;
         }
         if !self.agent_model_supports_compaction(&cid) {
-            self.emit_info("selected model does not support compaction");
+            self.send_ui_error_response(client_id, "selected model does not support compaction");
             return;
         }
         let Some(agent_id) = agent.agent_id.as_deref().map(crate::parse_agent_id) else {
-            self.emit_info("nothing to compact yet");
+            self.send_ui_error_response(client_id, "nothing to compact yet");
             return;
         };
         if matches!(agent.turn_state, AgentTurnState::Idle) {
@@ -21954,36 +22067,54 @@ impl Harness {
             return;
         }
         let AgentTurnState::ToolsRunning { remaining_calls } = &agent.turn_state else {
-            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            self.send_ui_error_response(
+                client_id,
+                "cannot compact while a prompt or tool turn is in flight",
+            );
             return;
         };
         let [wait_call_id] = remaining_calls.as_slice() else {
-            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            self.send_ui_error_response(
+                client_id,
+                "cannot compact while a prompt or tool turn is in flight",
+            );
             return;
         };
         if let Some(pending) = self.pending_ui_compactions_after_wait.get(&cid)
             && pending.wait_call_id == *wait_call_id
             && self.wait_claimed_for_manual_compaction(&cid, wait_call_id)
         {
-            self.emit_info("compaction already pending after wait cancellation");
+            self.send_ui_error_response(
+                client_id,
+                "compaction already pending after wait cancellation",
+            );
             return;
         }
         if self
             .pending_terminal_observations
             .contains_key(wait_call_id)
         {
-            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            self.send_ui_error_response(
+                client_id,
+                "cannot compact while a prompt or tool turn is in flight",
+            );
             return;
         }
         let wait_call_id = wait_call_id.clone();
         let Some(tool) = self.pending_tools.get(&wait_call_id).cloned() else {
-            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            self.send_ui_error_response(
+                client_id,
+                "cannot compact while a prompt or tool turn is in flight",
+            );
             return;
         };
         if tool.name.as_str() != path_crate_harness::subagents_tool::WAIT_TOOL_NAME
             || !self.claim_wait_for_manual_compaction(&cid, &wait_call_id)
         {
-            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            self.send_ui_error_response(
+                client_id,
+                "cannot compact while a prompt or tool turn is in flight",
+            );
             return;
         }
         self.pending_ui_compactions_after_wait.insert(
@@ -21992,6 +22123,7 @@ impl Harness {
                 session_generation: self.current_session_generation,
                 agent_id,
                 wait_call_id: wait_call_id.clone(),
+                requester_client_id: client_id.clone(),
             },
         );
         self.observe_tool_terminal(&cid, &wait_call_id, tau_proto::ToolTerminalCause::Unknown);
@@ -23101,7 +23233,7 @@ impl Harness {
         self.emit_notice(
             tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
             tau_proto::NoticeLevel::Warning,
-            false,
+            tau_proto::NoticePurpose::Diagnostic,
             &format!(
                 "duplicate provider-qualified model ids advertised: {displayed}{suffix}; \
                  preserving sorted-source last-wins routing"
@@ -23779,7 +23911,6 @@ impl Harness {
                 self.current_session_id.as_str(),
                 session_id.as_str()
             );
-            self.emit_info(&reason);
             return Ok(PromptSubmission::Rejected { reason });
         }
         let cid = self
@@ -23864,18 +23995,15 @@ impl Harness {
                 self.current_session_id.as_str(),
                 session_id.as_str()
             );
-            self.emit_info(&reason);
             return Ok(PromptSubmission::Rejected { reason });
         }
         let Some(cid) = self.agent_routes.get(agent_id).cloned() else {
-            self.emit_info(&format!("unknown agent `{agent_id}`"));
             return Ok(PromptSubmission::Rejected {
                 reason: format!("unknown agent `{agent_id}`"),
             });
         };
         if self.agents.get(&cid).is_none_or(|agent| agent.terminating) {
             let reason = format!("agent `{agent_id}` is terminating");
-            self.emit_info(&reason);
             return Ok(PromptSubmission::Rejected { reason });
         }
         if !self.session_initialized(&session_id)
@@ -24144,19 +24272,23 @@ impl Harness {
     /// resolves the durable agent-owned head-move target.
     fn validate_navigate_tree_target(
         &mut self,
+        client_id: &tau_proto::ConnectionId,
         session_id: &SessionId,
         target_agent_id: Option<&str>,
         target: UiTreeNavigationTarget,
     ) -> Option<(AgentId, tau_proto::AgentId, AgentHead)> {
         if session_id != &self.current_session_id {
-            self.emit_info(&format!(
-                "navigate ignored: harness is bound to `{}`",
-                self.current_session_id.as_str()
-            ));
+            self.send_ui_error_response(
+                client_id,
+                format!(
+                    "navigate ignored: harness is bound to `{}`",
+                    self.current_session_id.as_str()
+                ),
+            );
             return None;
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(target_agent_id) else {
-            self.emit_info("navigate ignored: unknown agent");
+            self.send_ui_error_response(client_id, "navigate ignored: unknown agent");
             return None;
         };
         let agent_id: tau_proto::AgentId = crate::parse_agent_id(
@@ -24167,9 +24299,10 @@ impl Harness {
         let events = match self.agent_store.agent_events(agent_id.as_str()) {
             Ok(events) => events,
             Err(error) => {
-                self.emit_info(&format!(
-                    "navigate ignored: failed to load agent log: {error}"
-                ));
+                self.send_ui_error_response(
+                    client_id,
+                    format!("navigate ignored: failed to load agent log: {error}"),
+                );
                 return None;
             }
         };
@@ -24177,14 +24310,20 @@ impl Harness {
             UiTreeNavigationTarget::Root => AgentHead::Root,
             UiTreeNavigationTarget::PromptAnchor(anchor) => {
                 let Some(tree) = tree else {
-                    self.emit_info("navigate ignored: agent tree is not loaded");
+                    self.send_ui_error_response(
+                        client_id,
+                        "navigate ignored: agent tree is not loaded",
+                    );
                     return None;
                 };
                 let Some(target) = prompt_anchor_targets(tree, &agent_id, &events)
                     .into_iter()
                     .find(|candidate| candidate.anchor == anchor)
                 else {
-                    self.emit_info(&format!("no prompt anchor `{anchor}` in agent tree"));
+                    self.send_ui_error_response(
+                        client_id,
+                        format!("no prompt anchor `{anchor}` in agent tree"),
+                    );
                     return None;
                 };
                 target.head
@@ -24192,7 +24331,10 @@ impl Harness {
             UiTreeNavigationTarget::Node(node_id) => {
                 let valid = tree.and_then(|t| t.node(node_id)).is_some();
                 if !valid {
-                    self.emit_info(&format!("no node `{}` in agent tree", node_id.get()));
+                    self.send_ui_error_response(
+                        client_id,
+                        format!("no node `{}` in agent tree", node_id.get()),
+                    );
                     return None;
                 }
                 AgentHead::Node(node_id)
@@ -24389,7 +24531,13 @@ impl Harness {
         self.uncommitted_peer_auto_starts.clear();
         self.pending_manual_compaction_tools.clear();
         self.accepted_manual_compaction_tools.clear();
-        self.pending_ui_compactions_after_wait.clear();
+        let pending_compactions = std::mem::take(&mut self.pending_ui_compactions_after_wait);
+        for pending in pending_compactions.into_values() {
+            self.send_ui_error_response(
+                &pending.requester_client_id,
+                "compaction canceled because the session changed",
+            );
+        }
         // Specialized cancellation paths above resolved accepted old-session
         // work. Suspend any responder whose publication is destructively
         // canceled, cancel transaction-owned checkpoints, and commit the queued
@@ -25224,7 +25372,7 @@ impl Harness {
             self.emit_notice(
                 tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
                 tau_proto::NoticeLevel::Warning,
-                true,
+                tau_proto::NoticePurpose::Alert,
                 &message,
             );
             if role_name == selected_role {
@@ -25791,7 +25939,10 @@ impl Harness {
     fn remove_agent_after_prompt_closure(&mut self, cid: &AgentId) {
         self.tombstone_ephemeral_provider_prompts_for_agent(cid);
         self.pending_agent_publish_completions.remove(cid);
-        self.pending_ui_compactions_after_wait.remove(cid);
+        self.reject_pending_ui_compaction(
+            cid,
+            "compaction canceled because the target agent unloaded",
+        );
         self.pending_publish_idle_dispatches
             .retain(|dispatch| &dispatch.cid != cid);
         let mut peer_internal_calls = self
@@ -33218,20 +33369,26 @@ impl Harness {
         if should_send {
             self.queue_working_reminder_if_needed(cid);
             let pending_ui = self.pending_ui_compactions_after_wait.remove(cid);
-            if let Some(pending) = pending_ui
-                && pending.wait_call_id.as_str() == completed_call_id
-                && pending.session_generation == self.current_session_generation
-                && self.agents.get(cid).is_some_and(|agent| {
-                    !agent.terminating
-                        && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
-                        && matches!(agent.turn_state, AgentTurnState::Idle)
-                })
-            {
-                self.handle_compact_request(
-                    self.current_session_id.clone(),
-                    Some(pending.agent_id.as_str()),
+            if let Some(pending) = pending_ui {
+                let remains_valid = pending.wait_call_id.as_str() == completed_call_id
+                    && pending.session_generation == self.current_session_generation
+                    && self.agents.get(cid).is_some_and(|agent| {
+                        !agent.terminating
+                            && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
+                            && matches!(agent.turn_state, AgentTurnState::Idle)
+                    });
+                if remains_valid {
+                    self.handle_compact_request(
+                        &pending.requester_client_id,
+                        self.current_session_id.clone(),
+                        Some(pending.agent_id.as_str()),
+                    );
+                    return;
+                }
+                self.send_ui_error_response(
+                    &pending.requester_client_id,
+                    "compaction canceled because deferred continuation became stale",
                 );
-                return;
             }
             let deferred_request = self
                 .agents
@@ -33602,7 +33759,7 @@ impl Harness {
                     self.emit_notice(
                         tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
                         tau_proto::NoticeLevel::Warning,
-                        true,
+                        tau_proto::NoticePurpose::Alert,
                         &format!(
                             "Loop guard stopped automatic continuation for agent `{cid}` after repeated cycle: {reason}."
                         ),
@@ -33803,7 +33960,7 @@ impl Harness {
                 self.emit_notice(
                     tau_proto::notice_kind::HARNESS_NOTICE,
                     tau_proto::NoticeLevel::Info,
-                    false,
+                    tau_proto::NoticePurpose::Diagnostic,
                     &format!(
                         "Repaired arguments for tool `{visible_tool_name}` after schema validation failure: {}.",
                         repair_summary

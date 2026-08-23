@@ -4,6 +4,29 @@ use ciborium::value as path_ciborium_value;
 
 use super::*;
 
+/// Notice-purpose wire tags must remain explicit and independent of notice
+/// level.
+#[test]
+fn harness_notice_purpose_serializes_all_closed_variants() {
+    for (notice, expected) in [
+        (
+            HarnessNotice::response("test.response", "done", NoticeLevel::Info),
+            "response",
+        ),
+        (
+            HarnessNotice::alert("test.alert", "attention", NoticeLevel::Info),
+            "alert",
+        ),
+        (
+            HarnessNotice::diagnostic("test.diagnostic", "detail", NoticeLevel::Warning),
+            "diagnostic",
+        ),
+    ] {
+        let json = serde_json::to_value(notice).expect("serialize harness notice");
+        assert_eq!(json["purpose"], expected);
+    }
+}
+
 fn test_session_id(value: impl Into<String>) -> SessionId {
     SessionId::parse(value).expect("test session id")
 }
@@ -1803,7 +1826,7 @@ fn representative_events() -> Vec<Event> {
             display: None,
             originator: PromptOriginator::User,
         }),
-        Event::HarnessNotice(HarnessNotice::new(
+        Event::HarnessNotice(HarnessNotice::diagnostic(
             notice_kind::HARNESS_NOTICE,
             "ready",
             NoticeLevel::Info,

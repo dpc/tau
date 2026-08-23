@@ -443,17 +443,20 @@ fn literal_existing_agent_skill_text_bypasses_skill_expansion() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: true,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        text: ":skill definitely-not-installed".to_owned(),
-        agent_id,
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("literal-existing".to_owned()),
-    })
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: true,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            text: ":skill definitely-not-installed".to_owned(),
+            agent_id,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("literal-existing".to_owned()),
+        },
+    )
     .expect("submit literal skill text");
 
     let submitted = event_log_events(&h)

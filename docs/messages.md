@@ -97,13 +97,13 @@ is done.
   user-visible diagnostic using only `message` and `level`. Every configured
   extension kind may send it; unconfigured or disconnected origins are silently
   denied. The harness caps `critical` to `warning`, creates a live-only
-  `harness.notice` of kind `extension.notice` with `always_show: false`, and sends
+  `harness.notice` of kind `extension.notice` with `purpose: diagnostic`, and sends
   that event through ordinary interception and broadcast. The request is metered
   as `message.extension_notice_request` and appears separately from the published
   event in debug JSONL. It is operational traffic before `ready`, so normal
   activation ordering and quotas apply. Extensions cannot use generic `emit` to
   author `harness.notice`; `config_error` remains the separate mandatory,
-  replayable diagnostic path.
+  replayable alert path. Extensions cannot choose response or alert purpose.
 
 ## UI point-to-point requests (UI → harness)
 

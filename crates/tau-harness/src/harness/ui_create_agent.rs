@@ -276,7 +276,6 @@ impl Harness {
                 self.current_session_id.as_str(),
                 req.session_id.as_str()
             );
-            self.emit_info(&message);
             return reject(
                 self,
                 tau_proto::UiCreateAgentRejection::StaleSession,
@@ -289,7 +288,6 @@ impl Harness {
                 .get(&req.role)
                 .map(|reason| reason.message.clone())
                 .unwrap_or_else(|| format!("unknown role `{}`", req.role));
-            self.emit_info(&message);
             return reject(
                 self,
                 tau_proto::UiCreateAgentRejection::RoleUnavailable,
@@ -298,7 +296,6 @@ impl Harness {
         }
         if let Err(error) = self.validate_initial_agent_metadata(&req.metadata) {
             let message = format!("create-agent metadata rejected: {error}");
-            self.emit_info(&message);
             return reject(
                 self,
                 tau_proto::UiCreateAgentRejection::InvalidMetadata,
@@ -309,7 +306,6 @@ impl Harness {
             let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() else {
                 let message =
                     format!("parent_agent `{agent_id}` is not loaded in the current session");
-                self.emit_info(&message);
                 return reject(
                     self,
                     tau_proto::UiCreateAgentRejection::ParentNotLoaded,

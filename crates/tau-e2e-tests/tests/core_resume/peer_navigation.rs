@@ -247,7 +247,7 @@ fn is_exact_visible_hold_ready(
             if notice.kind == tau_proto::notice_kind::EXTENSION_NOTICE
                 && notice.message == expected_message
                 && notice.level == tau_proto::NoticeLevel::Info
-                && !notice.always_show
+                && notice.purpose == tau_proto::NoticePurpose::Diagnostic
     )
 }
 

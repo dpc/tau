@@ -178,7 +178,7 @@ pub(super) fn assert_dispatch_uncertain_notice(
                     if notice.kind == tau_proto::notice_kind::HARNESS_INTERNAL_WARNING
                         && notice.message == expected
                         && notice.level == NoticeLevel::Warning
-                        && notice.always_show
+                        && notice.purpose == tau_proto::NoticePurpose::Alert
             )
         })
         .collect::<Vec<_>>();
