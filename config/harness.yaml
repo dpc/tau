@@ -5,6 +5,9 @@
 #
 # Optional startup-only aliases rewrite the provider and exact model suffix of
 # configured role models. They do not apply to interactive commands.
+# Set false to hide the one-line Tau onboarding notice at interactive startup.
+# show_introduction_notice: true
+#
 # aliases:
 #   providers:
 #     subscription: codex-work

@@ -9393,6 +9393,78 @@ fn accepted_initial_client_startup_error_uses_normal_writer() {
     assert!(reason.contains("post-accept startup failure"));
 }
 
+/// The onboarding notice remains a directed live presentation frame: it reaches
+/// only the initial UI, is absent when disabled, and never enters replay state.
+#[test]
+fn introduction_notice_is_enabled_directed_and_process_local() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let replayable_notices_before = h.replayable_harness_notices.len();
+    let (initial_server, initial_client) = UnixStream::pair().expect("initial pair");
+    let initial_id = h.accept_client(initial_server).expect("accept initial");
+    let (attached_server, attached_client) = UnixStream::pair().expect("attached pair");
+    h.accept_client(attached_server).expect("accept attachment");
+
+    h.send_introduction_notice_to_initial_client(Some(&initial_id));
+
+    let mut reader = HarnessOutputReader::new(BufReader::new(initial_client));
+    let message = reader
+        .read_message()
+        .expect("read introduction")
+        .expect("introduction frame");
+    let HarnessOutputMessage::Deliver(delivery) = message else {
+        panic!("expected delivery frame");
+    };
+    let Event::HarnessNotice(notice) = delivery.event() else {
+        panic!("expected harness notice");
+    };
+    assert_eq!(notice.kind, tau_proto::notice_kind::HARNESS_INTRODUCTION);
+    assert_eq!(
+        notice.message,
+        "Welcome to Tau! Ask your model to introduce you to Tau."
+    );
+    assert_eq!(notice.level, tau_proto::NoticeLevel::Info);
+    assert!(!notice.always_show);
+    assert_eq!(
+        h.replayable_harness_notices.len(),
+        replayable_notices_before
+    );
+
+    attached_client
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("set attachment timeout");
+    let error = HarnessOutputReader::new(BufReader::new(attached_client))
+        .read_message()
+        .expect_err("attachment must not receive introduction");
+    assert!(matches!(
+        error,
+        tau_proto::DecodeError::Io(error)
+            if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+    ));
+
+    h.accepted_harness_settings.show_introduction_notice = false;
+    let (disabled_server, disabled_client) = UnixStream::pair().expect("disabled pair");
+    let disabled_id = h
+        .accept_client(disabled_server)
+        .expect("accept disabled UI");
+    h.send_introduction_notice_to_initial_client(Some(&disabled_id));
+    disabled_client
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("set disabled timeout");
+    let error = HarnessOutputReader::new(BufReader::new(disabled_client))
+        .read_message()
+        .expect_err("disabled notice must remain absent");
+    assert!(matches!(
+        error,
+        tau_proto::DecodeError::Io(error)
+            if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+    ));
+    assert_eq!(
+        h.replayable_harness_notices.len(),
+        replayable_notices_before
+    );
+}
+
 /// A rejected startup handshake must finish its queued disconnect write before
 /// teardown removes the writer and allows the harness process to exit.
 #[test]

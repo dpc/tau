@@ -20,6 +20,7 @@ You are running inside Tau version `__TAU_SELF_KNOWLEDGE_VERSION__`, git revisio
 ## Built-in self-knowledge skills
 
 - `tau-self-knowledge` — overview of built-in Tau-specific skills.
+- `tau-self-knowledge-introduction` — conduct a short, conversational Tau onboarding.
 - `tau-self-knowledge-architecture` — high-level overview of Tau architecture and core components.
 - `tau-self-knowledge-harness` — harness daemon startup, runtime-dir sockets, initial UI stdio, attach behavior, foreground daemon APIs, socket activation, and embedded runs.
 - `tau-self-knowledge-config` — directories, important config files, and provider setup commands.

@@ -39,7 +39,7 @@ use tau_proto::{
 use crate::action_commands::ActionCommandState;
 use crate::agent_navigation::AgentNavigation;
 use crate::daemon::{
-    DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon,
+    DaemonCliOverrides, DaemonHandle, daemon_output_for_chat_session, resolve_daemon,
     storage_mode_from_ephemeral,
 };
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
@@ -1502,7 +1502,7 @@ fn start_chat_daemon(
     let startup_started_at = Instant::now();
     let storage_mode = storage_mode_from_ephemeral(ephemeral);
     let daemon_output = (!attach)
-        .then(|| daemon_output_for_session(session_id.as_str(), storage_mode, session_status))
+        .then(|| daemon_output_for_chat_session(session_id.as_str(), storage_mode, session_status))
         .transpose()?;
     let daemon = resolve_daemon(
         attach,

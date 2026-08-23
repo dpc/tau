@@ -771,6 +771,9 @@ pub struct HarnessSettings {
     /// Number of days to keep non-authoritative session diagnostic files.
     /// Set to `0` to disable diagnostic cleanup.
     pub diagnostic_retention_days: u64,
+    /// Whether a newly spawned interactive harness greets its initial UI with
+    /// the Tau onboarding notice.
+    pub show_introduction_notice: bool,
     /// Lowest effective activating-input wait timeout accepted from the `wait`
     /// tool, measured in whole minutes.
     pub wait_timeout_minimum_minutes: u64,
@@ -855,6 +858,9 @@ struct HarnessSettingsWire {
     session_retention_days: u64,
     /// Non-authoritative session diagnostic retention in days.
     diagnostic_retention_days: u64,
+    /// Whether to show Tau's onboarding notice to the initial UI.
+    #[serde(alias = "showIntroductionNotice")]
+    show_introduction_notice: bool,
     /// Lowest effective activating-input wait timeout in whole minutes.
     #[serde(alias = "waitTimeoutMinimumMinutes")]
     wait_timeout_minimum_minutes: u64,
@@ -968,6 +974,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
             diagnostic_retention_days: wire.diagnostic_retention_days,
+            show_introduction_notice: wire.show_introduction_notice,
             wait_timeout_minimum_minutes: wire.wait_timeout_minimum_minutes,
             wait_timeout_maximum_minutes: wire.wait_timeout_maximum_minutes,
             agent_watch_retry_notification_threshold: wire.agent_watch_retry_notification_threshold,
@@ -3962,6 +3969,13 @@ fn normalize_harness_config_value(
     normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
     normalize_alias_key(
         map,
+        "showIntroductionNotice",
+        "show_introduction_notice",
+        source,
+        "root",
+    )?;
+    normalize_alias_key(
+        map,
         "waitTimeoutMinimumMinutes",
         "wait_timeout_minimum_minutes",
         source,
@@ -4381,6 +4395,7 @@ fn canonical_top_level_key(key: &str) -> &str {
     match key {
         "customPrompts" => "custom_prompts",
         "toolPolicy" => "tool_policy",
+        "showIntroductionNotice" => "show_introduction_notice",
         "waitTimeoutMinimumMinutes" => "wait_timeout_minimum_minutes",
         "waitTimeoutMaximumMinutes" => "wait_timeout_maximum_minutes",
         "agentWatchRetryNotificationThreshold" => "agent_watch_retry_notification_threshold",

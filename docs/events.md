@@ -59,9 +59,12 @@ for control of the emit/intercept pipeline.
   `extension.notice` for harness-authored notices derived from configured-extension
   requests,
   `harness.config_error`, `harness.failure`, `harness.internal_warning`,
+  `harness.introduction`,
   `harness.notice`, `harness.replay_error`, `model.selection`,
   `skill.collision`, and `ui.command_error`. Expected skill-name collisions are
-  trace-level notices.
+  trace-level notices. The `harness.introduction` kind is sent directly to a
+  newly spawned harness's initial conversational UI; it is not published,
+  persisted, replayed, or broadcast to attached clients.
   Configured extensions request diagnostics with the point-to-point
   `extension_notice_request` message rather than emitting this event. The harness
   caps critical to warning and publishes a live-only `extension.notice` with

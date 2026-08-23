@@ -342,6 +342,16 @@ pub(crate) struct DaemonOutput {
     pub(crate) stderr: Stdio,
     /// Durable log target deferred until resumed startup proves ownership.
     deferred_harness_log: Option<PathBuf>,
+    /// Whether this spawn belongs to the conversational terminal UI.
+    introduction_notice_eligible: bool,
+}
+
+impl DaemonOutput {
+    /// Marks this output policy as belonging to a conversational chat launch.
+    pub(crate) fn with_introduction_notice(mut self) -> Self {
+        self.introduction_notice_eligible = true;
+        self
+    }
 }
 
 /// Maps the public session-only ephemeral flag without changing its semantics.
@@ -366,6 +376,31 @@ pub(crate) fn daemon_output_for_session(
     )
 }
 
+/// Resolves daemon output for a conversational chat spawn and opts its initial
+/// stdio client into the one-time welcome.
+pub(crate) fn daemon_output_for_chat_session(
+    session_id: &str,
+    storage_mode: HarnessStorageMode,
+    session_status: SessionLaunchStatus,
+) -> Result<DaemonOutput, CliError> {
+    daemon_output_for_chat_session_in(
+        &tau_session_inspect::default_sessions_dir(),
+        session_id,
+        storage_mode,
+        session_status,
+    )
+}
+
+fn daemon_output_for_chat_session_in(
+    sessions_dir: &Path,
+    session_id: &str,
+    storage_mode: HarnessStorageMode,
+    session_status: SessionLaunchStatus,
+) -> Result<DaemonOutput, CliError> {
+    daemon_output_for_session_in(sessions_dir, session_id, storage_mode, session_status)
+        .map(DaemonOutput::with_introduction_notice)
+}
+
 /// Resolves child stderr policy under an explicit sessions root.
 fn daemon_output_for_session_in(
     sessions_dir: &Path,
@@ -377,6 +412,7 @@ fn daemon_output_for_session_in(
         return Ok(DaemonOutput {
             stderr: Stdio::null(),
             deferred_harness_log: None,
+            introduction_notice_eligible: false,
         });
     }
     // Route the daemon's stderr (where its tracing subscriber writes) into the
@@ -389,6 +425,7 @@ fn daemon_output_for_session_in(
         return Ok(DaemonOutput {
             stderr: Stdio::piped(),
             deferred_harness_log: Some(harness_log),
+            introduction_notice_eligible: false,
         });
     }
     if let Some(parent) = harness_log.parent() {
@@ -402,6 +439,7 @@ fn daemon_output_for_session_in(
     Ok(DaemonOutput {
         stderr,
         deferred_harness_log: None,
+        introduction_notice_eligible: false,
     })
 }
 
@@ -465,6 +503,7 @@ fn start_daemon(
     let DaemonOutput {
         stderr,
         deferred_harness_log,
+        introduction_notice_eligible,
     } = output;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
@@ -480,6 +519,7 @@ fn start_daemon(
         cli_overrides,
         storage_mode,
     });
+    configure_introduction_notice(&mut command, introduction_notice_eligible);
     configure_agent_store_mode(&mut command, memory_only_agent_store);
     let runtime_instance_id = configure_runtime_instance(&mut command);
     let spawn_result = command.spawn();
@@ -520,6 +560,16 @@ fn configure_agent_store_mode(command: &mut Command, memory_only_agent_store: bo
         command.env(tau_harness::MEMORY_ONLY_AGENT_STORE_ENV, "1");
     } else {
         command.env_remove(tau_harness::MEMORY_ONLY_AGENT_STORE_ENV);
+    }
+}
+
+/// Sets or clears the private marker that authorizes the conversational
+/// welcome.
+fn configure_introduction_notice(command: &mut Command, eligible: bool) {
+    if eligible {
+        command.env(tau_harness::INITIAL_UI_INTRODUCTION_NOTICE_ENV, "1");
+    } else {
+        command.env_remove(tau_harness::INITIAL_UI_INTRODUCTION_NOTICE_ENV);
     }
 }
 

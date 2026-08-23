@@ -61,6 +61,8 @@ pub const MEMORY_ONLY_ENV: &str = "TAU_MEMORY_ONLY";
 /// Selects a process-local agent store without changing session or configured
 /// extension storage for owned diagnostic daemons.
 pub const MEMORY_ONLY_AGENT_STORE_ENV: &str = "TAU_MEMORY_ONLY_AGENT_STORE";
+/// Private marker set by the CLI only for its conversational terminal launch.
+pub const INITIAL_UI_INTRODUCTION_NOTICE_ENV: &str = "TAU_INITIAL_UI_INTRODUCTION_NOTICE";
 
 /// Immutable harness-wide storage capability policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1346,6 +1348,8 @@ struct RuntimeHarnessLaunch {
     initial_client: Option<InitialClient>,
     /// Best-effort startup error transport for the initial UI.
     initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
+    /// Whether the owned stdio client is the conversational terminal UI.
+    introduction_notice_eligible: bool,
 }
 
 fn run_harness_daemon_with_internal_tools_and_initial_client(
@@ -1360,6 +1364,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         runtime_instance_id,
         initial_client,
         mut initial_client_error_stream,
+        introduction_notice_eligible,
     } = launch;
     let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
@@ -1425,6 +1430,9 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         &mut harness,
         initial_client_id.as_ref(),
     )?;
+    if introduction_notice_eligible {
+        harness.send_introduction_notice_to_initial_client(initial_client_id.as_ref());
+    }
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
     drop(forwarder);
@@ -1599,6 +1607,8 @@ fn run_component_with_internal_tools_and_initial_client(
                 runtime_instance_id,
                 initial_client,
                 initial_client_error_stream: initial_client_error_output.take(),
+                introduction_notice_eligible: std::env::var_os(INITIAL_UI_INTRODUCTION_NOTICE_ENV)
+                    .is_some(),
             },
         )
         .map_err(Into::into)

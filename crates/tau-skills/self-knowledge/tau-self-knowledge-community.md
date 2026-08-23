@@ -9,9 +9,13 @@ advertise: false
 
 # Tau community and help
 
-Places to talk about Tau or ask for help:
+Tau's official and preferred community venue is:
 
-- [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, packaging requests, and general conversation.
+- [Tau Zulip chat](https://tauofunix.zulipchat.com/) — questions, ideas, support, and general conversation.
+
+Other places to talk about Tau or ask for help:
+
+- [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, and packaging requests.
 - [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw) — support chat for dpc's projects.
 - [Discord server](https://discord.gg/zens2jjA3U) — another support/chat venue for dpc's projects.
 - [Rostra p2p social network profile](https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy) — dpc's Rostra profile.

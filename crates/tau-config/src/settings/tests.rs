@@ -286,6 +286,47 @@ fn provider_cache_refresh_defaults_disabled() {
     );
 }
 
+/// The onboarding welcome is enabled by default and accepts both canonical and
+/// normalized camel-case file keys while rejecting ambiguous duplicate
+/// spellings.
+#[test]
+fn introduction_notice_default_override_and_alias_normalization() {
+    assert!(HarnessSettings::built_in().show_introduction_notice);
+
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "showIntroductionNotice: false\n",
+    )
+    .expect("write alias");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load alias override");
+    assert!(!settings.show_introduction_notice);
+
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "show_introduction_notice: true\nshowIntroductionNotice: false\n",
+    )
+    .expect("write conflicting keys");
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("duplicate canonical and alias keys must fail");
+    let message = error.to_string();
+    assert!(message.contains("show_introduction_notice"));
+    assert!(message.contains("showIntroductionNotice"));
+
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "show_introduction_notice: true\n",
+    )
+    .expect("restore canonical key");
+    let overrides =
+        [HarnessConfigCliOverride::from_str("showIntroductionNotice=false").expect("CLI alias")];
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
+            .expect("load CLI alias override");
+    assert!(!settings.show_introduction_notice);
+}
+
 /// Sparse drop-ins merge cache-refresh fields without resetting the idle bound.
 #[test]
 fn provider_cache_refresh_merges_recursively() {

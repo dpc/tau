@@ -2,6 +2,8 @@
 # are provided as ordinary config so user partial overrides keep built-in fields.
 session_retention_days: 60
 diagnostic_retention_days: 14
+# Show a one-line Tau onboarding prompt to the initial interactive UI.
+show_introduction_notice: true
 wait_timeout_minimum_minutes: 5
 wait_timeout_maximum_minutes: 1440
 # Suppress early live retry notifications sent to agents watching other agents.

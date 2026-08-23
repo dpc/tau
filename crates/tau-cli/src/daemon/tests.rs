@@ -677,6 +677,46 @@ fn daemon_command_uses_initial_ui_stdio() {
     assert_eq!(args, ["component", "harness", "--initial-ui-stdio"]);
 }
 
+/// Only conversational chat launches mark their owned stdio client as eligible
+/// for the welcome; preview and one-shot callers retain the cleared default.
+#[test]
+fn introduction_notice_marker_is_explicit_and_reversible() {
+    let mut command = Command::new("tau");
+    configure_introduction_notice(&mut command, true);
+    assert!(command.get_envs().any(|(key, value)| {
+        key == tau_harness::INITIAL_UI_INTRODUCTION_NOTICE_ENV
+            && value.and_then(std::ffi::OsStr::to_str) == Some("1")
+    }));
+
+    configure_introduction_notice(&mut command, false);
+    assert!(command.get_envs().any(|(key, value)| {
+        key == tau_harness::INITIAL_UI_INTRODUCTION_NOTICE_ENV && value.is_none()
+    }));
+}
+
+/// The production output constructors distinguish conversational chat from
+/// prompt-stdin and render-preview launches before command construction.
+#[test]
+fn chat_output_opts_into_introduction_while_headless_output_does_not() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chat = daemon_output_for_chat_session_in(
+        temp.path(),
+        "chat",
+        HarnessStorageMode::MemoryOnly,
+        SessionLaunchStatus::New,
+    )
+    .expect("chat output");
+    let headless = daemon_output_for_session_in(
+        temp.path(),
+        "preview",
+        HarnessStorageMode::MemoryOnly,
+        SessionLaunchStatus::New,
+    )
+    .expect("headless output");
+    assert!(chat.introduction_notice_eligible);
+    assert!(!headless.introduction_notice_eligible);
+}
+
 /// Session minting must normalize arbitrary filesystem basenames into the
 /// strict protocol grammar without exceeding its byte limit.
 #[test]

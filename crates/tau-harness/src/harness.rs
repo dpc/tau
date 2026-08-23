@@ -17419,6 +17419,26 @@ impl Harness {
         let _ = self.bus.send_to(client_id, None, frame);
     }
 
+    /// Sends the process-local onboarding hint only to the spawning interactive
+    /// UI.
+    pub(crate) fn send_introduction_notice_to_initial_client(
+        &mut self,
+        initial_client_id: Option<&tau_proto::ConnectionId>,
+    ) {
+        let Some(client_id) =
+            initial_client_id.filter(|_| self.accepted_harness_settings.show_introduction_notice)
+        else {
+            return;
+        };
+        self.send_direct_harness_notice(
+            client_id,
+            tau_proto::notice_kind::HARNESS_INTRODUCTION,
+            tau_proto::NoticeLevel::Info,
+            false,
+            "Welcome to Tau! Ask your model to introduce you to Tau.".to_owned(),
+        );
+    }
+
     fn handle_client_fallback_event(
         &mut self,
         client_id: &tau_proto::ConnectionId,

@@ -766,6 +766,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         names,
         vec![
             "tau-self-knowledge",
+            "tau-self-knowledge-introduction",
             "tau-self-knowledge-architecture",
             "tau-self-knowledge-harness",
             "tau-self-knowledge-config",
@@ -810,6 +811,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             .contains(&format!("Tau version `{TAU_VERSION}`"))
     );
     assert!(skill.content.contains("tau-self-knowledge-architecture"));
+    assert!(skill.content.contains("tau-self-knowledge-introduction"));
     assert!(skill.content.contains("tau-self-knowledge-harness"));
     assert!(skill.content.contains("tau-self-knowledge-config"));
     assert!(skill.content.contains("tau-self-knowledge-secrets"));
@@ -864,6 +866,26 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in architecture skill");
     assert!(!architecture.add_to_prompt);
     assert!(architecture.content.contains("# Tau architecture overview"));
+
+    let introduction = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-introduction")
+        .expect("built-in introduction skill");
+    assert!(introduction.add_to_prompt);
+    for required in [
+        "one selected topic",
+        "show_introduction_notice: false",
+        ":verbose-mode-toggle",
+        "Isolate sister project",
+        "not a hostile-code sandbox",
+        "https://tauofunix.zulipchat.com/",
+        "tau dev print-prompt --role ROLE",
+    ] {
+        assert!(
+            introduction.content.contains(required),
+            "introduction skill missing {required:?}"
+        );
+    }
 
     let harness = skills
         .iter()
@@ -1041,6 +1063,12 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .find(|skill| skill.name == "tau-self-knowledge-community")
         .expect("built-in community skill");
     assert!(!community.add_to_prompt);
+    assert!(
+        community
+            .content
+            .contains("https://tauofunix.zulipchat.com/")
+    );
+    assert!(community.content.contains("official and preferred"));
     assert!(community.content.contains("GitHub Discussions"));
 
     let debugging = skills

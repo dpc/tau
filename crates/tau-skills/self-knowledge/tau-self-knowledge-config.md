@@ -81,6 +81,10 @@ are ignored, but it does not accept list syntax.
 
 Tau layers these defaults underneath user config and `*.d/*.yaml` drop-ins.
 
+`show_introduction_notice` defaults to `true`. Set it to `false` in
+`harness.yaml` after onboarding to suppress the process-local welcome sent only
+to a newly spawned interactive UI.
+
 ### Harness defaults
 
 ```yaml
