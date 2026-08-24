@@ -1488,6 +1488,9 @@ struct PromptState {
     /// Latest provider-owned response stats received directly on
     /// `provider.response_updated` for repainting the live indicator.
     provider_response_stats: Option<tau_proto::ProviderResponseStats>,
+    /// Whether the live response block is the pending indicator rather than
+    /// response or status text.
+    live_response_is_pending_indicator: bool,
     /// Live provider-side compaction block. Created only while a provider emits
     /// an in-progress compaction item, then removed on completion/cancel.
     compaction_block_id: Option<tau_cli_term::BlockId>,
@@ -1705,11 +1708,16 @@ fn format_compact_duration(duration: std::time::Duration) -> String {
     format!("{}m", duration.as_secs() / 60)
 }
 
-fn response_stats_indicator_for_prompt(state: &PromptState) -> String {
-    state
-        .provider_response_stats
-        .as_ref()
-        .map_or_else(String::new, response_stats_indicator_suffix)
+fn response_stats_indicator_for_prompt(state: &PromptState, verbose_mode: bool) -> String {
+    verbose_mode
+        .then(|| {
+            state
+                .provider_response_stats
+                .as_ref()
+                .map(response_stats_indicator_suffix)
+        })
+        .flatten()
+        .unwrap_or_default()
 }
 
 fn provider_response_update_has_visible_content(
@@ -3602,6 +3610,7 @@ impl EventRenderer {
             );
         }
         self.rerender_live_thinking();
+        self.rerender_live_response_stat_indicators();
         let live_tool_blocks = self
             .tool_calls
             .values()
@@ -3670,6 +3679,36 @@ impl EventRenderer {
             .collect::<Vec<_>>();
         for (prompt_id, thinking) in missing {
             self.update_live_thinking_block(prompt_id.as_str(), Some(thinking.as_str()));
+        }
+    }
+
+    /// Reprojects in-progress response-stat suffixes for the current transcript
+    /// mode without disturbing live assistant response or status text.
+    fn rerender_live_response_stat_indicators(&mut self) {
+        use tau_themes::names;
+
+        let verbose_mode = self.verbose_mode;
+        let updates = self
+            .prompts
+            .values()
+            .filter(|state| state.live_response_is_pending_indicator)
+            .filter_map(|state| {
+                Some((
+                    state.response_block_id?,
+                    response_stats_indicator_for_prompt(state, verbose_mode),
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (block_id, suffix) in updates {
+            self.handle.set_block(
+                block_id,
+                streaming_block_with_indicator_suffix(
+                    &self.theme,
+                    names::AGENT_PENDING,
+                    STREAMING_AGENT_RESPONSE_PREFIX.trim_end(),
+                    suffix,
+                ),
+            );
         }
     }
 
@@ -7168,6 +7207,7 @@ impl EventRenderer {
             state.response_markdown_cache = MarkdownStreamCache::default();
             state.thinking_markdown_cache = MarkdownStreamCache::default();
             state.provider_response_stats = None;
+            state.live_response_is_pending_indicator = false;
             if let Some(block_id) = state.thinking_block_id.take() {
                 self.handle.remove_block(block_id);
             }
@@ -7415,18 +7455,21 @@ impl EventRenderer {
     fn update_live_response_block(&mut self, spid: &str, text: &str) {
         use tau_themes::names;
 
+        let verbose_mode = self.verbose_mode;
         if let Some(bid) = self.prompts.get(spid).and_then(|s| s.response_block_id) {
             let Some(state) = self.prompts.get_mut(spid) else {
                 return;
             };
             let block = if text.is_empty() {
+                state.live_response_is_pending_indicator = true;
                 streaming_block_with_indicator_suffix(
                     &self.theme,
                     names::AGENT_PENDING,
                     STREAMING_AGENT_RESPONSE_PREFIX.trim_end(),
-                    response_stats_indicator_for_prompt(state),
+                    response_stats_indicator_for_prompt(state, verbose_mode),
                 )
             } else {
+                state.live_response_is_pending_indicator = false;
                 markdown_prefixed_streaming_block_with_osc8(
                     &self.theme,
                     names::AGENT_RESPONSE,
@@ -7569,7 +7612,7 @@ impl EventRenderer {
             .turn_stats_history
             .last()
             .map(|entry| entry.usage.clone());
-        let block = if self.show_turn_stats {
+        let block = if self.verbose_mode && self.show_turn_stats {
             render_turn_stats_block_with_cumulative_usage(
                 &self.theme,
                 &usage,

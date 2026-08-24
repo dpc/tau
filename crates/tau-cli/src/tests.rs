@@ -9677,6 +9677,63 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
     assert!(!vt.screen_contains(80, "… (820ms,"));
 }
 
+/// Compact mode must hide both retained in-progress response statistics and a
+/// newly completed turn-stat row, then restore each retained projection in
+/// verbose mode.
+#[test]
+fn compact_mode_hides_live_and_new_turn_statistics() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-turn-stats", "true");
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-compact-stats",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        main_provider_response_stats_update("sp-compact-stats", 12 * 1024, 4 * 1024),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Δ8KB/s"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "Δ8KB/s"));
+
+    renderer.handle(&Event::ProviderResponseUpdated(
+        main_provider_response_stats_update("sp-compact-stats", 20 * 1024, 12 * 1024),
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "Δ8KB/s"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "… (2s, 20KB, Δ8KB/s, 10KB/s)"));
+    assert!(!vt.screen_contains(100, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
+
+    renderer.toggle_verbose_mode();
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "sp-compact-stats",
+            "main",
+            20_000,
+            10_000,
+            500,
+            "compact stats answer",
+        ),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "compact stats answer"));
+    assert!(!vt.screen_contains(100, "Δ"));
+
+    renderer.toggle_verbose_mode();
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Δ"));
+}
+
 /// First-output durations switch units at the approved five-second and
 /// five-minute boundaries without rendering a placeholder for absence.
 #[test]
