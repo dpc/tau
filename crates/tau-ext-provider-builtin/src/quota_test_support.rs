@@ -143,6 +143,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
                 .expect("valid OAuth credential reference"),
             ),
         )]),
+        missing_logins: Default::default(),
     };
     let reload_profiles = profiles.clone();
     let result = run_inner_with_prompt_executor(

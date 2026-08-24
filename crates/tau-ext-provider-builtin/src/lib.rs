@@ -21,7 +21,7 @@ mod responses;
 mod setup_store;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Cursor, Read, Write};
@@ -172,9 +172,18 @@ pub struct BuiltinProviderProfiles {
     providers: BTreeMap<ProviderName, BuiltinProviderProfile>,
     /// Explicit authentication selection retained for each parsed profile.
     credentials: BTreeMap<ProviderName, ProviderCredential>,
+    /// ChatGPT profiles whose OAuth Secret was positively found absent while
+    /// hydrating this prompt-time settings snapshot.
+    missing_logins: BTreeSet<ProviderName>,
 }
 
 impl BuiltinProviderProfiles {
+    /// Returns whether credential hydration found this ChatGPT profile logged
+    /// out.
+    fn missing_login(&self, provider: &ProviderName) -> bool {
+        self.missing_logins.contains(provider)
+    }
+
     /// Returns the stored OAuth credential selection for one ChatGPT profile.
     fn chatgpt_credential_reference(
         &self,
@@ -657,7 +666,7 @@ fn responses_profile_identity(config: &ResolvedConfig) -> InferenceProfileIdenti
 fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
     let mut hasher = path_std_collections_hash_map::DefaultHasher::new();
     match backend {
-        PromptBackend::Unavailable => return None,
+        PromptBackend::Unavailable { .. } => return None,
         PromptBackend::Responses(config) => {
             responses_profile_identity(config).hash(&mut hasher);
         }
@@ -678,7 +687,7 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
 fn automatic_retry_identity_matches(pinned: Option<&ResolvedConfig>, next: &PromptBackend) -> bool {
     match (pinned, next) {
         (Some(pinned), PromptBackend::Responses(next)) => pinned.same_chatgpt_identity(next),
-        (Some(_), PromptBackend::Unavailable) => true,
+        (Some(_), PromptBackend::Unavailable { .. }) => true,
         (Some(_), _) => false,
         (None, _) => true,
     }
@@ -2168,28 +2177,51 @@ fn hydrate_profile_credentials(
     client: &ExtensionDataClient,
     profiles: &mut BuiltinProviderProfiles,
 ) {
+    hydrate_profile_credentials_with(profiles, |path| {
+        client.request(
+            tau_proto::ExtensionDataScope::Secret,
+            tau_proto::ExtensionDataRequestOp::ReadFile { path },
+        )
+    });
+}
+
+/// Hydrates prompt-time profiles with credential records returned by Secret
+/// storage.
+fn hydrate_profile_credentials_with(
+    profiles: &mut BuiltinProviderProfiles,
+    mut read_secret: impl FnMut(
+        tau_proto::ExtensionDataPath,
+    ) -> Result<
+        tau_proto::ExtensionDataValue,
+        tau_client::ExtensionDataRpcError,
+    >,
+) {
     let names = profiles.providers.keys().cloned().collect::<Vec<_>>();
     for name in names {
         let Some(credential) = profiles.credentials.get(&name).cloned() else {
             profiles.providers.remove(&name);
             continue;
         };
-        let ProviderCredential::Stored(reference) = credential else {
+        let ProviderCredential::Stored(ref reference) = credential else {
             continue;
         };
         let path = reference.path().clone();
         let requires_value = reference.named_source().is_some();
-        let result = client.request(
-            tau_proto::ExtensionDataScope::Secret,
-            tau_proto::ExtensionDataRequestOp::ReadFile { path },
-        );
+        let result = read_secret(path);
         let tau_proto::ExtensionDataValue::ReadFile { contents } = (match result {
             Ok(value) => value,
             Err(error) => {
+                if credential_error_means_logged_out(
+                    profiles.providers.get(&name),
+                    &credential,
+                    &error,
+                ) {
+                    profiles.missing_logins.insert(name.clone());
+                }
                 tracing::warn!(
                     target: LOG_TARGET,
                     provider = %name,
-                    error = %error,
+                    credential_error = credential_hydration_error_category(&error),
                     "skipping provider with unavailable credential"
                 );
                 profiles.providers.remove(&name);
@@ -2255,6 +2287,47 @@ fn hydrate_profile_credentials(
             profiles.providers.remove(&name);
         }
     }
+}
+
+/// Returns the closed diagnostic category for a failed Secret hydration read.
+fn credential_hydration_error_category(error: &tau_client::ExtensionDataRpcError) -> &'static str {
+    match error {
+        tau_client::ExtensionDataRpcError::Harness {
+            kind: tau_proto::ExtensionDataErrorKind::NotFound,
+            ..
+        } => "not_found",
+        tau_client::ExtensionDataRpcError::Harness { .. } => "harness",
+        tau_client::ExtensionDataRpcError::Client(_) => "client",
+        tau_client::ExtensionDataRpcError::Timeout => "timeout",
+        tau_client::ExtensionDataRpcError::InputClosed => "input_closed",
+        tau_client::ExtensionDataRpcError::Disconnect(_) => "disconnected",
+    }
+}
+
+/// Returns whether Secret hydration safely proves a ChatGPT profile needs
+/// login.
+///
+/// The harness owns the `NotFound` classification. This intentionally ignores
+/// its descriptive message, which can include secret-storage implementation
+/// details.
+fn credential_error_means_logged_out(
+    profile: Option<&BuiltinProviderProfile>,
+    credential: &ProviderCredential,
+    error: &tau_client::ExtensionDataRpcError,
+) -> bool {
+    matches!(profile, Some(BuiltinProviderProfile::Chatgpt(_)))
+        && matches!(
+            credential,
+            ProviderCredential::Stored(reference)
+                if reference.slot() == ProviderCredentialSlot::OAuth
+        )
+        && matches!(
+            error,
+            tau_client::ExtensionDataRpcError::Harness {
+                kind: tau_proto::ExtensionDataErrorKind::NotFound,
+                ..
+            }
+        )
 }
 
 fn run_openai_codex_login(
@@ -2358,6 +2431,7 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
                 .expect("OAuth credential reference"),
             ),
         )]),
+        missing_logins: Default::default(),
     }
 }
 
@@ -2949,7 +3023,11 @@ where
             self.codex_runtime.network(),
             self.extension_data_client.as_ref(),
         )
-        .unwrap_or(PromptBackend::Unavailable);
+        .unwrap_or_else(|| PromptBackend::Unavailable {
+            login_required: profiles
+                .missing_login(&model.provider)
+                .then(|| model.provider.clone()),
+        });
         self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
             let identity = config.inference_identity();
@@ -4731,7 +4809,10 @@ fn send_scheduler_actions(
 #[derive(Clone)]
 enum PromptBackend {
     /// Mutable provider profile/model state was unavailable at this attempt.
-    Unavailable,
+    Unavailable {
+        /// Selected provider whose missing OAuth Secret requires a fresh login.
+        login_required: Option<ProviderName>,
+    },
     Responses(ResolvedConfig),
     ChatCompletions {
         provider: ChatCompletionsProvider,
@@ -5351,15 +5432,7 @@ fn emit_retry_status(
     live_detail: Option<&str>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
-    let delay = due.checked_duration_since(now).unwrap_or(Duration::ZERO);
-    let delay_text = tau_proto::format_approximate_duration_secs(delay.as_secs());
-    let reason = live_detail
-        .map(|detail| format!("{}: {detail}", class.public_reason()))
-        .unwrap_or_else(|| class.public_reason().to_owned());
-    let text = format!(
-        "{}; next attempt in about {} (attempt {}). Tau will keep trying; cancel the prompt to stop.",
-        reason, delay_text, job.retry_state.attempts,
-    );
+    let text = retry_status_text(job, class, due, now, live_detail);
     handle.send(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: job.agent_prompt_id.clone(),
@@ -5372,13 +5445,44 @@ fn emit_retry_status(
                 retry: Some(tau_proto::ProviderRetryStatus {
                     category: retry_class_provider_category(class),
                     attempt: saturating_retry_attempt(job.retry_state.attempts),
-                    next_retry_delay_secs: saturating_retry_delay(delay),
+                    next_retry_delay_secs: saturating_retry_delay(
+                        due.checked_duration_since(now).unwrap_or(Duration::ZERO),
+                    ),
                 }),
             }),
             response_stats: None,
             originator: job.prompt.originator.clone(),
         }),
     ))
+}
+
+/// Builds the initiating user's transient status for one scheduled retry.
+fn retry_status_text(
+    job: &PromptJob,
+    class: RetryClass,
+    due: Instant,
+    now: Instant,
+    live_detail: Option<&str>,
+) -> String {
+    let delay = due.checked_duration_since(now).unwrap_or(Duration::ZERO);
+    let delay_text = tau_proto::format_approximate_duration_secs(delay.as_secs());
+    let reason = match &job.backend {
+        PromptBackend::Unavailable {
+            login_required: Some(provider),
+        } => format!("provider {provider} is not logged in; run tau provider login {provider}"),
+        PromptBackend::Unavailable {
+            login_required: None,
+        }
+        | PromptBackend::Responses(_)
+        | PromptBackend::ChatCompletions { .. }
+        | PromptBackend::PublicResponses { .. } => live_detail
+            .map(|detail| format!("{}: {detail}", class.public_reason()))
+            .unwrap_or_else(|| class.public_reason().to_owned()),
+    };
+    format!(
+        "{}; next attempt in about {} (attempt {}). Tau will keep trying; cancel the prompt to stop.",
+        reason, delay_text, job.retry_state.attempts,
+    )
 }
 
 fn retry_class_provider_category(class: RetryClass) -> tau_proto::ProviderRetryCategory {
@@ -6166,7 +6270,7 @@ where
     R: TurnAbort,
 {
     match backend {
-        PromptBackend::Unavailable => Ok(Some(PromptAttemptRetry {
+        PromptBackend::Unavailable { .. } => Ok(Some(PromptAttemptRetry {
             decision: RetryDecision::new(RetryClass::Auth),
             live_detail: None,
             canonical_unauthorized: false,

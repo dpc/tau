@@ -90,7 +90,11 @@ ordinal. A new APID begins at one; a manual retry preserves the prompt-local
 failure count. Transparent WebSocket repair increments only the per-attempt
 wire-dispatch index. The extension does not add provider detail to
 `ProviderRetryStatus`, watcher state, agent messages, durable terminal facts, or
-restore journals.
+restore journals. When the harness classifies a configured ChatGPT OAuth Secret
+as `NotFound`, the initiating prompt's transient retry status may instead name
+that validated provider namespace and its exact `tau provider login` command.
+It never includes Secret paths, error prose, credential identities, or content;
+the watcher-visible retry category remains unchanged.
 
 Profile files, OAuth tokens, and API keys are local secrets. They must not enter
 model-visible output, notices, traces, debug logs, or fixtures. Debug captures

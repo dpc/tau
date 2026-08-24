@@ -15,6 +15,7 @@ use tau_proto::{
 };
 
 use super::*;
+use crate::tests::SharedTraceWriter;
 
 /// Shared byte sink used by tests that run tau-client's writer thread.
 #[derive(Clone, Default)]
@@ -1056,7 +1057,9 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         agent_prompt_id: prompt.agent_prompt_id.clone(),
         debug_provider_requests: false,
         prompt,
-        backend: PromptBackend::Unavailable,
+        backend: PromptBackend::Unavailable {
+            login_required: None,
+        },
         pinned_chatgpt_identity: None,
         profile_identity: None,
         retry_state: PromptRetryState::default(),
@@ -1636,7 +1639,9 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
         );
     }
     assert_eq!(
-        backend_profile_identity(&PromptBackend::Unavailable),
+        backend_profile_identity(&PromptBackend::Unavailable {
+            login_required: None,
+        }),
         None,
         "removed profiles carry no stale identity"
     );
@@ -3566,7 +3571,12 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                 *profiles_for_executor.lock().expect("mutable profiles") =
                     BuiltinProviderProfiles::default();
             }
-            (2, PromptBackend::Unavailable) => {
+            (
+                2,
+                PromptBackend::Unavailable {
+                    login_required: None,
+                },
+            ) => {
                 *profiles_for_executor.lock().expect("mutable profiles") =
                     profiles_with_chatgpt_auth(fresh.clone());
             }
@@ -4572,6 +4582,155 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
         Some(Event::ProviderResponseFinishedReported(finished))
             if finished.agent_prompt_id.as_str() == "sp-1"
     ));
+}
+
+/// Ensures a missing ChatGPT OAuth Secret gives the initiating user the exact
+/// login command on the first and later retry status, without exposing the
+/// Secret backend's diagnostic, while other unavailable profiles retain the
+/// generic authentication status.
+#[test]
+fn missing_chatgpt_login_status_is_actionable_and_redacted() {
+    let provider = ProviderName::new("chatgpt-fedi");
+    let api_key_provider = ProviderName::new("local");
+    let secret_backend_detail = "Secret providers/credential-id/oauth.json missing";
+    let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    profiles
+        .providers
+        .remove(&ProviderName::new(CHATGPT_PROVIDER_NAME));
+    let chatgpt = BuiltinProviderProfile::Chatgpt(ChatGptProfile::default());
+    profiles.providers.insert(provider.clone(), chatgpt);
+    profiles.providers.insert(
+        api_key_provider.clone(),
+        BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+            base_url: "https://local.invalid/v1".to_owned(),
+            models: vec![chat_model("model")],
+            ..ChatCompletionsProvider::default()
+        }),
+    );
+    profiles.credentials.insert(
+        provider.clone(),
+        ProviderCredential::Stored(
+            ProviderCredentialReference::new(
+                ProviderCredentialIdentity::random(),
+                ProviderCredentialSlot::OAuth,
+                None,
+            )
+            .expect("valid OAuth credential reference"),
+        ),
+    );
+    profiles.credentials.insert(
+        api_key_provider.clone(),
+        ProviderCredential::Stored(
+            ProviderCredentialReference::new(
+                ProviderCredentialIdentity::random(),
+                ProviderCredentialSlot::ApiKey,
+                None,
+            )
+            .expect("valid API-key credential reference"),
+        ),
+    );
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    let dispatch = tracing::subscriber::set_default(subscriber);
+    hydrate_profile_credentials_with(&mut profiles, |_| {
+        Err(tau_client::ExtensionDataRpcError::Harness {
+            kind: tau_proto::ExtensionDataErrorKind::NotFound,
+            message: secret_backend_detail.to_owned(),
+        })
+    });
+    drop(dispatch);
+    let trace = String::from_utf8(trace.bytes()).expect("trace is UTF-8");
+    assert!(!trace.contains(secret_backend_detail));
+    assert!(trace.contains("credential_error"));
+    assert!(trace.contains("not_found"));
+    assert!(profiles.missing_login(&provider));
+    assert!(!profiles.missing_login(&api_key_provider));
+    assert!(profiles.providers.is_empty());
+
+    let now = Instant::now();
+    let mut job = scheduled_job("missing-login", provider.as_str());
+    job.backend = resolve_prompt_backend(
+        &job.prompt.model,
+        &mut profiles,
+        &mut OAuthRefreshRejectionCache::default(),
+        &test_network_policy(),
+        None,
+    )
+    .unwrap_or_else(|| PromptBackend::Unavailable {
+        login_required: profiles
+            .missing_login(&job.prompt.model.provider)
+            .then(|| job.prompt.model.provider.clone()),
+    });
+    job.retry_state.attempts = 1;
+    let initial = retry_status_text(
+        &job,
+        RetryClass::Auth,
+        now + Duration::from_secs(1),
+        now,
+        None,
+    );
+    job.retry_state.attempts = 2;
+    let retry = retry_status_text(
+        &job,
+        RetryClass::Auth,
+        now + Duration::from_secs(1),
+        now,
+        Some(secret_backend_detail),
+    );
+    for text in [&initial, &retry] {
+        assert!(text.contains("provider chatgpt-fedi is not logged in"));
+        assert!(text.contains("tau provider login chatgpt-fedi"));
+        assert!(!text.contains(secret_backend_detail));
+        assert!(text.contains("Tau will keep trying; cancel the prompt to stop."));
+    }
+    assert!(initial.contains("attempt 1"));
+    assert!(retry.contains("attempt 2"));
+
+    let mut generic_job = scheduled_job("missing-api-key", api_key_provider.as_str());
+    generic_job.prompt.model.model = ModelName::new("model");
+    generic_job.retry_state.attempts = 2;
+    generic_job.backend = resolve_prompt_backend(
+        &generic_job.prompt.model,
+        &mut profiles,
+        &mut OAuthRefreshRejectionCache::default(),
+        &test_network_policy(),
+        None,
+    )
+    .unwrap_or_else(|| PromptBackend::Unavailable {
+        login_required: profiles
+            .missing_login(&generic_job.prompt.model.provider)
+            .then(|| generic_job.prompt.model.provider.clone()),
+    });
+    assert!(matches!(
+        generic_job.backend,
+        PromptBackend::Unavailable {
+            login_required: None,
+        }
+    ));
+    let generic = retry_status_text(
+        &generic_job,
+        RetryClass::Auth,
+        now + Duration::from_secs(1),
+        now,
+        None,
+    );
+    assert_eq!(
+        generic,
+        format!(
+            "{}; next attempt in about 1s (attempt 2). Tau will keep trying; cancel the prompt to stop.",
+            RetryClass::Auth.public_reason(),
+        ),
+        "unclassified Secret failures retain the generic status rather than a login claim"
+    );
+    assert!(!generic.contains(secret_backend_detail));
 }
 
 /// A queued targeted cancel consumes its marker after terminal commit so the

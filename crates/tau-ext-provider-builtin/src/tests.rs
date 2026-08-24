@@ -973,13 +973,14 @@ fn valid_provider_configure_publishes_models_and_ready() {
 
 /// Cloneable in-memory sink used to inspect structured tracing output.
 #[derive(Clone, Default)]
-struct SharedTraceWriter {
+pub(super) struct SharedTraceWriter {
     /// Bytes written by the temporary tracing subscriber.
     bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SharedTraceWriter {
-    fn bytes(&self) -> Vec<u8> {
+    /// Returns the trace bytes captured by this test sink.
+    pub(super) fn bytes(&self) -> Vec<u8> {
         self.bytes.lock().expect("trace writer lock").clone()
     }
 }
@@ -1583,7 +1584,9 @@ fn automatic_retry_refuses_cross_account_backend_rotation() {
     ));
     assert!(automatic_retry_identity_matches(
         Some(&anchor),
-        &PromptBackend::Unavailable
+        &PromptBackend::Unavailable {
+            login_required: None,
+        }
     ));
     assert!(!automatic_retry_identity_matches(
         Some(&anchor),
@@ -1655,6 +1658,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
                 BuiltinProviderProfile::OpenRouter(OpenRouterProfile::default()),
             ),
         ]),
+        missing_logins: Default::default(),
     };
 
     let published = models_for_profiles(&profiles);
@@ -1814,6 +1818,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
     let lite = ProviderName::new("lite");
     let mut startup = BuiltinProviderProfiles {
         credentials: Default::default(),
+        missing_logins: Default::default(),
         providers: BTreeMap::from([
             (
                 standard.clone(),
@@ -1940,6 +1945,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
     };
     let mut profiles = BuiltinProviderProfiles {
         credentials: Default::default(),
+        missing_logins: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::ChatCompletions(provider),
@@ -1985,6 +1991,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
     };
     let mut profiles = BuiltinProviderProfiles {
         credentials: Default::default(),
+        missing_logins: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::OpenRouter(profile),

@@ -763,7 +763,11 @@ referenced version-zero credentials before model publication and at prompt
 boundaries. Credential rotation therefore takes effect without restart;
 settings changes require a full harness restart. Provider-process restart does
 not reload either directory, and Tau creates no imported copy or watcher.
-Missing or malformed referenced credentials exclude that provider.
+Missing or malformed referenced credentials exclude that provider. If prompt-time
+hydration positively finds a ChatGPT OAuth Secret absent, the initiating retry
+status names the provider and prints `tau provider login <profile>`; it does not
+print the Secret path or storage error. Other hydration failures keep the generic
+authentication/configuration retry status.
 Initial Configure validates the complete bounded settings snapshot before
 retaining it or publishing any model. One invalid filename or profile—including
 legacy `api_key_secret`, inline API keys, or mixed credential fields—rejects the

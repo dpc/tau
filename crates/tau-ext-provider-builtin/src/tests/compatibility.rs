@@ -74,6 +74,7 @@ fn compatibility_profiles() -> BuiltinProviderProfiles {
                 .expect("valid OAuth credential reference"),
             ),
         )]),
+        missing_logins: Default::default(),
         providers: BTreeMap::from([
             (chatgpt, load_profile_fixture("profiles/chatgpt.json")),
             (
@@ -173,7 +174,7 @@ fn compatibility_route_snapshot(
             },
             "model": model,
         }),
-        Some(PromptBackend::Unavailable) => serde_json::json!({
+        Some(PromptBackend::Unavailable { .. }) => serde_json::json!({
             "requested": requested,
             "backend": "unavailable",
         }),
