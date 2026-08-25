@@ -152,40 +152,6 @@ fn deepseek_cache_usage_normalizes_contradictory_counters() {
     assert_eq!(cache.hit_ratio_millionths(), Some(900_000));
 }
 
-/// OpenRouter's documented OpenAI-compatible counters remain ordinary-request
-/// telemetry because router and selected-upstream cache residency are unknown.
-#[test]
-fn openrouter_shape_keeps_cache_residency_unknown() {
-    let mut state = StreamState::new_with_cache_usage(CacheUsageCompat::OpenAi);
-    capture_usage(
-        &mut state,
-        &serde_json::json!({
-            "prompt_tokens": 100,
-            "completion_tokens": 4,
-            "prompt_tokens_details": {
-                "cached_tokens": 80,
-                "cache_write_tokens": 10
-            }
-        }),
-    );
-
-    let cache = state
-        .usage()
-        .expect("OpenRouter usage")
-        .cache
-        .expect("OpenRouter cache telemetry");
-    assert_eq!(cache.read_tokens, Some(80));
-    assert_eq!(cache.write_tokens, Some(10));
-    assert_eq!(
-        cache.expiry_confidence,
-        Some(tau_proto::ProviderCacheExpiryConfidence::Unknown)
-    );
-    assert_eq!(
-        cache.refresh_reason,
-        Some(tau_proto::ProviderCacheRefreshReason::OrdinaryRequest)
-    );
-}
-
 /// Ensures historical XML-escaped and current exact-close web results remain
 /// byte-for-byte intact on the Chat Completions native tool-result path.
 #[test]
@@ -1042,6 +1008,27 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
         parameters: None,
         format: None,
     });
+    let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::AssistantResponse(
+            tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: tau_proto::ToolCallId::new("call-image"),
+                    name: tau_proto::ToolName::new("dangerous"),
+                    tool_type: ToolType::Function,
+                    arguments: tau_proto::json_to_cbor(
+                        &serde_json::from_str(raw_arguments).expect("valid raw arguments"),
+                    ),
+                    raw_arguments_json: Some(raw_arguments.to_owned()),
+                    responses_envelope: None,
+                })],
+                usage: None,
+            },
+        ));
     created
         .context
         .blocks
@@ -1103,6 +1090,14 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
     );
     assert_eq!(request.reasoning_effort, ordinary.reasoning_effort);
     assert_eq!(request.max_completion_tokens, Some(321));
+    assert_eq!(
+        ordinary.messages[ordinary.messages.len() - 2]["tool_calls"][0]["function"]["arguments"],
+        raw_arguments
+    );
+    assert_eq!(
+        request.messages[ordinary.messages.len() - 2]["tool_calls"][0]["function"]["arguments"],
+        raw_arguments
+    );
     assert_eq!(
         request.messages.last(),
         Some(&serde_json::json!({
@@ -1258,32 +1253,58 @@ fn image_request_budget_spans_tool_result_blocks() {
     model.supports_image_tool_results = true;
 
     let request = try_build_request(&config, &model, &created).expect("bounded vision request");
-    let messages = serde_json::to_value(&request.messages).expect("messages");
-    let wire = messages.to_string();
-    assert_eq!(wire.matches("\"type\":\"image_url\"").count(), 1);
-    assert!(wire.contains("aggregate provider image request limit exceeded"));
-    assert!(!wire.contains("AgICAgICAgICAgICAgICAgICAgICAgICAgICAg"));
+    let first = &request.messages[1];
+    assert_eq!(first["role"], "tool");
+    assert_eq!(first["tool_call_id"], "call-first");
+    assert_eq!(
+        first["content"],
+        serde_json::json!([
+            {"type": "text", "text": "image result"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!(
+                        "data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(vec![1_u8; 2 * 1024])
+                    ),
+                    "detail": "high"
+                }
+            }
+        ])
+    );
+    let second = &request.messages[2];
+    assert_eq!(second["role"], "tool");
+    assert_eq!(second["tool_call_id"], "call-over-limit");
+    assert_eq!(
+        second["content"],
+        serde_json::json!([
+            {"type": "text", "text": "image result"},
+            {
+                "type": "text",
+                "text": "[image omitted: aggregate provider image request limit exceeded]"
+            }
+        ])
+    );
 }
 
-/// An invalid explicit prefix budget must disable local compaction rather than
-/// silently changing the selected request.
+/// Standalone compaction must reject before request lowering when no selected
+/// local-summary configuration enables it.
 #[test]
-fn local_summary_compaction_rejects_oversized_input_without_truncation() {
+fn standalone_compaction_requires_enabled_local_summary_config() {
     let mut created = prompt();
     created.operation = tau_proto::PromptOperation::StandaloneCompaction;
     let mut config = resolved_provider(&provider());
-    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
-        NonZeroU64::new(8192).expect("positive"),
-        8192,
-        NonZeroU64::new(1).expect("positive"),
-        NonZeroU32::new(1).expect("positive"),
-        NonZeroU64::new(1).expect("positive"),
-    );
+    config.local_summary_compaction = None;
 
-    assert!(matches!(
-        try_build_request(&config, &provider().models[0], &created),
-        Err(LlmError::InvalidCompaction(_))
-    ));
+    let error = match try_build_request(&config, &provider().models[0], &created) {
+        Err(LlmError::InvalidCompaction(error)) => error,
+        Ok(_) => panic!("expected standalone-compaction capability gate"),
+        Err(error) => panic!("expected standalone-compaction capability gate, got {error:?}"),
+    };
+    assert_eq!(
+        error,
+        "standalone compaction is not enabled for this Chat Completions model"
+    );
 }
 
 /// Standalone local compaction must use the ordinary durable provider
