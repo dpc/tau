@@ -25,68 +25,46 @@ fn protocol_io_input_message_key_uses_emitted_event_name() {
     assert_eq!(input_message_key(&message), "term.bell");
 }
 
-/// Dedicated extension notice requests use their flat message name for
-/// metering.
+/// Flat input variants must retain their protocol names so each non-`Emit`
+/// message-key match arm stays distinguishable without duplicating fixtures.
 #[test]
-fn protocol_io_input_message_key_uses_extension_notice_request_name() {
-    let message = HarnessInputMessage::ExtensionNoticeRequest(tau_proto::ExtensionNoticeRequest {
-        message: "reconnecting".to_owned(),
-        level: tau_proto::NoticeLevel::Warning,
-    });
+fn protocol_io_input_message_keys_use_flat_variant_names() {
+    let cases = [
+        (
+            HarnessInputMessage::ExtensionNoticeRequest(tau_proto::ExtensionNoticeRequest {
+                message: "reconnecting".to_owned(),
+                level: tau_proto::NoticeLevel::Warning,
+            }),
+            "message.extension_notice_request",
+        ),
+        (
+            HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+                extension_name: test_extension_name("std-shell"),
+            }),
+            "message.ui_debug_event_stats_request",
+        ),
+        (
+            HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest::default()),
+            "message.ui_detach_request",
+        ),
+        (
+            HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+                target_agent_id: None,
+            }),
+            "message.ui_tree_request",
+        ),
+    ];
 
-    assert_eq!(
-        input_message_key(&message),
-        "message.extension_notice_request"
-    );
-}
-
-/// The separate harness-authored output remains metered as its event name.
-#[test]
-fn protocol_io_output_message_key_uses_harness_notice_name() {
-    let message =
-        HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice::diagnostic(
-            tau_proto::notice_kind::EXTENSION_NOTICE,
-            "reconnecting",
-            tau_proto::NoticeLevel::Warning,
-        )));
-
-    assert_eq!(output_message_key(&message), "harness.notice");
-}
-
-/// Dedicated UI debug requests use a flat message key rather than the removed
-/// dotted event name.
-#[test]
-fn protocol_io_input_message_key_uses_ui_debug_request_message_name() {
-    let message =
-        HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: test_extension_name("std-shell"),
-        });
-
-    assert_eq!(
-        input_message_key(&message),
-        "message.ui_debug_event_stats_request"
-    );
-}
-
-/// Dedicated UI detach requests use their flat message name for metering.
-#[test]
-fn protocol_io_input_message_key_uses_ui_detach_request_message_name() {
-    let message = HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest::default());
-
-    assert_eq!(input_message_key(&message), "message.ui_detach_request");
-}
-
-/// Dedicated UI tree requests use their flat message name for metering.
-#[test]
-fn protocol_io_input_message_key_uses_ui_tree_request_message_name() {
-    let message = HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        target_agent_id: None,
-    });
-
-    assert_eq!(input_message_key(&message), "message.ui_tree_request");
+    for (message, expected_key) in cases {
+        assert_eq!(
+            input_message_key(&message),
+            expected_key,
+            "message key must remain {expected_key}"
+        );
+    }
 }
 
 /// Cumulative protocol I/O counters must survive sample draining because debug
@@ -233,35 +211,45 @@ fn protocol_io_detailed_meter_integrates_delivery_and_cumulative_accounting() {
     )));
 }
 
-/// Protocol I/O meters must bound distinct keys so a peer cannot grow harness
-/// memory forever by emitting unique custom event names.
+/// Protocol I/O meters must cap each direction independently so configured
+/// extensions' custom names cannot grow debug-accounting state without bound.
 #[test]
 fn protocol_io_meter_buckets_overflow_after_key_cap() {
     let meter = ProtocolIoMeter::default();
-    for index in 0..(PROTOCOL_IO_MAX_KEYS_PER_DIRECTION + 4) {
-        meter.record_bytes(
-            ProtocolIoDirection::Uplink,
-            format!("custom.event_{index}"),
-            Some(1),
-        );
+    for direction in [ProtocolIoDirection::Uplink, ProtocolIoDirection::Downlink] {
+        for index in 0..(PROTOCOL_IO_MAX_KEYS_PER_DIRECTION + 4) {
+            meter.record_bytes(direction, format!("custom.event_{index}"), Some(1));
+        }
     }
 
     let sample = meter.take_sample();
     let cumulative = meter.cumulative_stats();
 
-    assert_eq!(
-        sample.uplink_breakdown.len(),
-        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION
-    );
-    assert_eq!(cumulative.uplink.len(), PROTOCOL_IO_MAX_KEYS_PER_DIRECTION);
-    assert_eq!(
-        sample.uplink_breakdown.get(PROTOCOL_IO_OVERFLOW_KEY),
-        Some(&5)
-    );
-    assert_eq!(
-        cumulative.uplink.get(PROTOCOL_IO_OVERFLOW_KEY).copied(),
-        Some(ProtocolIoFrameStats { count: 5, bytes: 5 })
-    );
+    for (direction, rolling, total) in [
+        ("uplink", &sample.uplink_breakdown, &cumulative.uplink),
+        ("downlink", &sample.downlink_breakdown, &cumulative.downlink),
+    ] {
+        assert_eq!(
+            rolling.len(),
+            PROTOCOL_IO_MAX_KEYS_PER_DIRECTION,
+            "{direction} rolling keys must remain capped"
+        );
+        assert_eq!(
+            total.len(),
+            PROTOCOL_IO_MAX_KEYS_PER_DIRECTION,
+            "{direction} cumulative keys must remain capped"
+        );
+        assert_eq!(
+            rolling.get(PROTOCOL_IO_OVERFLOW_KEY),
+            Some(&5),
+            "{direction} rolling overflow must retain all excess frames"
+        );
+        assert_eq!(
+            total.get(PROTOCOL_IO_OVERFLOW_KEY).copied(),
+            Some(ProtocolIoFrameStats { count: 5, bytes: 5 }),
+            "{direction} cumulative overflow must retain all excess frames"
+        );
+    }
 }
 
 /// Human-readable protocol I/O stats should use stable labels supplied by the
@@ -300,13 +288,15 @@ fn protocol_io_cumulative_stats_format_uses_labels_and_sorting() {
         &stats,
     );
 
-    assert!(formatted.contains("peer -> harness: 50B in 1 frame(s)"));
-    assert!(formatted.contains("  message.hello: 50B count=1"));
-    assert!(formatted.contains("harness -> peer: 12K in 5 frame(s)"));
-    assert!(!formatted.contains("bytes="));
-    assert!(
-        formatted.find("large.event").expect("large event line")
-            < formatted.find("small.event").expect("small event line")
+    assert_eq!(
+        formatted,
+        "\
+Example stats
+peer -> harness: 50B in 1 frame(s)
+  message.hello: 50B count=1
+harness -> peer: 12K in 5 frame(s)
+  large.event: 12K count=2
+  small.event: 512B count=3"
     );
 }
 

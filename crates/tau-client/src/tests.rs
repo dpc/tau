@@ -3417,6 +3417,8 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
     )));
 }
 
+/// Accepted Configure declarations must follow static defaults and precede
+/// `Ready`, so configured values can override startup defaults atomically.
 #[test]
 fn configure_declaration_overrides_static_declaration_before_ready() {
     let (_, frames) = run_messages(ConfigureDeclarationExtension { reject: false }, (), &[]);
@@ -3447,6 +3449,9 @@ fn configure_declaration_overrides_static_declaration_before_ready() {
     assert!(registrations[1].0 < ready);
 }
 
+/// Rejected Configure transactions must discard buffered declarations and
+/// withhold `Ready`, preventing partially configured startup from becoming
+/// live.
 #[test]
 fn rejected_configure_discards_buffered_declaration_and_withholds_ready() {
     let (_, frames) = run_messages(ConfigureDeclarationExtension { reject: true }, (), &[]);
