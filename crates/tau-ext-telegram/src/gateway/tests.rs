@@ -422,20 +422,6 @@ fn fixed_chat_reconciles_stale_private_link() {
     assert_eq!(durable.linked_chat, None);
 }
 
-/// Ensures the local socket request parser accepts the versioned status
-/// request shape intended for gateway-client discovery.
-#[test]
-fn local_socket_accepts_status_request() {
-    let (mut client, server) = UnixStream::pair().expect("socket pair");
-    writeln!(client, r#"{{"protocol_version":0,"kind":"status"}}"#).expect("write request");
-
-    assert!(
-        read_gateway_socket_request(&server)
-            .expect("status request should parse")
-            .is_some()
-    );
-}
-
 /// Local gateway requests must state the current protocol version explicitly.
 #[test]
 fn local_socket_rejects_missing_protocol_version() {

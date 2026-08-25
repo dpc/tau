@@ -4,7 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Condvar, Mutex, atomic as path_std_sync_atomic, mpsc};
-use std::{io as path_std_io, sync as path_std_sync, time as path_std_time};
+use std::{io as path_std_io, sync as path_std_sync};
 
 use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, ToolStarted};
 
@@ -394,32 +394,6 @@ impl TelegramClient for FakeClient {
     }
 }
 
-struct SlowPollClient;
-
-impl TelegramClient for SlowPollClient {
-    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
-        Ok(TgWebhookInfo::default())
-    }
-
-    fn get_updates(
-        &self,
-        _cfg: &RuntimeConfig,
-        _offset: Option<i64>,
-    ) -> Result<Vec<TgUpdate>, TelegramApiFailure> {
-        std::thread::sleep(Duration::from_secs(2));
-        Ok(Vec::new())
-    }
-
-    fn send_message(
-        &self,
-        _cfg: &RuntimeConfig,
-        _chat_id: i64,
-        _text: &str,
-    ) -> Result<(), TelegramApiFailure> {
-        Ok(())
-    }
-}
-
 /// Fixture state for pausing exactly one webhook preflight at a deterministic
 /// point in registration.
 #[derive(Default)]
@@ -446,8 +420,14 @@ struct ControlledPollClient {
     webhook_check_changed: Condvar,
     /// Number of currently executing poll calls.
     active_polls: AtomicUsize,
+    /// Completed provider poll calls.
+    returned_calls: Mutex<usize>,
+    /// Signals completed provider poll calls.
+    returned_ready: Condvar,
     /// Number of poll-loop exits.
-    poller_exits: AtomicUsize,
+    poller_exits: Mutex<usize>,
+    /// Signals poll-loop exit.
+    poller_exit_ready: Condvar,
 }
 
 /// Decrements the active provider-call count on every return path.
@@ -470,7 +450,10 @@ impl ControlledPollClient {
             webhook_check_gate: Mutex::new(WebhookCheckGate::Open),
             webhook_check_changed: Condvar::new(),
             active_polls: AtomicUsize::new(0),
-            poller_exits: AtomicUsize::new(0),
+            returned_calls: Mutex::new(0),
+            returned_ready: Condvar::new(),
+            poller_exits: Mutex::new(0),
+            poller_exit_ready: Condvar::new(),
         })
     }
 
@@ -524,11 +507,37 @@ impl ControlledPollClient {
         *self.first_response.lock().expect("lock") = Some(response);
         self.response_ready.notify_all();
     }
+
+    fn wait_for_returned_call_count(&self, expected: usize) {
+        let returned = self.returned_calls.lock().expect("lock");
+        let returned = self
+            .returned_ready
+            .wait_while(returned, |returned| *returned < expected)
+            .expect("wait");
+        assert!(
+            *returned >= expected,
+            "poller returned from {returned} getUpdates calls, expected {expected}"
+        );
+    }
+
+    fn wait_for_poller_exit(&self) {
+        let exits = self.poller_exits.lock().expect("lock");
+        drop(
+            self.poller_exit_ready
+                .wait_while(exits, |exits| *exits == 0)
+                .expect("wait"),
+        );
+    }
+
+    fn poller_exit_count(&self) -> usize {
+        *self.poller_exits.lock().expect("lock")
+    }
 }
 
 impl TelegramClient for ControlledPollClient {
     fn poller_exited(&self) {
-        self.poller_exits.fetch_add(1, AtomicOrdering::SeqCst);
+        *self.poller_exits.lock().expect("lock") += 1;
+        self.poller_exit_ready.notify_all();
     }
     fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, TelegramApiFailure> {
         let mut gate = self.webhook_check_gate.lock().expect("lock");
@@ -557,12 +566,17 @@ impl TelegramClient for ControlledPollClient {
             *called += 1;
             self.called_ready.notify_all();
         }
-        let response = self.first_response.lock().expect("lock");
-        let mut response = self
-            .response_ready
-            .wait_while(response, |response| response.is_none())
-            .expect("wait");
-        response.take().unwrap_or_else(|| Ok(Vec::new()))
+        let response = {
+            let response = self.first_response.lock().expect("lock");
+            let mut response = self
+                .response_ready
+                .wait_while(response, |response| response.is_none())
+                .expect("wait");
+            response.take().unwrap_or_else(|| Ok(Vec::new()))
+        };
+        *self.returned_calls.lock().expect("lock") += 1;
+        self.returned_ready.notify_all();
+        response
     }
 
     fn send_message(
@@ -2495,7 +2509,8 @@ fn update_stream_lock_allows_different_bot_tokens() {
 fn register_after_idle_must_reacquire_update_stream_lock() {
     let root = temp_ext_root();
     let (tx1, rx1) = mpsc::channel();
-    let ext1 = test_extension(FakeClient::new(), tx1);
+    let client1 = ControlledPollClient::new();
+    let ext1 = test_extension(client1.clone(), tx1);
     ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
         .expect("apply first config");
     let (tx2, rx2) = mpsc::channel();
@@ -2505,9 +2520,15 @@ fn register_after_idle_must_reacquire_update_stream_lock() {
 
     ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     expect_tool_finished(&rx1);
+    client1.wait_for_call();
     ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
     expect_tool_finished(&rx1);
-    std::thread::sleep(Duration::from_millis(100));
+    let (idle_tx, idle_rx) = mpsc::channel();
+    ext1.state.observe_next_readiness_wait(idle_tx);
+    client1.release_first_response(Vec::new());
+    idle_rx
+        .recv()
+        .expect("poller returned idle and released stream lock");
 
     ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
     expect_tool_finished(&rx2);
@@ -2549,8 +2570,13 @@ fn in_flight_poll_keeps_update_stream_lock_after_unregister() {
     let message = expect_tool_error(&rx2);
     assert!(message.contains("already locked"), "{message}");
 
+    let (idle_tx, idle_rx) = mpsc::channel();
+    ext1.state.observe_next_readiness_wait(idle_tx);
     client1.release_first_response(Vec::new());
-    std::thread::sleep(Duration::from_millis(100));
+    client1.wait_for_returned_call_count(1);
+    idle_rx
+        .recv()
+        .expect("poller retired returned request and released stream lock");
     ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
     expect_tool_finished(&rx2);
 }
@@ -4126,7 +4152,8 @@ fn unallowed_group_user_cannot_route() {
 #[test]
 fn initial_poller_drops_stale_backlog() {
     let (tx, rx) = mpsc::channel();
-    let client = FakeClient::with_updates(vec![vec![TgUpdate {
+    let client = ControlledPollClient::new();
+    let stale_update = TgUpdate {
         update_id: telegram_update_id(10),
         message: Some(TgMessage {
             chat_id: 123,
@@ -4135,15 +4162,21 @@ fn initial_poller_drops_stale_backlog() {
             from_name: None,
             text: Some("old".to_owned()),
         }),
-    }]]);
-    let ext = test_extension(client, tx);
+    };
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    let _progress = rx.recv().expect("progress");
-    let _result = rx.recv().expect("result");
-    std::thread::sleep(Duration::from_millis(100));
+    expect_tool_finished(&rx);
+    client.wait_for_call_count(1);
+    client.release_first_response(vec![stale_update]);
+    client.wait_for_call_count(2);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(3);
     assert!(rx.try_recv().is_err());
+    ext.request_shutdown();
+    client.release_first_response(Vec::new());
+    client.wait_for_poller_exit();
 }
 
 /// Initial backlog draining must continue until Telegram returns an empty
@@ -4731,7 +4764,7 @@ fn ingress_report_writer_failure_wakes_idle_production_loop() {
         "worker output failure must fail the production runner"
     );
     assert_eq!(client.active_polls.load(AtomicOrdering::SeqCst), 0);
-    assert_eq!(client.poller_exits.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(client.poller_exit_count(), 1);
 }
 
 /// Explicit Disconnect returns promptly while a local poller report remains
@@ -4816,8 +4849,17 @@ fn disconnect_detaches_blocked_local_report() {
 /// channel sender before the extension process can exit.
 #[test]
 fn run_exits_promptly_when_disconnect_races_long_poll() {
-    let mut input = Vec::new();
-    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    let (extension_input, harness_input) = UnixStream::pair().expect("input pair");
+    let client = ControlledPollClient::new();
+    let runner_client: Arc<dyn TelegramClient> = client.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        result_tx.send(
+            run_with_client(extension_input, Vec::new(), runner_client)
+                .map_err(|error| error.to_string()),
+        )
+    });
+    let mut writer = tau_proto::HarnessOutputWriter::new(harness_input);
     let mut secrets = BTreeMap::new();
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
@@ -4843,6 +4885,8 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
             bool_args(true),
         ))))
         .expect("tool");
+    writer.flush().expect("flush registration");
+    client.wait_for_call();
     writer
         .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: None,
@@ -4850,14 +4894,16 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
         .expect("disconnect");
     writer.flush().expect("flush");
 
-    let start = path_std_time::Instant::now();
-    run_with_client(
-        path_std_io::Cursor::new(input),
-        Vec::new(),
-        Arc::new(SlowPollClient),
-    )
-    .expect("run");
-    assert!(start.elapsed() < Duration::from_secs(1));
+    result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("disconnect returns while poll remains blocked")
+        .expect("run");
+    client.release_first_response(Vec::new());
+    client.wait_for_poller_exit();
+    runner
+        .join()
+        .expect("runner joins")
+        .expect("runner result channel remains open");
 }
 
 /// Replayed tool deliveries must be skipped so historical registrations do not
@@ -5423,12 +5469,16 @@ fn old_generation_empty_poll_response_does_not_drain_new_stream() {
     ext.apply_config(new_cfg, Some(temp_state_dir()))
         .expect("apply config");
     client.release_first_response(Vec::new());
-    std::thread::sleep(Duration::from_millis(100));
+    client.wait_for_call_count(2);
 
     let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, None);
     assert!(rx.try_recv().is_err());
+    drop(state);
+    ext.request_shutdown();
+    client.release_first_response(Vec::new());
+    client.wait_for_poller_exit();
 }
 
 /// Non-empty poll responses from an old config generation must also be
@@ -5460,12 +5510,16 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
             text: Some("stale".to_owned()),
         }),
     }]);
-    std::thread::sleep(Duration::from_millis(100));
+    client.wait_for_call_count(2);
 
     let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, None);
     assert!(rx.try_recv().is_err());
+    drop(state);
+    ext.request_shutdown();
+    client.release_first_response(Vec::new());
+    client.wait_for_poller_exit();
 }
 
 /// A period with no registered agents is a stale-backlog boundary: Telegram
@@ -5639,13 +5693,13 @@ fn shutdown_wakes_poller_readiness_wait() {
         .expect("apply config");
     let state = Arc::clone(&ext.state);
     let shutdown = Arc::clone(&ext.shutdown);
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    ext.state.observe_next_readiness_wait(waiting_tx);
     let handle = std::thread::spawn(move || poll_loop(state, client, tx.into(), shutdown));
 
-    std::thread::sleep(Duration::from_millis(50));
-    let start = path_std_time::Instant::now();
+    waiting_rx.recv().expect("poller entered readiness wait");
     ext.request_shutdown();
     handle.join().expect("poller joins after shutdown");
-    assert!(start.elapsed() < Duration::from_secs(1));
 }
 
 /// Even after the poll loop's first generation check succeeds, a later config

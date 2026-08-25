@@ -689,6 +689,10 @@ struct SharedState {
     /// a coordination wait atomically releases that lock.
     #[cfg(test)]
     wait_observer: Mutex<Option<mpsc::Sender<()>>>,
+    /// Test-only one-shot signal emitted while holding state immediately before
+    /// the poller atomically waits for registration or shutdown.
+    #[cfg(test)]
+    readiness_wait_observer: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl SharedState {
@@ -699,6 +703,8 @@ impl SharedState {
             changed: Condvar::new(),
             #[cfg(test)]
             wait_observer: Mutex::new(None),
+            #[cfg(test)]
+            readiness_wait_observer: Mutex::new(None),
         }
     }
 
@@ -754,6 +760,30 @@ impl SharedState {
             .wait_observer
             .lock()
             .expect("wait observer lock")
+            .take()
+        {
+            let _ = observer.send(());
+        }
+    }
+
+    /// Install a one-shot deterministic observer for the next poller readiness
+    /// wait.
+    #[cfg(test)]
+    fn observe_next_readiness_wait(&self, observer: mpsc::Sender<()>) {
+        *self
+            .readiness_wait_observer
+            .lock()
+            .expect("readiness wait observer lock") = Some(observer);
+    }
+
+    /// Signal a test while the poller still holds state immediately before
+    /// entering its readiness condition-variable wait.
+    #[cfg(test)]
+    fn notify_readiness_wait_observer(&self) {
+        if let Some(observer) = self
+            .readiness_wait_observer
+            .lock()
+            .expect("readiness wait observer lock")
             .take()
         {
             let _ = observer.send(());
@@ -2197,13 +2227,21 @@ fn wait_for_poller_ready_or_shutdown(
 ) -> Option<PollRequest> {
     let mut state = state_cell.lock();
     state.retire_update_stream_lock_if_idle();
-    state = state_cell.wait_while(state, |state| {
-        state.retire_update_stream_lock_if_idle();
-        !state.shutdown_requested
-            && (state.config.is_none()
-                || state.registered_agents.is_empty()
-                || state.update_stream_lock.is_none())
-    });
+    while !state.shutdown_requested
+        && (state.config.is_none()
+            || state.registered_agents.is_empty()
+            || state.update_stream_lock.is_none())
+    {
+        #[cfg(test)]
+        state_cell.notify_readiness_wait_observer();
+        state = state_cell.wait_while(state, |state| {
+            state.retire_update_stream_lock_if_idle();
+            !state.shutdown_requested
+                && (state.config.is_none()
+                    || state.registered_agents.is_empty()
+                    || state.update_stream_lock.is_none())
+        });
+    }
     if state.shutdown_requested || shutdown.load(Ordering::Relaxed) {
         return None;
     }
