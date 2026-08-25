@@ -166,6 +166,30 @@ pub(crate) enum HarnessEvent {
     ComponentIngressReady,
 }
 
+impl HarnessEvent {
+    /// Returns the fixed local prompt-traffic class, if this is a prompt frame.
+    pub(crate) fn prompt_traffic_class(&self) -> Option<&'static str> {
+        let Self::FromConnection { message, .. } = self else {
+            return None;
+        };
+        prompt_traffic_class_for_message(message)
+    }
+}
+
+/// Classifies only canonical UI prompt-bearing input without cloning payloads.
+fn prompt_traffic_class_for_message(message: &HarnessInputMessage) -> Option<&'static str> {
+    let HarnessInputMessage::Emit(emit) = message else {
+        return None;
+    };
+    match emit.event.as_ref() {
+        tau_proto::Event::UiPromptSubmitted(_) => Some("ui_prompt_submitted"),
+        tau_proto::Event::UiCreateAgent(request) if request.initial_prompt.is_some() => {
+            Some("ui_create_agent")
+        }
+        _ => None,
+    }
+}
+
 /// Shared state for the trivially small component-ingress rendezvous lane.
 struct ComponentIngressState {
     /// At most one component payload awaiting harness consumption.
@@ -200,6 +224,28 @@ struct PendingIngress {
     ticket: IngressTicket,
     /// Component payload awaiting harness consumption.
     event: HarnessEvent,
+    /// Local monotonic instant when this payload occupied the slot.
+    occupied_at: Instant,
+    /// Fixed local prompt class, or none for unrelated ingress.
+    prompt_traffic_class: Option<&'static str>,
+}
+
+/// Captured prompt timing emitted only after the ingress lock is released.
+pub(crate) struct IngressTakeDiagnostic {
+    /// Fixed content-free prompt traffic class.
+    traffic_class: &'static str,
+    /// Slot occupation through payload take, in microseconds.
+    wake_to_take_ready_us: u128,
+    /// Exact blocked-sender count observed while taking the payload.
+    blocked_reader_count: usize,
+}
+
+/// One taken payload plus optional prompt-only timing metadata.
+pub(crate) struct TakenIngress {
+    /// Component payload released from the one-slot lane.
+    pub(crate) event: HarnessEvent,
+    /// Captured prompt timing, absent for unrelated traffic.
+    pub(crate) diagnostic: Option<IngressTakeDiagnostic>,
 }
 
 /// Harness-owned receiver for bounded or rendezvous component ingress.
@@ -257,15 +303,52 @@ impl ComponentIngress {
     }
 
     /// Takes the payload associated with one control-lane wake.
+    #[cfg(test)]
     pub(crate) fn take_ready(&self) -> Option<HarnessEvent> {
+        self.take_ready_with_diagnostic().map(|taken| {
+            Self::trace_take_diagnostic(taken.diagnostic);
+            taken.event
+        })
+    }
+
+    /// Takes one payload while deferring diagnostic emission to the caller.
+    pub(crate) fn take_ready_with_diagnostic(&self) -> Option<TakenIngress> {
         let (state, changed) = &*self.state;
         let mut state = state.lock().expect("component ingress mutex poisoned");
-        let event = state.slot.take().map(|pending| {
+        let taken = state.slot.take().map(|pending| {
+            let diagnostic =
+                pending
+                    .prompt_traffic_class
+                    .map(|traffic_class| IngressTakeDiagnostic {
+                        traffic_class,
+                        wake_to_take_ready_us: pending.occupied_at.elapsed().as_micros(),
+                        blocked_reader_count: state.blocked_senders,
+                    });
             state.consumed_through = Some(pending.ticket);
-            pending.event
+            TakenIngress {
+                event: pending.event,
+                diagnostic,
+            }
         });
         changed.notify_all();
-        event
+        drop(state);
+        taken
+    }
+
+    /// Emits already-captured take diagnostics after semantic state is
+    /// released.
+    pub(crate) fn trace_take_diagnostic(diagnostic: Option<IngressTakeDiagnostic>) {
+        if let Some(diagnostic) = diagnostic {
+            tracing::trace!(
+                target: "tau_harness::prompt_ingress",
+                stage = "wake_to_take_ready",
+                traffic_class = diagnostic.traffic_class,
+                wake_to_take_ready_us = diagnostic.wake_to_take_ready_us,
+                blocked_reader_count = diagnostic.blocked_reader_count,
+                slot_occupied = true,
+                "content-free component ingress stage"
+            );
+        }
     }
 
     /// Closes ingress and wakes every producer before component joins begin.
@@ -296,6 +379,7 @@ impl ComponentIngressSender {
     /// Sends one component frame or lifecycle observation with natural
     /// backpressure from harness consumption.
     fn send(&self, event: HarnessEvent) -> Result<(), ()> {
+        let started = Instant::now();
         let (state, changed) = &*self.state;
         let mut state = state.lock().expect("component ingress mutex poisoned");
         let blocked = state.receiver_alive && state.slot.is_some();
@@ -316,7 +400,14 @@ impl ComponentIngressSender {
         }
         let ticket = state.next_ticket;
         state.next_ticket = state.next_ticket.next();
-        state.slot = Some(PendingIngress { ticket, event });
+        let prompt_traffic_class = event.prompt_traffic_class();
+        state.slot = Some(PendingIngress {
+            ticket,
+            event,
+            occupied_at: Instant::now(),
+            prompt_traffic_class,
+        });
+        let blocked_reader_count = state.blocked_senders;
         drop(state);
         if self
             .wake_tx
@@ -325,6 +416,17 @@ impl ComponentIngressSender {
         {
             self.close_after_wake_failure();
             return Err(());
+        }
+        if let Some(traffic_class) = prompt_traffic_class {
+            tracing::trace!(
+                target: "tau_harness::prompt_ingress",
+                stage = "ingress_admission",
+                traffic_class,
+                ingress_wait_us = started.elapsed().as_micros(),
+                blocked_reader_count,
+                slot_occupied = true,
+                "content-free component ingress stage"
+            );
         }
         if self.capacity == ComponentIngressCapacity::Rendezvous {
             let mut state = state_lock(&self.state);
@@ -594,8 +696,20 @@ fn spawn_reader_thread_inner(
 
         let mut reader = HarnessInputReader::new(BufReader::new(stream));
         loop {
+            let read_started = Instant::now();
             match reader.read_message_with_size() {
                 Ok(Some(decoded)) => {
+                    let traffic_class = prompt_traffic_class_for_message(&decoded.message);
+                    if let Some(traffic_class) = traffic_class {
+                        tracing::trace!(
+                            target: "tau_harness::prompt_ingress",
+                            stage = "blocking_read_decode",
+                            traffic_class,
+                            encoded_bytes = decoded.encoded_bytes.get(),
+                            socket_wait_read_decode_us = read_started.elapsed().as_micros(),
+                            "content-free component ingress stage"
+                        );
+                    }
                     if tx
                         .send(HarnessEvent::FromConnection {
                             connection_id: connection_id.clone(),

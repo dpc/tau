@@ -17,6 +17,8 @@
 //! [`Harness::dispatch_blocked_for`] is the predicate the rest of the harness
 //! uses to decide whether to dispatch immediately or queue.
 
+use std::time::Instant;
+
 use tau_proto::{AgentId, Event, SessionId};
 
 use crate::agent as path_crate_agent;
@@ -599,7 +601,16 @@ impl Harness {
         }) else {
             return;
         };
-        let _ = self.store.record_session_activity(session_id.as_str());
+        let started = Instant::now();
+        let result = self.store.record_session_activity(session_id.as_str());
+        tracing::trace!(
+            target: "tau_harness::prompt_acceptance",
+            stage = "session_meta_touch",
+            agent_id = %agent_id,
+            result_class = if result.is_ok() { "success" } else { "failure" },
+            session_meta_touch_us = started.elapsed().as_micros(),
+            "content-free prompt acceptance precursor"
+        );
     }
 
     /// True when a fresh prompt for one agent should *not* be sent

@@ -4632,9 +4632,24 @@ impl Harness {
     /// Replaces a non-payload ingress wake with its bounded component payload.
     fn expand_component_ingress_wake(&self, event: HarnessEvent) -> HarnessEvent {
         if matches!(event, HarnessEvent::ComponentIngressReady) {
-            self.component_ingress
-                .take_ready()
-                .expect("component ingress wake must own one payload")
+            let started = Instant::now();
+            let taken = self
+                .component_ingress
+                .take_ready_with_diagnostic()
+                .expect("component ingress wake must own one payload");
+            let handoff_us = started.elapsed().as_micros();
+            ComponentIngress::trace_take_diagnostic(taken.diagnostic);
+            let event = taken.event;
+            if let Some(traffic_class) = event.prompt_traffic_class() {
+                tracing::trace!(
+                    target: "tau_harness::prompt_ingress",
+                    stage = "take_ready_to_runtime_handoff",
+                    traffic_class,
+                    take_ready_to_runtime_handoff_us = handoff_us,
+                    "content-free component ingress stage"
+                );
+            }
+            event
         } else {
             event
         }
@@ -5244,37 +5259,41 @@ impl Harness {
     /// The semantic append still validates and writes one failure-atomic
     /// journal frame synchronously. The caller must perform the runtime
     /// action regardless of that append's result; file-data and directory
-    /// synchronization remain asynchronous.
+    /// synchronization remain asynchronous. The return value reports only
+    /// whether this immediate append succeeded.
     pub(crate) fn append_best_effort_observation(
         &mut self,
         cid: &AgentId,
         observation_id: tau_proto::ObservationId,
         event: Event,
-    ) {
+    ) -> bool {
         let Some(agent) = self.agents.get(cid) else {
-            return;
+            return false;
         };
         let Some(agent_id) = agent.agent_id.as_deref() else {
-            return;
+            return false;
         };
         let parent = agent
             .head
             .map(tau_core::AgentEventParent::Under)
             .unwrap_or(tau_core::AgentEventParent::Root);
-        if let Err(error) = self.agent_store.append_agent_event_at_with_observation_id(
+        let result = self.agent_store.append_agent_event_at_with_observation_id(
             agent_id,
             None,
             parent,
             event,
             tau_proto::UnixMicros::now(),
             observation_id,
-        ) {
+        );
+        let succeeded = result.is_ok();
+        if let Err(error) = result {
             tracing::warn!(
                 target: "tau_harness",
                 %error,
                 "best-effort runtime observation append failed"
             );
         }
+        succeeded
     }
 
     /// Allocate and append the identity of one accepted activating queue item.
@@ -5289,7 +5308,23 @@ impl Harness {
         source_call: Option<tau_proto::ToolCallRef>,
     ) -> tau_proto::ObservationId {
         let observation_id = tau_proto::ObservationId::random();
-        self.append_activation_queued(cid, observation_id, kind, source_observation, source_call);
+        let started = Instant::now();
+        let succeeded = self.append_activation_queued(
+            cid,
+            observation_id,
+            kind,
+            source_observation,
+            source_call,
+        );
+        tracing::trace!(
+            target: "tau_harness::prompt_acceptance",
+            stage = "activation_append",
+            agent_id = %cid,
+            event_class = "agent.activation_queued",
+            result_class = if succeeded { "success" } else { "failure" },
+            activation_append_us = started.elapsed().as_micros(),
+            "content-free prompt acceptance precursor"
+        );
         observation_id
     }
 
@@ -5316,7 +5351,7 @@ impl Harness {
         kind: tau_proto::ActivationKind,
         source_observation: Option<tau_proto::ObservationId>,
         source_call: Option<tau_proto::ToolCallRef>,
-    ) {
+    ) -> bool {
         self.append_best_effort_observation(
             cid,
             observation_id,
@@ -5325,7 +5360,7 @@ impl Harness {
                 source_observation,
                 source_call,
             }),
-        );
+        )
     }
 
     /// Preallocate a canonical terminal identity and submit its classification

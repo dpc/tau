@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -134,33 +134,44 @@ impl UiWriter {
         }
     }
 
-    fn send_frame(&mut self, message: &HarnessInputMessage) -> io::Result<()> {
-        let write_started = Instant::now();
+    fn send_frame(
+        &mut self,
+        message: &HarnessInputMessage,
+        diagnostic_seq: Option<u64>,
+    ) -> io::Result<()> {
+        let hold_started = Instant::now();
         let frame_bytes = self
             .writer
             .write_message_with_size(message)
             .map_err(io::Error::other)?;
         let flush_started = Instant::now();
         self.writer.flush()?;
+        let flushed_at = Instant::now();
+        let metering_started = Instant::now();
+        self.meter.record_uplink_frame_bytes(message, frame_bytes);
         tracing::trace!(
             target: "tau_cli::frontend_progress",
-            write_us = flush_started.duration_since(write_started).as_micros(),
-            flush_us = flush_started.elapsed().as_micros(),
+            diagnostic_seq,
+            message_kind = tau_client::harness_input_message_name(message),
+            encoded_bytes = frame_bytes.get(),
+            write_us = flush_started.duration_since(hold_started).as_micros(),
+            flush_us = flushed_at.duration_since(flush_started).as_micros(),
+            metering_us = metering_started.elapsed().as_micros(),
+            total_hold_us = hold_started.elapsed().as_micros(),
             "terminal UI uplink written and flushed"
         );
-        self.meter.record_uplink_frame_bytes(message, frame_bytes);
         Ok(())
     }
 }
 
 /// Shared writer handle: the input loop and the prompt-draft debounce
 /// thread both need to send events on the same socket. Stream
-/// `write()` calls are atomic only up to `PIPE_BUF` (~4 KB on
-/// AF_UNIX) so we serialize whole-event writes through a `Mutex`
-/// instead of risking a long draft burst interleaving with a
-/// `UiPromptSubmitted` mid-byte. Contention is essentially zero —
-/// debounce fires at most once per second per typing burst.
+/// The self-delimiting CBOR application stream requires serialized whole-item
+/// writes, so the mutex prevents concurrent producers from interleaving bytes.
 type WriterHandle = Arc<Mutex<UiWriter>>;
+
+/// Wrapping process-local identity for content-free submission diagnostics.
+static NEXT_PROMPT_SUBMISSION_DIAGNOSTIC_SEQ: AtomicU64 = AtomicU64::new(1);
 
 const RENDERER_QUEUE_MAX_ITEMS: usize = 1_024;
 const RENDERER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -300,7 +311,31 @@ fn connect_ui_transport(
 /// `io::Error` on failure so callers can use `?` or discard with
 /// `let _ = …`.
 fn send_frame(writer: &WriterHandle, message: &HarnessInputMessage) -> io::Result<()> {
-    locked(writer).send_frame(message)
+    send_frame_with_diagnostic(writer, message, None)
+}
+
+/// Sends one frame with optional process-local diagnostic correlation.
+fn send_frame_with_diagnostic(
+    writer: &WriterHandle,
+    message: &HarnessInputMessage,
+    diagnostic_seq: Option<u64>,
+) -> io::Result<()> {
+    let started = Instant::now();
+    let mut writer = locked(writer);
+    let acquired = Instant::now();
+    let result = writer.send_frame(message, diagnostic_seq);
+    let writer_total_hold_us = acquired.elapsed().as_micros();
+    drop(writer);
+    tracing::trace!(
+        target: "tau_cli::frontend_progress",
+        diagnostic_seq,
+        message_kind = tau_client::harness_input_message_name(message),
+        writer_wait_us = acquired.duration_since(started).as_micros(),
+        writer_total_hold_us,
+        writer_total_us = started.elapsed().as_micros(),
+        "terminal UI writer lock lifecycle"
+    );
+    result
 }
 
 fn send_handshake_frame(
@@ -332,12 +367,6 @@ fn startup_disconnect_or_io_error(
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 pub(crate) fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &durable_emit_message(event))
-}
-
-/// Sends a one-shot event without cloning its owned payload into the Emit
-/// frame.
-fn send_owned_event(writer: &WriterHandle, event: Event) -> io::Result<()> {
-    send_frame(writer, &durable_emit_message_owned(event))
 }
 
 /// Sends the production cancellation event through the direct uplink.
@@ -820,7 +849,7 @@ pub(crate) fn send_draft_snapshot_with_before_writer(
     if !should_send_draft_snapshot(handle, epoch) {
         return Ok(false);
     }
-    writer.send_frame(&durable_emit_message(&Event::UiPromptDraft(draft)))?;
+    writer.send_frame(&durable_emit_message(&Event::UiPromptDraft(draft)), None)?;
     Ok(true)
 }
 
@@ -2142,6 +2171,8 @@ struct TerminalInputSession<'a> {
     ctx: TerminalInputLoopCtx,
     output: LocalTerminalOutput,
     pending_new_agent_options: PendingNewAgentOptions,
+    /// Current line's wrapping process-local diagnostic identity.
+    prompt_diagnostic_seq: Option<u64>,
 }
 
 /// One-shot options staged while the UI is in new-agent mode, as governed by
@@ -2514,7 +2545,20 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_line(&mut self, line: &str) -> Result<Option<InputLoopExit>, CliError> {
-        handle_submitted_line_with_handlers(line, self)
+        let started = Instant::now();
+        let diagnostic_seq = NEXT_PROMPT_SUBMISSION_DIAGNOSTIC_SEQ.fetch_add(1, Ordering::Relaxed);
+        self.prompt_diagnostic_seq = Some(diagnostic_seq);
+        let result = handle_submitted_line_with_handlers(line, self);
+        self.prompt_diagnostic_seq = None;
+        tracing::trace!(
+            target: "tau_cli::prompt_submission",
+            diagnostic_seq,
+            stage = "chat_history_routing",
+            prompt_bytes = line.len(),
+            stage_us = started.elapsed().as_micros(),
+            "content-free prompt submission stage"
+        );
+        result
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
@@ -2594,14 +2638,24 @@ impl<'a> TerminalInputSession<'a> {
         text: &str,
         routing_text: &str,
     ) {
+        let started = Instant::now();
         let history_line = redacted_prompt_history_line(line, text);
         if self.prompt_line_targets_ephemeral_agent(routing_text) {
             if let Ok(mut context) = self.ctx.editor_context.lock() {
                 context.previous_prompt = Some(history_line.into_owned());
             }
+            tracing::trace!(
+                target: "tau_cli::prompt_submission",
+                diagnostic_seq = self.prompt_diagnostic_seq,
+                stage = "chat_history",
+                history_admission = "ephemeral",
+                stage_us = started.elapsed().as_micros(),
+                "content-free prompt-history stage"
+            );
             return;
         }
-        match self.ctx.prompt_history.append(&history_line) {
+        let admission = self.ctx.prompt_history.append(&history_line);
+        match admission {
             PromptHistoryAdmission::Queued | PromptHistoryAdmission::IgnoredEmpty => {}
             PromptHistoryAdmission::DroppedFull => {
                 tracing::warn!(
@@ -2619,6 +2673,14 @@ impl<'a> TerminalInputSession<'a> {
         if let Ok(mut context) = self.ctx.editor_context.lock() {
             context.previous_prompt = Some(history_line.into_owned());
         }
+        tracing::trace!(
+            target: "tau_cli::prompt_submission",
+            diagnostic_seq = self.prompt_diagnostic_seq,
+            stage = "chat_history",
+            history_admission = admission.diagnostic_class(),
+            stage_us = started.elapsed().as_micros(),
+            "content-free prompt-history stage"
+        );
     }
 
     fn prompt_line_targets_ephemeral_agent(&self, text: &str) -> bool {
@@ -3273,7 +3335,18 @@ impl<'a> TerminalInputSession<'a> {
                 },
             ))
         };
-        if send_owned_event(self.writer, event).is_err() {
+        let frame_started = Instant::now();
+        let event_kind = event.name();
+        let message = durable_emit_message_owned(event);
+        tracing::trace!(
+            target: "tau_cli::prompt_submission",
+            diagnostic_seq = self.prompt_diagnostic_seq,
+            stage = "frame_construct",
+            event_kind = %event_kind,
+            stage_us = frame_started.elapsed().as_micros(),
+            "content-free prompt frame construction stage"
+        );
+        if send_frame_with_diagnostic(self.writer, &message, self.prompt_diagnostic_seq).is_err() {
             return Some(InputLoopExit::Quit);
         }
 
@@ -3828,6 +3901,7 @@ fn terminal_input_loop(
         ctx,
         output,
         pending_new_agent_options: PendingNewAgentOptions::default(),
+        prompt_diagnostic_seq: None,
     }
     .run()
 }

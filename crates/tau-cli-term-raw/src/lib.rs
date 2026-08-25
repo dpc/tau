@@ -2721,6 +2721,7 @@ impl Term {
         if self.accept_completion_event().is_some() {
             return Event::CompletionAccept;
         }
+        let started = path_std_time::Instant::now();
         let line = {
             let mut st = self.handle.lock();
             st.completion = None;
@@ -2730,6 +2731,13 @@ impl Term {
             st.push_current_as_history_entry();
             line
         };
+        tracing::trace!(
+            target: "tau_cli::prompt_submission",
+            stage = "raw_submit_clear",
+            prompt_bytes = line.len(),
+            stage_us = started.elapsed().as_micros(),
+            "content-free prompt submission stage"
+        );
         Event::Line(line)
     }
 

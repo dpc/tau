@@ -197,6 +197,48 @@ and approximate delays. Enabling or re-enabling shows the current snapshot rathe
 than attempt history. Raw endpoint bodies and provider error text intentionally
 remain unavailable across the watch boundary; inspect provider-local debug logs
 under the existing diagnostics policy when those details are required.
+
+## Interactive prompt latency traces
+
+Trace-level logs expose content-free observations for the local interactive
+prompt path. They are diagnostic observations, not protocol, correlation,
+ordering, acceptance, or durability facts. They never contain prompt text,
+payload values, paths, credentials, or durable observation identifiers.
+
+- `tau_cli::prompt_submission` reports the fixed stages
+  `raw_submit_clear`, `highterm_history_menu`, `chat_history`,
+  `chat_history_routing`, and `frame_construct`. Fields are the wrapping
+  process-local `diagnostic_seq` where available, `prompt_bytes`, fixed
+  `history_admission`/`event_kind` classes, and microsecond durations.
+  Admission is `queued`, `ignored_empty`, `dropped_full`,
+  `dropped_unavailable`, or `ephemeral`. Raw and HighTerm stages deliberately
+  have no inferred cross-component correlation.
+- `tau_cli::frontend_progress` reports fixed `message_kind`, `encoded_bytes`,
+  `write_us`, `flush_us`, `metering_us`, `total_hold_us`, `writer_wait_us`,
+  `writer_total_hold_us`, and `writer_total_us`. Both writer records carry the
+  same optional process-local `diagnostic_seq` as the prompt frame constructor.
+- `tau_harness::prompt_ingress` reports fixed event/message classes, encoded
+  bytes, `socket_wait_read_decode_us`, `ingress_wait_us`,
+  `wake_to_take_ready_us`, exact one-slot occupancy, and the existing
+  `blocked_reader_count`. Socket wait includes idle time before bytes arrive.
+  The slot timestamp precedes the control wake and therefore includes the
+  sender/wake tail, so the wake duration is conservative rather than a causal
+  protocol interval. Its `traffic_class` is exactly `ui_prompt_submitted` or
+  `ui_create_agent`; unrelated frames and prompt drafts do not emit these
+  prompt-ingress records.
+- `tau_harness::prompt_acceptance` reports `activation_append_us` and
+  `session_meta_touch_us`, safe agent identity, fixed event/stage class, and
+  only `success` or `failure`.
+
+All counters use existing bounded state. The one added correlation value is a
+wrapping fixed-size process-local sequence; it never enters wire or durable
+state. Durations use process-local monotonic clocks and cannot establish
+causality across processes or restarts. The instrumentation does not add
+queues, I/O, or change mutex, flush, wake,
+deadline, persistence, or dispatch ordering. Redraw flushes currently expose
+no submission-owned generation; asynchronous coalesced redraw state has no
+existing safe correlation, so these traces do not invent one.
+
 ### Debugging manual compaction
 
 Trace `agent.manual_compaction_requested` by request id, then expect exactly

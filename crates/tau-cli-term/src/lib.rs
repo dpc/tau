@@ -616,10 +616,25 @@ impl HighTerm {
     }
 
     fn handle_line_event(&mut self, line: String) -> NextEventStep {
+        let started = path_std_time::Instant::now();
         self.record_submitted_prompt(&line);
-        if self.sync_menu_block() {
+        let history_finished = path_std_time::Instant::now();
+        let redraw_requested = self.sync_menu_block();
+        let menu_finished = path_std_time::Instant::now();
+        if redraw_requested {
             self.handle.redraw();
         }
+        tracing::trace!(
+            target: "tau_cli::prompt_submission",
+            stage = "highterm_history_menu",
+            prompt_bytes = line.len(),
+            history_us = history_finished.duration_since(started).as_micros(),
+            menu_sync_us = menu_finished.duration_since(history_finished).as_micros(),
+            redraw_request_us = menu_finished.elapsed().as_micros(),
+            redraw_requested,
+            stage_us = started.elapsed().as_micros(),
+            "content-free prompt submission stage"
+        );
         NextEventStep::Return(Event::Line(line))
     }
 
@@ -770,8 +785,21 @@ impl HighTerm {
                 PromptActionOutcome::Continue
             }
             RawEvent::Line(line) => {
+                let started = path_std_time::Instant::now();
                 self.record_submitted_prompt(&line);
+                let history_finished = path_std_time::Instant::now();
                 self.sync_menu_block();
+                tracing::trace!(
+                    target: "tau_cli::prompt_submission",
+                    stage = "highterm_history_menu",
+                    prompt_bytes = line.len(),
+                    history_us = history_finished.duration_since(started).as_micros(),
+                    menu_sync_us = history_finished.elapsed().as_micros(),
+                    redraw_request_us = 0_u64,
+                    redraw_requested = false,
+                    stage_us = started.elapsed().as_micros(),
+                    "content-free prompt submission stage"
+                );
                 PromptActionOutcome::Return(Event::Line(line))
             }
             RawEvent::Eof => PromptActionOutcome::Return(Event::Eof),

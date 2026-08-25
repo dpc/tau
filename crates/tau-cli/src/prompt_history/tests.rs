@@ -533,3 +533,22 @@ fn prompt_history_record_rejects_unknown_fields() {
 
     assert!(error.to_string().contains("unknown field"), "got: {error}");
 }
+
+/// Diagnostic admission labels must remain bounded classes and must never
+/// derive labels from prompt content.
+#[test]
+fn prompt_history_diagnostic_classes_are_fixed_and_content_free() {
+    assert_eq!(PromptHistoryAdmission::Queued.diagnostic_class(), "queued");
+    assert_eq!(
+        PromptHistoryAdmission::IgnoredEmpty.diagnostic_class(),
+        "ignored_empty"
+    );
+    assert_eq!(
+        PromptHistoryAdmission::DroppedFull.diagnostic_class(),
+        "dropped_full"
+    );
+    assert_eq!(
+        PromptHistoryAdmission::DroppedUnavailable.diagnostic_class(),
+        "dropped_unavailable"
+    );
+}

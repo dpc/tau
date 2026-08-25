@@ -103,6 +103,18 @@ pub(crate) enum PromptHistoryAdmission {
     DroppedUnavailable,
 }
 
+impl PromptHistoryAdmission {
+    /// Returns the bounded, content-free diagnostic class for this admission.
+    pub(crate) const fn diagnostic_class(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::IgnoredEmpty => "ignored_empty",
+            Self::DroppedFull => "dropped_full",
+            Self::DroppedUnavailable => "dropped_unavailable",
+        }
+    }
+}
+
 /// Identity and boundary witness for one validated append-only file prefix.
 ///
 /// The witness has authority only after device, inode, length, and `boundary`

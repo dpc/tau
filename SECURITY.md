@@ -206,6 +206,12 @@ and cancel target resolution. They never retain prompt, response, tool, event,
 terminal-output, or disconnect-reason bodies. Trace-level paired stage markers
 localize an operation that never returns; warnings for completed stages at or
 above 500 ms are rate-limited per frontend component to one per five seconds.
+Interactive prompt-latency traces additionally use one wrapping fixed-size,
+process-local submission sequence and fixed prompt-traffic classes. That
+sequence is diagnostic correlation only: it never enters protocol messages,
+events, journals, settings, or persistence. These records must never include
+prompt or payload bodies, paths, credentials, durable observation identifiers,
+or protocol correlation identifiers.
 The CLI socket-to-renderer FIFO is bounded at 1,024 items and 64 MiB, but
 backpressure can migrate backlog to the harness writer queue. These bounds
 therefore do not promise whole-process or end-to-end slow-client memory limits.
