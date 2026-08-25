@@ -191,54 +191,6 @@ fn google_event_page_cursor_rejects_control_characters() {
 }
 
 #[test]
-fn parses_device_auth_response_and_oauth_errors() {
-    let start = parse_device_auth_start(
-        r#"{
-            "device_code":"device-code",
-            "user_code":"USER-CODE",
-            "verification_url":"https://www.google.com/device",
-            "expires_in":600
-        }"#,
-    )
-    .expect("device auth response");
-
-    assert_eq!(start.device_code, "device-code");
-    assert_eq!(start.user_code, "USER-CODE");
-    assert_eq!(start.verification_uri, "https://www.google.com/device");
-    assert_eq!(start.expires_in_secs, 600);
-    assert_eq!(start.interval_secs, 5);
-    assert_eq!(
-        google_oauth_error_message(r#"{"error":"authorization_pending"}"#).as_deref(),
-        Some(
-            "Google authorization is still pending; approve it in the browser, then run the finish action again"
-        )
-    );
-}
-
-#[test]
-fn parses_access_token_response_with_expiry() {
-    let token = parse_access_token_response(
-        r#"{"access_token":"access-token","expires_in":3600}"#,
-        "Google token response",
-    )
-    .expect("access token response");
-
-    assert_eq!(token.access_token, "access-token");
-    assert_eq!(token.expires_in_secs, Some(3600));
-}
-
-#[test]
-fn oauth_fields_reject_control_characters() {
-    let err = parse_access_token_response(
-        r#"{"access_token":"access\ntoken","expires_in":3600}"#,
-        "Google token response",
-    )
-    .expect_err("control character is rejected");
-
-    assert!(err.contains("access_token"), "{err}");
-}
-
-#[test]
 fn parses_event_date_times_dates_and_attendees() {
     let json = serde_json::json!({
         "id": "evt",
@@ -346,27 +298,6 @@ fn attendee_response_patch_preserves_other_attendees() {
 
     assert_eq!(patch["attendees"][0]["responseStatus"], "needsAction");
     assert_eq!(patch["attendees"][1]["responseStatus"], "accepted");
-}
-
-#[test]
-fn path_segments_encode_spaces_as_percent_twenty() {
-    assert_eq!(encode_path_segment("a b/c"), "a%20b%2Fc");
-}
-
-#[test]
-fn google_if_match_header_accepts_etags_without_quotes() {
-    // Google ETags are quoted in API responses. Preserve already-valid
-    // preconditions and repair stripped forms from legacy internal state.
-    assert_eq!(
-        google_if_match_header("3560073119029470"),
-        "\"3560073119029470\""
-    );
-    assert_eq!(
-        google_if_match_header("\"3560073119029470\""),
-        "\"3560073119029470\""
-    );
-    assert_eq!(google_if_match_header("W/\"weak\""), "W/\"weak\"");
-    assert_eq!(google_if_match_header("*"), "*");
 }
 
 fn google_account(allowed_calendars: Vec<&str>) -> ValidatedAccount {

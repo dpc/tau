@@ -13,11 +13,6 @@ use crate::google_oauth::{
     GoogleDeviceAuthFinish, GoogleDeviceAuthStart, GoogleOauthClient, GoogleOauthSecretConfig,
     google_http_agent,
 };
-#[cfg(test)]
-use crate::google_oauth::{
-    google_oauth_error_message, parse_access_token_response, parse_device_auth_start,
-};
-
 const GOOGLE_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const GOOGLE_CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const GOOGLE_SEND_UPDATES: &str = "all";

@@ -1659,25 +1659,6 @@ fn list_folders_returns_flattened_ids_and_hides_secrets() {
     );
 }
 
-#[test]
-fn folder_line_keeps_key_reversible_without_extra_columns() {
-    // Folder names are follow-up keys. Percent-encode whitespace instead of
-    // replacing it so `Sent Items` cannot collide with `Sent_Items`.
-    let line = format_folder_line(
-        "work",
-        BackendFolder {
-            name: "Sent Items".to_owned(),
-            delimiter: "/".to_owned(),
-            selectable: true,
-        },
-    );
-
-    assert_eq!(
-        line,
-        CborValue::Text("work/Sent%20Items selectable".to_owned())
-    );
-}
-
 /// Folder ids returned in list payloads are opaque tokens that the model passes
 /// back verbatim. Preserve spaces, percent signs, and provider hierarchy
 /// separators across that round trip so follow-up reads target the listed
@@ -4973,9 +4954,24 @@ fn disabled_email_config_and_accounts_do_not_require_password_secrets() {
     assert!(err.contains("auth.password_secret"), "{err}");
 }
 
+/// Legacy envelopes still drive the email runtime, so keep their defaults while
+/// ensuring malformed commands identify the rejected command or field.
 #[test]
 fn parser_accepts_and_rejects_command_shapes() {
-    assert!(parse_command(&command_args("list_accounts", vec![])).is_err());
+    let unsupported =
+        parse_command(&command_args("list_accounts", vec![])).expect_err("unsupported command");
+    assert_eq!(
+        cbor_text_field(&unsupported, "command"),
+        Some("list_accounts")
+    );
+    assert_eq!(
+        cbor_nested_text_field(&unsupported, "error", "code"),
+        Some("invalid_input")
+    );
+    assert_eq!(
+        cbor_nested_text_field(&unsupported, "error", "message"),
+        Some("unsupported email command")
+    );
     assert_eq!(
         parse_command(&command_args("list_folders", vec![])).expect("default account"),
         EmailCommand::ListFolders {
@@ -5073,27 +5069,43 @@ fn parser_accepts_and_rejects_command_shapes() {
             uid: "1".to_owned()
         }
     );
-    assert!(
-        parse_command(&command_args(
-            "list",
-            vec![
-                ("account", CborValue::Text("work".to_owned())),
-                ("folder", CborValue::Text("INBOX".to_owned())),
-                ("limit", CborValue::Integer(0.into()))
-            ]
-        ))
-        .is_err()
+    let invalid_limit = parse_command(&command_args(
+        "list",
+        vec![
+            ("folder", CborValue::Text("work/INBOX".to_owned())),
+            ("limit", CborValue::Integer(0.into())),
+        ],
+    ))
+    .expect_err("zero limit is rejected");
+    assert_eq!(cbor_text_field(&invalid_limit, "command"), Some("list"));
+    assert_eq!(
+        cbor_nested_text_field(&invalid_limit, "error", "code"),
+        Some("invalid_input")
     );
-    assert!(
-        parse_command(&command_args(
-            "send",
-            vec![
-                ("to", CborValue::Array(Vec::new())),
-                ("subject", CborValue::Text("hi".to_owned())),
-                ("body_text", CborValue::Text("body".to_owned()))
-            ]
-        ))
-        .is_err()
+    assert_eq!(
+        cbor_nested_text_field(&invalid_limit, "error", "message"),
+        Some("`limit` must be a positive integer")
+    );
+    let missing_recipients = parse_command(&command_args(
+        "send",
+        vec![
+            ("to", CborValue::Array(Vec::new())),
+            ("subject", CborValue::Text("hi".to_owned())),
+            ("body_text", CborValue::Text("body".to_owned())),
+        ],
+    ))
+    .expect_err("empty recipients are rejected");
+    assert_eq!(
+        cbor_text_field(&missing_recipients, "command"),
+        Some("send")
+    );
+    assert_eq!(
+        cbor_nested_text_field(&missing_recipients, "error", "code"),
+        Some("invalid_input")
+    );
+    assert_eq!(
+        cbor_nested_text_field(&missing_recipients, "error", "message"),
+        Some("`to` must not be empty")
     );
 }
 

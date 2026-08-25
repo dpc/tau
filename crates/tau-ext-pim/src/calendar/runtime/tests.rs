@@ -10,23 +10,6 @@ use crate::calendar::config::{
     CalendarWritePolicyConfig, ValidatedReadPolicy, ValidatedWritePolicy,
 };
 
-#[test]
-fn list_calendars_reports_flattened_calendar_ids() {
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    let engine = test_engine(temp.path());
-
-    let output = engine.list_calendars().expect("list calendars");
-    let data = cbor_field(&output, "data").expect("data");
-
-    assert_eq!(cbor_text_field(&output, "command"), Some("list_calendars"));
-    assert_eq!(cbor_text_field(&output, "status"), Some("ok"));
-    assert_eq!(cbor_text_field(data, "format"), Some(LIST_CALENDARS_FORMAT));
-    assert_eq!(
-        line_payload(data, "calendars"),
-        "feed/main read_only \"Feed\""
-    );
-}
-
 /// Calendar ids in the first list column are opaque tokens for follow-up tool
 /// calls. Encode lossy display characters reversibly instead of applying
 /// display sanitization that would change spaces, percent signs, or slashes.
@@ -2157,16 +2140,4 @@ fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
             .map(|(key, value)| (CborValue::Text(key.to_owned()), value))
             .collect(),
     )
-}
-
-fn line_payload(data: &CborValue, field: &str) -> String {
-    cbor_array_field(data, field)
-        .expect("line array")
-        .iter()
-        .map(|value| match value {
-            CborValue::Text(value) => value.as_str(),
-            _ => panic!("line array contains non-text value"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }

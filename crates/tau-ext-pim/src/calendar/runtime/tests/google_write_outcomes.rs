@@ -4,6 +4,11 @@ use std::thread;
 
 use super::*;
 
+const SPECIAL_CALENDAR_ID: &str = "Team 100%/東京";
+const SPECIAL_EVENT_ID: &str = "event 100%/東京";
+const SPECIAL_EVENT_PATH: &str =
+    "/calendars/Team%20100%25%2F%E6%9D%B1%E4%BA%AC/events/event%20100%25%2F%E6%9D%B1%E4%BA%AC";
+
 /// Calendar list/read failures redact the request bearer and custom endpoint at
 /// the provider boundary before tool errors and audit records retain them.
 #[test]
@@ -271,20 +276,29 @@ fn unknown_outcome_diagnostic_is_bounded_and_sanitized() {
     assert!(!error.chars().any(char::is_control));
 }
 
-/// Update, delete, and RSVP mutation requests all cross the same typed dispatch
-/// boundary and retain their claims when no trusted result returns.
+/// Update, delete, and RSVP keep their claims after dispatch while carrying
+/// opaque path ids and quoted or legacy ETag preconditions to the real request.
 #[test]
 fn all_google_mutation_methods_retain_sending_after_dispatch() {
-    assert_mutation_dispatch_unknown(pending_update, b"PATCH ");
-    assert_mutation_dispatch_unknown(pending_delete, b"DELETE ");
+    assert_mutation_dispatch_unknown(
+        pending_special_update,
+        "PATCH",
+        Some("\"provider-quoted-etag\""),
+    );
+    assert_mutation_dispatch_unknown(
+        pending_special_delete,
+        "DELETE",
+        Some("\"legacy-unquoted-etag\""),
+    );
 
     let temp = tempfile::TempDir::new().expect("tempdir");
     let current = http_ok(
-        br#"{"id":"evt","etag":"tag","start":{"dateTime":"2026-05-28T12:00:00Z"},"end":{"dateTime":"2026-05-28T13:00:00Z"},"attendees":[{"email":"me@example.test","self":true,"responseStatus":"needsAction"}]}"#,
+        br#"{"id":"event 100%/\u6771\u4eac","etag":"\"provider-quoted-etag\"","start":{"dateTime":"2026-05-28T12:00:00Z"},"end":{"dateTime":"2026-05-28T13:00:00Z"},"attendees":[{"email":"me@example.test","self":true,"responseStatus":"needsAction"}]}"#,
     );
     let (api_base, server) = scripted_server(vec![Some(current), None]);
-    let engine = google_network_test_engine(temp.path(), &api_base, true);
-    let id = pending_rsvp(&engine);
+    let engine =
+        google_network_test_engine_for_calendar(temp.path(), &api_base, true, SPECIAL_CALENDAR_ID);
+    let id = pending_special_rsvp(&engine);
 
     let error = engine
         .action_change_approve(&id)
@@ -293,8 +307,13 @@ fn all_google_mutation_methods_retain_sending_after_dispatch() {
     assert_unknown_outcome(&error);
     assert!(engine.state.change_sending_exists(&id).expect("sending"));
     let requests = server.join().expect("server");
-    assert!(requests[0].starts_with(b"GET "), "{:?}", requests[0]);
-    assert!(requests[1].starts_with(b"PATCH "), "{:?}", requests[1]);
+    assert_special_google_event_request(&requests[0], "GET", false, None);
+    assert_special_google_event_request(
+        &requests[1],
+        "PATCH",
+        true,
+        Some("\"provider-quoted-etag\""),
+    );
 }
 
 /// RSVP's preparatory GET is before the mutation dispatch cut; if it fails,
@@ -358,18 +377,20 @@ fn pending_create(engine: &Engine) -> String {
     engine.state.pending_change(&change).expect("pending")
 }
 
-fn pending_update(engine: &Engine) -> String {
+fn pending_special_update(engine: &Engine) -> String {
     let mut change = CalendarChangeApproval::pending("update_event", "google", "primary");
-    change.event_id = Some("evt".to_owned());
-    change.etag = Some("tag".to_owned());
+    change.calendar = SPECIAL_CALENDAR_ID.to_owned();
+    change.event_id = Some(SPECIAL_EVENT_ID.to_owned());
+    change.etag = Some("\"provider-quoted-etag\"".to_owned());
     change.title = Some("Updated".to_owned());
     engine.state.pending_change(&change).expect("pending")
 }
 
-fn pending_delete(engine: &Engine) -> String {
+fn pending_special_delete(engine: &Engine) -> String {
     let mut change = CalendarChangeApproval::pending("delete_event", "google", "primary");
-    change.event_id = Some("evt".to_owned());
-    change.etag = Some("tag".to_owned());
+    change.calendar = SPECIAL_CALENDAR_ID.to_owned();
+    change.event_id = Some(SPECIAL_EVENT_ID.to_owned());
+    change.etag = Some("legacy-unquoted-etag".to_owned());
     engine.state.pending_change(&change).expect("pending")
 }
 
@@ -381,10 +402,24 @@ fn pending_rsvp(engine: &Engine) -> String {
     engine.state.pending_change(&change).expect("pending")
 }
 
-fn assert_mutation_dispatch_unknown(pending: fn(&Engine) -> String, method: &[u8]) {
+fn pending_special_rsvp(engine: &Engine) -> String {
+    let mut change = CalendarChangeApproval::pending("respond_invite", "google", "primary");
+    change.calendar = SPECIAL_CALENDAR_ID.to_owned();
+    change.event_id = Some(SPECIAL_EVENT_ID.to_owned());
+    change.etag = Some("\"provider-quoted-etag\"".to_owned());
+    change.response = Some("accepted".to_owned());
+    engine.state.pending_change(&change).expect("pending")
+}
+
+fn assert_mutation_dispatch_unknown(
+    pending: fn(&Engine) -> String,
+    method: &str,
+    if_match: Option<&str>,
+) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let (api_base, server) = one_request_server(None);
-    let engine = google_network_test_engine(temp.path(), &api_base, true);
+    let engine =
+        google_network_test_engine_for_calendar(temp.path(), &api_base, true, SPECIAL_CALENDAR_ID);
     let id = pending(&engine);
 
     let error = engine
@@ -394,7 +429,33 @@ fn assert_mutation_dispatch_unknown(pending: fn(&Engine) -> String, method: &[u8
     assert_unknown_outcome(&error);
     assert!(engine.state.change_sending_exists(&id).expect("sending"));
     let request = server.join().expect("server");
-    assert!(request.starts_with(method), "{request:?}");
+    assert_special_google_event_request(&request, method, true, if_match);
+}
+
+fn assert_special_google_event_request(
+    request: &[u8],
+    method: &str,
+    mutation: bool,
+    if_match: Option<&str>,
+) {
+    let request = std::str::from_utf8(request).expect("UTF-8 request");
+    let query = if mutation { "?sendUpdates=all" } else { "" };
+    assert!(
+        request.starts_with(&format!(
+            "{method} {SPECIAL_EVENT_PATH}{query} HTTP/1.1\r\n"
+        )),
+        "{request:?}"
+    );
+    if let Some(if_match) = if_match {
+        let request = request.to_ascii_lowercase();
+        assert!(
+            request.contains(&format!(
+                "\r\nif-match: {}\r\n",
+                if_match.to_ascii_lowercase()
+            )),
+            "{request:?}"
+        );
+    }
 }
 
 fn http_ok(body: &[u8]) -> Vec<u8> {
@@ -498,6 +559,15 @@ fn google_network_test_engine(
     api_base: &str,
     require_approval: bool,
 ) -> Engine {
+    google_network_test_engine_for_calendar(root, api_base, require_approval, "primary")
+}
+
+fn google_network_test_engine_for_calendar(
+    root: &std::path::Path,
+    api_base: &str,
+    require_approval: bool,
+    calendar_id: &str,
+) -> Engine {
     let cfg = CalendarExtensionConfig {
         enable: true,
         accounts: vec![CalendarAccountConfig {
@@ -510,8 +580,8 @@ fn google_network_test_engine(
                 api_base: Some(api_base.to_owned()),
             }),
             calendars: CalendarSelectionConfig {
-                default: Some("primary".to_owned()),
-                allow: vec!["primary".to_owned()],
+                default: Some(calendar_id.to_owned()),
+                allow: vec![calendar_id.to_owned()],
             },
             timezone: Some("UTC".to_owned()),
             ..Default::default()

@@ -24,6 +24,9 @@ enum ScriptedSmtpResult {
 struct SmtpObservation {
     /// Number of complete DATA blocks received from the client.
     data_blocks: usize,
+    /// Authentication mechanisms selected without retaining credential
+    /// payloads.
+    auth_commands: Vec<String>,
 }
 
 fn spawn_scripted_smtp(result: ScriptedSmtpResult) -> (u16, thread::JoinHandle<SmtpObservation>) {
@@ -61,6 +64,7 @@ fn run_smtp_script(stream: TcpStream, result: ScriptedSmtpResult) -> SmtpObserva
         .expect("greeting");
     writer.flush().expect("flush greeting");
     let mut data_blocks = 0;
+    let mut auth_commands = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).expect("read SMTP command") == 0 {
@@ -72,6 +76,11 @@ fn run_smtp_script(stream: TcpStream, result: ScriptedSmtpResult) -> SmtpObserva
                 .write_all(b"250-localhost\r\n250 AUTH PLAIN LOGIN XOAUTH2\r\n")
                 .expect("EHLO reply");
         } else if command.starts_with("AUTH ") {
+            let mechanism = command
+                .split_ascii_whitespace()
+                .nth(1)
+                .unwrap_or("<missing>");
+            auth_commands.push(format!("AUTH {mechanism}"));
             if matches!(result, ScriptedSmtpResult::RejectAuth) {
                 writer
                     .write_all(b"535 5.7.8 authentication rejected\r\n")
@@ -133,7 +142,10 @@ fn run_smtp_script(stream: TcpStream, result: ScriptedSmtpResult) -> SmtpObserva
         }
         writer.flush().expect("flush SMTP reply");
     }
-    SmtpObservation { data_blocks }
+    SmtpObservation {
+        data_blocks,
+        auth_commands,
+    }
 }
 
 fn smtp_backend(
@@ -290,8 +302,8 @@ fn password_auth_rejection_is_not_dispatched() {
     assert_eq!(server.join().expect("SMTP server").data_blocks, 0);
 }
 
-/// OAuth retries only rejected authentication on a fresh connection, then
-/// performs one message submission and never retries ambiguous DATA.
+/// OAuth retries only rejected XOAUTH2 authentication on a fresh connection,
+/// then performs one message submission and never retries ambiguous DATA.
 #[test]
 fn oauth_auth_retry_precedes_single_submission() {
     for submission_result in [
@@ -327,6 +339,14 @@ fn oauth_auth_retry_precedes_single_submission() {
             assert!(matches!(result, Err(EmailSendFailure::OutcomeUnknown(_))));
         }
         let observations = server.join().expect("SMTP server");
+        assert_eq!(
+            observations
+                .iter()
+                .flat_map(|observation| observation.auth_commands.iter())
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["AUTH XOAUTH2", "AUTH XOAUTH2"]
+        );
         assert_eq!(
             observations
                 .iter()
@@ -375,13 +395,6 @@ fn xoauth2_payload_uses_gmail_sasl_format() {
         xoauth2_payload("alice@example.com", "access-token"),
         "user=alice@example.com\x01auth=Bearer access-token\x01\x01"
     );
-}
-
-/// Ensures the SMTP OAuth path pins lettre to XOAUTH2 rather than allowing
-/// the default PLAIN/LOGIN mechanism list for bearer-token credentials.
-#[test]
-fn smtp_oauth_mechanism_selection_is_xoauth2_only() {
-    assert_eq!(smtp_oauth_mechanisms(), vec![Mechanism::Xoauth2]);
 }
 
 /// Ensures SMTP diagnostics redact the exact bearer token before they can
