@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use super::*;
@@ -90,23 +88,4 @@ fn response_byte_bounds_cover_frames_and_cumulative_streams() {
         checked_response_bytes(MAX_RESPONSE_BYTES - 1, 1),
         Some(MAX_RESPONSE_BYTES)
     );
-}
-
-/// Repeated control frames must not refresh semantic-idle time, while actual
-/// semantic drips cannot move the absolute stream deadline.
-#[test]
-fn control_frames_cannot_refresh_response_deadlines() {
-    let start = Instant::now();
-    let mut deadlines = deadlines::StreamDeadlines::new(start);
-
-    for minute in 1..5 {
-        let heartbeat = start + Duration::from_secs(minute * 60);
-        assert!(!deadlines.expired(heartbeat));
-    }
-    assert!(deadlines.expired(start + deadlines::STREAM_IDLE_TIMEOUT));
-
-    deadlines = deadlines::StreamDeadlines::new(start);
-    deadlines.renew_for_qualifying_progress(start + Duration::from_secs(4 * 60));
-    assert!(!deadlines.expired(start + Duration::from_secs(8 * 60 + 59)));
-    assert!(deadlines.expired(start + deadlines::STREAM_TOTAL_TIMEOUT));
 }

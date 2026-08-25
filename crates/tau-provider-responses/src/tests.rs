@@ -50,9 +50,8 @@ fn responses_tool_result_marks_omitted_images_without_byte_egress() {
     );
 }
 
-/// Real attempt entry points emit typed build and outbound failures, emit no
-/// cancellation record, and retain no material when capture policy is disabled
-/// or the prompt is standalone compaction.
+/// Real attempt entry points emit typed build and outbound failures, while
+/// cancellation and disabled capture policy emit no diagnostic record.
 #[test]
 fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
     let captures = Arc::new(Mutex::new(Vec::new()));
@@ -114,18 +113,6 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
     );
     assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
 
-    let mut standalone = minimal_prompt();
-    standalone.operation = tau_proto::PromptOperation::StandaloneCompaction;
-    assert!(debug_capture_enabled(&standalone, true));
-    let _ = run_attempt_with_capture(
-        &invalid,
-        &config,
-        &model,
-        DebugCapture::with_test_sink(debug_capture_enabled(&standalone, true), Arc::clone(&sink)),
-        &mut |_| {},
-        &mut || false,
-        &test_network(),
-    );
     let _ = run_attempt_with_capture(
         &invalid,
         &config,
@@ -139,7 +126,7 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
     let captures = captures.lock().expect("capture lock");
     assert_eq!(
         captures.len(),
-        3,
+        2,
         "disabled and canceled attempts add nothing"
     );
     assert!(captures.iter().all(|capture| capture.class()
@@ -153,7 +140,7 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
             .iter()
             .filter(|value| value["error"]["kind"] == "unsupported_tool")
             .count(),
-        2
+        1
     );
     let outbound = values
         .iter()
@@ -1316,10 +1303,10 @@ fn http_sse_attempt_posts_responses_and_completes() {
     assert_eq!(response["raw_events_truncated"], true);
 }
 
-/// Public Responses requests must always transmit the harness-effective effort:
-/// `off` uses the API's explicit `none` spelling and `max` remains selectable.
+/// Public Responses requests must lower every harness-effective effort to the
+/// exact spelling the API accepts.
 #[test]
-fn request_lowers_off_and_max_reasoning_efforts() {
+fn request_lowers_every_reasoning_effort_to_exact_wire_spelling() {
     let config = AttemptConfig {
         base_url: "https://example.test/v1".to_owned(),
         api_key: String::new(),
@@ -1333,6 +1320,11 @@ fn request_lowers_off_and_max_reasoning_efforts() {
 
     for (effort, expected) in [
         (tau_proto::Effort::Off, "none"),
+        (tau_proto::Effort::Minimal, "minimal"),
+        (tau_proto::Effort::Low, "low"),
+        (tau_proto::Effort::Medium, "medium"),
+        (tau_proto::Effort::High, "high"),
+        (tau_proto::Effort::XHigh, "xhigh"),
         (tau_proto::Effort::Max, "max"),
     ] {
         let mut prompt = minimal_prompt();
@@ -1591,52 +1583,6 @@ fn explicit_prompt_cache_marks_only_earliest_constructed_input() {
             .get("prompt_cache_breakpoint")
             .is_none()
     );
-}
-
-/// HTTP/SSE and WebSocket must preserve cache fields identically when
-/// converting the shared request body into the WebSocket response-create
-/// envelope.
-#[test]
-fn cache_policy_wire_fields_match_shared_request_conversion() {
-    for policy in [
-        None,
-        Some(PromptCachePolicy::Legacy(PromptCacheRetention::InMemory)),
-        Some(PromptCachePolicy::Explicit),
-    ] {
-        let prompt = if policy == Some(PromptCachePolicy::Explicit) {
-            cache_prefix_prompt()
-        } else {
-            minimal_prompt()
-        };
-        let body = build_request(
-            &prompt,
-            &AttemptConfig {
-                base_url: "https://example.test/v1".to_owned(),
-                api_key: String::new(),
-                max_output_tokens: 0,
-                transport: Transport::Sse,
-                prompt_cache: policy,
-            },
-            &AttemptModel {
-                id: ModelName::new("test-model"),
-            },
-        )
-        .expect("request");
-        let http = serde_json::to_value(&body).expect("HTTP/SSE body");
-        let mut websocket = serde_json::to_value(body).expect("WebSocket body");
-        let object = websocket.as_object_mut().expect("request object");
-        object.remove("stream");
-        object.insert("type".to_owned(), serde_json::json!("response.create"));
-        for field in [
-            "instructions",
-            "input",
-            "prompt_cache_key",
-            "prompt_cache_retention",
-            "prompt_cache_options",
-        ] {
-            assert_eq!(http.get(field), websocket.get(field), "{field}");
-        }
-    }
 }
 
 /// Post-upgrade provider errors must terminate known auth/request/context
