@@ -25,6 +25,3 @@ tau-harness = { workspace = true, features = ["provider-test-support"] }
 tau-proto.workspace = true
 tau-session-inspect.workspace = true
 tempfile.workspace = true
-
-[dev-dependencies]
-tau-ext-shell = { workspace = true, features = ["echo-agent"] }
