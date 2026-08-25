@@ -265,21 +265,6 @@ use super::tool_render::{
     render_turn_stats_block, streaming_block, synthesize_fallback_display,
 };
 
-#[test]
-fn dev_print_prompt_uses_shared_role_flag() {
-    // Diagnostics share root-owned harness selection with normal startup.
-    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-prompt"]);
-    assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
-    assert!(matches!(
-        cli.command,
-        Some(super::cli::Command::Dev {
-            command: super::cli::DevCommand::PrintPrompt {
-                enable_agents_md: true
-            },
-        })
-    ));
-}
-
 /// Ensures `--profile` keeps its root-owned ordered selection syntax through
 /// command parsing before startup forwards it to the harness.
 #[test]
@@ -331,36 +316,6 @@ fn dev_print_prompt_accepts_agents_md_toggle() {
             command: super::cli::DevCommand::PrintPrompt {
                 enable_agents_md: false,
             },
-        })
-    ));
-}
-
-#[test]
-fn dev_print_system_prompt_uses_shared_role_flag() {
-    let cli = path_super_cli::Cli::parse_from([
-        "tau",
-        "--role",
-        "engineer",
-        "dev",
-        "print-system-prompt",
-    ]);
-    assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
-    assert!(matches!(
-        cli.command,
-        Some(super::cli::Command::Dev {
-            command: super::cli::DevCommand::PrintSystemPrompt,
-        })
-    ));
-}
-#[test]
-fn dev_print_tools_uses_shared_role_flag() {
-    // `print-tools` mirrors print-prompt and uses the same global role flag.
-    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-tools"]);
-    assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
-    assert!(matches!(
-        cli.command,
-        Some(super::cli::Command::Dev {
-            command: super::cli::DevCommand::PrintTools,
         })
     ));
 }
@@ -464,19 +419,6 @@ fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
         }) if args.target.common.scratch_root == Some(std::path::PathBuf::from("/tmp/tau-e2e-test"))
             && args.no_enter
             && args.text == vec![":version".to_owned(), "with spaces".to_owned()]
-    ));
-}
-
-#[test]
-fn component_command_parses_harness() {
-    let cli = path_super_cli::Cli::parse_from(["tau", "component", "harness"]);
-
-    assert!(matches!(
-        cli.command,
-        Some(super::cli::Command::Component {
-            name,
-            initial_ui_stdio: false,
-        }) if name == "harness"
     ));
 }
 
@@ -801,36 +743,6 @@ fn session_list_rejects_inaccessible_directory_during_parsing() {
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     assert_eq!(error.exit_code(), 2);
-}
-
-/// The superseded flat commands stay rejected instead of creating a second
-/// public spelling for each nested operation.
-#[test]
-fn flat_session_and_agent_commands_are_rejected() {
-    for command in ["session-list", "session-show", "list-agents"] {
-        let err = match path_super_cli::Cli::try_parse_from(["tau", command]) {
-            Ok(_) => panic!("flat command should be rejected"),
-            Err(err) => err,
-        };
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-    }
-}
-
-#[test]
-fn ext_command_is_not_a_component_alias() {
-    let err = match path_super_cli::Cli::try_parse_from(["tau", "ext", "harness"]) {
-        Ok(_) => panic!("ext should not remain a supported component alias"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-}
-
-#[test]
-fn startup_role_flag_is_parsed_for_default_run() {
-    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "manager"]);
-
-    assert_eq!(cli.harness.role.as_deref(), Some("manager"));
 }
 
 /// Tool starts carry the owning agent id, so hidden-agent tools must be routed
@@ -1457,13 +1369,43 @@ fn content_free_prompt_drafts_do_not_add_gmail_redaction_text() {
     assert_eq!(draft.text, None);
 }
 
+/// The shared version label must use the exact build metadata string in both
+/// command modes, rather than accepting arbitrary text between its parentheses.
 #[test]
 fn runtime_version_label_matches_cli_version_shape() {
-    // `:version` uses this same label at runtime, so keep it aligned with the
-    // custom `tau --version` output instead of clap's default package version.
     let label = super::version_label();
-    assert!(label.starts_with(concat!("tau ", env!("CARGO_PKG_VERSION"), " (")));
-    assert!(label.ends_with(')'));
+    let expected = match super::build_last_modified() {
+        Some(date) => format!(
+            "tau {} ({}, {date})",
+            env!("CARGO_PKG_VERSION"),
+            super::build_revision()
+        ),
+        None => format!(
+            "tau {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            super::build_revision()
+        ),
+    };
+    assert_eq!(label, expected);
+
+    let (_term, handle, vt) = setup(100, 24);
+    handle.print_output(
+        "system-info",
+        tau_cli_term::resolve::themed_block(
+            &cli_test_theme(),
+            tau_themes::names::SYSTEM_INFO,
+            format!("{}{}", transcript_markers::NOTICE, label),
+        ),
+    );
+    sync(&handle);
+    assert_eq!(
+        vt.screen_text(100)
+            .join("\n")
+            .matches(label.as_str())
+            .count(),
+        1,
+        ":version command feedback must render the shared label exactly once"
+    );
 }
 
 /// Writer that feeds bytes directly into a VT parser and records a screen

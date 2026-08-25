@@ -1,5 +1,6 @@
 use tau_actions::{
     ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionSchema,
+    ParsedArgValue,
 };
 
 use super::*;
@@ -175,13 +176,39 @@ fn google_auth_published(accounts: &[&str], instance_id: u64) -> ActionSchemaPub
     }
 }
 
+/// Dynamic action parsing must preserve ordered positional arguments and their
+/// typed names for the `action.invoke` payload sent to the owning extension,
+/// while missing required values keep the owning command and expected argument
+/// actionable.
 #[test]
 fn parses_known_dynamic_action_line() {
     let state = ActionCommandState::new([":quit"]);
-    state.apply_schema_published(&published(":email", "email.list", 1));
+    let mut publication = published(":email", "email.list", 1);
+    publication.schema.roots[0].children[0].args = vec![
+        ActionArg {
+            name: "mailbox".to_owned(),
+            description: "Mailbox selector".to_owned(),
+            required: true,
+            suggestions: Vec::new(),
+            kind: ActionArgKind::String,
+        },
+        ActionArg {
+            name: "format".to_owned(),
+            description: "Output format".to_owned(),
+            required: true,
+            suggestions: Vec::new(),
+            kind: ActionArgKind::Enum {
+                values: vec![ActionChoice {
+                    value: "json-sentinel".to_owned(),
+                    description: "Machine-readable sentinel output".to_owned(),
+                }],
+            },
+        },
+    ];
+    state.apply_schema_published(&publication);
 
     let dispatch = state
-        .parse_line(":email list")
+        .parse_line(":email list mailbox-sentinel json-sentinel")
         .expect("known root")
         .expect("valid action");
 
@@ -192,6 +219,27 @@ fn parses_known_dynamic_action_line() {
     );
     assert_eq!(dispatch.instance_id, ExtensionInstanceId::from(1));
     assert_eq!(dispatch.parsed.action_id, "email.list");
+    assert_eq!(dispatch.parsed.argv, ["mailbox-sentinel", "json-sentinel"]);
+    assert_eq!(
+        dispatch.parsed.named_args,
+        std::collections::BTreeMap::from([
+            (
+                "format".to_owned(),
+                ParsedArgValue::String("json-sentinel".to_owned())
+            ),
+            (
+                "mailbox".to_owned(),
+                ParsedArgValue::String("mailbox-sentinel".to_owned())
+            ),
+        ])
+    );
+
+    let error = state
+        .parse_line(":email list")
+        .expect("known root")
+        .expect_err("required mailbox is missing");
+    assert!(error.message().contains("mailbox"));
+    assert_eq!(error.usage(), Some(":email list <mailbox> <json-sentinel>"));
 }
 
 #[test]

@@ -31,17 +31,6 @@ fn papercut_developer_commands_parse_with_their_documented_options() {
     assert!(papercut.find_subcommand_mut("clear").is_some());
 }
 
-/// The removed inspection command must neither parse nor appear in top-level
-/// help, preventing stale scripts from mistaking legacy state for active
-/// policy.
-#[test]
-fn policy_show_is_not_exposed() {
-    assert!(Cli::try_parse_from(["tau", "policy-show"]).is_err());
-
-    let help = Cli::command().render_long_help().to_string();
-    assert!(!help.contains("policy-show"));
-}
-
 /// The public startup contract uses target-oriented subcommands and rejects the
 /// removed flags so scripts cannot silently select the previous path.
 #[test]

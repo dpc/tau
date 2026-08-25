@@ -1,77 +1,130 @@
-/// `:set show-messages` is registry-driven, so the registry must expose all
-/// documented modes for parsing and completion.
-#[test]
-fn show_messages_values_are_registered() {
-    let setting = super::find("show-messages").expect("show-messages setting");
-    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
+use std::collections::BTreeSet;
 
-    assert_eq!(
-        values,
-        vec![
-            "none",
-            "self-summary",
-            "self-full",
-            "all-summary",
-            "all-full"
-        ]
-    );
+use tau_config::settings::CliState;
+
+/// Every advertised setting candidate must be usable and explain its effect so
+/// completion never exposes an invalid or opaque registry entry.
+#[test]
+fn settings_registry_advertises_valid_described_unique_candidates() {
+    let mut names = BTreeSet::new();
+    for definition in super::SETTINGS {
+        assert!(
+            !definition.name.is_empty() && names.insert(definition.name),
+            "setting names must be nonempty and unique: {}",
+            definition.name
+        );
+        assert!(
+            !definition.description.trim().is_empty(),
+            "{} needs a user-facing description",
+            definition.name
+        );
+        assert!(
+            !definition.value_hint.trim().is_empty(),
+            "{} needs a user-facing value hint",
+            definition.name
+        );
+        let found = super::find(definition.name)
+            .unwrap_or_else(|| panic!("find must return {}", definition.name));
+        assert_eq!(found.description, definition.description);
+        assert_eq!(found.value_hint, definition.value_hint);
+        assert_eq!(
+            found
+                .values
+                .iter()
+                .map(|value| (value.value, value.description))
+                .collect::<Vec<_>>(),
+            definition
+                .values
+                .iter()
+                .map(|value| (value.value, value.description))
+                .collect::<Vec<_>>(),
+            "find must return the registry definition for {}",
+            definition.name
+        );
+        let state = CliState::default();
+        assert_eq!(
+            (found.get)(&state),
+            (definition.get)(&state),
+            "find must return the getter for {}",
+            definition.name
+        );
+
+        let mut values = BTreeSet::new();
+        for value in definition.values {
+            assert!(
+                values.insert(value.value),
+                "{} advertises duplicate value {}",
+                definition.name,
+                value.value
+            );
+            assert!(
+                !value.description.trim().is_empty()
+                    && !matches!(
+                        value.description.trim().to_ascii_lowercase().as_str(),
+                        "item" | "value" | "setting" | "command"
+                    ),
+                "{}={} needs a specific completion description",
+                definition.name,
+                value.value
+            );
+            assert!(
+                (definition.validate)(value.value),
+                "{} advertises invalid value {}",
+                definition.name,
+                value.value
+            );
+            assert_eq!(
+                (found.validate)(value.value),
+                (definition.validate)(value.value),
+                "find must return the validator for {}",
+                definition.name
+            );
+        }
+    }
 }
 
-/// `:set show-internal-prompts` uses the compact on/off vocabulary promised by
-/// the runtime setting contract.
+/// Stable setting vocabularies and free-form numeric boundaries remain explicit
+/// because scripts and documented command examples rely on these spellings.
 #[test]
-fn show_internal_prompts_values_are_registered() {
-    let setting = super::find("show-internal-prompts").expect("show-internal-prompts setting");
-    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
+fn settings_registry_preserves_public_vocabularies_and_numeric_boundaries() {
+    for (name, expected) in [
+        (
+            "show-messages",
+            &[
+                "none",
+                "self-summary",
+                "self-full",
+                "all-summary",
+                "all-full",
+            ][..],
+        ),
+        ("show-internal-prompts", &["on", "off"][..]),
+        (
+            "notice-level",
+            &["critical", "warning", "info", "debug", "trace"][..],
+        ),
+    ] {
+        let definition = super::find(name).expect("documented setting");
+        assert_eq!(
+            definition
+                .values
+                .iter()
+                .map(|value| value.value)
+                .collect::<Vec<_>>(),
+            expected,
+            "{name} vocabulary"
+        );
+    }
 
-    assert_eq!(values, vec!["on", "off"]);
-    assert!((setting.validate)("on"));
-    assert!(!(setting.validate)("true"));
-}
-
-/// `:set show-ui-io` is a boolean status-bar toggle, so it should use the
-/// standard true/false values that completion and validation expect.
-#[test]
-fn show_ui_io_values_are_registered() {
-    let setting = super::find("show-ui-io").expect("show-ui-io setting");
-    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
-
-    assert_eq!(values, vec!["true", "false"]);
-}
-
-/// `:set notice-level` is ordered by visibility threshold and uses meaningful
-/// severity names for completion and validation.
-#[test]
-fn notice_level_values_are_registered() {
-    let setting = super::find("notice-level").expect("notice-level setting");
-    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
-
-    assert_eq!(
-        values,
-        vec!["critical", "warning", "info", "debug", "trace"]
-    );
-}
-
-/// `:set show-prompt-scroll-indicator` is a boolean prompt-input toggle.
-#[test]
-fn show_prompt_scroll_indicator_values_are_registered() {
-    let setting =
-        super::find("show-prompt-scroll-indicator").expect("show-prompt-scroll-indicator setting");
-    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
-
-    assert_eq!(values, vec!["true", "false"]);
-}
-
-/// `:set redraw-history-size` accepts arbitrary non-negative integers while
-/// still offering common sizes in completion.
-#[test]
-fn redraw_history_size_accepts_integer_values() {
-    let setting = super::find("redraw-history-size").expect("redraw-history-size setting");
-    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
-
-    assert!(values.contains(&"2000"));
-    assert!((setting.validate)("0"));
-    assert!((setting.validate)("12345"));
-    assert!(!(setting.validate)("all"));
-    assert!(!(setting.validate)("-1"));
+    let redraw_history_size =
+        super::find("redraw-history-size").expect("redraw-history-size setting");
+    for value in ["0", "12345"] {
+        assert!((redraw_history_size.validate)(value), "{value} is accepted");
+    }
+    for value in ["all", "-1"] {
+        assert!(
+            !(redraw_history_size.validate)(value),
+            "{value} is rejected"
+        );
+    }
 }

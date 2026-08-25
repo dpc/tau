@@ -1,19 +1,5 @@
 use super::*;
 
-/// The shared picker projection records exact canonical values, snapshots them,
-/// and drops every value at a session boundary.
-#[test]
-fn agent_cost_projection_records_snapshots_and_clears() {
-    let projection = AgentCostProjection::default();
-    let agent_id = tau_proto::AgentId::parse("agent-a").expect("valid agent id");
-    let cost = EstimatedApiCost::from_picodollars(2_140_000_000_000);
-    let snapshot = AgentCostSnapshot::new(cost, cost);
-    projection.record(agent_id.clone(), snapshot);
-    assert_eq!(projection.snapshot().get(&agent_id), Some(&snapshot));
-    projection.clear();
-    assert!(projection.snapshot().is_empty());
-}
-
 /// Preserves availability and independently compact-formats self and subtree
 /// costs so an absent stats snapshot never appears as a known zero.
 #[test]

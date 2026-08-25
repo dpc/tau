@@ -15,7 +15,27 @@ fn action_schema(root: &str, action_id: &str) -> tau_actions::ActionSchema {
                 name: "list".to_owned(),
                 description: "List items".to_owned(),
                 action_id: Some(action_id.to_owned()),
-                args: Vec::new(),
+                args: vec![
+                    tau_actions::ActionArg {
+                        name: "mailbox".to_owned(),
+                        description: "Mailbox selector".to_owned(),
+                        required: true,
+                        suggestions: Vec::new(),
+                        kind: tau_actions::ActionArgKind::String,
+                    },
+                    tau_actions::ActionArg {
+                        name: "format".to_owned(),
+                        description: "Output format".to_owned(),
+                        required: true,
+                        suggestions: Vec::new(),
+                        kind: tau_actions::ActionArgKind::Enum {
+                            values: vec![tau_actions::ActionChoice {
+                                value: "json-sentinel".to_owned(),
+                                description: "Machine-readable sentinel output".to_owned(),
+                            }],
+                        },
+                    },
+                ],
                 children: Vec::new(),
             }],
         }],
@@ -384,9 +404,9 @@ fn retry_prompt_result_renderer_displays_harness_message() {
 }
 
 /// Dynamic action preparation uses the same selected-agent mirror as the input
-/// loop and emits a renderer owner command whose invocation id matches the
-/// harness `action.invoke`. This protects completion routing from drifting away
-/// from the command path that captures invocation-time ownership.
+/// loop and lowers parsed positional and named arguments into the matching
+/// harness `action.invoke`. This protects payload and completion routing from
+/// drifting away from the command path that captures invocation-time ownership.
 #[test]
 fn dynamic_action_prepare_records_matching_selected_agent_owner() {
     let action_state = action_state_with_email_list();
@@ -395,7 +415,7 @@ fn dynamic_action_prepare_records_matching_selected_agent_owner() {
         &action_state,
         &routing,
         &tau_proto::SessionId::parse("s1").expect("test session id"),
-        ":email list",
+        ":email list mailbox-sentinel json-sentinel",
     )
     .expect("dynamic action prepares")
     .expect("known dynamic action");
@@ -404,6 +424,25 @@ fn dynamic_action_prepare_records_matching_selected_agent_owner() {
         panic!("expected action.invoke");
     };
     assert_eq!(invoke.action_id, "email.list");
+    assert_eq!(
+        invoke.argv,
+        ["mailbox-sentinel", "json-sentinel"],
+        "action.invoke keeps positional schema order"
+    );
+    assert_eq!(
+        invoke.arguments,
+        tau_proto::CborValue::Map(vec![
+            (
+                tau_proto::CborValue::Text("format".to_owned()),
+                tau_proto::CborValue::Text("json-sentinel".to_owned()),
+            ),
+            (
+                tau_proto::CborValue::Text("mailbox".to_owned()),
+                tau_proto::CborValue::Text("mailbox-sentinel".to_owned()),
+            ),
+        ]),
+        "action.invoke lowers each named argument with its typed value"
+    );
 
     let RendererCmd::ActionInvoked {
         invocation_id,

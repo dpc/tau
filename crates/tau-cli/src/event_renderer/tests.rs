@@ -8,7 +8,7 @@ use tau_config::settings as path_tau_config_settings;
 use super::{
     AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
     bounded_queued_line_end, bounded_queued_line_start, queued_prompt_projection,
-    role_setting_value_completions, role_value_completion,
+    role_setting_value_completions,
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
@@ -1902,27 +1902,100 @@ fn role_details_structured_role_without_model_renders_as_no_model() {
     assert_eq!(details.current_description("model"), "unset");
 }
 
+/// Every role-setting completion must expose the current value from the same
+/// parsed detail field, including tool policy and compaction controls.
 #[test]
-fn role_details_report_single_current_field() {
+fn role_details_report_every_current_field() {
     let details = RoleCompletionDetails::from_description(
-        "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, service-tier=fast, tools=read_only, enable-tools=web_search",
+        "model=model-sentinel, effort=effort-sentinel, verbosity=verbosity-sentinel, thinking-summary=thinking-sentinel, service-tier=tier-sentinel, tools=tools-sentinel, enable-tool-groups=enable-groups-sentinel, disable-tool-groups=disable-groups-sentinel, enable-tools=enable-tools-sentinel, disable-tools=disable-tools-sentinel, inference-compaction=inference-sentinel, compactions=compactions-sentinel",
     );
 
-    assert_eq!(details.current_description("model"), "codex-dpcpw/gpt-5.5");
-    assert_eq!(details.current_description("effort"), "xhigh");
-    assert_eq!(details.current_description("verbosity"), "medium");
-    assert_eq!(details.current_description("thinking-summary"), "off");
-    assert_eq!(details.current_description("service-tier"), "fast");
-    assert_eq!(details.current_description("tools"), "read_only");
-    assert_eq!(details.current_description("enable-tools"), "web_search");
+    for (field, expected) in [
+        ("model", "model-sentinel"),
+        ("effort", "effort-sentinel"),
+        ("verbosity", "verbosity-sentinel"),
+        ("thinking-summary", "thinking-sentinel"),
+        ("service-tier", "tier-sentinel"),
+        ("tools", "tools-sentinel"),
+        ("enable-tool-groups", "enable-groups-sentinel"),
+        ("disable-tool-groups", "disable-groups-sentinel"),
+        ("enable-tools", "enable-tools-sentinel"),
+        ("disable-tools", "disable-tools-sentinel"),
+        ("inference-compaction", "inference-sentinel"),
+        ("compactions", "compactions-sentinel"),
+    ] {
+        assert_eq!(details.current_description(field), expected, "{field}");
+    }
+    assert_eq!(details.current_description("unknown"), "unset");
 }
 
+/// Every offered role-setting value must retain its schema order, a meaningful
+/// description, and its normal completion filtering behavior.
 #[test]
-fn role_values_have_descriptions() {
-    let item = role_value_completion("thinking-summary", "detailed");
-
-    assert_eq!(item.value, "detailed");
-    assert_eq!(item.description, "detailed thinking summaries");
+fn role_setting_values_have_descriptions_and_filtering() {
+    for (setting, values, needle, filtered_values) in [
+        ("model", &["reset"][..], "res", &["reset"][..]),
+        ("tools", &["reset"][..], "res", &["reset"][..]),
+        ("enable-tool-groups", &["reset"][..], "res", &["reset"][..]),
+        ("disable-tool-groups", &["reset"][..], "res", &["reset"][..]),
+        ("enable-tools", &["reset"][..], "res", &["reset"][..]),
+        ("disable-tools", &["reset"][..], "res", &["reset"][..]),
+        (
+            "effort",
+            &[
+                "reset", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+            ][..],
+            "max",
+            &["max"][..],
+        ),
+        (
+            "verbosity",
+            &["reset", "low", "medium", "high"][..],
+            "med",
+            &["medium"][..],
+        ),
+        (
+            "thinking-summary",
+            &["reset", "off", "auto", "concise", "detailed"][..],
+            "tail",
+            &["detailed"][..],
+        ),
+        (
+            "service-tier",
+            &["reset", "fast", "flex"][..],
+            "lex",
+            &["flex"][..],
+        ),
+    ] {
+        let completions = role_setting_value_completions(setting, "");
+        assert_eq!(
+            completions
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            values,
+            "{setting} value order"
+        );
+        for item in &completions {
+            assert!(
+                !item.description.trim().is_empty()
+                    && !matches!(
+                        item.description.trim().to_ascii_lowercase().as_str(),
+                        "item" | "value" | "setting" | "command"
+                    ),
+                "{setting}={} needs a specific description",
+                item.value
+            );
+        }
+        assert_eq!(
+            role_setting_value_completions(setting, needle)
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            filtered_values,
+            "{setting} filter {needle:?}"
+        );
+    }
 }
 
 /// Ensures `:role ... effort` completion exposes GPT-5.6 maximum effort with a

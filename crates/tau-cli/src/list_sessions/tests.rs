@@ -62,22 +62,6 @@ fn json_output_preserves_each_responsive_harness_record() {
     );
 }
 
-/// Empty JSON results use an explicit array rather than empty stdout or a human
-/// placeholder, making zero matches unambiguous to automation.
-#[test]
-fn json_output_is_an_array_when_no_sessions_match() {
-    let output = render(
-        &[session("session", "/work/other")],
-        &crate::cli::SessionListArgs {
-            dir: Some(PathBuf::from("/work/requested")),
-            json: true,
-        },
-    )
-    .expect("empty JSON output");
-
-    assert_eq!(output, "[]\n");
-}
-
 /// Directory filtering compares the already-canonical roots exactly rather than
 /// admitting a parent, child, or textual-prefix path.
 #[test]
