@@ -11,7 +11,7 @@ fn shell_cancel_observes_cancellation_before_wait() {
     cancel.cancel();
     let watcher_cancel = cancel.clone();
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    let watcher = std::thread::spawn(move || {
         watcher_cancel.wait_until_requested_or_completed();
         tx.send(watcher_cancel.should_report_cancel())
             .expect("test receiver should stay alive");
@@ -21,6 +21,7 @@ fn shell_cancel_observes_cancellation_before_wait() {
             .expect("cancellation watcher should wake"),
         "cancellation should be reported when no completion raced with it"
     );
+    watcher.join().expect("cancellation watcher");
 }
 
 /// Ensures completion wakes a blocked cancellation watcher so ordinary shell
@@ -30,7 +31,7 @@ fn shell_cancel_completion_wakes_waiter() {
     let cancel = ShellCancel::default();
     let watcher_cancel = cancel.clone();
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    let watcher = std::thread::spawn(move || {
         watcher_cancel.wait_until_requested_or_completed();
         tx.send(watcher_cancel.should_report_cancel())
             .expect("test receiver should stay alive");
@@ -41,4 +42,5 @@ fn shell_cancel_completion_wakes_waiter() {
             .expect("completion should wake cancellation watcher"),
         "completed processes should not report cancellation"
     );
+    watcher.join().expect("cancellation watcher");
 }

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Cursor, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process as path_std_process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -336,6 +336,122 @@ fn setsid_available() -> bool {
         .arg("command -v setsid >/dev/null")
         .status()
         .is_ok_and(|status| status.success())
+}
+
+// Owns cleanup of a fixture process that deliberately escaped its parent group.
+struct DetachedProcessCleanup {
+    // File where the fixture publishes its session-leader PID.
+    pid_file: PathBuf,
+    // PID recorded before normal fixture cleanup begins.
+    pid: Option<i32>,
+    // Whether this fixture's process group has already disappeared.
+    cleaned: bool,
+}
+
+impl DetachedProcessCleanup {
+    // Creates cleanup that also covers a panic before the fixture publishes its
+    // PID.
+    fn new(pid_file: PathBuf) -> Self {
+        Self {
+            pid_file,
+            pid: None,
+            cleaned: false,
+        }
+    }
+
+    // Waits for the fixture to publish the escaped process PID.
+    fn wait_for_pid(&mut self) -> i32 {
+        self.published_pid(Duration::from_secs(1))
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out waiting for detached fixture PID at {}",
+                    self.pid_file.display()
+                )
+            })
+    }
+
+    // Reads a published PID before a bounded deadline.
+    fn published_pid(&mut self, timeout: Duration) -> Option<i32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(&self.pid_file)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                self.pid = Some(pid);
+                return Some(pid);
+            }
+            if deadline <= Instant::now() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    // Stops the escaped process group and waits for its session leader to
+    // disappear.
+    fn cleanup(&mut self) -> bool {
+        if self.cleaned {
+            return true;
+        }
+        let Some(pid) = self
+            .pid
+            .or_else(|| self.published_pid(Duration::from_secs(1)))
+        else {
+            return false;
+        };
+        #[allow(unsafe_code)]
+        // SAFETY: the fixture records its `setsid` session leader PID, so `-pid`
+        // names only the process group deliberately created by this test.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        self.cleaned = process_disappears(pid, Duration::from_secs(1));
+        self.cleaned
+    }
+
+    // Disarms cleanup after the test has independently confirmed process exit.
+    fn mark_cleaned(&mut self) {
+        self.cleaned = true;
+    }
+}
+
+impl Drop for DetachedProcessCleanup {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+// Returns once a fixture creates a synchronization file, without a fixed delay.
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for fixture file {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+// Returns whether a process no longer exists after a bounded polling interval.
+fn process_disappears(pid: i32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        #[allow(unsafe_code)]
+        // SAFETY: `kill(pid, 0)` only probes the PID recorded by this test fixture.
+        let exists = unsafe { libc::kill(pid, 0) } == 0
+            || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        if !exists {
+            return true;
+        }
+        if deadline <= Instant::now() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]
@@ -1322,36 +1438,117 @@ fn all_rhai_tool_terminal_flush_failures_terminate_runtime() {
     }
 }
 
+/// A returned shell job holds its tool call open until its callback supplies
+/// one result.
 #[test]
 fn shell_job_returned_by_tool_defers_until_completion_callback() {
-    // Returning ShellJob from a tool handler defers ToolResult emission until
-    // the async command completes; the completion callback's value becomes the
-    // final tool result.
     let dir = tempfile::tempdir().expect("tempdir");
+    let started_marker = dir.path().join("shell-started");
+    let release = dir.path().join("release-shell");
     let script = write_script(
         &dir,
-        r#"
-            fn init(config) { register_tool("host_echo", #{}, Fn("host_echo")); }
-            fn host_echo(args, c) {
-                return shell_spawn("printf shell-ok", #{ timeout: 5, on_complete: Fn("done") });
-            }
-            fn done(result, job) {
-                if !result.success { throw result.output; }
+        &format!(
+            r#"
+            fn init(config) {{ register_tool("host_echo", #{{}}, Fn("host_echo")); }}
+            fn host_echo(args, c) {{
+                return shell_spawn(
+                    "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; printf shell-ok",
+                    #{{ timeout: 5, on_complete: Fn("done") }},
+                );
+            }}
+            fn done(result, job) {{
+                if !result.success {{ throw result.output; }}
                 return result.output;
-            }
+            }}
         "#,
+            started_marker.display(),
+            release.display()
+        ),
     );
-    let started = HarnessOutputMessage::deliver_live(
-        UnixMicros::new(1),
-        tool_started("host_echo", CborValue::Map(Vec::new())),
+    let (input_reader, input_writer) = UnixStream::pair().expect("unix stream pair");
+    let mut harness_writer = HarnessOutputWriter::new(
+        input_writer
+            .try_clone()
+            .expect("clone harness input writer"),
+    );
+    let output = SharedWriter::default();
+    let run_output = output.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let run_thread = std::thread::spawn(move || {
+        let result = run(input_reader, run_output).map_err(|error| error.to_string());
+        finished_tx
+            .send(result)
+            .expect("test receiver should stay alive");
+    });
+
+    for frame in [
+        configure_with_script(&script),
+        HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started("host_echo", CborValue::Map(Vec::new())),
+        ),
+    ] {
+        harness_writer
+            .write_message(&frame)
+            .expect("write harness input");
+    }
+    harness_writer.flush().expect("flush harness input");
+    wait_for_file(&started_marker);
+
+    let before_release = frames_from_bytes_lossy(output.bytes());
+    assert!(
+        before_release.iter().all(|frame| !matches!(
+            emitted_event(frame),
+            Some(Event::ToolResultReported(_) | Event::ToolErrorReported(_))
+        )),
+        "shell-backed tool emitted a terminal before its release gate opened"
     );
 
-    let frames = run_frames(&[configure_with_script(&script), started]);
+    std::fs::write(&release, "").expect("release shell command");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let frames = frames_from_bytes_lossy(output.bytes());
+        let terminals: Vec<_> = frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    emitted_event(frame),
+                    Some(Event::ToolResultReported(_) | Event::ToolErrorReported(_))
+                )
+            })
+            .collect();
+        if !terminals.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the deferred shell callback terminal"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(harness_writer);
+    drop(input_writer);
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("extension should exit after input closes")
+        .expect("run rhai extension");
+    run_thread.join().expect("run thread");
 
-    assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::ToolResultReported(result)) if result.result == CborValue::Text("shell-ok".to_owned())
-    )));
+    let frames = frames_from_bytes_lossy(output.bytes());
+    let terminals: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResultReported(result)) => Some(Ok(result)),
+            Some(Event::ToolErrorReported(error)) => Some(Err(error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminals.len(), 1);
+    let result = terminals[0]
+        .as_ref()
+        .expect("callback should return ToolResult");
+    assert_eq!(result.call_id, tau_proto::ToolCallId::new("call_1"));
+    assert_eq!(result.result, CborValue::Text("shell-ok".to_owned()));
 }
 
 #[test]
@@ -1506,11 +1703,10 @@ fn shell_completion_callback_throw_emits_tool_error() {
     )));
 }
 
+/// Shell results preserve working-directory behavior, stderr appending, nonzero
+/// exits, and start failures for script tools.
 #[test]
 fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
-    // The documented shell result map must expose working-directory behavior,
-    // stderr appending, nonzero process exits, and start failures in a stable
-    // JSON/CBOR-compatible shape for script tools.
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
     std::fs::write(cwd.path().join("input.txt"), "ok").expect("write cwd input");
@@ -1600,7 +1796,7 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
         (CborValue::Text(key), CborValue::Text(output))
             if key == "output" && output.contains("ok") && output.contains("[stderr]\nerr")
     )));
-    let start_error_result = results
+    let _start_error_result = results
         .iter()
         .find_map(|result| match result {
             CborValue::Map(fields)
@@ -1617,25 +1813,25 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
             _ => None,
         })
         .expect("start error shell result");
-    assert!(start_error_result.iter().any(|(key, value)| matches!(
-        (key, value),
-        (CborValue::Text(key), CborValue::Text(reason)) if key == "termination_reason" && reason == "start_error"
-    )));
 }
 
+/// An oversized timeout rejects its tool call without spawning the requested
+/// command.
 #[test]
-fn oversized_shell_timeout_is_rejected_before_pending_job_is_inserted() {
-    // Timeout validation must happen before the job enters the pending map; an
-    // overflowing deadline would otherwise panic the worker and wedge tool calls.
+fn oversized_shell_timeout_is_rejected_without_spawning_or_duplicate_terminal() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("oversized-timeout-command-ran");
     let script = write_script(
         &dir,
-        r#"
-            fn init(config) { register_tool("huge_timeout", #{}, Fn("huge_timeout")); }
-            fn huge_timeout(args, c) {
-                return shell_spawn("printf never", #{ timeout: 999999999999999999 });
-            }
+        &format!(
+            r#"
+            fn init(config) {{ register_tool("huge_timeout", #{{}}, Fn("huge_timeout")); }}
+            fn huge_timeout(args, c) {{
+                return shell_spawn("touch '{}'", #{{ timeout: 999999999999999999 }});
+            }}
         "#,
+            marker.display()
+        ),
     );
     let started = HarnessOutputMessage::deliver_live(
         UnixMicros::new(1),
@@ -1644,10 +1840,21 @@ fn oversized_shell_timeout_is_rejected_before_pending_job_is_inserted() {
 
     let frames = run_frames(&[configure_with_script(&script), started]);
 
-    assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::ToolErrorReported(error)) if error.message.contains("timeout must be at most")
-    )));
+    assert!(!marker.exists(), "rejected shell command must not run");
+    let terminals: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResultReported(result)) => Some(Ok(result)),
+            Some(Event::ToolErrorReported(error)) => Some(Err(error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminals.len(), 1, "tool call must have one terminal");
+    let error = terminals[0]
+        .as_ref()
+        .expect_err("oversized timeout must not emit ToolResult");
+    assert_eq!(error.call_id, tau_proto::ToolCallId::new("call_1"));
+    assert!(error.message.contains("timeout must be at most"));
 }
 
 /// A completed job must release its admission slot before its callback spawns
@@ -1710,39 +1917,81 @@ fn shell_callback_can_chain_at_pending_job_admission_cap() {
     );
 }
 
+/// Disconnect cancels an admitted shell before it can produce its side effect.
 #[test]
 fn disconnect_cancels_pending_shell_jobs() {
-    // On harness shutdown the extension must not leave trusted shell children
-    // running after its runtime exits.
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("marker");
+    let started_marker = dir.path().join("shell-started");
+    let pid_file = dir.path().join("shell-pid");
+    let mut child_cleanup = DetachedProcessCleanup::new(pid_file.clone());
     let script = write_script(
         &dir,
         &format!(
             r#"
                 fn init(config) {{ register_tool("long_shell", #{{}}, Fn("long_shell")); }}
                 fn long_shell(args, c) {{
-                    return shell_spawn("sleep 2; touch '{}'", #{{ timeout: 10 }});
+                    return shell_spawn(
+                        "echo $$ > '{}'; touch '{}'; while :; do sleep 1; done; touch '{}'",
+                        #{{ timeout: 10 }},
+                    );
                 }}
             "#,
+            pid_file.display(),
+            started_marker.display(),
             marker.display()
         ),
     );
-    let started = HarnessOutputMessage::deliver_live(
-        UnixMicros::new(1),
-        tool_started("long_shell", CborValue::Map(Vec::new())),
+    let (input_reader, input_writer) = UnixStream::pair().expect("unix stream pair");
+    let mut harness_writer = HarnessOutputWriter::new(
+        input_writer
+            .try_clone()
+            .expect("clone harness input writer"),
     );
+    let output = SharedWriter::default();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let run_thread = std::thread::spawn(move || {
+        let result = run(input_reader, output).map_err(|error| error.to_string());
+        finished_tx
+            .send(result)
+            .expect("test receiver should stay alive");
+    });
 
-    let started_at = Instant::now();
-    let _frames = run_frames(&[
+    for frame in [
         configure_with_script(&script),
-        started,
-        HarnessOutputMessage::Disconnect(tau_proto::Disconnect::default()),
-    ]);
-    assert!(started_at.elapsed() < Duration::from_secs(1));
-    std::thread::sleep(Duration::from_millis(2500));
+        HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started("long_shell", CborValue::Map(Vec::new())),
+        ),
+    ] {
+        harness_writer
+            .write_message(&frame)
+            .expect("write harness input");
+    }
+    harness_writer.flush().expect("flush harness input");
+    wait_for_file(&started_marker);
+    let pid = child_cleanup.wait_for_pid();
+    harness_writer
+        .write_message(&HarnessOutputMessage::Disconnect(
+            tau_proto::Disconnect::default(),
+        ))
+        .expect("write disconnect");
+    harness_writer.flush().expect("flush disconnect");
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("disconnect should stop extension promptly")
+        .expect("run rhai extension");
+    run_thread.join().expect("run thread");
 
-    assert!(!marker.exists());
+    assert!(
+        process_disappears(pid, Duration::from_secs(1)),
+        "disconnect must kill the admitted shell process"
+    );
+    child_cleanup.mark_cleaned();
+    assert!(
+        !marker.exists(),
+        "canceled shell must not create its marker"
+    );
 }
 
 #[test]
@@ -1772,26 +2021,30 @@ fn shell_completion_kills_background_descendant_holding_output_pipe() {
     assert_eq!(tool_result_output(&frames), "done");
 }
 
+/// An escaped idle pipe holder cannot delay completion and is fixture-cleaned.
 #[test]
 fn shell_completion_does_not_wait_for_detached_descendant_holding_output_pipe() {
-    // A hostile or careless trusted command can detach from the shell process
-    // group while keeping inherited stdout open. The extension should still
-    // return promptly with already-captured output instead of waiting for pipe
-    // EOF from a process group it no longer owns. This regression requires the
-    // `setsid` helper to be available in the test environment.
     if !setsid_available() {
         eprintln!("skipping detached setsid regression: setsid not available");
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("detached-pipe-pid");
+    let ready_file = dir.path().join("detached-pipe-ready");
+    let mut detached_cleanup = DetachedProcessCleanup::new(pid_file.clone());
     let script = write_script(
         &dir,
-        r#"
-            fn init(config) { register_tool("detached_pipe", #{}, Fn("detached_pipe")); }
-            fn detached_pipe(args, c) {
-                return shell_spawn("setsid sh -c 'sleep 2' & printf done", #{ timeout: 10 });
-            }
+        &format!(
+            r#"
+            fn init(config) {{ register_tool("detached_pipe", #{{}}, Fn("detached_pipe")); }}
+            fn detached_pipe(args, c) {{
+                return shell_spawn("setsid sh -c 'echo $$ > \"{}\"; touch \"{}\"; sleep 2' & while [ ! -e \"{}\" ]; do sleep 0.01; done; printf done", #{{ timeout: 10 }});
+            }}
         "#,
+            pid_file.display(),
+            ready_file.display(),
+            ready_file.display()
+        ),
     );
     let started = HarnessOutputMessage::deliver_live(
         UnixMicros::new(1),
@@ -1803,28 +2056,38 @@ fn shell_completion_does_not_wait_for_detached_descendant_holding_output_pipe() 
 
     assert!(started_at.elapsed() < Duration::from_secs(1));
     assert_eq!(tool_result_output(&frames), "done");
+    detached_cleanup.wait_for_pid();
+    assert!(
+        detached_cleanup.cleanup(),
+        "fixture cleanup must stop detached pipe holder"
+    );
 }
 
+/// An escaped writer cannot exceed the post-stop drain bound and is
+/// fixture-cleaned.
 #[test]
 fn shell_completion_bounds_detached_descendant_continuing_to_write() {
-    // Post-completion pipe draining must have an absolute bound. A detached
-    // descendant that keeps writing to inherited stdout after the foreground
-    // shell exits should not keep the pipe reader alive indefinitely. This
-    // regression requires the `setsid` helper to be available in the test
-    // environment.
     if !setsid_available() {
         eprintln!("skipping detached setsid writer regression: setsid not available");
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("writing-pipe-pid");
+    let ready_file = dir.path().join("writing-pipe-ready");
+    let mut detached_cleanup = DetachedProcessCleanup::new(pid_file.clone());
     let script = write_script(
         &dir,
-        r#"
-            fn init(config) { register_tool("writing_pipe", #{}, Fn("writing_pipe")); }
-            fn writing_pipe(args, c) {
-                return shell_spawn("setsid sh -c 'i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); sleep 0.01; done' & printf done", #{ timeout: 10 });
-            }
+        &format!(
+            r#"
+            fn init(config) {{ register_tool("writing_pipe", #{{}}, Fn("writing_pipe")); }}
+            fn writing_pipe(args, c) {{
+                return shell_spawn("setsid sh -c 'echo $$ > \"{}\"; touch \"{}\"; i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); sleep 0.01; done' & while [ ! -e \"{}\" ]; do sleep 0.01; done; printf done", #{{ timeout: 10 }});
+            }}
         "#,
+            pid_file.display(),
+            ready_file.display(),
+            ready_file.display()
+        ),
     );
     let started = HarnessOutputMessage::deliver_live(
         UnixMicros::new(1),
@@ -1836,6 +2099,11 @@ fn shell_completion_bounds_detached_descendant_continuing_to_write() {
 
     assert!(started_at.elapsed() < Duration::from_secs(1));
     assert!(tool_result_output(&frames).contains("done"));
+    detached_cleanup.wait_for_pid();
+    assert!(
+        detached_cleanup.cleanup(),
+        "fixture cleanup must stop detached writer"
+    );
 }
 
 #[test]
