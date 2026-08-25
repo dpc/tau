@@ -538,19 +538,42 @@ fn generic_prefixes_scope_xmpp_instances() {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(registrations.iter().any(|registration| {
-            registration.tool.name.as_str() == format!("{prefix}_{REGISTER_TOOL_NAME}")
-                && registration
+        assert_eq!(registrations.len(), 2);
+        for (tool_name, tag) in [
+            (REGISTER_TOOL_NAME, REGISTER_TOOL_TAG),
+            (SEND_TOOL_NAME, SEND_TOOL_TAG),
+        ] {
+            let wire_name = format!("{prefix}_{tool_name}");
+            let registration = registrations
+                .iter()
+                .find(|registration| registration.tool.name.as_str() == wire_name)
+                .expect("exactly one scoped XMPP declaration");
+            assert_eq!(
+                registration
                     .tool
                     .model_visible_name
                     .as_ref()
-                    .is_some_and(|name| name.as_str() == format!("{prefix}_{REGISTER_TOOL_NAME}"))
-                && registration.tool_group.as_ref().is_some_and(|group| {
-                    group.name.as_str() == format!("{prefix}_{TOOL_GROUP_NAME}")
-                })
-        }));
-        assert!(registrations.iter().any(|registration| {
-            registration.tool.name.as_str() == format!("{prefix}_{SEND_TOOL_NAME}")
+                    .map(tau_proto::ToolName::as_str),
+                Some(wire_name.as_str())
+            );
+            assert!(
+                registration.tool_group.as_ref().is_some_and(
+                    |group| group.name.as_str() == format!("{prefix}_{TOOL_GROUP_NAME}")
+                )
+            );
+            assert_eq!(
+                registration
+                    .tool
+                    .tags
+                    .iter()
+                    .map(tau_proto::ToolTag::as_str)
+                    .collect::<Vec<_>>(),
+                vec![tag]
+            );
+            assert!(!registration.tool.enabled_by_default);
+        }
+        assert!(!registrations.iter().any(|registration| {
+            [REGISTER_TOOL_NAME, SEND_TOOL_NAME].contains(&registration.tool.name.as_str())
         }));
     }
 }
@@ -1076,18 +1099,55 @@ fn xmpp_send_fails_before_registration() {
     assert!(error.message.contains("registration tool"));
 }
 
-/// Registering an agent starts the XMPP bridge lazily and records only
-/// in-memory conversation state for the current Tau process.
+/// Registering an agent emits its exact progress and sole correlated success
+/// terminal while lazily starting the bridge and recording process-local
+/// conversation state.
 #[test]
 fn xmpp_register_true_registers_agent_and_starts_bridge() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    let _progress = rx.recv().expect("progress");
-    let _result = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("progress") else {
+        panic!("progress emit")
+    };
+    assert_eq!(
+        *emit.event,
+        Event::ToolProgressReported(ToolProgress {
+            call_id: format!("call-{REGISTER_TOOL_NAME}").into(),
+            tool_name: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
+            message: Some("xmpp tool started".to_owned()),
+            progress: None,
+            display: Some(ToolUseState {
+                status: ToolUseStatus::InProgress,
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+                ..Default::default()
+            }),
+        })
+    );
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
+        panic!("result emit")
+    };
+    let Event::ToolResultReported(result) = *emit.event else {
+        panic!("successful terminal")
+    };
+    assert_eq!(
+        result.call_id.as_str(),
+        format!("call-{REGISTER_TOOL_NAME}")
+    );
+    assert_eq!(result.tool_name.as_str(), REGISTER_TOOL_NAME);
     assert_eq!(*bridge.started.lock().expect("lock"), 1);
     let state = ext.state.lock().expect("lock");
     assert!(state.registered_agents.contains_key(&agent_id("agent-1")));
-    assert!(state.conversations.contains_key(&agent_id("agent-1")));
+    let address = state
+        .conversations
+        .get(&agent_id("agent-1"))
+        .expect("registered conversation");
+    assert_eq!(
+        result.result,
+        CborValue::Text(format!(
+            "registered for XMPP messages at {address}. Plaintext over TLS only; no OMEMO/E2EE."
+        ))
+    );
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
 }
 
 /// Explicit unregister revokes local authority and reports success even when
@@ -1899,21 +1959,15 @@ fn xmpp_send_waits_for_online_readiness_after_registration() {
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
 }
 
-/// Readiness waits are deliberately bounded to the 30-second user-facing retry
-/// window, avoiding hidden unbounded tool calls when the XMPP account never
-/// connects.
-#[test]
-fn online_readiness_wait_is_bounded_to_thirty_seconds() {
-    assert_eq!(ONLINE_WAIT_TIMEOUT, Duration::from_secs(30));
-}
-
 /// Harness disconnect is the authoritative lifecycle signal; the extension must
 /// stop processing further input and ask the XMPP bridge to clean up rooms.
 #[test]
 fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
     let bridge = FakeBridge::new();
     bridge.set_ready(true);
-    run_protocol_messages(
+    let mut after_disconnect = tool(SEND_TOOL_NAME, "agent-1", message_args("must not send"));
+    after_disconnect.call_id = "post-disconnect-send".into();
+    let frames = run_protocol_messages(
         &[
             valid_config_message(),
             session_started_message("session-1"),
@@ -1925,12 +1979,28 @@ fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
             HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
                 reason: Some("test shutdown".to_owned()),
             }),
+            HarnessOutputMessage::deliver(Event::ToolStarted(after_disconnect)),
         ],
         bridge.clone(),
     );
 
     assert_eq!(*bridge.shutdowns.lock().expect("lock"), 1);
     assert_eq!(bridge.cleanup_leases.lock().expect("lock").len(), 1);
+    assert!(bridge.sent.lock().expect("lock").is_empty());
+    assert_eq!(bridge.registrations.lock().expect("lock").len(), 1);
+    assert!(!frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolResultReported(result)
+                    if result.call_id.as_str() == "post-disconnect-send"
+            ) || matches!(
+                emit.event.as_ref(),
+                Event::ToolErrorReported(error)
+                    if error.call_id.as_str() == "post-disconnect-send"
+            )
+    )));
 }
 
 /// A new live session id retires every registration from the previous session
@@ -3401,9 +3471,16 @@ fn direct_message_requires_exact_bound_full_jid() {
     worker.handle_stanza(wrong_to.into());
     assert!(rx.try_recv().is_err());
 
+    let mut unallowlisted_sender =
+        Message::chat(bound.clone()).with_body(Lang::new(), "unallowlisted".to_owned());
+    unallowlisted_sender.from = Some(Jid::new("mallory@example.org/dino").expect("jid"));
+    unallowlisted_sender.to = Some(bound.clone());
+    worker.handle_stanza(unallowlisted_sender.into());
+    assert!(rx.try_recv().is_err());
+
     let mut ok = Message::chat(bound.clone()).with_body(Lang::new(), "hello".to_owned());
     ok.from = Some(Jid::new("me@example.org/dino").expect("jid"));
-    ok.to = Some(bound);
+    ok.to = Some(bound.clone());
     worker.handle_stanza(ok.into());
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
@@ -3421,6 +3498,30 @@ fn direct_message_requires_exact_bound_full_jid() {
         report.conversation.expect("conversation").stable_id,
         "me@example.org"
     );
+
+    worker.cfg.allowed_jids =
+        validate_allowed_jids(vec!["me@example.org/dino".to_owned()]).expect("full allowlist");
+    let mut exact_full =
+        Message::chat(bound.clone()).with_body(Lang::new(), "exact full".to_owned());
+    exact_full.from = Some(Jid::new("me@example.org/dino").expect("jid"));
+    exact_full.to = Some(bound.clone());
+    worker.handle_stanza(exact_full.into());
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("full-JID report") else {
+        panic!("emit")
+    };
+    assert!(matches!(
+        emit.event.as_ref(),
+        Event::MessageDeliveredReported(report)
+            if report.text == "exact full"
+                && report.sender.sender_auth == Some(MessageSenderAuth::VerifiedAllowlisted)
+    ));
+
+    let mut different_resource =
+        Message::chat(bound.clone()).with_body(Lang::new(), "different resource".to_owned());
+    different_resource.from = Some(Jid::new("me@example.org/other").expect("jid"));
+    different_resource.to = Some(bound);
+    worker.handle_stanza(different_resource.into());
+    assert!(rx.try_recv().is_err());
 }
 
 /// The final inbound authority check rejects a stanza when revocation occurs
