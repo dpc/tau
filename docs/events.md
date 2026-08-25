@@ -934,8 +934,8 @@ terminal silently no-op. See
   **`agent.tool_wait_settled`**, **`agent.tool_cancellation_requested`**, and
   **`agent.tool_terminal_classified`** — Content-free, best-effort runtime
   observations linked by opaque random observation IDs and exact declaration
-  references. They synchronously validate and submit one best-effort journal
-  frame, but do not wait for stable-storage synchronization or acknowledgement,
+  references. They validate and attempt bounded nonblocking admission of one
+  best-effort journal frame, but do not wait for filesystem I/O or acknowledgement,
   traverse interception, deliver to subscribers, or make runtime outcomes
   depend on append success. Replay is observation-only. A crash, append failure, or selected
   snapshot may leave references unresolved or calls incomplete; consumers must

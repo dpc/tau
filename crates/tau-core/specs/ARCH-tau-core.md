@@ -11,15 +11,16 @@ limit before opening or mutating the journal.
 not a transcript node. The latest bootstrap/skill replacement survives replay
 and remains outside branch-head movement and compaction.
 
-Agent journals and both ordinary and restore session journals use the same
-failure-atomic frame append. A writer captures the exact pre-append EOF, writes
-the complete length prefix and CBOR payload, then advances folded state and
-sequence without waiting for sync. A prefix or payload failure truncates to the
-captured EOF. Only inability to restore that EOF poisons the live path.
+Agent journals and both ordinary and restore session journals share one bounded,
+ordered persistence worker. Live admission validates and advances process-local
+folded state and sequence without filesystem I/O. The worker captures the exact
+pre-append EOF and writes the complete length prefix and CBOR payload. A prefix
+or payload failure truncates to the captured EOF; only inability to restore that
+EOF poisons later worker-side appends to that journal.
 
-A lifecycle-owned worker coalesces one dirty state per journal or directory
-boundary, syncs complete frames and typed child-before-parent directory targets
-in the background, tracks generations
+A lifecycle-owned persistence worker serializes frame and checkpoint writes and
+coalesces one dirty state per journal or directory boundary. It syncs complete
+frames and typed child-before-parent directory targets in the background and tracks generations
 so concurrent writes cannot lose a wake, and retries failures. Sync failure does
 not retract or fail an accepted semantic append. Locked recovery truncates only
 an incomplete frame header or payload at EOF, then rebuilds folded state and
@@ -49,8 +50,9 @@ validates and folds the durable snapshot, then validates and composes the
 overlay. Cached membership never bypasses durable journal validation, and restart
 discards the overlay with the corresponding ephemeral transcripts.
 
-Each durable `AgentStore` and `SessionStore` owns one lazily spawned
-`JournalSyncWorker` through its `FramedAppendState`. The worker keeps at most one
+Durable semantic stores share one bounded persistence admission stream. Its
+worker owns journal filesystem state and uses `JournalSyncWorker` through
+`FramedAppendState` for coalesced synchronization. The sync state keeps at most one
 merged dirty target and one ready-or-in-flight position per journal or directory
 boundary. A journal target records its generation, exact end offset, and required
 parent directories. A directory-boundary target records its distinct kind and
@@ -59,8 +61,8 @@ after acquiring writable branch ownership, stores deliberately re-cover the
 existing branch boundary and a pending store-root chain through `.` or filesystem
 root, so a prior process cannot strand any ancestor entry. Opening retains that
 root debt without submitting it; read-only use and losing lock contenders neither
-submit nor consume it. Foreground appends update their journal target and return
-without waiting.
+submit nor consume it. Worker-side appends update their journal target without
+delaying live publication.
 
 The worker syncs each journal file before its required directories and each
 directory boundary child before its parent. It compares the full
@@ -88,8 +90,8 @@ Memory-only streams use the same semantic fold as journal-backed streams and
 support same-daemon replay, but create no durable artifact. Agent journals remain
 the sole durable identity and listing authority: atomically replaced `meta.json`
 files are versioned, journal-bound derived checkpoints rather than a second
-index or evidence of durability. A complete journal-frame write precedes
-checkpoint replacement. Missing, stale, corrupt, or over-budget checkpoints
+index or evidence of durability. On the persistence worker, a complete journal
+frame precedes checkpoint replacement. Missing, stale, corrupt, or over-budget checkpoints
 must not hide a valid journal-backed agent, and recovery invalidates a checkpoint
 when it truncates an incomplete EOF crash tail.
 

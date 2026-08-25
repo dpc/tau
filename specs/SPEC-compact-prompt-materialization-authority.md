@@ -18,8 +18,9 @@ one unresolved owner by agent, prompt, model, and operation. The content-bearing
 to its selected provider and existing live observers; it never enters semantic
 storage.
 
-The owner must commit before materialization. The prompt-start foreground frame
-write must then complete before provider delivery, and its post-commit
+The owner must commit before materialization. The prompt-start fact must then
+complete bounded persistence admission and its in-memory fold before provider
+delivery, and its post-commit
 continuation exclusively owns that delivery. Immediately before send, the
 continuation revalidates the same session and loaded runtime incarnation, the
 unresolved owner, the unique prompt-start fact, their matching identity fields,
@@ -44,5 +45,5 @@ output contains only a bounded content-free summary. Optional exact request
 capture is diagnostic output with explicit bounded retention and is never
 semantic authority, replay input, or recovery state.
 
-The foreground-write versus background-sync crash boundary follows
+The live-acceptance versus worker-persistence crash boundary follows
 [SPEC-semantic-journal-writeback-durability](SPEC-semantic-journal-writeback-durability.md).

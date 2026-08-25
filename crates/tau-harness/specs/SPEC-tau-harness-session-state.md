@@ -103,15 +103,15 @@ remains strict. Recovery under the writer lock retains the longest valid prefix
 and truncates the first corrupt, truncated, spliced, or semantically invalid
 frame and every later byte, even if a later frame looks valid.
 
-Journal-backed agent, ordinary-session, and session-restore appends capture the exact
-journal EOF before writing a length-prefixed CBOR frame. Prefix, payload, or
-payload-write failure rolls the journal back to that EOF before returning the
-original append error. A live store that cannot truncate to the old EOF rejects
-later appends to that journal without touching it. A complete frame immediately
-advances sequence and folded state. A coalesced lifecycle-owned worker later
-syncs journal data and newly created directory entries, retries failures, and
-never blocks or retracts semantic acceptance. Recovery truncation is itself
-marked dirty for background sync.
+Journal-backed agent, ordinary-session, and session-restore facts use bounded
+nonblocking admission before canonical acceptance. The live path advances
+process-local sequence and folded state without filesystem I/O. One ordered
+worker captures the exact journal EOF, writes a length-prefixed CBOR frame, and
+then replaces any journal-derived checkpoint. Prefix, payload, or payload-write
+failure rolls the journal back to that EOF. Failure to restore the old EOF
+poisons later worker-side appends to that journal. Storage failures are
+diagnosed and retried asynchronously without retracting accepted facts.
+Recovery truncation is marked dirty for background sync.
 
 Manifest replacement is failure-atomic but does not add a synchronous
 stable-storage barrier. No durability barrier precedes provider, tool, renderer, or other external

@@ -233,8 +233,8 @@ worker owns every append handle and performs directory/open work, per-line
 accounting includes queued and in-flight line-plus-path bytes; overflow and
 recoverable I/O omit diagnostics, while uncertain rollback poisons the singleton.
 No harness lifecycle owns, drains, joins, or fsyncs this worker. Authoritative
-CBOR journals never use its queue or lock; they use a separate lifecycle-owned
-coalesced sync worker under
+CBOR journals use a separate bounded, non-droppable ordered persistence queue
+and worker under
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 Startup separately runs one best-effort, time-based cleanup of expired session
 `events.jsonl` files and exact compressed provider request/response or

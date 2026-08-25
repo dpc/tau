@@ -1,27 +1,29 @@
-# GATE-asynchronous-journal-durability: Keep journal durability off runtime paths
+# GATE-asynchronous-journal-durability: Keep journal filesystem I/O off runtime paths
 
 ## Gate
 
-Tau must not wait for journal file-data or directory synchronization before
-continuing runtime work after a semantic append. Journal writeback must remain
-asynchronous and coalesced; a system crash may lose the unsynchronized suffix
-of otherwise accepted events.
+Normal live paths validate and perform required in-memory semantic ordering and
+fold work, then use bounded nonblocking persistence admission. Queue saturation
+rejects before canonical acceptance. Ordered persistence workers perform
+journal and journal-derived checkpoint filesystem writes using failure-atomic
+techniques. Canonical publication does not wait for write or synchronization
+completion.
 
-Observational events added for tracing or correlation must remain best-effort.
-Tool dispatch, wait behavior, activation delivery, cancellation, provider
-continuation, and other runtime outcomes must not wait for those observations
-to reach durable storage or change because their logging fails. Tau must not
-introduce per-event durability acknowledgements, sync-before-action ordering,
-or write-ahead-log-style commit gating for these effects.
+Later storage failure does not retract an accepted event; diagnostics and retry
+remain asynchronous. A process, kernel, or power crash may lose recent admitted
+events. Tau must not introduce per-event durability acknowledgements,
+sync-before-action ordering, or write-ahead-log-style commit gating.
 
-This constraint does not remove immediate append validation, failure-atomic
-frame writes, event ordering, existing semantic-event append requirements, or
-replay semantics. It separates those concerns from stable-storage durability
-and prevents new observational logging from becoming a runtime precondition.
+Worker-side persistence preserves complete ordered frames, partial-write
+rollback and poisoning, atomic checkpoint replacement and recovery, journal
+order, and bounded memory and backpressure. Observational events added for
+tracing or correlation remain best-effort and never make tool dispatch, wait
+behavior, activation delivery, cancellation, provider continuation, or another
+runtime outcome wait for filesystem I/O or change because storage later fails.
 
 ## Justification
 
-The user deliberately chose low hot-path latency over crash-complete durability
-of the newest journal entries. A session journal is an event log, not a
-transactional database. Consumers must tolerate an incomplete crash tail rather
-than move storage synchronization into runtime paths.
+The user deliberately chose low interactive latency over crash-complete
+durability of the newest journal entries. Filesystem writes and synchronization
+can have significant tail latency, so failure-atomic I/O belongs on bounded
+workers rather than canonical live paths.

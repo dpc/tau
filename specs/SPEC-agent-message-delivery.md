@@ -255,10 +255,10 @@ result without the recipient projection. No automatic model-level ACK is
 introduced. Cross-harness callback-bound typed authority and bounded admission
 remain unchanged.
 
-The target ACK becomes eligible after the exact receive occurrence completes its
-authoritative foreground framed write. It does not wait for background
-filesystem sync, so an ACK or provider effect can survive a crash that loses the
-journal fact. This boundary is governed by
+The target ACK becomes eligible after the exact receive occurrence completes
+bounded persistence admission and its authoritative in-memory fold. It does not
+wait for worker filesystem I/O, so an ACK or provider effect can survive a crash
+that loses the journal fact. This boundary is governed by
 [SPEC-semantic-journal-writeback-durability](SPEC-semantic-journal-writeback-durability.md).
 The target's same-loop post-commit reaction queues or transfers the live wake
 before sending that ACK, but model inference and response are not ACK

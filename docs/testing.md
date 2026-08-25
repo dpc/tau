@@ -166,12 +166,14 @@ invalid frame and prove the entire suffix is truncated. Read-only snapshot tests
 remain strict. Use deterministic injected I/O failures without
 sleeps or timing assumptions.
 
-`tau-core::journal_sync::JournalSyncWorker` owns deterministic writeback tests.
-They cover lazy spawn attempts and target-kind ordering,
+The semantic persistence worker owns deterministic bounded-admission, ordered
+frame/checkpoint write, failure, and blocked-filesystem tests.
+`tau-core::journal_sync::JournalSyncWorker` separately owns deterministic
+synchronization tests. They cover lazy spawn attempts and target-kind ordering,
 generation/offset lost-wake handshakes, exact created-directory coverage, fair
 per-path retry backoff, partial directory retry through dirty-state clearance,
-and detached shutdown. Store tests prove a later semantic append and fold completes
-while sync is blocked. Recovery tests prove repair marks the journal dirty and
+and detached shutdown. Store tests prove live admission and fold complete while
+worker filesystem I/O is blocked. Recovery tests prove repair marks the journal dirty and
 failed session-metadata rebuild remains retryable across restart.
 
 ## Provider response streaming tests
