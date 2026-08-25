@@ -177,14 +177,14 @@ standalone-compaction opt-in: all other scenarios continue publishing that
 capability as false. They accept a nonempty harness-owned compact transcript,
 bounded terminal error or cancellation hold, one dedicated private typed local
 narrative output, or one fixed canonical opaque item. The local action requires
-the exact escaped composite checkpoint, exact empty durable-facts JSON, removed
-source context, byte-identical clean-restart replay, and resumed continuation.
+the exact model final text as one synthetic user checkpoint, removed source
+context, byte-identical clean-restart replay, and resumed continuation.
 One closed reactive sequence additionally
 accepts a canonical no-output context-window failure, one correlated compact
 request for a verified pre-cut round, and one replacement/suffix continuation
 that retains the overflowing prompt while excluding that pre-cut round. The
-shared `tau-provider` policy owns transcript-v1 request materialization. The
-Chat Completions adapter owns its static no-tools wire lowering, while
+shared `tau-provider` policy owns the exact trailing summary instruction. The
+Chat Completions adapter owns its cache-aligned ordinary-prefix wire lowering, while
 provider-builtin owns public Responses fallback dispatch and validation.
 
 The output-length acceptance is one separate closed two-action, sole-lane

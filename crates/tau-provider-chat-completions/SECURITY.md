@@ -34,31 +34,24 @@ volatile-suffix cache-write premium.
 The explicit policy requires a non-empty system prompt. It sends explicit mode
 with the fixed 30-minute TTL and marks the end of that system text, leaving
 conversation and tool suffixes unmarked. `extra_body` cannot override the key,
-retention, or options fields. Standalone summary compaction omits every cache
-control.
+retention, or options fields. Standalone summary compaction preserves the same cache controls as ordinary
+inference so its unchanged prefix remains cache-eligible.
 
 ## Local summary compactor boundary
 
-The built-in provider supplies conservative context-derived transcript-v1
-summary limits for every viable model; an explicit `local_summary_compaction`
-profile fully overrides them. This low-level adapter uses only the resolved
-optional limits it receives. The dedicated exact-model request has no tools,
-omits image bytes while retaining typed metadata and an explicit loss marker,
-and is excluded from durable provider debug capture. It accepts one bounded
-nonempty assistant narrative, discards separately bounded typed reasoning, and
-rejects every other output item. The harness adds its own deterministic durable
-tool-status supplement before the bounded narrative persists as untrusted
-synthetic user-role history. Separately
-byte-bounded reasoning text may accompany that result but is discarded. Other
-semantic output is rejected. Failures after semantic output terminalize without
-resend. The local extension returns a dedicated private typed narrative
-envelope; the harness rejects empty, oversized, or multi-item envelopes
-atomically, and provider transcript phases remain provider-valid only. The
-harness walks the selected cut's full durable ancestry through prior
-compactions, retains at most 32 newest tool terminal facts under 8 KiB, escapes
-tag delimiters, and excludes arguments, outputs, error prose, media, messages,
-reasoning, opaque data, metadata, UI/runtime/debug state, suffixes, and sibling
-branches. Revisit provenance, ancestry, included/excluded fields, budgeting,
-escaping, atomic failure, capture, retries, validation, and eligibility when
-changing this boundary. Raw narrative is capped at 256 KiB and the complete
-escaped persisted checkpoint at 2 MiB.
+The built-in provider supplies conservative context-derived summary limits for
+every viable model; an explicit `local_summary_compaction` profile fully
+overrides them. The adapter lowers the immutable cut exactly like ordinary
+inference, retaining the ordinary system prompt, tools, typed history, images,
+raw tool arguments, route/model fields, and cache controls, then appends the
+fixed harness-authored `<tau_internal>` user instruction last. This is deliberate
+cache alignment, not an isolated authority or privacy boundary.
+
+Any returned tool call rejects the attempt and executes nothing. The extension
+accepts exactly one nonempty bounded assistant final text, discards bounded
+reasoning, and rejects every other semantic item. The harness stores the exact
+text once as one synthetic user-role checkpoint without a wrapper or supplement.
+Ordinary opted-in provider debug capture applies and remains non-semantic,
+sensitive observability data. Revisit prefix identity, output validation,
+non-execution, bounds, capture, retries, suffix preservation, and replay identity
+when changing this boundary.

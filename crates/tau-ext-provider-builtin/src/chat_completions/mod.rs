@@ -95,15 +95,15 @@ pub struct ChatCompletionsModel {
         Option<tau_proto::EstimatedUsdPerMillionTokenHours>,
 }
 
-/// Explicit limits and serialization profile for Tau summary compaction.
+/// Explicit limits and compatibility profile for Tau summary compaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalSummaryCompactionConfig {
-    /// Versioned canonical transcript serialization accepted by the model.
+    /// Versioned profile identifier for local summary compaction.
     pub serialization_profile: LocalSummaryCompactionSerializationProfile,
     /// Explicit context window for this local compactor; must match the model.
     pub context_window_tokens: NonZeroU64,
-    /// Maximum serialized compactor input size in bytes.
+    /// Input-size budget used to derive the proactive compaction threshold.
     pub max_input_bytes: NonZeroU64,
     /// Maximum requested summary output tokens.
     pub max_output_tokens: NonZeroU32,

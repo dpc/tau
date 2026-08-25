@@ -143,6 +143,27 @@ fn narrative_output_requires_one_assistant_message_and_rejects_other_items() {
     }
 }
 
+/// Assistant final text plus any attempted tool call must fail atomically, so
+/// no narrative crosses the extension seam and the harness cannot execute it.
+#[test]
+fn narrative_output_rejects_text_mixed_with_attempted_tool_call() {
+    let attempted_call = tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+        call_id: "call-compaction-must-not-run".into(),
+        name: tau_proto::ToolName::new("dangerous"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: tau_proto::CborValue::Null,
+        raw_arguments_json: Some(r#"{"path":"/must/not/run"}"#.to_owned()),
+        responses_envelope: None,
+    });
+    assert!(
+        validate_narrative_output(
+            vec![valid_narrative_item(), attempted_call],
+            narrative_config(4096),
+        )
+        .is_err()
+    );
+}
+
 fn narrative_config(max_output_bytes: u64) -> LocalSummaryCompactionConfig {
     LocalSummaryCompactionConfig {
         serialization_profile: LocalSummaryCompactionSerializationProfile::LocalTranscriptV1,

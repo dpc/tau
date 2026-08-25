@@ -315,25 +315,23 @@ repair. Complete invalid frames fail closed without mutation. Re-check byte-boun
 retry-sequence, restore-journal, writeback, and suffix regressions whenever
 framed I/O changes.
 
-The opted-in local Chat Completions compactor returns one bounded narrative in
-a dedicated private `local_compaction_narrative` output envelope. The harness
-accepts that provenance only on the correlated standalone terminal from its
-configured provider route and rejects an empty, oversized, or multi-item local
-envelope atomically. Ordinary provider messages cannot represent this control
-output, and provider lowering never emits it.
-Before persistence, the harness escapes tag delimiters and combines the
-untrusted narrative with deterministic JSON derived by walking the selected
-cut's complete durable ancestry. The JSON retains at most the newest 32 closed
-tool results under 8 KiB, rendered chronologically with an omission count, and
-contains only tool name, function/custom type, and
-success/error/cancelled class. It excludes arguments, result and error prose,
-media, messages, reasoning, opaque provider data, metadata, UI/runtime/debug
-state, suffixes, and sibling branches. Scanning through earlier compaction
-boundaries keeps recent typed statuses available even after repeated poor
-summaries. Re-review private-envelope admission, ancestry selection, bounds,
-escaping, atomic failure, and live/cold byte identity whenever this checkpoint
-format or local compaction dispatch changes. Raw narrative is capped at 256 KiB
-and the complete escaped persisted checkpoint at 2 MiB.
+The opted-in generic local compactor reuses the ordinary provider request
+prefix for the immutable cut, including its system prompt, tools, messages,
+images, raw tool-call arguments, and cache controls, then appends a
+harness-authored `<tau_internal>` user message that forbids tool use and requests
+only a summary. This deliberately does not create a separate compactor authority
+or privacy-reduced transcript. The configured provider has already received the
+same ordinary context; cache alignment avoids a second cold prefill when the
+provider cache retains that prefix.
+
+The extension rejects any tool call or other semantic output without execution,
+accepts exactly one nonempty bounded assistant final text, and discards reasoning
+and opaque replay items. The harness persists that text exactly once as one
+synthetic user-role checkpoint, with no deterministic supplement or wrapper.
+Events committed after the immutable cut remain suffix history. Ordinary
+opted-in provider debug captures apply to compaction; they are sensitive,
+best-effort observability artifacts and never journal, transcript, replay, or
+recovery authority.
 
 Provider work leaves the harness only after its inference or compaction owner
 and one matching source-free `agent.prompt_started` frame have completed

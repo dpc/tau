@@ -116,7 +116,7 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
 
     let mut standalone = minimal_prompt();
     standalone.operation = tau_proto::PromptOperation::StandaloneCompaction;
-    assert!(!debug_capture_enabled(&standalone, true));
+    assert!(debug_capture_enabled(&standalone, true));
     let _ = run_attempt_with_capture(
         &invalid,
         &config,
@@ -139,22 +139,34 @@ fn debug_capture_policy_and_pre_dispatch_failures_use_real_attempt_path() {
     let captures = captures.lock().expect("capture lock");
     assert_eq!(
         captures.len(),
-        2,
+        3,
         "disabled and canceled attempts add nothing"
     );
     assert!(captures.iter().all(|capture| capture.class()
         == tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse));
-    let build: Value = serde_json::from_slice(captures[0].json()).expect("build capture");
-    assert_eq!(build["error"]["kind"], "unsupported_tool");
-    let outbound: Value = serde_json::from_slice(captures[1].json()).expect("outbound capture");
+    let values = captures
+        .iter()
+        .map(|capture| serde_json::from_slice::<Value>(capture.json()).expect("failure capture"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value["error"]["kind"] == "unsupported_tool")
+            .count(),
+        2
+    );
+    let outbound = values
+        .iter()
+        .find(|value| value["error"]["kind"] == "outbound")
+        .expect("outbound capture");
     assert_eq!(outbound["error"]["kind"], "outbound");
     assert_eq!(outbound["error"]["route"], "Proxy");
     assert_eq!(outbound["error"]["phase"], "Configure");
     assert_eq!(outbound["error"]["category"], "InvalidConfiguration");
 }
 
-/// The public attempt entry point applies enabled, disabled, and standalone
-/// policy to a successful event stream rather than only to pre-dispatch errors.
+/// The public attempt entry point applies the same enabled or disabled capture
+/// policy to ordinary inference and standalone local compaction.
 #[test]
 fn public_attempt_applies_debug_capture_policy_to_successful_streams() {
     let enabled = successful_public_sse_captures(true, tau_proto::PromptOperation::Inference);
@@ -170,9 +182,10 @@ fn public_attempt_applies_debug_capture_policy_to_successful_streams() {
     assert!(
         successful_public_sse_captures(false, tau_proto::PromptOperation::Inference).is_empty()
     );
-    assert!(
+    assert_eq!(
         successful_public_sse_captures(true, tau_proto::PromptOperation::StandaloneCompaction)
-            .is_empty()
+            .len(),
+        2
     );
 }
 
@@ -2398,6 +2411,77 @@ fn responses_request_keeps_stable_lowering_for_local_changes() {
     let disabled = build_request(&disabled, &config, &model).expect("disabled request");
     assert_eq!(disabled.tools, stable.tools);
     assert_eq!(disabled.tool_choice.as_deref(), Some("none"));
+}
+
+/// A harness-shaped public Responses compaction prompt must remove only its
+/// provider-native trigger, preserve the actual ordinary lowered request, and
+/// append the local summary instruction as the final input item.
+#[test]
+fn local_compaction_request_extends_the_actual_ordinary_wire_prefix() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 4096,
+        transport: Transport::Sse,
+        prompt_cache: Some(PromptCachePolicy::Explicit),
+    };
+    let model = AttemptModel {
+        id: ModelName::new("test-model"),
+    };
+    let ordinary_prompt = cache_prefix_prompt();
+    let ordinary = serde_json::to_value(
+        build_request(&ordinary_prompt, &config, &model).expect("ordinary request"),
+    )
+    .expect("ordinary JSON");
+
+    let mut compact_prompt = ordinary_prompt.clone();
+    compact_prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    compact_prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    tau_provider::local_summary_compaction::replace_trailing_trigger(&mut compact_prompt.context)
+        .expect("harness trigger");
+    let compact = serde_json::to_value(
+        build_request(&compact_prompt, &config, &model).expect("compact request"),
+    )
+    .expect("compact JSON");
+
+    for field in [
+        "model",
+        "stream",
+        "reasoning",
+        "instructions",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "prompt_cache_options",
+        "max_output_tokens",
+        "tools",
+        "tool_choice",
+    ] {
+        assert_eq!(compact.get(field), ordinary.get(field), "{field}");
+    }
+    let ordinary_input = ordinary["input"].as_array().expect("ordinary input");
+    let compact_input = compact["input"].as_array().expect("compact input");
+    assert_eq!(
+        &compact_input[..ordinary_input.len()],
+        ordinary_input,
+        "warmed input prefix must be byte-identical"
+    );
+    assert_eq!(
+        compact_input.last(),
+        Some(&serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": tau_provider::local_summary_compaction::REQUEST,
+            }],
+        }))
+    );
 }
 
 /// Ensures provider-visible model, authority, schema, and effort changes do

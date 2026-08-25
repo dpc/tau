@@ -179,26 +179,20 @@ retains its existing policy. See
 
 ## Tau-owned summary compaction fallback
 
-Standalone summary compaction is available by default for Chat Completions,
-OpenRouter, and public Responses models using context-derived bounded limits
-and a proactive threshold. An exact model may fully override those limits with
-`local_summary_compaction`. Provider-native ChatGPT/Codex compaction remains
-preferred. The provider runtime never persists the full
-compactor request, including debug capture, and never retries after semantic
-output. It discards separately bounded typed reasoning and, on public Responses,
-its paired opaque replay twin. It accepts only one nonempty bounded assistant
-narrative; every other semantic output is rejected.
-The harness, rather than the provider, adds a bounded durable tool-status
-supplement before that narrative becomes an explicitly
-untrusted user-role historical checkpoint. The validator separately byte-bounds
-and discards reasoning text plus that public Responses replay twin, and rejects
-every other output item. Re-review
-locality, typed private narrative-envelope provenance, the 256-KiB raw narrative
-and 2-MiB final checkpoint caps, 32-fact/8-KiB supplement budgeting,
-selected-cut ancestry (including traversal through earlier compactions),
-included and excluded fields, tag-delimiter escaping, atomic rejection,
-capture, and terminalization whenever this profile or dispatch path changes.
-OpenRouter and public Responses use the same bounded fallback contract.
+Chat Completions, OpenRouter, and public Responses models advertise standalone
+summary compaction by default with conservative context-derived limits and a
+proactive threshold. `local_summary_compaction` remains an optional full
+per-model override. Tau sends the ordinary provider request prefix for the
+immutable cut, including the normal system prompt, tools, history, images, raw
+tool arguments, and cache controls, then appends one harness-authored
+`<tau_internal>` user message. Any tool call fails without execution. Tau accepts
+one nonempty bounded assistant final text, discards reasoning and opaque replay
+data, and stores the exact text once as one synthetic user checkpoint without a
+wrapper or deterministic supplement. Ordinary opted-in debug capture applies.
+Unsupported output, insufficient context, cancellation, route loss, stale state,
+and post-output failures end the durable transaction without inference fallback
+or ambiguous resend.
+
 Provider settings contain no credentials. The extension reads typed version-zero
 OAuth and API-key records only through its configured-instance Secret RPC,
 reloads them at prompt time, and persists OAuth rotation with generation

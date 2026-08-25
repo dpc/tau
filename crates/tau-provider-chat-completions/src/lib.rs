@@ -1073,10 +1073,10 @@ fn chat_completions_stream(
 }
 
 fn debug_capture_enabled_for_prompt(
-    prompt: &tau_proto::AgentPromptCreated,
+    _prompt: &tau_proto::AgentPromptCreated,
     configured: bool,
 ) -> bool {
-    configured && prompt.operation != tau_proto::PromptOperation::StandaloneCompaction
+    configured
 }
 
 struct AsyncAttemptContext<'a> {
@@ -1293,9 +1293,16 @@ fn try_build_request(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> Result<ChatRequest, LlmError> {
     validate_extra_body(&provider.extra_body)?;
-    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
-        return build_local_summary_compaction_request(provider, model, prompt);
-    }
+    let summary_config = (prompt.operation == tau_proto::PromptOperation::StandaloneCompaction)
+        .then(|| {
+            provider.local_summary_compaction.ok_or_else(|| {
+                LlmError::InvalidCompaction(
+                    "standalone compaction is not enabled for this Chat Completions model"
+                        .to_owned(),
+                )
+            })
+        })
+        .transpose()?;
     let explicit_system_prompt = matches!(
         provider.compat.prompt_cache,
         Some(PromptCache::ExplicitSystemPrompt)
@@ -1336,6 +1343,12 @@ fn try_build_request(
             &mut messages,
         );
     }
+    if summary_config.is_some() {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": tau_provider::local_summary_compaction::REQUEST,
+        }));
+    }
     let tools = prompt
         .tools
         .iter()
@@ -1346,7 +1359,16 @@ fn try_build_request(
         (ToolChoice::Auto, false) => Some("auto"),
         (ToolChoice::Auto, true) => None,
     };
-    let (max_tokens, max_completion_tokens) = output_token_cap_fields(provider);
+    let (max_tokens, max_completion_tokens) = summary_config.map_or_else(
+        || output_token_cap_fields(provider),
+        |config| {
+            if provider.compat.max_completion_tokens {
+                (None, Some(config.max_output_tokens()))
+            } else {
+                (Some(config.max_output_tokens()), None)
+            }
+        },
+    );
     Ok(ChatRequest {
         model: model.id.as_str().to_owned(),
         messages,
@@ -1391,50 +1413,6 @@ fn context_block_has_system_authority(block: &tau_proto::ContextBlock) -> bool {
             ContextItem::Message(message)
                 if matches!(message.role, ContextRole::System | ContextRole::Developer)
         )
-    })
-}
-
-fn build_local_summary_compaction_request(
-    provider: &AttemptConfig,
-    model: &AttemptModel,
-    prompt: &tau_proto::AgentPromptCreated,
-) -> Result<ChatRequest, LlmError> {
-    let config = provider.local_summary_compaction.ok_or_else(|| {
-        LlmError::InvalidCompaction(
-            "standalone compaction is not enabled for this Chat Completions model".to_owned(),
-        )
-    })?;
-    let (instruction, input) =
-        tau_provider::local_summary_compaction::request_parts(&prompt.context, config)
-            .map_err(|error| LlmError::InvalidCompaction(error.to_owned()))?;
-    let (max_tokens, max_completion_tokens) = if provider.compat.max_completion_tokens {
-        (None, Some(config.max_output_tokens()))
-    } else {
-        (Some(config.max_output_tokens()), None)
-    };
-    Ok(ChatRequest {
-        model: model.id.as_str().to_owned(),
-        messages: vec![
-            serde_json::json!({
-                "role": "system",
-                "content": instruction,
-            }),
-            serde_json::json!({"role": "user", "content": input}),
-        ],
-        stream: true,
-        stream_options: provider.compat.stream_options.then_some(StreamOptions {
-            include_usage: true,
-        }),
-        tools: Vec::new(),
-        tool_choice: Some("none"),
-        parallel_tool_calls: None,
-        prompt_cache_key: None,
-        prompt_cache_retention: None,
-        prompt_cache_options: None,
-        reasoning_effort: None,
-        max_tokens,
-        max_completion_tokens,
-        extra_body: provider.extra_body.clone(),
     })
 }
 

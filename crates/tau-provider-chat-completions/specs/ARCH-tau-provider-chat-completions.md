@@ -38,8 +38,7 @@ model name. A legacy retention policy sends an agent-derived key plus
 behavior. An explicit policy sends the same key, explicit `30m` options, and
 marks the end of a non-empty system message with the documented content-block
 breakpoint. It does not mark conversation or tool suffixes, so it does not
-implicitly write a volatile suffix. The standalone compactor omits every cache
-field. Opaque `extra_body` cannot collide with these typed top-level members.
+implicitly write a volatile suffix. The standalone local compactor preserves these ordinary cache fields and appends its instruction after the unchanged ordinary message prefix. Opaque `extra_body` cannot collide with these typed top-level members.
 
 ## Cache telemetry route capabilities
 

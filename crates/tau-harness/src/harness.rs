@@ -30855,25 +30855,25 @@ impl Harness {
                 StandaloneCompactionRejection::InvalidStop,
             );
         }
-        let replacement_window =
-            match self.harness_supplemented_compaction_window(cid, &response.output_items) {
-                Ok(Some(window)) => window,
-                Ok(None) => {
-                    let Ok(window) =
-                        tau_proto::ValidatedCompactionWindow::new(response.output_items.clone())
-                    else {
-                        return StandaloneCompactionTerminal::Rejected(
-                            StandaloneCompactionRejection::InvalidWindow,
-                        );
-                    };
-                    window
-                }
-                Err(()) => {
+        let replacement_window = match self.local_summary_compaction_window(&response.output_items)
+        {
+            Ok(Some(window)) => window,
+            Ok(None) => {
+                let Ok(window) =
+                    tau_proto::ValidatedCompactionWindow::new(response.output_items.clone())
+                else {
                     return StandaloneCompactionTerminal::Rejected(
                         StandaloneCompactionRejection::InvalidWindow,
                     );
-                }
-            };
+                };
+                window
+            }
+            Err(()) => {
+                return StandaloneCompactionTerminal::Rejected(
+                    StandaloneCompactionRejection::InvalidWindow,
+                );
+            }
+        };
         if !self.standalone_compaction_boundary_is_valid(cid, response, &replacement_window) {
             return StandaloneCompactionTerminal::Rejected(
                 StandaloneCompactionRejection::InvalidWindow,
@@ -30882,27 +30882,13 @@ impl Harness {
         StandaloneCompactionTerminal::Accepted(replacement_window)
     }
 
-    /// Adds harness-owned durable facts to the local narrative checkpoint.
-    ///
-    /// The supplement derives from the immutable transaction cut, not current
-    /// runtime state, so a concurrent suffix and a cold replay see the same
-    /// selected durable history. Other providers retain their exact output
-    /// window unchanged.
-    fn harness_supplemented_compaction_window(
+    /// Converts a local narrative into its exact synthetic user checkpoint.
+    /// Other providers retain their exact output window unchanged.
+    fn local_summary_compaction_window(
         &self,
-        cid: &AgentId,
         output_items: &[ContextItem],
     ) -> Result<Option<tau_proto::ValidatedCompactionWindow>, ()> {
-        compaction_supplement::compose(output_items, || {
-            let agent = self.agents.get(cid).ok_or(())?;
-            let cut = match &agent.activation_dispatch {
-                path_crate_agent::ActivationDispatchState::Running { cut, .. } => *cut,
-                _ => return Err(()),
-            };
-            let agent_id = agent.agent_id.as_deref().ok_or(())?;
-            let tree = self.agent_store.agent(agent_id).ok_or(())?;
-            Ok((tree, cut))
-        })
+        compaction_supplement::compose(output_items)
     }
 
     /// Checks the complete core boundary contract without appending it.

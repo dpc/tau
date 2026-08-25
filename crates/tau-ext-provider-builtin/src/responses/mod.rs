@@ -293,26 +293,23 @@ pub fn run_prompt_attempt<W: std::io::Write>(
             compact_prompt.is_some(),
         ),
         transport: provider.transport,
-        prompt_cache: use_prompt_cache(compact_prompt.is_some())
-            .then_some(compat.openai_prompt_cache)
-            .flatten()
-            .map(|cache| match cache.key {
-                OpenAiPromptCacheKey::Agent => match cache.policy {
-                    OpenAiPromptCachePolicy::Legacy { retention } => {
-                        tau_provider_responses::PromptCachePolicy::Legacy(match retention {
-                            crate::OpenAiPromptCacheRetention::InMemory => {
-                                tau_provider_responses::PromptCacheRetention::InMemory
-                            }
-                            crate::OpenAiPromptCacheRetention::Hours24 => {
-                                tau_provider_responses::PromptCacheRetention::Hours24
-                            }
-                        })
-                    }
-                    OpenAiPromptCachePolicy::Explicit { .. } => {
-                        tau_provider_responses::PromptCachePolicy::Explicit
-                    }
-                },
-            }),
+        prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
+            OpenAiPromptCacheKey::Agent => match cache.policy {
+                OpenAiPromptCachePolicy::Legacy { retention } => {
+                    tau_provider_responses::PromptCachePolicy::Legacy(match retention {
+                        crate::OpenAiPromptCacheRetention::InMemory => {
+                            tau_provider_responses::PromptCacheRetention::InMemory
+                        }
+                        crate::OpenAiPromptCacheRetention::Hours24 => {
+                            tau_provider_responses::PromptCacheRetention::Hours24
+                        }
+                    })
+                }
+                OpenAiPromptCachePolicy::Explicit { .. } => {
+                    tau_provider_responses::PromptCachePolicy::Explicit
+                }
+            },
+        }),
     };
     let model = tau_provider_responses::AttemptModel {
         id: model.id.clone(),
@@ -414,33 +411,12 @@ fn attempt_output_tokens(
         .map_or(ordinary, SummaryCompactionConfig::max_output_tokens)
 }
 
-fn use_prompt_cache(is_compaction: bool) -> bool {
-    !is_compaction
-}
-
 fn materialize_summary_prompt(
     prompt: &tau_proto::AgentPromptCreated,
-    config: SummaryCompactionConfig,
+    _config: SummaryCompactionConfig,
 ) -> Result<tau_proto::AgentPromptCreated, &'static str> {
-    let (instruction, input) =
-        tau_provider::local_summary_compaction::request_parts(&prompt.context, config)?;
     let mut compact = prompt.clone();
-    compact.system_prompt = instruction.to_owned();
-    compact.context = tau_proto::PromptContext {
-        blocks: vec![tau_proto::ContextBlock::UserInput(
-            tau_proto::UserInputBlock {
-                items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
-                    role: tau_proto::ContextRole::User,
-                    content: vec![tau_proto::ContentPart::Text { text: input }],
-                    phase: None,
-                    responses_raw_json: None,
-                })],
-            },
-        )],
-    };
-    compact.tools.clear();
-    compact.tools_ref = None;
-    compact.tool_choice = tau_proto::ToolChoice::None;
+    tau_provider::local_summary_compaction::replace_trailing_trigger(&mut compact.context)?;
     Ok(compact)
 }
 

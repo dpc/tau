@@ -141,7 +141,7 @@ pub enum ScenarioActionV2 {
     CompactedText {
         /// Exact latest user text.
         user_text: String,
-        /// Exact composite checkpoint that must survive in replacement context.
+        /// Exact synthetic user checkpoint that must survive replacement.
         checkpoint: String,
         /// Earlier user text that the replacement must remove from context.
         removed_user_text: String,

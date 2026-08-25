@@ -2326,7 +2326,7 @@ impl FakeState {
                 error: _,
             }
             | ScenarioActionV2::StandaloneCompactionHold { timeout_ms: _ } => {
-                // The Chat Completions adapter owns static no-tools lowering.
+                // The Chat Completions adapter owns cache-aligned lowering.
                 // This provider seam instead proves the harness supplied the
                 // standalone operation and nonempty compactable transcript.
                 if prompt.context.blocks.is_empty() {
@@ -2363,7 +2363,7 @@ impl FakeState {
                 {
                     return Err(self.mismatch(
                         cursor,
-                        "exact composite checkpoint did not replace prior transcript",
+                        "exact synthetic user checkpoint did not replace prior transcript",
                     ));
                 }
             }

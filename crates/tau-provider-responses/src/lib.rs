@@ -341,13 +341,12 @@ pub fn run_attempt_with_debug(
     )
 }
 
-/// Apply the durable-session policy and suppress standalone compaction
-/// diagnostics, whose material is intentionally outside provider capture.
+/// Apply the ordinary durable-session debug-capture policy.
 fn debug_capture_enabled(
-    prompt: &tau_proto::AgentPromptCreated,
+    _prompt: &tau_proto::AgentPromptCreated,
     debug_provider_requests: bool,
 ) -> bool {
-    debug_provider_requests && prompt.operation != tau_proto::PromptOperation::StandaloneCompaction
+    debug_provider_requests
 }
 
 /// Run an attempt with already-selected capture policy and sink.

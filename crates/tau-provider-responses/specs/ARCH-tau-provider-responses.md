@@ -39,8 +39,7 @@ upgrade work. A successful response is recorded only after terminal validation;
 non-cancellation build, runtime, transport, HTTP/provider, parsing, and validation
 failures produce bounded error metadata. Cancellation produces no error capture,
 though a request capture remains when cancellation arrives after that request's
-send boundary. Standalone compaction and disabled durable-session diagnostics
-construct no capture metadata and submit nothing.
+send boundary. Standalone local compaction follows the same durable-session diagnostic policy as ordinary inference; disabled diagnostics submit nothing.
 
 Response snapshots retain at most 512 KiB and 4,096 raw event JSON values.
 Serialization writes through a strict 1 MiB ceiling and replaces an oversized

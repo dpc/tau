@@ -565,8 +565,6 @@ pub struct LocalCompactionNarrativeItem {
 
 /// Maximum raw UTF-8 bytes accepted from one local compaction narrative.
 pub const LOCAL_COMPACTION_NARRATIVE_MAX_BYTES: usize = 256 * 1024;
-/// Maximum bytes persisted in one composite local compaction checkpoint.
-pub const LOCAL_COMPACTION_CHECKPOINT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// One item in Tau's prompt/response timeline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -737,9 +735,7 @@ impl PromptContext {
     /// retaining safe metadata and transcript structure.
     ///
     /// This is for incidental diagnostics and generic projections. Provider
-    /// paths retain canonical bytes except the explicitly opted-in local
-    /// Chat Completions transcript-v1 summary compactor, whose versioned lossy
-    /// projection carries metadata plus an explicit image-loss marker.
+    /// paths, including cache-aligned local compaction, retain canonical bytes.
     pub fn clear_provider_image_bytes(&mut self) {
         for block in &mut self.blocks {
             match block {

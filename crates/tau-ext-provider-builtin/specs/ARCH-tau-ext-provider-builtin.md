@@ -27,11 +27,12 @@ public response sampling, logical retries, cancellation, and supervised prewarm
 work. Backends return typed outcomes and never serialize harness frames.
 
 Chat Completions, OpenRouter, and public Responses models use the shared
-Tau-owned transcript-v1 summary fallback when they lack provider-native
-compaction. Publication derives conservative bounded limits and a proactive
-threshold from each context window; `local_summary_compaction` is an optional
-full model override. ChatGPT/Codex continues to prefer native inline or
-standalone compaction.
+Tau-owned cache-aligned local summary fallback when they lack provider-native
+compaction. It preserves the ordinary provider request prefix and appends the
+harness summary instruction last. Publication derives conservative limits and a
+proactive threshold from each context window; `local_summary_compaction` is an
+optional full model override. ChatGPT/Codex continues to prefer unchanged native
+inline or standalone compaction.
 
 Chat Completions routes select cache-usage parsing only through their serialized
 compatibility capability. A selected cache schema requires streamed usage, so the

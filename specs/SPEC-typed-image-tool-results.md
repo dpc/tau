@@ -69,10 +69,9 @@ Debug and TRACE projections that serialize a prompt as JSON recursively clear
 image buffers, including prompt contexts and compaction replacement windows.
 The built-in provider's ordinary TRACE record instead emits only fixed
 content-free structural metadata and does not serialize prompt content.
-The Tau-owned transcript-v1 summary fallback for Chat Completions, OpenRouter,
-and public Responses also clears image bytes in its dedicated provider request while retaining typed
-metadata and an explicit loss marker. Normal inference and all other directed
-provider paths retain canonical bytes.
+The Tau-owned local summary fallback for Chat Completions, OpenRouter, and
+public Responses uses the same ordinary provider lowering and therefore retains
+canonical image bytes through the warmed request prefix.
 
 An agent may retain at most 128 MiB of logical canonical image bytes across its
 complete append-only history, including branches and compaction replacement

@@ -835,33 +835,29 @@ optional `local_summary_compaction` object fully overrides those defaults:
 }
 ```
 
-Tau sends one dedicated no-tools request through that exact model's configured
-backend. It commits only a validated summary as untrusted synthetic historical
-context; it never adds model text to the system prompt. ChatGPT/Codex models
-continue to prefer their provider-native inline or standalone compaction.
-The model may emit reasoning text before its summary. Tau applies
-`max_output_bytes` separately to the aggregate reasoning text and the assistant
-message, discards the reasoning, and rejects every other output item. The final
-assistant message may use any concise nonempty narrative shape. Tau combines it
-with a bounded harness-generated JSON supplement of recent durable tool-result
-facts (tool name/type and success/error/cancelled class), then stores one
-untrusted synthetic historical checkpoint. The supplement never contains tool
-arguments, tool output/error prose, media bytes, reasoning, messages, metadata,
-or runtime/debug/UI state. The harness walks the selected cut's complete
-ancestry through prior compactions, admits the newest 32 facts under an 8-KiB
-serialized cap, and renders retained facts chronologically with an omitted
-count. A dedicated private output envelope distinguishes the local narrative
-from ordinary provider messages; empty, oversized, or multi-item envelopes fail
-atomically, and provider lowering cannot replay the private envelope. Raw
-narrative is capped at 256 KiB, the final escaped checkpoint at 2 MiB, and tag
-delimiters are escaped.
+`local_transcript_v1` remains the serialized compatibility discriminator for
+this profile; it no longer means Tau materializes a canonical transcript.
+
+Tau lowers the selected immutable cut exactly like ordinary inference: the
+same system prompt, tools, ordered history, images, raw tool-call arguments,
+route/model fields, and cache controls. It appends one harness-authored
+`<tau_internal>` user message last. This preserves eligibility for provider
+prefix-cache reuse; actual cache hits remain provider-controlled. ChatGPT/Codex
+models continue to prefer their unchanged provider-native compaction.
+
+Any returned tool call rejects compaction and executes nothing. Tau accepts
+exactly one nonempty bounded assistant final text, discards separately bounded
+reasoning and opaque replay items, and rejects every other semantic item. The
+harness stores the exact final text once as one synthetic user-role checkpoint,
+without a wrapper or deterministic supplement. Events after the immutable cut
+remain suffix history, and live/cold replay reuse the committed checkpoint
+without another model call. Ordinary opted-in provider debug capture applies.
 Context windows below 1,316 tokens cannot fit even the minimum bounded request
 and therefore do not publish the fallback. For an override, the context window
 must match the model field. Input and output limits must be positive and fit
 conservatively within that window; `max_input_bytes` must be at least 256. Units are
 bytes, tokens, and bytes respectively, with an additional 1,024-token worst-case
-request and chat-template reserve. Transcript-v1 deliberately removes image
-bytes while retaining image metadata and a loss marker. Empty, unsupported,
+request and chat-template reserve. The limit profile controls scheduling and output bounds; compaction does not rewrite the ordinary input prefix. Empty, unsupported,
 truncated, or over-limit summaries fail the durable transaction without fallback
 or resend.
 

@@ -320,15 +320,15 @@ terminal provider error, or exact cancellation hold. The opaque action's one fol
 ordinary action runs only after a clean daemon restart and requires exactly one
 `ContextItem::Compaction` with the fixed raw provider JSON while the discarded
 user text is absent. The local narrative action emits the same dedicated
-private typed output as the production extension, requires the harness's exact
-escaped composite checkpoint with exact empty durable-facts JSON, stops Boot A,
-then validates byte-identical durable replay, removed source context, and
+private typed output as the production extension, requires the exact model final
+text as one synthetic user checkpoint, stops Boot A, then validates
+byte-identical durable replay, removed source context, and
 ordinary continuation in Boot B. This proves harness transaction, typed-local
-composition, durable replacement, opaque and composite cold replay, and
+conversion, durable replacement, opaque and local-summary cold replay, and
 continuation semantics through the provider extension seam; it does not expand
 the grammar into a compaction outcome matrix. Shared `tau-provider` tests own
-transcript-v1 materialization and limits, the Chat Completions adapter owns its
-private static no-tools wire lowering, and provider-builtin tests own public
+the trailing instruction and limits, the Chat Completions adapter owns its
+private cache-aligned ordinary-prefix wire lowering, and provider-builtin tests own public
 Responses fallback dispatch and validation.
 
 One separate closed lifecycle scenario runs a successful deterministic dummy

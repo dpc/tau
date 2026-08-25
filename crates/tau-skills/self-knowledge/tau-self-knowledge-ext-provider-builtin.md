@@ -424,12 +424,13 @@ quota display updates do not clear inference cooldowns.
 Chat Completions, OpenRouter, and public Responses models advertise standalone
 summary compaction by default with conservative context-derived limits and a
 proactive threshold. `local_summary_compaction` remains an optional full
-per-model override using `local_transcript_v1` and a context window matching the
-model. Tau uses the exact model and backend for one no-tools request, intentionally omits image
-bytes with a loss marker, persists no full request, and accepts one bounded
-free-form final narrative while discarding separately bounded typed reasoning.
-The harness adds a deterministic bounded supplement of durable tool terminal
-names/types/statuses as untrusted synthetic history. Unsupported output,
-insufficient context, cancellation, route loss, stale state, and post-output
-failures end the durable transaction without inference fallback or ambiguous
-resend.
+per-model override. Tau sends the ordinary provider request prefix for the
+immutable cut, including the normal system prompt, tools, history, images, raw
+tool arguments, and cache controls, then appends one harness-authored
+`<tau_internal>` user message. Any tool call fails without execution. Tau accepts
+one nonempty bounded assistant final text, discards reasoning and opaque replay
+data, and stores the exact text once as one synthetic user checkpoint without a
+wrapper or deterministic supplement. Ordinary opted-in debug capture applies.
+Unsupported output, insufficient context, cancellation, route loss, stale state,
+and post-output failures end the durable transaction without inference fallback
+or ambiguous resend.

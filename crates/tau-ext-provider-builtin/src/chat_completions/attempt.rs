@@ -326,10 +326,8 @@ pub(crate) fn validate_resolved_narrative_output(
     {
         return Err("summary compactor output is empty or exceeds its byte limit".to_owned());
     }
-    // The provider's final assistant message is a bounded narrative. Typed
-    // reasoning remains deliberately absent from the durable checkpoint; the
-    // harness adds its own deterministic durable-facts supplement before the
-    // replacement window commits.
+    // Only the provider's bounded final assistant text crosses the private
+    // extension seam; reasoning remains absent from semantic history.
     Ok(tau_proto::ContextItem::LocalCompactionNarrative(
         tau_proto::LocalCompactionNarrativeItem { narrative: text },
     ))
