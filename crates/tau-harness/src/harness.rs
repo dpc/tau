@@ -17813,14 +17813,12 @@ impl Harness {
         } else {
             prompt.text.clone()
         };
-        let pending = if prompt.message_class.is_internal() {
-            PendingPrompt::untrusted_internal(text.clone())
-        } else if is_user_interaction {
-            PendingPrompt::human_ui_watch_notified(text.clone())
-        } else {
-            PendingPrompt::human_ui(text.clone())
-        }
-        .with_ctx_id(prompt.ctx_id.clone());
+        let pending = Self::pending_authenticated_ui_prompt(
+            text,
+            prompt.message_class,
+            is_user_interaction,
+            prompt.ctx_id.clone(),
+        );
         let will_accept = prompt.session_id == self.current_session_id
             && self
                 .agent_routes
@@ -17862,6 +17860,24 @@ impl Harness {
             !will_accept
         );
         Ok(true)
+    }
+
+    /// Classify an authenticated UI prompt and move its already-expanded text
+    /// into the selected pending prompt.
+    fn pending_authenticated_ui_prompt(
+        text: String,
+        message_class: tau_proto::PromptMessageClass,
+        is_user_interaction: bool,
+        ctx_id: Option<String>,
+    ) -> PendingPrompt {
+        let pending = if message_class.is_internal() {
+            PendingPrompt::untrusted_internal(text)
+        } else if is_user_interaction {
+            PendingPrompt::human_ui_watch_notified(text)
+        } else {
+            PendingPrompt::human_ui(text)
+        };
+        pending.with_ctx_id(ctx_id)
     }
 
     /// Record one accepted visible UI interaction without retaining its

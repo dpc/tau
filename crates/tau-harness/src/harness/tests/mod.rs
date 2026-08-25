@@ -31,7 +31,7 @@ use tau_session_inspect::open_session_store;
 use tempfile::TempDir;
 
 use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall};
-use crate::agent::{AgentTurnState, PendingPrompt};
+use crate::agent::{AgentTurnState, PendingPrompt, PendingPromptSource};
 use crate::daemon::{
     ServeOptions, bind_listener, get_daemon_rendered_system_prompt,
     get_daemon_rendered_tool_definitions, run_daemon_with_echo, run_embedded_message_with_echo,
@@ -470,6 +470,70 @@ fn literal_existing_agent_skill_text_bypasses_skill_expansion() {
         .expect("literal prompt submitted");
     assert_eq!(submitted.text, ":skill definitely-not-installed");
     assert_literal_provider_projection(&h, &submitted.agent_id, ":skill definitely-not-installed");
+}
+
+/// Ensures UI prompt classification transfers, rather than clones, the
+/// expanded text buffer while preserving every constructor's prompt metadata.
+#[test]
+fn authenticated_ui_pending_prompt_classification_moves_text_buffer() {
+    let cases = [
+        (
+            tau_proto::PromptMessageClass::Internal,
+            false,
+            tau_proto::PromptMessageClass::Internal,
+            PendingPromptSource::General,
+            tau_proto::PromptSubmissionSource::HarnessInternal,
+        ),
+        (
+            tau_proto::PromptMessageClass::User,
+            true,
+            tau_proto::PromptMessageClass::User,
+            PendingPromptSource::WatchNotifiedUser,
+            tau_proto::PromptSubmissionSource::HumanUi,
+        ),
+        (
+            tau_proto::PromptMessageClass::User,
+            false,
+            tau_proto::PromptMessageClass::User,
+            PendingPromptSource::General,
+            tau_proto::PromptSubmissionSource::HumanUi,
+        ),
+    ];
+
+    for (
+        index,
+        (
+            message_class,
+            is_user_interaction,
+            expected_class,
+            expected_source,
+            expected_submission_source,
+        ),
+    ) in cases.into_iter().enumerate()
+    {
+        let text = format!("prompt-{index}-{}", "x".repeat(1024));
+        let text_ptr = text.as_ptr();
+        let pending = Harness::pending_authenticated_ui_prompt(
+            text,
+            message_class,
+            is_user_interaction,
+            Some(format!("ctx-{index}")),
+        );
+
+        assert_eq!(
+            pending.text.as_ptr(),
+            text_ptr,
+            "selected constructor must retain the owned text allocation"
+        );
+        assert_eq!(pending.text, format!("prompt-{index}-{}", "x".repeat(1024)));
+        assert_eq!(pending.message_class, expected_class);
+        assert_eq!(pending.source, expected_source);
+        assert_eq!(pending.submission_source, expected_submission_source);
+        assert_eq!(
+            pending.ctx_id.as_deref(),
+            Some(format!("ctx-{index}").as_str())
+        );
+    }
 }
 
 /// Ensures an escaped literal used as a new agent's first prompt retains
