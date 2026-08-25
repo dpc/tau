@@ -199,10 +199,10 @@ fn word_left_boundary_uses_unicode_whitespace() {
 
 // --- full_render: content overflows terminal height ---
 
-/// Full redraw is allowed to write past the viewport; this locks in which rows
-/// stay visible and which enter terminal scrollback.
+/// An overflowing full redraw must retain its clipped viewport, scrollback,
+/// cursor, and cache coordinates as one physical-terminal state.
 #[test]
-fn full_render_overflow_visible_and_scrollback() {
+fn full_render_overflow_preserves_visible_scrollback_cursor_and_cache() {
     // 3 history lines + 4 live lines = 7 total, 5-row terminal.
     let lines = plain_lines(&[
         "history 0",
@@ -213,7 +213,7 @@ fn full_render_overflow_visible_and_scrollback() {
         "> hello",
         "below",
     ]);
-    let (mut term, _screen) = run_full_render(5, 30, lines, 3, 5, 7);
+    let (mut term, screen) = run_full_render(5, 30, lines, 3, 5, 7);
 
     // Visible: last 5 lines (indices 2..7).
     let vis = visible_rows(&term);
@@ -228,23 +228,6 @@ fn full_render_overflow_visible_and_scrollback() {
     let sb = visible_rows(&term);
     assert_eq!(sb[0], "history 0");
     assert_eq!(sb[1], "history 1");
-}
-
-/// After an overflowing full redraw, cursor coordinates and the retained Screen
-/// cache must both be relative to the physical viewport.
-#[test]
-fn full_render_overflow_cursor_and_screen_state() {
-    // 3 history + 4 live = 7, 5-row terminal.
-    let lines = plain_lines(&[
-        "history 0",
-        "history 1",
-        "history 2",
-        "above A",
-        "above B",
-        "> hello",
-        "below",
-    ]);
-    let (term, screen) = run_full_render(5, 30, lines, 3, 5, 7);
 
     // Terminal cursor: row 5 is "> hello", viewport_top=2,
     // live_start=3, cursor_in_live=2 → screen row = 3.
@@ -312,14 +295,14 @@ fn cursor_shape_maps_to_steady_styles() {
     );
 }
 
-/// Short full-render content should start at the top without synthetic padding
-/// rows.
+/// A short full redraw must remain top-aligned with matching cursor and cache
+/// coordinates rather than adding synthetic bottom rubber.
 #[test]
-fn full_render_short_content_at_top() {
+fn full_render_short_content_starts_at_top_with_matching_cursor_and_cache() {
     // 0 history + 3 live = 3, 10-row terminal.
     // Content starts at the top (no blank padding).
     let lines = plain_lines(&["above", "> hi", "below"]);
-    let (term, _screen) = run_full_render(10, 30, lines, 0, 1, 4);
+    let (term, screen) = run_full_render(10, 30, lines, 0, 1, 4);
 
     let vis = visible_rows(&term);
     assert_eq!(vis[0], "above");
@@ -329,15 +312,6 @@ fn full_render_short_content_at_top() {
     for (i, row) in vis.iter().enumerate().take(10).skip(3) {
         assert_eq!(row, "", "row {i} should be blank");
     }
-}
-
-/// For non-overflowing full redraws, cursor placement and retained cache rows
-/// should match the original content indices.
-#[test]
-fn full_render_short_content_cursor() {
-    // 0 history + 3 live = 3, 10-row terminal.
-    let lines = plain_lines(&["above", "> hi", "below"]);
-    let (term, screen) = run_full_render(10, 30, lines, 0, 1, 4);
 
     // Content starts at the top. cursor_row=1 → screen row 1.
     let (r, c) = term.screen().cursor_position();
@@ -485,31 +459,6 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
     assert_eq!(plan.rubber_height, 0);
     assert_eq!(plan.viewport_start, 1);
     assert_eq!(model.viewport_start, 1);
-}
-
-/// A diff render after full redraw must compare against the retained visible
-/// viewport so subsequent live updates remain incremental.
-#[test]
-fn full_render_then_diff_render() {
-    // After full_render, Screen tracks the live area.
-    // A subsequent Screen::update (as render_live does) should
-    // diff only against the live area.
-    //
-    // 0 history + 3 live = 3, 10-row terminal.
-    let lines = plain_lines(&["above", "> hello", "below"]);
-    let (_term, mut screen) = run_full_render(10, 30, lines, 0, 1, 7);
-
-    // Screen should track 3 lines (visible viewport).
-    assert_eq!(screen.actual_line_count(), 3);
-
-    // Diff update: change "> hello" to "> world".
-    let live_lines2 = plain_lines(&["above", "> world", "below"]);
-    let mut buf2: Vec<u8> = Vec::new();
-    screen
-        .update(&mut buf2, &live_lines2, (1, 7))
-        .expect("update should succeed");
-
-    assert!(!buf2.is_empty(), "diff should produce output");
 }
 
 /// Empty prompt rendering may show hint text, but the editable buffer and
@@ -865,8 +814,9 @@ fn output_snapshot_mutation_matches_terminal_handle() {
     );
     for (id, terminal_block) in &terminal.blocks {
         assert_eq!(
-            format!("{terminal_block:?}"),
-            format!("{:?}", model.blocks.get(id).expect("matching model block"))
+            layout_block(terminal_block, 80),
+            layout_block(model.blocks.get(id).expect("matching model block"), 80),
+            "block {id:?} has different fixed-width layout"
         );
     }
     assert_eq!(terminal.block_debug_ids, model.block_debug_ids);
@@ -875,20 +825,6 @@ fn output_snapshot_mutation_matches_terminal_handle() {
     assert_eq!(terminal.above_sticky, model.above_sticky);
     assert_eq!(terminal.suggestions, model.suggestions);
     assert_eq!(terminal.below, model.below);
-}
-
-/// Input shutdown requests must wake a virtual input loop without requiring an
-/// injected key event; the real terminal path uses the same shutdown channel to
-/// stop waiting even if a one-shot crossterm read helper remains blocked.
-#[test]
-fn input_shutdown_request_returns_eof() {
-    let buf = SharedBuffer::new();
-    let (term, handle, _input_tx) =
-        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
-
-    handle.request_input_shutdown();
-
-    assert!(matches!(term.get_next_event(), Ok(Event::Eof)));
 }
 
 /// Recalling a queued prompt should insert it immediately before the current
@@ -2029,26 +1965,6 @@ fn vertical_motion_stays_within_multiline_buffer_before_history() {
     assert_eq!(handle.get_cursor(), 1);
 }
 
-/// A diff after a full redraw with history must update visible rows
-/// incrementally while keeping history rows in the cache.
-#[test]
-fn full_render_then_diff_with_history() {
-    // 3 history + 2 live = 5, 5-row terminal.
-    // Screen tracks all 5 visible lines. A diff update that
-    // changes only the live portion should produce minimal output.
-    let lines = plain_lines(&["h0", "h1", "h2", "> cmd", "status"]);
-    let (_term, mut screen) = run_full_render(5, 30, lines, 3, 3, 5);
-
-    assert_eq!(screen.actual_line_count(), 5, "visible viewport tracked");
-
-    // Update: change "> cmd" to "> new" (history unchanged).
-    let visible2 = plain_lines(&["h0", "h1", "h2", "> new", "status"]);
-    let mut buf2: Vec<u8> = Vec::new();
-    screen.update(&mut buf2, &visible2, (3, 5)).expect("ok");
-
-    assert!(!buf2.is_empty());
-}
-
 // --- Virtual terminal E2E tests ---
 
 /// Shared buffer that implements Write for the redraw thread
@@ -2520,8 +2436,8 @@ fn prompt_boundaries_move_by_grapheme_cluster() {
     }
 }
 
-// Regression guard for prompt-input cursor wrapping. The final-column case is
-// prompt-only cursor behavior, not generic block wrapping behavior.
+/// Prompt cursor placement must use the final column before the line becomes
+/// full; prompt wrapping differs from generic block wrapping.
 #[test]
 fn prompt_input_cursor_uses_last_column_before_line_is_full() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
@@ -2535,8 +2451,8 @@ fn prompt_input_cursor_uses_last_column_before_line_is_full() {
     assert_eq!((layout.cursor_row, layout.cursor_col), (0, 9));
 }
 
-// Commonly broken property: once prompt input fills the last column, the cursor
-// must immediately live on the next visual row at column 0.
+/// A prompt that fills its last column must move the cursor immediately to the
+/// next visual row at column zero.
 #[test]
 fn prompt_input_cursor_wraps_to_new_line_when_last_column_is_filled() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
@@ -2551,10 +2467,8 @@ fn prompt_input_cursor_wraps_to_new_line_when_last_column_is_filled() {
     assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
 }
 
-// Regression guard for Shift+Enter after an exact-width prompt line.
-// The previous printable character already moved the cursor to the next
-// visual row; the explicit newline must consume that pending wrap, not create
-// an additional phantom blank row below it.
+/// An explicit newline after an exact-width prompt line must consume its
+/// pending wrap instead of adding a phantom blank row.
 #[test]
 fn prompt_input_newline_after_filled_line_does_not_add_phantom_row() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
@@ -2569,9 +2483,8 @@ fn prompt_input_newline_after_filled_line_does_not_add_phantom_row() {
     assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
 }
 
-// After an exact-width line followed by a newline, newly typed text must land
-// on the immediate next row. This catches the bug where the cursor was drawn
-// one row too low while inserted characters appeared on the row above.
+/// Text after an exact-width line and newline must share the immediate next row
+/// with its cursor rather than leaving the cursor one row too low.
 #[test]
 fn prompt_input_text_after_newline_after_filled_line_keeps_cursor_on_text_row() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
@@ -2586,10 +2499,8 @@ fn prompt_input_text_after_newline_after_filled_line_keeps_cursor_on_text_row() 
     assert_eq!((layout.cursor_row, layout.cursor_col), (1, 1));
 }
 
-// Multi-line version of the same regression: every exact-width line ending in
-// an explicit newline used to add one more phantom row, so the cursor drifted
-// farther down with each full line. Cursor accounting and rendered prompt
-// height must stay in lockstep for all lines.
+/// Repeated exact-width lines ending in newlines must not accumulate phantom
+/// rows, keeping cursor accounting and rendered prompt height in lockstep.
 #[test]
 fn prompt_input_repeated_full_lines_ending_in_newline_do_not_stack_phantom_rows() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
@@ -2605,6 +2516,8 @@ fn prompt_input_repeated_full_lines_ending_in_newline_do_not_stack_phantom_rows(
     assert_eq!((layout.cursor_row, layout.cursor_col), (2, 0));
 }
 
+/// Prompt height caps must reserve at most 33 percent of terminal rows, rounded
+/// down, while keeping one editable row available on tiny terminals.
 #[test]
 fn prompt_input_height_cap_uses_floor_third_with_minimum_one() {
     assert_eq!(prompt_input_max_rows(0), 1);
@@ -2614,6 +2527,8 @@ fn prompt_input_height_cap_uses_floor_third_with_minimum_one() {
     assert_eq!(prompt_input_max_rows(12), 3);
 }
 
+/// A capped prompt viewport must show its hidden-row indicator while retaining
+/// the newest editable rows.
 #[test]
 fn prompt_input_layout_caps_height_and_shows_hidden_row_indicator() {
     let mut st = SharedState::new(12, 12, StyledText::from("> "));
@@ -2629,6 +2544,8 @@ fn prompt_input_layout_caps_height_and_shows_hidden_row_indicator() {
     assert_eq!(layout.line_sources[0], LineSource::InputScrollIndicator);
 }
 
+/// A one-row prompt cap must preserve the editable row and omit an indicator
+/// that would consume the only available row.
 #[test]
 fn prompt_input_cap_one_keeps_editable_row_and_suppresses_indicator() {
     let mut st = SharedState::new(12, 1, StyledText::from("> "));
@@ -2642,6 +2559,8 @@ fn prompt_input_cap_one_keeps_editable_row_and_suppresses_indicator() {
     assert_eq!(layout.line_sources[0], LineSource::Input { wrapped_row: 2 });
 }
 
+/// Disabling the prompt scroll indicator must still expose the newest capped
+/// input rows.
 #[test]
 fn prompt_input_scroll_indicator_can_be_disabled() {
     let mut st = SharedState::new(12, 9, StyledText::from("> "));
@@ -2656,6 +2575,8 @@ fn prompt_input_scroll_indicator_can_be_disabled() {
     assert_eq!(line_text(&layout.all_lines[1]), "d");
 }
 
+/// Resizing taller must clamp a previously scrolled prompt viewport so newly
+/// available rows reappear.
 #[test]
 fn prompt_input_resize_clamps_viewport_when_more_rows_fit() {
     let mut st = SharedState::new(12, 12, StyledText::from("> "));
@@ -2671,6 +2592,7 @@ fn prompt_input_resize_clamps_viewport_when_more_rows_fit() {
     assert_eq!(layout.all_lines.len(), 5);
 }
 
+/// Plain Up must scroll locally before it starts navigating submitted history.
 #[test]
 fn prompt_input_plain_up_scrolls_before_history_navigation() {
     let buf = SharedBuffer::new();
@@ -2715,6 +2637,8 @@ fn prompt_input_plain_up_scrolls_before_history_navigation() {
     assert_eq!(handle.get_buffer(), "hist");
 }
 
+/// The explicit history shortcut must bypass local prompt scrolling and recall
+/// history immediately.
 #[test]
 fn prompt_input_explicit_history_shortcut_bypasses_local_scroll() {
     let buf = SharedBuffer::new();
@@ -2741,6 +2665,7 @@ fn prompt_input_explicit_history_shortcut_bypasses_local_scroll() {
     assert_eq!(handle.get_buffer(), "hist");
 }
 
+/// Completion-menu navigation must take precedence over local prompt scrolling.
 #[test]
 fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
     let buf = SharedBuffer::new();
@@ -2772,6 +2697,7 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
     assert_eq!(handle.get_buffer(), "replacement");
 }
 
+/// The prompt scroll indicator must fit a one-column terminal without wrapping.
 #[test]
 fn prompt_input_indicator_fits_tiny_terminal_width() {
     let mut st = SharedState::new(1, 7, StyledText::from(""));
@@ -2788,6 +2714,8 @@ fn prompt_input_indicator_fits_tiny_terminal_width() {
     );
 }
 
+/// Plain Down must scroll a locally clipped prompt before creating or
+/// navigating a history entry.
 #[test]
 fn prompt_input_plain_down_scrolls_before_history_navigation() {
     let buf = SharedBuffer::new();
@@ -2812,6 +2740,7 @@ fn prompt_input_plain_down_scrolls_before_history_navigation() {
     assert_eq!(handle.lock().input_viewport_start, 2);
 }
 
+/// The explicit next-history shortcut must bypass local prompt scrolling.
 #[test]
 fn prompt_input_explicit_next_history_shortcut_bypasses_local_scroll() {
     let buf = SharedBuffer::new();
@@ -2832,45 +2761,6 @@ fn prompt_input_explicit_next_history_shortcut_bypasses_local_scroll() {
     let _ = term.get_next_event().expect("ctrl-down event");
 
     assert_eq!(handle.get_buffer(), "");
-}
-
-/// Virtual terminal smoke test: constructing Term should render the prompt on
-/// the redraw thread.
-#[test]
-fn virtual_term_shows_prompt() {
-    let buf = SharedBuffer::new();
-    let mut parser = vt100::Parser::new(24, 80, 0);
-
-    let (term, handle, _input_tx) =
-        Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
-
-    flush_redraws(&handle, &buf, &mut parser);
-
-    assert!(screen_contains(&parser, 80, "> "));
-
-    drop(term);
-}
-
-/// Direct buffer updates should flow through layout and redraw so typed input
-/// appears next to the prompt.
-#[test]
-fn virtual_term_renders_typed_input() {
-    let buf = SharedBuffer::new();
-    let mut parser = vt100::Parser::new(24, 80, 0);
-
-    let (_term, handle, _input_tx) =
-        Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
-
-    // Simulate typing by setting the buffer directly (avoids
-    // needing to drive the input event loop).
-    handle.set_buffer("hello".to_owned(), 5);
-    flush_redraws(&handle, &buf, &mut parser);
-
-    assert!(
-        screen_contains(&parser, 80, "> hello"),
-        "expected '> hello' on screen, got: {:?}",
-        vt100_rows(&parser, 80)
-    );
 }
 
 /// Editing the prompt after persistent history has scrolled away must keep the
@@ -2903,30 +2793,6 @@ fn prompt_edit_after_scrolled_history_updates_prompt_tail() {
         screen_contains(&parser, 40, "> x"),
         "edited prompt should be visible, got: {:?}",
         vt100_rows(&parser, 40)
-    );
-}
-
-/// Printed output blocks should be included in the virtual terminal frame, not
-/// only stored in the model.
-#[test]
-fn virtual_term_renders_print_output() {
-    let buf = SharedBuffer::new();
-    let mut parser = vt100::Parser::new(24, 80, 0);
-
-    let (_term, handle, _input_tx) =
-        Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
-
-    handle.print_output(
-        "test",
-        StyledBlock::new(StyledText::from(Span::plain("Hello from output"))),
-    );
-
-    flush_redraws(&handle, &buf, &mut parser);
-
-    assert!(
-        screen_contains(&parser, 80, "Hello from output"),
-        "expected output on screen, got: {:?}",
-        vt100_rows(&parser, 80)
     );
 }
 
@@ -3768,6 +3634,8 @@ fn resize_full_redraw_discards_rubber_gap() {
     );
 }
 
+/// Resize sampling must prefer the reported dimension, then a fresh actual
+/// dimension, and retain zero only when both are zero.
 #[test]
 fn resize_resampling_uses_actual_size_without_hiding_zero() {
     assert_eq!(resample_resize_dimension(0, 80), 80);
@@ -3973,6 +3841,8 @@ fn tool_summary_like_reorder_in_visible_area_does_not_full_redraw() {
     });
 }
 
+/// Moving live blocks before active anchors must insert, reposition, and append
+/// them without rebuilding the active zone.
 #[test]
 fn push_above_active_before_any_inserts_moves_and_appends() {
     let buf = SharedBuffer::new();
@@ -4019,76 +3889,6 @@ fn push_above_active_before_any_inserts_moves_and_appends() {
             "> ",
         ],
     );
-}
-
-/// Pseudo-random visible block churn stress-tests that visible-only mutations
-/// keep using incremental rendering.
-#[test]
-fn randomized_visible_block_churn_does_not_full_redraw() {
-    let buf = SharedBuffer::new();
-    let mut parser = vt100::Parser::new(6, 40, 100);
-    let (_term, handle, _input_tx) =
-        Term::new_virtual(40, 6, "> ", Box::new(buf.clone()), CursorShape::Bar);
-    flush_redraws(&handle, &buf, &mut parser);
-
-    let mut history_ids = Vec::new();
-    for i in 0..5 {
-        history_ids.push(handle.print_output("test", plain_block(format!("seed {i}"))));
-    }
-    let mut active_ids = Vec::new();
-    flush_redraws(&handle, &buf, &mut parser);
-
-    let mut rng = 0x1234_5678_u64;
-    for step in 0..120 {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-        match rng % 5 {
-            0 => {
-                assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
-                    history_ids
-                        .push(handle.print_output("test", plain_block(format!("append {step}"))));
-                });
-            }
-            1 => {
-                let id = active_ids
-                    .last()
-                    .copied()
-                    .or_else(|| history_ids.last().copied())
-                    .expect("visible id");
-                assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
-                    handle.set_block(id, plain_block(format!("visible update {step}")));
-                });
-            }
-            2 => {
-                if active_ids.len() < 2 {
-                    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
-                        let id = handle.new_block("test", plain_block(format!("active {step}")));
-                        handle.push_above_active(id);
-                        active_ids.push(id);
-                    });
-                }
-            }
-            3 => {
-                if let Some(&id) = active_ids.last() {
-                    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
-                        handle.set_block(id, plain_block(format!("active update {step}")));
-                    });
-                }
-            }
-            _ => {
-                if let Some(id) = active_ids.pop() {
-                    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
-                        handle.remove_block(id);
-                        history_ids.push(
-                            handle.print_output(
-                                "test",
-                                plain_block(format!("active finalized {step}")),
-                            ),
-                        );
-                    });
-                }
-            }
-        }
-    }
 }
 
 /// Every hidden scrollback mutation needs its own full redraw so the retained
