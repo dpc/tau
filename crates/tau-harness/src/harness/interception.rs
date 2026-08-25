@@ -17,7 +17,10 @@
 //! / [`Harness::fail_pending_intercept_for_disconnect`], which advance the
 //! chain and then drain the deferred queue.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
 
 use tau_proto::{
     AgentId, Event, EventName, EventSelector, ExtensionName, HarnessOutputMessage, InterceptAction,
@@ -848,6 +851,8 @@ struct InterceptorRegistration {
 
 impl Ord for InterceptorRegistration {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        #[cfg(test)]
+        test_registration_order_comparison();
         self.priority
             .cmp(&other.priority)
             .then_with(|| {
@@ -953,11 +958,38 @@ impl InterceptorRegistry {
         registrations: Option<&BTreeSet<InterceptorRegistration>>,
         cursor: Option<&InterceptorRegistration>,
     ) -> Option<InterceptorRegistration> {
-        registrations?
-            .iter()
-            .find(|registration| cursor.is_none_or(|cursor| cursor < registration))
-            .cloned()
+        let registrations = registrations?;
+        match cursor {
+            Some(cursor) => registrations
+                .range((Excluded(cursor), Unbounded))
+                .next()
+                .cloned(),
+            None => registrations.first().cloned(),
+        }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Counts ordering comparisons for the current registry test thread.
+static REGISTRATION_ORDER_COMPARISONS: std::cell::Cell<usize> = const {
+        Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn test_registration_order_comparison() {
+    REGISTRATION_ORDER_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_registration_order_comparisons() {
+    REGISTRATION_ORDER_COMPARISONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn registration_order_comparisons() -> usize {
+    REGISTRATION_ORDER_COMPARISONS.with(Cell::get)
 }
 
 impl Harness {
@@ -2295,3 +2327,6 @@ impl Harness {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
