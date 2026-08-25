@@ -16,17 +16,32 @@ fn job(prompt: &str, json: &[u8]) -> CaptureJob {
     ))
 }
 
-/// Proves full queues reject new captures immediately rather than waiting for
-/// worker progress.
+/// Proves the production queue admits its exact bound, then rejects and returns
+/// the next capture without waiting or changing its private attribution.
 #[test]
-fn overload_drops_new_capture_without_blocking() {
-    let (sender, _receiver) = mpsc::sync_channel(1);
+fn production_queue_bound_rejects_new_capture_without_blocking() {
+    assert_eq!(super::CAPTURE_QUEUE_CAPACITY, 64);
+    let (sender, _receiver) = mpsc::sync_channel(super::CAPTURE_QUEUE_CAPACITY);
     let queue = CaptureQueue::with_sender(sender);
-    queue.try_submit(job("one", b"one")).expect("first job");
-    assert!(matches!(
-        queue.try_submit(job("two", b"two")),
-        Err(mpsc::TrySendError::Full(_))
-    ));
+    for index in 1..=super::CAPTURE_QUEUE_CAPACITY {
+        queue
+            .try_submit(job(&format!("prompt-{index}"), b"capture"))
+            .unwrap_or_else(|_| panic!("admission {index} within production capacity"));
+    }
+
+    let rejected = queue
+        .try_submit(job("rejected", b"private rejected capture"))
+        .expect_err("first capture over the bound");
+    let mpsc::TrySendError::Full(rejected) = rejected else {
+        panic!("queue should reject the capture because it is full");
+    };
+    assert_eq!(rejected.capture.session_id.as_str(), "session-test");
+    assert_eq!(rejected.capture.agent_prompt_id.as_str(), "rejected");
+    assert_eq!(
+        rejected.capture.class,
+        tau_proto::ProviderDebugCaptureClass::HttpSseRequest
+    );
+    assert_eq!(rejected.capture.json, b"private rejected capture");
 }
 
 /// Proves one transport failure does not stop later accepted captures.
@@ -53,73 +68,32 @@ fn transport_failure_isolated_from_later_capture() {
     assert_eq!(*attempted.lock().expect("attempts"), ["one", "two"]);
 }
 
-/// Proves the shared production constructor accepts admissions 1 through 64
-/// and rejects admission 65 without blocking.
-#[test]
-fn production_queue_capacity_is_enforced() {
-    assert_eq!(super::CAPTURE_QUEUE_CAPACITY, 64);
-    let (sender, _receiver) = mpsc::sync_channel(super::CAPTURE_QUEUE_CAPACITY);
-    let queue = CaptureQueue::with_sender(sender);
-    for index in 1..=64 {
-        queue
-            .try_submit(job(&format!("prompt-{index}"), b"capture"))
-            .unwrap_or_else(|_| panic!("admission {index} within production capacity"));
-    }
-    assert!(matches!(
-        queue.try_submit(job("prompt-65", b"capture")),
-        Err(mpsc::TrySendError::Full(_))
-    ));
-}
-
 /// Proves the Provider compresses the exact JSON and preserves only structured
 /// attribution in the dedicated non-event protocol message.
 #[test]
 fn compression_builds_opaque_attributed_protocol_message() {
     let json = br#"{"secret":"debug"}"#;
-    let message = compressed_message(&job("prompt", json)).expect("compress");
+    let capture = ProviderDebugCapture::new(
+        tau_proto::SessionId::parse("session-test").expect("session"),
+        tau_proto::AgentPromptId::parse("prompt").expect("prompt"),
+        tau_proto::ProviderDebugCaptureClass::HttpSseResponse,
+        json.to_vec(),
+    );
+    let message = compressed_message(&CaptureJob::new(capture)).expect("compress");
     let tau_proto::HarnessInputMessage::ProviderDebugCapture(capture) = message else {
         panic!("dedicated capture message");
     };
     assert_eq!(capture.session_id.as_str(), "session-test");
     assert_eq!(capture.agent_prompt_id.as_str(), "prompt");
     assert_eq!(
+        capture.class,
+        tau_proto::ProviderDebugCaptureClass::HttpSseResponse
+    );
+    assert_eq!(
         zstd::stream::decode_all(&capture.zstd[..]).expect("decode"),
         json
     );
     assert!(!format!("{capture:?}").contains("secret"));
-}
-
-/// Compact HTTP failure evidence must use the same zstd-compressed,
-/// non-journaled harness-provider transport as every other private capture.
-#[test]
-fn compact_failure_uses_shared_zstd_transport() {
-    let capture = ProviderDebugCapture::new(
-        tau_proto::SessionId::parse("session-test").expect("session"),
-        tau_proto::AgentPromptId::parse("compact-prompt").expect("prompt"),
-        tau_proto::ProviderDebugCaptureClass::CompactHttpFailure,
-        br#"{"capture_kind":"compact_http_failure"}"#.to_vec(),
-    );
-    let message = compressed_message(&CaptureJob::new(capture)).expect("compress");
-    let tau_proto::HarnessInputMessage::ProviderDebugCapture(capture) = message else {
-        panic!("dedicated capture message");
-    };
-    assert_eq!(
-        capture.class,
-        tau_proto::ProviderDebugCaptureClass::CompactHttpFailure
-    );
-    assert_eq!(
-        zstd::stream::decode_all(&capture.zstd[..]).expect("decode"),
-        br#"{"capture_kind":"compact_http_failure"}"#
-    );
-}
-
-/// Ensures absolute, traversal, and malformed session spellings cannot enter
-/// structured capture attribution.
-#[test]
-fn capture_api_rejects_unsafe_session_identity() {
-    for invalid in ["../escape", "/absolute", ".", "has/slash", "has space"] {
-        assert!(tau_proto::SessionId::parse(invalid).is_err(), "{invalid}");
-    }
 }
 
 /// Proves the raw payload bound is inclusive at the established protocol

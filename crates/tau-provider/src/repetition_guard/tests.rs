@@ -36,7 +36,14 @@ fn detects_repeated_token_suffix() {
             &delta,
         )
         .expect("exact token loop should trigger");
-    assert_eq!(hit.mode, RepetitionMode::Tokens);
+    assert_eq!(
+        hit,
+        StreamRepetition {
+            key: StreamRepetitionKey::ReasoningText { output_index: 0 },
+            mode: RepetitionMode::Tokens,
+            snippet: "alpha beta gamma".to_owned(),
+        }
+    );
 }
 
 /// Ensures exact repeated line blocks are caught after substantial output.
@@ -156,4 +163,86 @@ fn keeps_stream_keys_independent() {
                 .is_none()
         );
     }
+}
+
+/// Ensures final snapshots replace only their component's prior deltas, while
+/// preserving detection for both an independent component and a repeating
+/// snapshot.
+#[test]
+fn replace_tail_discards_prior_delta_state() {
+    let mut guard = StreamRepetitionGuard::new();
+    let primary = StreamRepetitionKey::AssistantText { output_index: 0 };
+    let independent = StreamRepetitionKey::ReasoningText { output_index: 1 };
+    assert!(
+        guard
+            .push_delta(primary.clone(), &".".repeat(512))
+            .is_none()
+    );
+    assert!(
+        guard
+            .push_delta(independent.clone(), &".".repeat(1023))
+            .is_none()
+    );
+
+    assert!(
+        guard
+            .replace_tail(primary.clone(), &".".repeat(512))
+            .is_none(),
+        "a non-repeating final snapshot must not append to prior deltas"
+    );
+    assert_eq!(
+        guard
+            .push_delta(independent.clone(), ".")
+            .expect("replacing another component must preserve its state")
+            .key,
+        independent
+    );
+
+    let repeated_snapshot = (0..40)
+        .map(|_| "alpha beta gamma")
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hit = guard
+        .replace_tail(primary.clone(), &repeated_snapshot)
+        .expect("a repeating final snapshot should trigger");
+    assert_eq!(hit.key, primary);
+    assert_eq!(hit.mode, RepetitionMode::Tokens);
+}
+
+/// Ensures the default 16-component bound rejects new provider-controlled
+/// keys without preventing accepted components from updating and detecting.
+#[test]
+fn bounds_tracked_stream_components() {
+    let mut guard = StreamRepetitionGuard::new();
+    for output_index in 0..16 {
+        assert!(
+            guard
+                .push_delta(
+                    StreamRepetitionKey::AssistantText { output_index },
+                    &format!("non-repeating seed {output_index}")
+                )
+                .is_none()
+        );
+    }
+
+    assert!(
+        guard
+            .push_delta(
+                StreamRepetitionKey::AssistantText { output_index: 16 },
+                &".".repeat(1024)
+            )
+            .is_none(),
+        "the seventeenth component must not be admitted"
+    );
+    let hit = guard
+        .push_delta(
+            StreamRepetitionKey::AssistantText { output_index: 0 },
+            &".".repeat(1024),
+        )
+        .expect("an admitted component must continue to update at the key bound");
+    assert_eq!(
+        hit.key,
+        StreamRepetitionKey::AssistantText { output_index: 0 }
+    );
+    assert_eq!(hit.mode, RepetitionMode::Fragment);
 }
