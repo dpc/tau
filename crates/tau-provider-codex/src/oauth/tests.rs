@@ -72,19 +72,6 @@ fn jwt_issued_at_rejects_millisecond_overflow() {
     assert!(super::jwt_expiration_ms(&token).is_some());
 }
 
-/// Refresh uses the current JSON contract and never regresses auth-code
-/// exchange's separate form-encoded request.
-#[test]
-fn refresh_request_fields_serialize_as_json() {
-    let body = super::refresh_request("opaque +& token");
-    let encoded = body.to_string();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&encoded).expect("JSON request"),
-        body
-    );
-    assert!(!encoded.contains("grant_type=refresh_token"));
-}
-
 /// The actual HTTP helpers keep refresh JSON separate from the form-encoded
 /// authorization-code exchange path.
 #[test]
@@ -162,10 +149,10 @@ fn nested_openai_error_envelope_is_typed_and_bounded() {
     assert!(!rendered.contains('\n'));
 }
 
-/// Provider codes and messages are bounded before storage so repeated logging
-/// cannot amplify an arbitrarily large OAuth response.
+/// Provider fields retain their exact bounded prefixes while safe formatting
+/// excludes all untrusted content.
 #[test]
-fn oauth_error_fields_and_repeated_rendering_remain_bounded() {
+fn oauth_error_fields_are_bounded_and_formatting_is_safe() {
     let code = format!("prefix_{}secret-code-tail", "c".repeat(1_000));
     let message = format!("first line\n{}\nsecret-message-tail", "m".repeat(10_000));
     let body = serde_json::json!({
@@ -177,25 +164,19 @@ fn oauth_error_fields_and_repeated_rendering_remain_bounded() {
     .to_string();
     let error = super::OAuthError::http(400, Some(&body));
 
-    assert!(
-        error
-            .provider_code()
-            .expect("bounded provider code")
-            .ends_with('…')
+    let provider_code = error.provider_code().expect("bounded provider code");
+    assert_eq!(provider_code.chars().count(), 64);
+    assert_eq!(provider_code, format!("prefix_{}…", "c".repeat(56)));
+
+    let message = error.message().expect("bounded provider message");
+    assert_eq!(message.chars().count(), 256);
+    assert_eq!(message, format!("first line {}…", "m".repeat(244)));
+
+    assert_eq!(error.to_string(), "OAuth request was rejected (HTTP 400)");
+    assert_eq!(
+        format!("{error:?}"),
+        "OAuthError { kind: Http, http_status: Some(400), provider_code: None, outbound: None, .. }"
     );
-    assert!(
-        error
-            .message()
-            .expect("bounded provider message")
-            .ends_with('…')
-    );
-    for _ in 0..32 {
-        let rendered = error.to_string();
-        assert!(rendered.chars().count() < 400);
-        assert!(!rendered.contains("secret-code-tail"));
-        assert!(!rendered.contains("secret-message-tail"));
-        assert!(!rendered.contains('\n'));
-    }
 }
 
 /// Malformed and non-JSON error bodies must degrade to status-only failures and

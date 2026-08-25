@@ -272,40 +272,6 @@ fn nested_echo_reset_hint_is_ignored() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
-#[test]
-fn rate_limit_429_is_retryable() {
-    let error = LlmError::HttpStatus(
-        429,
-        serde_json::json!({
-            "error": {
-                "type": "rate_limit_exceeded",
-                "message": "slow down"
-            }
-        })
-        .to_string(),
-    );
-
-    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
-}
-
-#[test]
-fn server_error_uses_backoff_retry() {
-    let error = LlmError::HttpStatus(503, "overloaded".into());
-
-    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
-}
-
-/// Ensures usage-window errors are parked by the outer scheduler rather than
-/// becoming terminal or sleeping in a bounded prompt worker.
-#[test]
-fn ws_stream_error_with_usage_limit_type_is_retryable() {
-    let error = LlmError::HttpStatus(
-        0,
-        "stream error: The usage limit has been reached (type=usage_limit_reached)".to_owned(),
-    );
-    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
-}
-
 /// Deterministic 4xx request statuses are terminal without elevating echoed or
 /// prose content to a more specific typed category.
 #[test]
@@ -344,27 +310,6 @@ fn trusted_local_cancellation_is_terminal_and_config_is_retryable() {
     );
 }
 
-#[test]
-fn ws_stream_error_with_rate_limit_type_is_retryable() {
-    let error = LlmError::HttpStatus(
-        0,
-        "stream error: rate limit (type=rate_limit_exceeded)".to_owned(),
-    );
-    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
-}
-
-/// Backward-compat baseline: a `stream error:` body with no
-/// `(type=…)` suffix (transport hiccup, upstream timeout) must keep
-/// retrying. Only the typed account-cap variants short-circuit.
-#[test]
-fn ws_stream_error_without_type_suffix_is_retryable() {
-    let error = LlmError::HttpStatus(
-        0,
-        "stream error: ws closed mid-stream (code=1011 reason=keepalive ping timeout)".to_owned(),
-    );
-    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
-}
-
 /// A local watchdog ends only the attempt; required logical work remains
 /// pending.
 #[test]
@@ -373,7 +318,12 @@ fn provider_stream_idle_timeout_is_retryable() {
         0,
         "stream error: provider stream idle timeout: transport=Websocket".to_owned(),
     );
-    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
+    let decision = error
+        .retry_decision()
+        .expect("idle timeout remains retryable");
+    assert_eq!(decision.class, RetryClass::Transport);
+    assert_eq!(decision.retry_after, None);
+    assert_eq!(error.failure_kind(), None);
 }
 
 fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {

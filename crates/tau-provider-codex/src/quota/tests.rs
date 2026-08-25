@@ -69,16 +69,50 @@ fn full_usage_normalizes_all_supported_windows() {
         }"#,
     )
     .expect("valid quota test value");
-    assert_eq!(snapshot.windows.len(), 3);
-    assert!(snapshot.windows.iter().any(|window| {
-        window.limit_id.as_str() == "codex"
-            && window.window_id.as_str() == "secondary"
-            && window.used_basis_points == 4_000
-            && window.remaining_seconds == Some(302_400)
-    }));
-    assert!(snapshot.windows.iter().any(|window| {
-        window.limit_id.as_str() == "codex_fast" && window.used_basis_points == 9_000
-    }));
+    let mut windows = snapshot
+        .windows
+        .iter()
+        .map(|window| {
+            (
+                window.limit_id.as_str(),
+                window.window_id.as_str(),
+                window.used_basis_points,
+                window.window_seconds,
+                window.remaining_seconds,
+                window.reset_at_unix_seconds,
+            )
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    assert_eq!(
+        windows,
+        vec![
+            (
+                "codex",
+                "primary",
+                1_250,
+                Some(18_000),
+                Some(9_000),
+                Some(20_000),
+            ),
+            (
+                "codex",
+                "secondary",
+                4_000,
+                Some(604_800),
+                Some(302_400),
+                Some(700_000),
+            ),
+            (
+                "codex_fast",
+                "secondary",
+                9_000,
+                Some(604_800),
+                Some(100),
+                Some(800_000),
+            ),
+        ]
+    );
 }
 
 /// A malformed pool is rejected independently, and normalization collisions
@@ -113,12 +147,51 @@ fn websocket_event_normalizes_and_binds_named_pool() {
     assert_eq!(
         observation
             .active_limit_id
+            .as_ref()
             .expect("valid quota test value")
             .as_str(),
         "codex_bengalfox"
     );
-    assert_eq!(observation.windows.len(), 2);
-    assert_eq!(observation.windows[1].window_seconds, Some(604_800));
+    assert_eq!(
+        observation.binding_provenance,
+        Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent)
+    );
+    let mut windows = observation
+        .windows
+        .iter()
+        .map(|window| {
+            (
+                window.limit_id.as_str(),
+                window.window_id.as_str(),
+                window.used_basis_points,
+                window.window_seconds,
+                window.remaining_seconds,
+                window.reset_at_unix_seconds,
+            )
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    assert_eq!(
+        windows,
+        vec![
+            (
+                "codex_bengalfox",
+                "primary",
+                1_250,
+                Some(18_000),
+                None,
+                Some(1_700_000_000),
+            ),
+            (
+                "codex_bengalfox",
+                "secondary",
+                4_500,
+                Some(604_800),
+                None,
+                Some(1_700_600_000),
+            ),
+        ]
+    );
 }
 
 /// The ordinary official Codex WebSocket shape omits both optional pool-name
