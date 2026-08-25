@@ -51,6 +51,131 @@ fn qwen_reasoning_profile_publishes_exact_efforts() {
     );
 }
 
+/// Exact model-local image modality declarations must survive profile
+/// serialization and model publication so only the audited route exposes
+/// image-producing tools.
+#[test]
+fn image_tool_result_modalities_are_model_local_and_published() {
+    let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+        "models": [
+            {
+                "id": "Qwen/Qwen3.8-27B",
+                "input_modalities": ["text", "image"],
+                "tool_result_modalities": ["text", "image"]
+            },
+            {"id": "text-only"}
+        ]
+    }))
+    .expect("vision profile");
+    provider.validate().expect("valid paired capabilities");
+
+    let models = models_for_provider(&tau_proto::ProviderName::new("ren"), &provider);
+    assert_eq!(
+        models[0].input_modalities,
+        vec![
+            tau_proto::InputModality::Text,
+            tau_proto::InputModality::Image
+        ]
+    );
+    assert_eq!(
+        models[0].tool_result_modalities,
+        vec![
+            tau_proto::InputModality::Text,
+            tau_proto::InputModality::Image
+        ]
+    );
+    assert!(models[1].input_modalities.is_empty());
+    assert!(models[1].tool_result_modalities.is_empty());
+
+    let encoded = serde_json::to_value(provider).expect("profile serialization");
+    assert_eq!(
+        encoded["models"][0]["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert!(encoded["models"][1].get("input_modalities").is_none());
+}
+
+/// Image capabilities are an atomic exact-route assertion: malformed order,
+/// duplicates, image-only declarations, and one-sided declarations must fail
+/// before model publication.
+#[test]
+fn image_tool_result_modalities_fail_closed() {
+    for model in [
+        serde_json::json!({
+            "id": "one-sided",
+            "input_modalities": ["text", "image"]
+        }),
+        serde_json::json!({
+            "id": "image-only",
+            "input_modalities": ["image"],
+            "tool_result_modalities": ["image"]
+        }),
+        serde_json::json!({
+            "id": "duplicate",
+            "input_modalities": ["text", "image", "image"],
+            "tool_result_modalities": ["text", "image"]
+        }),
+        serde_json::json!({
+            "id": "reversed",
+            "input_modalities": ["image", "text"],
+            "tool_result_modalities": ["image", "text"]
+        }),
+    ] {
+        let provider: ChatCompletionsProvider =
+            serde_json::from_value(serde_json::json!({"models": [model]}))
+                .expect("syntactically valid profile");
+        assert!(provider.validate().is_err());
+    }
+}
+
+/// Duplicate model ids would let publication and runtime resolution disagree
+/// about image authority, so profiles must reject them even when only their
+/// modality declarations differ.
+#[test]
+fn duplicate_model_ids_cannot_split_image_capability_authority() {
+    let provider: ChatCompletionsProvider = serde_json::from_value(serde_json::json!({
+        "models": [
+            {
+                "id": "same",
+                "input_modalities": ["text", "image"],
+                "tool_result_modalities": ["text", "image"]
+            },
+            {"id": "same"}
+        ]
+    }))
+    .expect("syntactically valid profile");
+    assert_eq!(
+        provider.validate(),
+        Err("Chat Completions model ids must be unique")
+    );
+}
+
+/// OpenRouter's selected upstream is not an audited multimodal tool-result
+/// route: declarations must fail validation and conversion must remain
+/// text-only as defense in depth before publication or attempt resolution.
+#[test]
+fn openrouter_rejects_and_clears_image_capabilities() {
+    let profile: OpenRouterProfile = serde_json::from_value(serde_json::json!({
+        "models": [{
+            "id": "upstream/model",
+            "input_modalities": ["text", "image"],
+            "tool_result_modalities": ["text", "image"]
+        }]
+    }))
+    .expect("syntactically valid OpenRouter profile");
+    assert_eq!(
+        profile.validate(),
+        Err("OpenRouter does not support image modality declarations")
+    );
+
+    let provider = profile.to_chat_completions();
+    assert!(provider.models[0].input_modalities.is_empty());
+    assert!(provider.models[0].tool_result_modalities.is_empty());
+    let published = models_for_provider(&tau_proto::ProviderName::new("router"), &provider);
+    assert!(published[0].input_modalities.is_empty());
+    assert!(published[0].tool_result_modalities.is_empty());
+}
+
 /// Empty and duplicate effort sets are ambiguous publication contracts and
 /// must fail while decoding the operator profile.
 #[test]
@@ -172,6 +297,8 @@ fn cache_usage_requires_stream_options() {
             ..ChatCompletionsCompat::default()
         }),
         tags: Vec::new(),
+        input_modalities: Vec::new(),
+        tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         local_summary_compaction: None,
         cache_contract: None,
@@ -327,6 +454,8 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
         context_window: 128_000,
         compat: None,
         tags: Vec::new(),
+        input_modalities: Vec::new(),
+        tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         local_summary_compaction: None,
         cache_contract: None,
@@ -510,6 +639,8 @@ fn unpriced_local_model_uses_central_fallback() {
             context_window: 4096,
             compat: None,
             tags: Vec::new(),
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
             cache_contract: None,
@@ -567,6 +698,8 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
             context_window: 4096,
             compat: None,
             tags: Vec::new(),
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
             cache_contract: None,
@@ -649,6 +782,8 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
                 ..ChatCompletionsCompat::default()
             }),
             tags: Vec::new(),
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: false,
             local_summary_compaction: None,
             cache_contract: None,

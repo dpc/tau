@@ -96,7 +96,7 @@ Supported profile kinds:
   Omitted transport in an older profile means SSE. The provider-kind picker
   labels it `OpenAI Responses API`.
 
-For text-only `Qwen/Qwen3.8-27B`, configure a model-local Chat Completions
+For `Qwen/Qwen3.8-27B`, configure a model-local Chat Completions
 compatibility block with literal reasoning efforts `low`, `medium`, and `xhigh`,
 plus `single_initial_system_message: true`. Select role effort `xhigh`, retain
 Qwen's fixed thinking sampler, set
@@ -109,6 +109,14 @@ only `xhigh` with wire policy `omit` and rely on Qwen's default template behavio
 Start local
 operation with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY=1`; increase it only
 after measuring server batching, KV cache, and memory headroom.
+
+When the exact llama.cpp route loads and accepts vision, add
+`input_modalities: ["text", "image"]` and
+`tool_result_modalities: ["text", "image"]` to only that model entry. Both
+fields are required together; omitted fields keep text-only behavior. Tau then
+publishes `read_image` and lowers its typed result as one correlated multimodal
+`tool` message with text followed by high-detail `image_url` data URL parts.
+Tau never infers this capability from Qwen or other model names.
 
 For API-key profiles, setup asks for the authority first: `Enter API key now`,
 `Use configured named secret` when declarations exist, or `No API key` where

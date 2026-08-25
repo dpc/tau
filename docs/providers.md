@@ -145,6 +145,27 @@ struct ProviderModelInfo {
 prompt input, while `tool_result_modalities` declares what it accepts inside
 native tool-result output. A tool that returns images is exposed only when both
 lists contain `image`; omitted lists preserve legacy text-only behavior.
+
+For a Chat Completions profile, declare these fields on only the exact
+multimodal `models[]` entry:
+
+```json
+{
+  "id": "Qwen/Qwen3.8-27B",
+  "input_modalities": ["text", "image"],
+  "tool_result_modalities": ["text", "image"]
+}
+```
+
+The two image declarations are atomic and accept only canonical `[text,
+image]` ordering. Tau rejects one-sided, image-only, repeated, or reordered
+declarations before publishing models. Omission remains text-only. On an
+opted-in route the Chat Completions adapter replays an image-bearing Function
+result as a `tool` message with text followed by high-detail `image_url` data
+URL parts, as accepted by llama.cpp. Do not set these fields merely because a
+model name suggests vision support; the exact endpoint and loaded projector
+must accept that wire shape.
+
 `supports_parallel_tool_calls` is the effective route capability used to make
 system-prompt guidance truthful; it is not merely abstract model metadata.
 Publishing a model means it is available; no separate `enabled` flag is needed initially.

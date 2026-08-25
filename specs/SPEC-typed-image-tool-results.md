@@ -2,7 +2,14 @@
 
 ## Record justification
 
-Extension preparation, protocol/harness persistence and byte-free projections, the [security disclosure boundary](../SECURITY.md), and [audited provider lowering](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md) jointly implement this contract, so no one local artifact can coherently own its end-to-end typed-content, retention, and disclosure rules.
+Extension preparation, protocol/harness persistence and byte-free projections,
+the [security disclosure boundary](../SECURITY.md), and audited provider
+lowering in
+[Codex Responses](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md)
+and
+[Chat Completions](../crates/tau-provider-chat-completions/specs/ARCH-tau-provider-chat-completions.md)
+jointly implement this contract, so no one local artifact can coherently own
+its end-to-end typed-content, retention, and disclosure rules.
 
 Local image inspection is a native tool-result capability, not text containing
 base64 and not a synthesized user message. A successful image-producing
@@ -35,13 +42,17 @@ or normative general guidance until the opt-in live visual-fidelity oracle
 meets its [documented gates](../docs/read-image-fidelity-oracle.md).
 
 The harness exposes an image-producing tool only when the exact provider model
-route publishes both image-input and image-tool-result modalities. GPT-5.6
-Sol/Terra/Luna on the ChatGPT Responses surface are the audited initial routes.
+route publishes both image-input and image-tool-result modalities. Audited
+routes include GPT-5.6 Sol/Terra/Luna on the ChatGPT Responses surface and
+operator-declared multimodal llama.cpp Chat Completions models.
 Responses lowering uses `function_call_output.output[]` with text followed by
 `input_image`; standard GPT-5.6 Responses preserves `detail: high`, while
 Responses Lite receives prepared high-detail pixels but omits
-the `detail` field. Unsupported projections contain a bounded omission marker
-and never send image bytes.
+the `detail` field. Audited Chat Completions lowering uses a `tool` message whose
+`content` array contains the normalized `text` part followed by `image_url`
+parts with high-detail data URLs, the multimodal tool-result shape accepted by
+llama.cpp. Unsupported projections contain a bounded omission marker and never
+send image bytes.
 
 Canonical image bytes are durable transcript data under the same retention and
 access rules as other session data. Generic UI completion events, wait results,
@@ -85,4 +96,5 @@ and is implemented at the component boundaries described by
 [SPEC-tau-proto-provider-data](../crates/tau-proto/specs/SPEC-tau-proto-provider-data.md),
 [SPEC-tau-harness-prompt-dispatch](../crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md),
 [ARCH-tau-provider-codex](../crates/tau-provider-codex/specs/ARCH-tau-provider-codex.md),
+[ARCH-tau-provider-chat-completions](../crates/tau-provider-chat-completions/specs/ARCH-tau-provider-chat-completions.md),
 and [ARCH-tau-ext-shell](../crates/tau-ext-shell/specs/ARCH-tau-ext-shell.md).

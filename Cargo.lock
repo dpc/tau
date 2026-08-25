@@ -6217,6 +6217,7 @@ dependencies = [
 name = "tau-provider-chat-completions"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

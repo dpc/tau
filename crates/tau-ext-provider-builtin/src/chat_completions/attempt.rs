@@ -30,8 +30,8 @@ pub fn models_for_provider(
                 display_name: model.display_name.clone(),
                 tags,
                 supported_tool_types: vec![tau_proto::ToolType::Function],
-                input_modalities: Vec::new(),
-                tool_result_modalities: Vec::new(),
+                input_modalities: model.input_modalities.clone(),
+                tool_result_modalities: model.tool_result_modalities.clone(),
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
                 context_window: model.context_window,
@@ -97,6 +97,12 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     };
     let wire_model = tau_provider_chat_completions::AttemptModel {
         id: model.id.clone(),
+        supports_image_tool_results: model
+            .input_modalities
+            .contains(&tau_proto::InputModality::Image)
+            && model
+                .tool_result_modalities
+                .contains(&tau_proto::InputModality::Image),
     };
     let mut sampler = ResponseSampler::new();
     let outcome = tau_provider_chat_completions::run_attempt(

@@ -1684,6 +1684,8 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             context_window: 128_000,
             compat: None,
             tags: Vec::new(),
+            input_modalities: Vec::new(),
+            tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
             cache_contract: None,

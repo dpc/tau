@@ -9,11 +9,15 @@ use std::io::Read;
 use std::time::{Duration, Instant, SystemTime};
 use std::{cell as path_std_cell, io as path_std_io};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::Serialize;
+#[cfg(test)]
+use tau_proto::ToolResultStatus;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, ModelName, OpaqueProviderItem, ProviderStopReason,
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ToolCallItem, ToolChoice,
-    ToolDefinition, ToolResultStatus, ToolType,
+    ToolDefinition, ToolType,
 };
 #[cfg(test)]
 use tau_provider::local_summary_compaction::REQUEST_OVERHEAD_TOKENS as LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS;
@@ -37,6 +41,8 @@ const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DEBUG_EVENTS: usize = 4096;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(test)]
 std::thread_local! {
     static OUTPUT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -153,6 +159,52 @@ pub enum CacheUsageCompat {
 pub struct AttemptModel {
     /// Upstream model id sent in the request.
     pub id: ModelName,
+    /// Whether this exact route accepts native images in Function tool results.
+    pub supports_image_tool_results: bool,
+}
+
+/// Capability and aggregate image limits for one complete provider request.
+///
+/// One value travels through every transcript block so capability authority and
+/// both byte counters cannot diverge or reset at block boundaries.
+struct ImageRequestBudget {
+    /// Whether the exact resolved provider/model route accepts image tool
+    /// results.
+    supports_image_tool_results: bool,
+    /// Aggregate canonical encoded image bytes admitted to this request.
+    image_bytes: usize,
+    /// Aggregate base64 data-URL bytes admitted to this request.
+    data_url_bytes: usize,
+}
+
+impl ImageRequestBudget {
+    /// Start one request budget with the exact resolved route capability.
+    fn new(supports_image_tool_results: bool) -> Self {
+        Self {
+            supports_image_tool_results,
+            image_bytes: 0,
+            data_url_bytes: 0,
+        }
+    }
+
+    /// Reserve raw and expanded capacity for one image without partial updates.
+    fn reserve(&mut self, image: &tau_proto::ImageContent) -> bool {
+        let encoded_len = image.data.len().div_ceil(3).saturating_mul(4);
+        let data_url_len = "data:;base64,"
+            .len()
+            .saturating_add(image.media_type.mime_type().len())
+            .saturating_add(encoded_len);
+        let next_image_bytes = self.image_bytes.saturating_add(image.data.len());
+        let next_data_url_bytes = self.data_url_bytes.saturating_add(data_url_len);
+        if MAX_REQUEST_IMAGE_BYTES < next_image_bytes
+            || MAX_REQUEST_IMAGE_DATA_URL_BYTES < next_data_url_bytes
+        {
+            return false;
+        }
+        self.image_bytes = next_image_bytes;
+        self.data_url_bytes = next_data_url_bytes;
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -1275,8 +1327,14 @@ fn try_build_request(
     {
         return Err(LlmError::UnsupportedMessageRole);
     }
+    let mut image_budget = ImageRequestBudget::new(model.supports_image_tool_results);
     for block in &prompt.context.blocks {
-        append_context_block(block, provider.compat.reasoning_replay, &mut messages);
+        append_context_block(
+            block,
+            provider.compat.reasoning_replay,
+            &mut image_budget,
+            &mut messages,
+        );
     }
     let tools = prompt
         .tools
@@ -1453,6 +1511,8 @@ fn provider_request_debug_metadata(
     model: &AttemptModel,
     body: &ChatRequest,
 ) -> serde_json::Value {
+    let mut body = serde_json::to_value(body).expect("Chat request serializes");
+    redact_image_data_urls(&mut body);
     serde_json::json!({
         "session_id": prompt.session_id,
         "agent_prompt_id": prompt.agent_prompt_id,
@@ -1464,6 +1524,28 @@ fn provider_request_debug_metadata(
         "tool_choice": prompt.tool_choice,
         "body": body,
     })
+}
+
+fn redact_image_data_urls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) if text.starts_with("data:image/") => {
+            *text = "[image data omitted]".to_owned();
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_image_data_urls(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_image_data_urls(value);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 fn maybe_debug_submit_provider_request(
@@ -1654,6 +1736,7 @@ fn output_token_cap_fields(provider: &AttemptConfig) -> (Option<u32>, Option<u32
 fn append_context_block(
     block: &tau_proto::ContextBlock,
     reasoning_replay: ReasoningReplay,
+    image_budget: &mut ImageRequestBudget,
     messages: &mut Vec<serde_json::Value>,
 ) {
     match block {
@@ -1746,12 +1829,7 @@ fn append_context_block(
         }
         tau_proto::ContextBlock::ToolResults(block) => {
             for result in &block.items {
-                let mut content = tool_result_text(result.status.clone(), &result.output);
-                if !result.provider_content.is_empty() {
-                    content.push_str(
-                        "\n[image omitted: Chat Completions does not support native image tool output]",
-                    );
-                }
+                let content = chat_completions_tool_result_content(result, image_budget);
                 messages.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": result.call_id,
@@ -1762,6 +1840,46 @@ fn append_context_block(
     }
 }
 
+fn chat_completions_tool_result_content(
+    result: &tau_proto::ToolResultItem,
+    image_budget: &mut ImageRequestBudget,
+) -> serde_json::Value {
+    let text = result.render_provider_text();
+    if result.provider_content.is_empty() {
+        return serde_json::Value::String(text);
+    }
+    if !image_budget.supports_image_tool_results {
+        return serde_json::Value::String(format!(
+            "{text}\n[image omitted: this Chat Completions route does not support native image tool output]"
+        ));
+    }
+
+    let mut content = vec![serde_json::json!({"type": "text", "text": text})];
+    for part in &result.provider_content {
+        let tau_proto::ToolResultContentPart::Image(image) = part;
+        if !image_budget.reserve(image) {
+            content.push(serde_json::json!({
+                "type": "text",
+                "text": "[image omitted: aggregate provider image request limit exceeded]",
+            }));
+            continue;
+        }
+        let encoded = BASE64_STANDARD.encode(&image.data);
+        content.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!(
+                    "data:{};base64,{encoded}",
+                    image.media_type.mime_type()
+                ),
+                "detail": "high",
+            },
+        }));
+    }
+    serde_json::Value::Array(content)
+}
+
+#[cfg(test)]
 fn tool_result_text(status: ToolResultStatus, output: &tau_proto::ToolResponse) -> String {
     tau_proto::ToolResultItem {
         call_id: String::new().into(),

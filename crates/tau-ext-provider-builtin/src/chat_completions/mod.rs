@@ -59,6 +59,13 @@ pub struct ChatCompletionsModel {
     /// Model-specific tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<tau_proto::ModelTag>,
+    /// Input modalities accepted by this exact configured route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<tau_proto::InputModality>,
+    /// Modalities accepted in native Function tool-result content by this
+    /// route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_result_modalities: Vec<tau_proto::InputModality>,
     /// Whether this model may produce multiple Function calls in one turn.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
@@ -378,7 +385,36 @@ impl ChatCompletionsProvider {
     /// telemetry on this streaming-only adapter.
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         self.compat.validate()?;
-        for model in &self.models {
+        for (index, model) in self.models.iter().enumerate() {
+            if self.models[..index]
+                .iter()
+                .any(|candidate| candidate.id == model.id)
+            {
+                return Err("Chat Completions model ids must be unique");
+            }
+            for modalities in [&model.input_modalities, &model.tool_result_modalities] {
+                if !matches!(
+                    modalities.as_slice(),
+                    [] | [tau_proto::InputModality::Text]
+                        | [
+                            tau_proto::InputModality::Text,
+                            tau_proto::InputModality::Image
+                        ]
+                ) {
+                    return Err("modalities must be omitted, [text], or [text, image]");
+                }
+            }
+            let accepts_image_input = model
+                .input_modalities
+                .contains(&tau_proto::InputModality::Image);
+            let accepts_image_tool_results = model
+                .tool_result_modalities
+                .contains(&tau_proto::InputModality::Image);
+            if accepts_image_input != accepts_image_tool_results {
+                return Err(
+                    "Chat Completions image input and tool-result modalities must be declared together",
+                );
+            }
             if let Some(compat) = model.compat {
                 compat.validate()?;
             }

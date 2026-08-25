@@ -140,6 +140,25 @@ Chat Completions publishes Function-only model tool support. Request conversion
 is fallible and rejects any non-Function definition as an invariant violation;
 it must never silently omit one.
 
+## Typed image tool-result lowering
+
+The adapter lowers typed images only when the extension marks the exact attempt
+model as accepting native image tool results. It emits one `role: "tool"`
+message with the original `tool_call_id` and multimodal `content`: normalized
+text first, then `image_url` parts containing high-detail canonical data URLs.
+This is llama.cpp's documented OpenAI-compatible multimodal tool-result shape;
+the OpenAI Chat Completions schema itself promises only text parts for tool
+messages, so compatible routes must opt in explicitly rather than inheriting a
+provider-wide or model-name-derived default.
+
+Image bytes and expanded data URLs share the same 24 MiB and 32 MiB aggregate
+request bounds as Tau's Responses lowering. An over-limit image becomes a
+bounded omission part. A route without the attempt capability retains a
+byte-free text omission marker. Opt-in provider request diagnostics recursively
+replace image data URLs with a fixed omission marker before persistence; only
+the live outbound request body, not its debug-capture projection, contains the
+canonical image data URL.
+
 ## Terminal request rejection
 
 Canonical OpenAI-style `error.code`/`error.type` context-window rejections are returned as typed

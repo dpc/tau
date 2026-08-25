@@ -110,6 +110,8 @@ impl OpenRouterProfile {
                     // model-level compatibility override retains unrelated
                     // controls but cannot alter the telemetry-only cache route.
                     model.cache_contract = None;
+                    model.input_modalities.clear();
+                    model.tool_result_modalities.clear();
                     if let Some(compat) = model.compat.as_mut() {
                         compat.stream_options = true;
                         compat.openai_prompt_cache = None;
@@ -141,6 +143,15 @@ impl OpenRouterProfile {
     /// streamed usage.
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         for model in &self.models {
+            if model
+                .input_modalities
+                .contains(&tau_proto::InputModality::Image)
+                || model
+                    .tool_result_modalities
+                    .contains(&tau_proto::InputModality::Image)
+            {
+                return Err("OpenRouter does not support image modality declarations");
+            }
             if let Some(compat) = model.compat {
                 compat.validate()?;
             }
@@ -314,6 +325,8 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             cache_usage: super::CacheUsageCompat::OpenAi,
         }),
         tags: Vec::new(),
+        input_modalities: Vec::new(),
+        tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         local_summary_compaction: None,
         cache_contract: None,

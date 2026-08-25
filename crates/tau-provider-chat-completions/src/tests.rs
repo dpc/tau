@@ -1,6 +1,6 @@
 use std::io::Write as _;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::atomic as path_std_sync_atomic;
+use std::sync::{Arc, atomic as path_std_sync_atomic};
 use std::{
     collections as path_std_collections, io as path_std_io, net as path_std_net,
     sync as path_std_sync,
@@ -226,6 +226,7 @@ fn provider() -> TestProvider {
         api_key: String::new(),
         models: vec![AttemptModel {
             id: ModelName::new("test-model"),
+            supports_image_tool_results: false,
         }],
         max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
@@ -936,6 +937,7 @@ fn chat_request_exposes_provider_visible_identity_changes() {
 
     let changed_model = AttemptModel {
         id: ModelName::new("other-model"),
+        supports_image_tool_results: false,
     };
     assert_ne!(
         serde_json::to_vec(&build_request(&config, &changed_model, &created)).expect("serialize"),
@@ -1055,7 +1057,7 @@ fn local_summary_compaction_builds_dedicated_bounded_request() {
                     provider_content: vec![tau_proto::ToolResultContentPart::Image(
                         tau_proto::ImageContent {
                             media_type: tau_proto::ImageMediaType::Png,
-                            data: std::sync::Arc::from([11_u8, 22, 33]),
+                            data: Arc::from([11_u8, 22, 33]),
                             width: 17,
                             height: 19,
                             detail: tau_proto::ImageDetail::High,
@@ -1112,6 +1114,156 @@ fn local_summary_compaction_builds_dedicated_bounded_request() {
     assert!(!input.contains("11"));
     assert!(!input.contains("22"));
     assert!(!input.contains("33"));
+}
+
+fn image_tool_results_block(call_id: &str, data: impl Into<Arc<[u8]>>) -> tau_proto::ContextBlock {
+    tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+        items: vec![tau_proto::ToolResultItem {
+            presentation: Default::default(),
+            call_id: tau_proto::ToolCallId::new(call_id),
+            tool_type: tau_proto::ToolType::Function,
+            status: tau_proto::ToolResultStatus::Success,
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                "image result".to_owned(),
+            )),
+            provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                tau_proto::ImageContent {
+                    media_type: tau_proto::ImageMediaType::Png,
+                    data: data.into(),
+                    width: 17,
+                    height: 19,
+                    detail: tau_proto::ImageDetail::High,
+                },
+            )],
+        }],
+    })
+}
+
+/// An explicitly audited llama.cpp route must receive exact multimodal tool
+/// content, while the default text-only route must retain a byte-free marker.
+#[test]
+fn image_tool_result_lowering_is_exact_and_capability_gated() {
+    let mut created = prompt();
+    created
+        .context
+        .blocks
+        .push(image_tool_results_block("call-image", [11_u8, 22, 33]));
+
+    let config = resolved_provider(&provider());
+    let mut model = provider().models[0].clone();
+    model.supports_image_tool_results = true;
+    let request = try_build_request(&config, &model, &created).expect("vision request");
+    assert_eq!(
+        request.messages.last(),
+        Some(&serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call-image",
+            "content": [
+                {"type": "text", "text": "image result"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,CxYh",
+                        "detail": "high"
+                    }
+                }
+            ]
+        }))
+    );
+
+    model.supports_image_tool_results = false;
+    let request = try_build_request(&config, &model, &created).expect("text-only request");
+    let content = request.messages.last().expect("tool result")["content"]
+        .as_str()
+        .expect("text-only projection");
+    assert!(content.contains("image result"));
+    assert!(content.contains("route does not support native image tool output"));
+    assert!(!content.contains("CxYh"));
+    assert!(
+        !serde_json::to_string(&request)
+            .expect("request")
+            .contains("data:image")
+    );
+}
+
+/// Provider request diagnostics must preserve useful structure without
+/// persisting the canonical image data URL that only the outbound request
+/// needs.
+#[test]
+fn image_tool_result_debug_metadata_redacts_data_urls() {
+    let mut created = prompt();
+    created
+        .context
+        .blocks
+        .push(image_tool_results_block("call-image", [11_u8, 22, 33]));
+    let config = resolved_provider(&provider());
+    let mut model = provider().models[0].clone();
+    model.supports_image_tool_results = true;
+    let request = try_build_request(&config, &model, &created).expect("vision request");
+
+    let debug = provider_request_debug_metadata(&created, &model, &request);
+    let debug = serde_json::to_string(&debug).expect("debug metadata");
+    assert!(debug.contains("[image data omitted]"));
+    assert!(!debug.contains("data:image"));
+    assert!(!debug.contains("CxYh"));
+}
+
+/// Raw canonical bytes and expanded data URLs are independent provider request
+/// limits; exhausting either one must reject the next reservation atomically.
+#[test]
+fn image_request_budget_enforces_independent_limits() {
+    let image = tau_proto::ImageContent {
+        media_type: tau_proto::ImageMediaType::Png,
+        data: Arc::from([11_u8, 22, 33]),
+        width: 17,
+        height: 19,
+        detail: tau_proto::ImageDetail::High,
+    };
+    let mut raw_exhausted = ImageRequestBudget {
+        supports_image_tool_results: true,
+        image_bytes: MAX_REQUEST_IMAGE_BYTES,
+        data_url_bytes: 0,
+    };
+    assert!(!raw_exhausted.reserve(&image));
+    assert_eq!(raw_exhausted.image_bytes, MAX_REQUEST_IMAGE_BYTES);
+    assert_eq!(raw_exhausted.data_url_bytes, 0);
+
+    let mut expanded_exhausted = ImageRequestBudget {
+        supports_image_tool_results: true,
+        image_bytes: 0,
+        data_url_bytes: MAX_REQUEST_IMAGE_DATA_URL_BYTES,
+    };
+    assert!(!expanded_exhausted.reserve(&image));
+    assert_eq!(expanded_exhausted.image_bytes, 0);
+    assert_eq!(
+        expanded_exhausted.data_url_bytes,
+        MAX_REQUEST_IMAGE_DATA_URL_BYTES
+    );
+}
+
+/// The aggregate budget must span separate ToolResults blocks so replay cannot
+/// reset limits at a transcript boundary and admit a later oversized payload.
+#[test]
+fn image_request_budget_spans_tool_result_blocks() {
+    let mut created = prompt();
+    created
+        .context
+        .blocks
+        .push(image_tool_results_block("call-first", vec![1_u8; 2 * 1024]));
+    created.context.blocks.push(image_tool_results_block(
+        "call-over-limit",
+        vec![2_u8; MAX_REQUEST_IMAGE_BYTES - 1024],
+    ));
+    let config = resolved_provider(&provider());
+    let mut model = provider().models[0].clone();
+    model.supports_image_tool_results = true;
+
+    let request = try_build_request(&config, &model, &created).expect("bounded vision request");
+    let messages = serde_json::to_value(&request.messages).expect("messages");
+    let wire = messages.to_string();
+    assert_eq!(wire.matches("\"type\":\"image_url\"").count(), 1);
+    assert!(wire.contains("aggregate provider image request limit exceeded"));
+    assert!(!wire.contains("AgICAgICAgICAgICAgICAgICAgICAgICAgICAg"));
 }
 
 /// Ensures an oversized canonical transcript fails before request dispatch
