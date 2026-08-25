@@ -21,6 +21,12 @@ use daemon_support::*;
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DUMMY_TOOL: &str = env!("CARGO_BIN_EXE_tau-e2e-test-dummy");
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
+const RESTORE_NOTICE: &str = concat!(
+    "Previous session was interrupted and restored. Less than 1 minute has passed ",
+    "since the last recorded session event, and the state of the world might have changed. ",
+    "Session-scoped tool and extension state may also have changed; inspect current tool state ",
+    "and recreate timers or other session-scoped setup if still needed."
+);
 
 /// Proves the supervised provider sees exactly one replay-safe output-limit
 /// successor whose request retains the source reasoning and internal
@@ -770,6 +776,18 @@ fn deterministic_restart_preserves_response_before_successor_input()
     let first = recv_until_finished(&mut peer_a)?;
     assert_assistant(&first.output_items, R);
     let agent_id = first.agent_id;
+    let snapshot_a = DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    assert_restart_boot_a_prefix(&snapshot_a, H, R);
+    let journal_prefix = std::fs::read(
+        fixture
+            .harness_state_dir()
+            .join("agents")
+            .join(agent_id.as_str())
+            .join("events.cbor"),
+    )?;
     disconnect_ui(&mut peer_a)?;
     server_a.finish()?;
 
@@ -790,18 +808,42 @@ fn deterministic_restart_preserves_response_before_successor_input()
     }
     submit_prompt(&mut peer_b, &agent_id, "restart-successor", Q)?;
     let second_prompt = recv_until_created(&mut peer_b, Some("restart-successor"))?;
-    let rendered = serde_json::to_string(&second_prompt.context)?;
-    for expected in [H, R, Q] {
-        assert_eq!(rendered.matches(expected).count(), 1, "{expected}");
-    }
-    assert!(rendered.find(H) < rendered.find(R));
-    assert!(rendered.find(R) < rendered.find(Q));
+    assert_restart_context(&second_prompt.context, H, R, Q);
     let second = recv_until_finished_for(&mut peer_b, &second_prompt.agent_prompt_id)?;
     assert_assistant(&second.output_items, "restart successor");
     disconnect_ui(&mut peer_b)?;
     server_b.finish()?;
+    let snapshot_b = DurableSnapshot::load(
+        fixture.harness_state_dir(),
+        &"deterministic-e2e-session".parse()?,
+    )?;
+    snapshot_b.require_prefix(&snapshot_a)?;
+    let journal_after = std::fs::read(
+        fixture
+            .harness_state_dir()
+            .join("agents")
+            .join(agent_id.as_str())
+            .join("events.cbor"),
+    )?;
+    assert!(
+        journal_after.starts_with(&journal_prefix),
+        "Boot B rewrote the closed Boot A agent journal prefix"
+    );
+    assert_restart_successor_suffix(&snapshot_a, &snapshot_b, &second_prompt.agent_prompt_id, Q);
+    assert_eq!(
+        fixture.trace()?.matches(" matched ").count(),
+        2,
+        "cold replay must not consume a source action or dispatch a third turn"
+    );
     fixture.assert_consumed()?;
     Ok(())
+}
+
+/// Proves the daemon guard refuses a nominally successful parent exit while a
+/// process-group child remains, then reaps that child as failure containment.
+#[test]
+fn daemon_finish_rejects_a_lingering_process_group_member() {
+    assert_daemon_finish_rejects_a_lingering_process_group_member();
 }
 
 /// Proves a provider-side hold has a hard deadline, its worker is reaped, and
@@ -1298,6 +1340,194 @@ fn assert_typed_image_display(display: &tau_proto::ToolResultDisplay, call_id: &
     assert_eq!(display.kind, ToolResultKind::Final);
     assert_eq!(display.display, None);
     assert_eq!(display.originator, tau_proto::PromptOriginator::User);
+}
+
+/// Requires Boot A to persist one closed prompt/response turn before shutdown.
+fn assert_restart_boot_a_prefix(snapshot: &DurableSnapshot, prompt: &str, response: &str) {
+    assert_eq!(
+        snapshot
+            .agent_events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentPromptSubmitted(submitted)
+                        if submitted.inference_activation && submitted.text == prompt
+                )
+            })
+            .count(),
+        1,
+        "Boot A must durably accept its source prompt exactly once"
+    );
+    assert_eq!(
+        snapshot
+            .agent_events
+            .iter()
+            .filter(|record| matches!(&record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        1,
+        "Boot A must durably own one source dispatch"
+    );
+    assert_eq!(
+        snapshot
+            .agent_events
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ProviderResponseFinished(finished)
+                        if assistant_output_is(&finished.output_items, response)
+                )
+            })
+            .count(),
+        1,
+        "Boot A must durably close the source response before shutdown"
+    );
+    assert_eq!(
+        snapshot
+            .agent_events
+            .iter()
+            .filter(|record| matches!(&record.event, Event::AgentOuterTurnFinished(_)))
+            .count(),
+        1,
+        "Boot A must durably finish its source outer turn before shutdown"
+    );
+}
+
+/// Requires the resumed provider context to contain the exact completed
+/// user/assistant prefix, recovery notice, and one submitted successor input.
+fn assert_restart_context(context: &tau_proto::PromptContext, h: &str, r: &str, q: &str) {
+    let items = context.flatten_iter().collect::<Vec<_>>();
+    let [
+        ContextItem::Message(h_item),
+        ContextItem::Message(r_item),
+        ContextItem::Message(restore_item),
+        ContextItem::Message(q_item),
+    ] = items.as_slice()
+    else {
+        panic!("expected typed H, R, restore, Q context items, got {items:?}");
+    };
+    assert_exact_text_message(
+        h_item,
+        tau_proto::ContextRole::User,
+        &format!("<user>{h}</user>"),
+    );
+    assert_exact_text_message(r_item, tau_proto::ContextRole::Assistant, r);
+    assert_exact_text_message(
+        restore_item,
+        tau_proto::ContextRole::User,
+        &format!("<tau_internal>{RESTORE_NOTICE}</tau_internal>"),
+    );
+    assert_exact_text_message(
+        q_item,
+        tau_proto::ContextRole::User,
+        &format!("<user>{q}</user>"),
+    );
+}
+
+/// Requires one message to have exactly one typed text part with the given role
+/// and content.
+fn assert_exact_text_message(
+    message: &tau_proto::MessageItem,
+    role: tau_proto::ContextRole,
+    text: &str,
+) {
+    assert_eq!(message.role, role);
+    let [tau_proto::ContentPart::Text { text: actual }] = message.content.as_slice() else {
+        panic!("expected one typed text part, got {:?}", message.content);
+    };
+    assert_eq!(actual, text);
+}
+
+/// Requires the cold-resume journal suffix to add exactly one correlated
+/// successor prompt, dispatch, and terminal without replaying the source.
+fn assert_restart_successor_suffix(
+    before: &DurableSnapshot,
+    after: &DurableSnapshot,
+    successor_prompt_id: &tau_proto::AgentPromptId,
+    successor_text: &str,
+) {
+    let suffix = &after.agent_events[before.agent_events.len()..];
+    let submitted = suffix
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSubmitted(submitted) => Some(submitted),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [restore, submitted] = submitted.as_slice() else {
+        panic!("expected a durable restore notice and one successor input, got {submitted:?}");
+    };
+    assert!(!restore.inference_activation);
+    assert_eq!(restore.text, RESTORE_NOTICE);
+    assert_eq!(
+        restore.message_class,
+        tau_proto::PromptMessageClass::Internal
+    );
+    assert_eq!(
+        restore.submission_source,
+        tau_proto::PromptSubmissionSource::HarnessInternal
+    );
+    assert!(submitted.inference_activation);
+    assert_eq!(submitted.text, successor_text);
+
+    let dispatches = suffix
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentInferenceDispatchStarted(dispatch) => Some(dispatch),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [dispatch] = dispatches.as_slice() else {
+        panic!("expected exactly one durable successor dispatch, got {dispatches:?}");
+    };
+    assert_eq!(&dispatch.agent_prompt_id, successor_prompt_id);
+
+    let starts = suffix
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [started] = starts.as_slice() else {
+        panic!("expected exactly one durable successor prompt start, got {starts:?}");
+    };
+    assert_eq!(&started.agent_prompt_id, successor_prompt_id);
+
+    let terminals = suffix
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(finished) => Some(finished),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [terminal] = terminals.as_slice() else {
+        panic!("expected exactly one durable successor terminal, got {terminals:?}");
+    };
+    assert_eq!(&terminal.agent_prompt_id, successor_prompt_id);
+
+    assert_eq!(
+        after
+            .agent_events
+            .iter()
+            .filter(|record| matches!(&record.event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        2,
+        "cold replay must not resend the source or dispatch a third turn"
+    );
+}
+
+/// Returns whether one terminal contains exactly the expected assistant text.
+fn assistant_output_is(items: &[ContextItem], expected: &str) -> bool {
+    matches!(
+        items,
+        [ContextItem::Message(message)]
+            if message.content
+                == [tau_proto::ContentPart::Text {
+                    text: expected.to_owned()
+                }]
+    )
 }
 
 /// Requires one durable assistant message carrying the expected final text.

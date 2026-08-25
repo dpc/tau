@@ -294,10 +294,9 @@ fn force_process_group_cleanup(pgid: nix::unistd::Pid) -> Result<(), String> {
     Err("daemon process group survived SIGKILL cleanup".to_owned())
 }
 
-/// Proves successful `finish` never repairs a leaked process-group member and
-/// reports success; forced termination remains failure containment only.
-#[test]
-fn daemon_finish_rejects_a_lingering_process_group_member() {
+/// Requires successful `finish` to reject, rather than silently repair, a
+/// leaked process-group member.
+pub(super) fn assert_daemon_finish_rejects_a_lingering_process_group_member() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let stderr_path = tempdir.path().join("daemon.stderr");
     std::fs::write(&stderr_path, b"").expect("stderr file");
