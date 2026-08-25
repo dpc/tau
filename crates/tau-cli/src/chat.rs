@@ -166,10 +166,12 @@ impl UiWriter {
     }
 }
 
-/// Shared writer handle: the input loop and the prompt-draft debounce
-/// thread both need to send events on the same socket. Stream
-/// The self-delimiting CBOR application stream requires serialized whole-item
-/// writes, so the mutex prevents concurrent producers from interleaving bytes.
+/// Shared writer handle: the input loop and prompt-draft debounce thread both
+/// send events on one socket. The application protocol is a stream of
+/// self-delimiting CBOR items, so the mutex serializes each complete item and
+/// prevents concurrent producers from interleaving its bytes. This is
+/// application-level serialization, not reliance on atomic stream writes or
+/// `PIPE_BUF`.
 type WriterHandle = Arc<Mutex<UiWriter>>;
 
 /// Wrapping process-local identity for content-free submission diagnostics.
