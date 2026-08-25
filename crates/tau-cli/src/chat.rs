@@ -19,6 +19,7 @@ mod renderer_scheduler;
 
 #[cfg(test)]
 mod ui_io_tests;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::Shutdown;
@@ -333,6 +334,12 @@ pub(crate) fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()>
     send_frame(writer, &durable_emit_message(event))
 }
 
+/// Sends a one-shot event without cloning its owned payload into the Emit
+/// frame.
+fn send_owned_event(writer: &WriterHandle, event: Event) -> io::Result<()> {
+    send_frame(writer, &durable_emit_message_owned(event))
+}
+
 /// Sends the production cancellation event through the direct uplink.
 fn send_cancel_prompt_frame(
     writer: &WriterHandle,
@@ -368,6 +375,11 @@ fn handle_ui_detach_command_text(text: &str, writer: &WriterHandle) -> Option<In
 /// Wrap an event in the interactive UI's durable-by-default Emit message.
 fn durable_emit_message(event: &Event) -> HarnessInputMessage {
     HarnessInputMessage::emit(event.clone())
+}
+
+/// Moves a one-shot event into the interactive UI's durable Emit message.
+fn durable_emit_message_owned(event: Event) -> HarnessInputMessage {
+    HarnessInputMessage::emit(event)
 }
 
 fn format_ui_io_cumulative_stats(stats: &UiIoCumulativeStats) -> String {
@@ -2585,7 +2597,7 @@ impl<'a> TerminalInputSession<'a> {
         let history_line = redacted_prompt_history_line(line, text);
         if self.prompt_line_targets_ephemeral_agent(routing_text) {
             if let Ok(mut context) = self.ctx.editor_context.lock() {
-                context.previous_prompt = Some(history_line);
+                context.previous_prompt = Some(history_line.into_owned());
             }
             return;
         }
@@ -2605,7 +2617,7 @@ impl<'a> TerminalInputSession<'a> {
             }
         }
         if let Ok(mut context) = self.ctx.editor_context.lock() {
-            context.previous_prompt = Some(history_line);
+            context.previous_prompt = Some(history_line.into_owned());
         }
     }
 
@@ -3261,7 +3273,7 @@ impl<'a> TerminalInputSession<'a> {
                 },
             ))
         };
-        if send_event(self.writer, &event).is_err() {
+        if send_owned_event(self.writer, event).is_err() {
             return Some(InputLoopExit::Quit);
         }
 
@@ -4124,12 +4136,12 @@ pub(crate) fn leading_command_token(text: &str) -> Option<&str> {
     command.starts_with(':').then_some(command)
 }
 
-pub(crate) fn redacted_command_echo_line(text: &str) -> String {
-    redact_sensitive_action_line(text).unwrap_or_else(|| text.to_owned())
+pub(crate) fn redacted_command_echo_line(text: &str) -> Cow<'_, str> {
+    redact_sensitive_action_line(text).map_or(Cow::Borrowed(text), Cow::Owned)
 }
 
-pub(crate) fn redacted_prompt_history_line(line: &str, text: &str) -> String {
-    redact_sensitive_action_line(text).unwrap_or_else(|| line.to_owned())
+pub(crate) fn redacted_prompt_history_line<'a>(line: &'a str, text: &str) -> Cow<'a, str> {
+    redact_sensitive_action_line(text).map_or(Cow::Borrowed(line), Cow::Owned)
 }
 
 fn redact_sensitive_action_line(text: &str) -> Option<String> {
@@ -4193,9 +4205,9 @@ fn handle_submitted_line_with_handlers(
     if let Some(canonical_line) = tau_cli_term::canonical_literal_colon_prompt(line) {
         let canonical_text = canonical_line.trim();
         let submitted_text = redact_sensitive_action_line(canonical_text)
-            .unwrap_or_else(|| canonical_text.to_owned());
+            .map_or(Cow::Borrowed(canonical_text), Cow::Owned);
         if submitted_text != canonical_text {
-            handlers.replace_last_submitted_prompt(submitted_text.clone());
+            handlers.replace_last_submitted_prompt(submitted_text.clone().into_owned());
         }
         handlers.record_prompt_line(SubmittedLineRecord {
             history_fallback: &canonical_line,

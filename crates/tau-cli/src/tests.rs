@@ -1317,6 +1317,23 @@ fn gmail_oauth_finish_redirect_url_is_redacted_from_echo_and_prompt_history() {
     assert!(profile_error.to_string().contains("configuration profile"));
 }
 
+/// Ordinary prose needs no presentation or history transformation, so both
+/// views must borrow the submitted bytes until an independent owner retains
+/// them.
+#[test]
+fn ordinary_prompt_presentation_and_history_views_borrow_submitted_bytes() {
+    let line = "large ordinary prompt ".repeat(4_096);
+    let text = line.trim();
+
+    let presentation = redacted_command_echo_line(text);
+    let history = redacted_prompt_history_line(&line, text);
+
+    assert!(matches!(presentation, std::borrow::Cow::Borrowed(_)));
+    assert!(matches!(history, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(presentation.as_ptr(), text.as_ptr());
+    assert_eq!(history.as_ptr(), line.as_ptr());
+}
+
 /// Content-enabled draft publication must preserve ordinary text while
 /// replacing every recognizable Gmail OAuth finish buffer before serialization.
 #[test]
