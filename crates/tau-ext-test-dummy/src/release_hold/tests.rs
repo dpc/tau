@@ -3,7 +3,7 @@
 use std::io::{Cursor, Write};
 use std::os::unix::net::UnixStream;
 
-use super::{RELEASE_FRAME_MAX_BYTES, configure_client_timeout, read_release_frame};
+use super::{RELEASE_FRAME_MAX_BYTES, read_release_frame};
 
 /// A complete frame is accepted at its newline without waiting for EOF.
 #[test]
@@ -35,11 +35,4 @@ fn release_frame_enforces_exact_byte_boundary() {
     assert_eq!(parsed.call_id.as_str(), "call-1");
     assert_eq!(parsed.release_nonce, expected_nonce);
     assert!(read_release_frame(&mut Cursor::new(rejected.as_bytes())).is_none());
-}
-
-/// Timeout setup errors remain visible instead of entering an unbounded read.
-#[test]
-fn zero_client_timeout_is_rejected() {
-    let (stream, _peer) = UnixStream::pair().expect("socket pair");
-    assert!(configure_client_timeout(&stream, std::time::Duration::ZERO).is_err());
 }

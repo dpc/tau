@@ -1,6 +1,7 @@
 use std::collections as path_std_collections;
 use std::fs::DirBuilder;
 use std::io::{Cursor, Error, ErrorKind, Read};
+use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -257,6 +258,40 @@ fn typed_image_config() -> HarnessOutputMessage {
         secrets: path_std_collections::BTreeMap::new(),
         settings_files: Default::default(),
     })
+}
+
+fn provider_context_raw_message_config() -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![(
+            CborValue::Text("provider_context_raw_message".to_owned()),
+            CborValue::Bool(true),
+        )]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
+    })
+}
+
+fn invoke_provider_context_raw_message() -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        call_id: "raw-message-call".into(),
+        tool_name: tau_proto::ToolName::new(PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME),
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("agent_id".to_owned()),
+                CborValue::Text("provider-context-agent".to_owned()),
+            ),
+            (
+                CborValue::Text("text".to_owned()),
+                CborValue::Text("exact raw fixture message".to_owned()),
+            ),
+        ]),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: fixture_extension_originator(),
+    }))
 }
 
 fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMessage {
@@ -534,6 +569,25 @@ fn typed_image_mode_registers_and_returns_the_fixed_image() {
         TYPED_IMAGE_TEST_DUMMY_TOOL_NAME
     );
     assert_eq!(
+        declarations[1].tool.tool_type,
+        tau_proto::ToolType::Function
+    );
+    assert_eq!(
+        declarations[1].tool.parameters,
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }))
+    );
+    assert_eq!(
+        declarations[1]
+            .tool_group
+            .as_ref()
+            .map(|group| group.name.as_str()),
+        Some("test")
+    );
+    assert_eq!(
         declarations[1].tool.tags,
         vec![tau_proto::ToolTag::new("provider-content:image")]
     );
@@ -550,14 +604,153 @@ fn typed_image_mode_registers_and_returns_the_fixed_image() {
         })
         .expect("typed image result");
     assert_eq!(result.call_id.as_str(), "typed-image-call");
+    assert_eq!(result.tool_name.as_str(), TYPED_IMAGE_TEST_DUMMY_TOOL_NAME);
+    assert_eq!(result.tool_type, tau_proto::ToolType::Function);
+    assert_eq!(result.kind, tau_proto::ToolResultKind::Final);
+    assert_eq!(
+        result.result,
+        CborValue::Text("typed image succeeded".to_owned())
+    );
     let [tau_proto::ToolResultContentPart::Image(image)] = result.provider_content.as_slice()
     else {
-        panic!("typed image result");
+        panic!("typed image result must contain exactly one image part");
     };
+    assert_eq!(image.media_type, tau_proto::ImageMediaType::Png);
+    assert_eq!(image.detail, tau_proto::ImageDetail::High);
     assert!(
         image.data.as_ref() == TYPED_IMAGE_PNG,
         "typed image bytes differ from the fixed canonical fixture"
     );
+}
+
+/// Verifies the enabled raw-message fixture declares its closed tool, reports
+/// one exact fact before its terminal, and remains inert when disabled.
+#[test]
+fn provider_context_raw_message_mode_declares_and_reports_exact_message() {
+    let frames = run_restart_frames(
+        &[
+            provider_context_raw_message_config(),
+            invoke_provider_context_raw_message(),
+        ],
+        1,
+    );
+    let declarations = frames
+        .iter()
+        .filter_map(emitted_event)
+        .filter_map(|event| match event {
+            Event::ToolRegistrationDeclared(declaration)
+                if declaration.tool.name.as_str() == PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME =>
+            {
+                Some(declaration)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [declaration] = declarations.as_slice() else {
+        panic!("expected exactly one raw-message tool declaration");
+    };
+    assert_eq!(
+        declaration.tool.name.as_str(),
+        PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME
+    );
+    assert_eq!(
+        declaration.tool.parameters,
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": { "type": "string" },
+                "text": { "type": "string" }
+            },
+            "required": ["agent_id", "text"],
+            "additionalProperties": false,
+        }))
+    );
+    assert_eq!(
+        declaration
+            .tool_group
+            .as_ref()
+            .map(|group| group.name.as_str()),
+        Some("test")
+    );
+    assert_eq!(
+        declaration.tool.background_support,
+        Some(tau_proto::BackgroundSupport::Never)
+    );
+
+    let reports = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match emitted_event(frame) {
+            Some(Event::MessageDeliveredReported(report)) => Some((index, report)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(report_index, report)] = reports.as_slice() else {
+        panic!("expected exactly one raw-message fixture report");
+    };
+    let terminals = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| match emitted_event(frame) {
+            Some(Event::ToolResultReported(result))
+                if result.call_id.as_str() == "raw-message-call" =>
+            {
+                Some((index, result))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(terminal_index, result)] = terminals.as_slice() else {
+        panic!("expected exactly one raw-message fixture terminal");
+    };
+    assert!(
+        report_index < terminal_index,
+        "raw-message report must precede its tool terminal"
+    );
+    assert_eq!(report.publisher_extension_id.as_str(), "e2e-test-dummy");
+    assert_eq!(report.agent_id.as_str(), "provider-context-agent");
+    assert_eq!(report.message_id.as_str(), "provider-context-raw-message");
+    assert_eq!(report.sender.stable_id, "provider-context-raw-sender");
+    assert_eq!(report.sender.display_name, None);
+    assert_eq!(report.sender.sender_auth, None);
+    assert_eq!(report.conversation, None);
+    assert_eq!(report.text, "exact raw fixture message");
+    assert_eq!(result.call_id.as_str(), "raw-message-call");
+    assert_eq!(
+        result.tool_name.as_str(),
+        PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME
+    );
+    assert_eq!(result.kind, tau_proto::ToolResultKind::Final);
+    assert_eq!(
+        result.result,
+        CborValue::Text("raw message emitted".to_owned())
+    );
+    assert_eq!(result.provider_content, Vec::new());
+    assert_eq!(result.originator, fixture_extension_originator());
+
+    let disabled_frames = run_restart_frames(&[invoke_provider_context_raw_message()], 1);
+    assert!(disabled_frames.iter().all(|frame| {
+        !matches!(
+            emitted_event(frame),
+            Some(Event::ToolRegistrationDeclared(declaration))
+                if declaration.tool.name.as_str() == PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME
+        ) && !matches!(
+            emitted_event(frame),
+            Some(Event::MessageDeliveredReported(_))
+        ) && !matches!(
+            emitted_event(frame),
+            Some(Event::ToolResultReported(result))
+                if result.call_id.as_str() == "raw-message-call"
+        ) && !matches!(
+            emitted_event(frame),
+            Some(Event::ToolErrorReported(error))
+                if error.call_id.as_str() == "raw-message-call"
+        ) && !matches!(
+            emitted_event(frame),
+            Some(Event::ToolCancelledReported(cancelled))
+                if cancelled.call_id.as_str() == "raw-message-call"
+        )
+    }));
 }
 
 /// Verifies an undeclared typed-image call cannot produce a terminal outside
@@ -708,8 +901,8 @@ fn invalid_restart_mode_emits_config_error() {
     );
 }
 
-/// Ensures the closed marker mode rejects missing, relative, and unrelated
-/// marker configuration before it can claim or reuse a filesystem marker.
+/// Ensures the closed marker mode rejects invalid marker shapes and reports a
+/// failed live claim without creating a missing parent.
 #[test]
 fn exit_once_mode_configuration_fails_closed() {
     let missing = restart_config("exit_once_then_success");
@@ -731,13 +924,14 @@ fn exit_once_mode_configuration_fails_closed() {
         secrets: path_std_collections::BTreeMap::new(),
         settings_files: Default::default(),
     });
+    let extra_marker_path = unique_marker_path("exit-extra");
     let extra = HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         config: CborValue::Map(vec![(
             CborValue::Text("exit_once_marker_path".to_owned()),
-            CborValue::Text("/tmp/fixture-marker".to_owned()),
+            CborValue::Text(extra_marker_path.to_string_lossy().into_owned()),
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
@@ -755,12 +949,50 @@ fn exit_once_mode_configuration_fails_closed() {
         secrets: path_std_collections::BTreeMap::new(),
         settings_files: Default::default(),
     });
-    for config in [missing, relative, extra, release_extra] {
+    let directory_marker_path = unique_marker_path("exit-directory");
+    std::fs::create_dir(&directory_marker_path).expect("create directory marker");
+    let directory = exit_once_config(&directory_marker_path);
+    let symlink_marker_path = unique_marker_path("exit-symlink");
+    symlink("symlink-target", &symlink_marker_path).expect("create symlink marker");
+    let symlink = exit_once_config(&symlink_marker_path);
+    for (config, expected_error) in [
+        (
+            missing,
+            "exit_once_then_success requires exit_once_marker_path",
+        ),
+        (
+            relative,
+            "exit_once_then_success requires an absolute exit_once_marker_path",
+        ),
+        (
+            extra,
+            "exit_once_marker_path is only valid for exit_once_then_success",
+        ),
+        (
+            release_extra,
+            "release_socket_path and release_nonce are only valid for hold_until_success_release",
+        ),
+        (
+            directory,
+            "exit_once_then_success marker must be absent or a regular file",
+        ),
+        (
+            symlink,
+            "exit_once_then_success marker must be absent or a regular file",
+        ),
+    ] {
         let frames = run_restart_frames(&[config], 1);
+        let error = frames
+            .iter()
+            .find_map(|frame| match frame {
+                HarnessInputMessage::ConfigError(error) => Some(error),
+                _ => None,
+            })
+            .expect("invalid marker configuration must report ConfigError");
         assert!(
-            frames
-                .iter()
-                .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+            error.message.contains(expected_error),
+            "ConfigError must identify the rejected field or marker shape: {}",
+            error.message
         );
         assert!(frames.iter().all(|frame| {
             !matches!(
@@ -769,6 +1001,56 @@ fn exit_once_mode_configuration_fails_closed() {
             )
         }));
     }
+    std::fs::remove_dir_all(extra_marker_path.parent().expect("fixture marker parent"))
+        .expect("remove extra marker root");
+    std::fs::remove_dir_all(
+        directory_marker_path
+            .parent()
+            .expect("fixture marker parent"),
+    )
+    .expect("remove directory marker root");
+    std::fs::remove_dir_all(symlink_marker_path.parent().expect("fixture marker parent"))
+        .expect("remove symlink marker root");
+
+    let missing_parent_root = unique_marker_path("exit-missing-parent");
+    let missing_parent_marker = missing_parent_root.join("missing-parent").join("marker");
+    let input = restart_input(&[exit_once_config(&missing_parent_marker), invoke_restart()]);
+    let output = SharedWriter::default();
+    let mut rng = StdRng::seed_from_u64(1);
+    let error = run_with_rng(Cursor::new(input), output.clone(), &mut rng)
+        .expect_err("missing marker parent must fail the live claim");
+    assert!(
+        error
+            .to_string()
+            .contains("exit_once_then_success marker claim failed"),
+        "live failure must retain the marker-claim context: {error}"
+    );
+    assert!(
+        error.to_string().contains("No such file or directory"),
+        "live failure must retain the missing-parent filesystem error: {error}"
+    );
+    assert!(
+        !missing_parent_marker.exists(),
+        "missing-parent invocation must not create a marker"
+    );
+    assert!(
+        !missing_parent_marker
+            .parent()
+            .expect("missing parent")
+            .exists(),
+        "missing-parent invocation must not create its parent"
+    );
+    let frames = decode_output(output.snapshot());
+    assert!(frames.iter().all(|frame| {
+        !matches!(
+            emitted_event(frame),
+            Some(Event::ToolResultReported(_))
+                | Some(Event::ToolErrorReported(_))
+                | Some(Event::ToolCancelledReported(_))
+        )
+    }));
+    std::fs::remove_dir_all(missing_parent_root.parent().expect("fixture marker root"))
+        .expect("remove missing-parent fixture root");
 }
 
 /// Ensures the first live marker-mode call reports correlated progress, claims
@@ -1612,11 +1894,18 @@ fn prompt_correction_preserves_letter_case() {
 #[test]
 fn prompt_correction_preserves_prompt_identity_fields() {
     let mut prompt = test_prompt("internal Tao");
+    prompt.inference_activation = true;
+    prompt.trusted_internal_spans = vec![tau_proto::TrustedInternalSpan { start: 0, end: 8 }];
     prompt.message_class = PromptMessageClass::Internal;
+    prompt.internal_kind = Some(tau_proto::InternalPromptKind::ContextSizeAlert);
     prompt.originator = PromptOriginator::Extension {
         name: tau_proto::ExtensionName::parse("fixture")
             .expect("test extension name must satisfy the identifier grammar"),
         query_id: "query-1".to_owned(),
+    };
+    prompt.submission_source = tau_proto::PromptSubmissionSource::Extension {
+        name: tau_proto::ExtensionName::parse("fixture")
+            .expect("test extension name must satisfy the identifier grammar"),
     };
     prompt.display_name = Some("fixture".to_owned());
     prompt.ctx_id = Some("ctx-1".into());
@@ -1632,7 +1921,13 @@ fn prompt_correction_preserves_prompt_identity_fields() {
     };
     assert_eq!(replaced.text, "internal Tau");
     assert_eq!(replaced.agent_id, original_agent_id);
+    assert!(!replaced.inference_activation);
+    assert!(replaced.trusted_internal_spans.is_empty());
     assert_eq!(replaced.message_class, PromptMessageClass::Internal);
+    assert_eq!(
+        replaced.internal_kind,
+        Some(tau_proto::InternalPromptKind::ContextSizeAlert)
+    );
     assert_eq!(
         replaced.originator,
         PromptOriginator::Extension {
@@ -1643,6 +1938,13 @@ fn prompt_correction_preserves_prompt_identity_fields() {
     );
     assert_eq!(replaced.display_name.as_deref(), Some("fixture"));
     assert_eq!(replaced.ctx_id.as_deref(), Some("ctx-1"));
+    assert_eq!(
+        replaced.submission_source,
+        tau_proto::PromptSubmissionSource::Extension {
+            name: tau_proto::ExtensionName::parse("fixture")
+                .expect("test extension name must satisfy the identifier grammar"),
+        }
+    );
 }
 
 /// Verifies the fixture does not rewrite `tao` embedded within ASCII words.
