@@ -27,9 +27,7 @@ use tau_proto::{
     ResponsesToolCallEnvelope, StartAgentRequest, Subscribe, ToolCallId, ToolCallItem, ToolName,
     ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
-use tau_session_inspect::{
-    format_session_entry, open_session_store, session_lines, session_list_lines,
-};
+use tau_session_inspect::open_session_store;
 use tempfile::TempDir;
 
 use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall};
@@ -1877,7 +1875,6 @@ mod agent_list;
 mod agent_watch_wait;
 mod dedup;
 mod dispatch;
-mod format;
 mod interception;
 mod lifecycle;
 mod mode;

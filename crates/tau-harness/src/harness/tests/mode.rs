@@ -17,8 +17,8 @@ fn wait_for_socket(sock: &Path) {
     }
 }
 
-/// Ensures embedded mode returns provider output and persists the resulting
-/// history/debug events.
+/// Ensures embedded mode returns provider output, persists the resulting
+/// history/debug events, and leaves the durable session inspectable.
 #[test]
 fn embedded_mode_returns_provider_response_and_persists_history() {
     let td = TempDir::new().expect("tempdir");
@@ -33,6 +33,23 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
         2 <= branch.len(),
         "should have user msg + agent response, got {}",
         branch.len()
+    );
+    let session_id = session_id("s1");
+    let session_lines = tau_session_inspect::session_lines(&sessions_dir, &session_id)
+        .expect("durable embedded session should be inspectable");
+    assert!(
+        session_lines
+            .iter()
+            .any(|line| line.starts_with("1: loaded agent ")),
+        "session inspection should expose the loaded agent: {session_lines:?}"
+    );
+    let session_list_lines = tau_session_inspect::session_list_lines(&sessions_dir)
+        .expect("durable embedded session list should be inspectable");
+    assert!(
+        session_list_lines
+            .iter()
+            .any(|line| line.starts_with("s1 (") && line.contains("loaded agent")),
+        "session listing should summarize session s1's loaded agent: {session_list_lines:?}"
     );
 
     // Debug-log mirror: every turn that goes through the harness

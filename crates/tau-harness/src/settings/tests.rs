@@ -1149,13 +1149,6 @@ fn resolve_extensions_loads_from_yaml() {
     );
 }
 
-/// Force a parse of `config/built-in.extensions.yaml` so a
-/// malformed file blows up here rather than at user startup.
-#[test]
-fn built_in_extensions_yaml_parses() {
-    let _ = built_in_extension_defs();
-}
-
 /// Ensures the real embedded built-in extension config keeps the full
 /// std-notifications default shape rather than only the duplicated test
 /// fixture.
