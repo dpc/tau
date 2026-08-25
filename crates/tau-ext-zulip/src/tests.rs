@@ -1413,9 +1413,9 @@ fn agent_chosen_topic_configuration_fails_closed() {
     assert!(config.configured_routes[0].topic.is_none());
 }
 
-/// A topicless agent-chosen route may receive every topic in its stream, while
-/// receive overlap remains rejected and a send-only route can share that
-/// stream.
+/// Topicless agent-chosen receive routes accept every topic, while native
+/// stream resolution allows proactive-only coexistence but rejects overlapping
+/// receive authority before queue registration.
 #[test]
 fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
     let all_topics = validated_config(serde_json::json!([{
@@ -1444,31 +1444,68 @@ fn agent_chosen_topic_receive_and_collision_rules_are_explicit() {
         Event::MessageDeliveredReported(_)
     ));
 
-    let send_and_exact_receive = validated_config(serde_json::json!([
+    let proactive_and_exact_receive = validated_config(serde_json::json!([
         {
-            "name":"channel",
+            "name":"channel-wide",
             "proactive_send":true, "agent_chosen_topic":true
         },
         {
-            "name":"deploy", "topic":"deploy",
+            "name":"deploy-receive", "topic":"deploy",
             "receive":"mentions_only"
         }
-    ]));
-    assert!(send_and_exact_receive.is_ok());
+    ]))
+    .expect("distinct proactive-only and exact receive routes");
+    let client = Arc::new(FakeClient::default());
+    client
+        .resolved_stream_ids
+        .lock()
+        .expect("resolved stream IDs")
+        .extend([
+            ("channel-wide".to_owned(), 7),
+            ("deploy-receive".to_owned(), 7),
+        ]);
+    let ext = Extension::new(client.clone(), mpsc::channel().0, ToolNames::logical());
+    ext.acquire_queue(&proactive_and_exact_receive)
+        .expect("proactive-only route may share the exact receive stream");
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve", "resolve", "register"]
+    );
 
-    let Err(error) = validated_config(serde_json::json!([
+    let overlapping_receive_routes = validated_config(serde_json::json!([
         {
-            "name":"channel", "receive":"mentions_only",
+            "name":"all-topics", "receive":"all_messages",
             "proactive_send":true, "agent_chosen_topic":true
         },
         {
-            "name":"channel", "topic":"deploy",
+            "name":"deploy-receive", "topic":"deploy",
             "receive":"mentions_only"
         }
-    ])) else {
-        panic!("overlapping receive routes accepted")
-    };
-    assert_eq!(error, "zulip conversation names must be unique");
+    ]))
+    .expect("distinct configured route names");
+    let client = Arc::new(FakeClient::default());
+    client
+        .resolved_stream_ids
+        .lock()
+        .expect("resolved stream IDs")
+        .extend([
+            ("all-topics".to_owned(), 7),
+            ("deploy-receive".to_owned(), 7),
+        ]);
+    let ext = Extension::new(client.clone(), mpsc::channel().0, ToolNames::logical());
+    assert!(ext.acquire_queue(&overlapping_receive_routes).is_err());
+    assert_eq!(
+        client
+            .queue_setup_calls
+            .lock()
+            .expect("queue setup calls")
+            .as_slice(),
+        &["resolve", "resolve"]
+    );
 }
 
 /// Proactive direct-message aliases carry exactly one independently configured
@@ -2425,10 +2462,10 @@ fn discovery_marks_agent_chosen_topic_authority() {
     assert!(!value.to_string().contains("stream_id"));
 }
 
-/// Duplicate native creates and self-authored messages are suppressed before
-/// report emission.
+/// A repeated native message ID must emit only its first report, preserving the
+/// extension's process-local deduplication boundary.
 #[test]
-fn duplicate_and_self_messages_are_suppressed() {
+fn duplicate_native_message_is_suppressed() {
     let (ext, rx, _) = extension();
     let state = ext.state.lock();
     let generation = state.config_generation;
@@ -2436,8 +2473,12 @@ fn duplicate_and_self_messages_are_suppressed() {
     drop(state);
     let event = serde_json::json!({"id":13,"type":"message","message":{"id":502,"type":"private","sender_id":42,"content":"once","flags":[],"display_recipient":[{"id":42},{"id":99}]}});
     ext.process_event(event.clone(), generation, registration, 99);
-    ext.process_event(event, generation, registration, 99);
-    ext.process_event(serde_json::json!({"id":14,"type":"message","message":{"id":503,"type":"private","sender_id":99,"content":"echo","flags":[]}}), generation, registration, 99);
+    ext.process_event(
+        serde_json::json!({"id":14,"type":"message","message":{"id":502,"type":"private","sender_id":42,"content":"once","flags":[],"display_recipient":[{"id":42},{"id":99}]}}),
+        generation,
+        registration,
+        99,
+    );
     assert!(matches!(
         event_from(rx.recv().expect("one report")),
         Event::MessageDeliveredReported(_)
@@ -2445,15 +2486,63 @@ fn duplicate_and_self_messages_are_suppressed() {
     assert!(rx.try_recv().is_err());
 }
 
-/// A stale registration generation cannot submit an event after unregister or
-/// retarget authority changes.
+/// A fully admissible self-authored message must not report or install source
+/// authority, preventing the bridge from feeding its own Zulip echo back in.
+#[test]
+fn self_authored_valid_message_is_suppressed() {
+    let mut config = cfg();
+    config.allowed_user_ids.insert(99);
+    let (ext, rx, _) = extension_with_config(config);
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    ext.process_event(
+        serde_json::json!({"id":14,"type":"message","message":{"id":503,"type":"private","sender_id":99,"content":"echo","flags":[],"display_recipient":[{"id":42},{"id":99}]}}),
+        generation,
+        registration,
+        99,
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(
+        !ext.state
+            .lock()
+            .owners
+            .contains_key(message_fact_id(&cfg(), 503).as_str())
+    );
+    assert!(!ext.state.lock().recent_set.contains("message:503"));
+}
+
+/// A stale registration generation drops an otherwise admitted message before
+/// it emits a report or mutates reply and duplicate-suppression ownership.
 #[test]
 fn stale_generation_drops_ingress() {
     let (ext, rx, _) = extension();
-    let generation = ext.state.lock().config_generation;
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    let current = serde_json::json!({"id":15,"type":"message","message":{"id":504,"type":"private","sender_id":42,"content":"current","flags":[],"display_recipient":[{"id":42},{"id":99}]}});
+    ext.process_event(current, generation, registration, 99);
+    assert!(matches!(
+        event_from(rx.recv().expect("current-generation report")),
+        Event::MessageDeliveredReported(_)
+    ));
     ext.state.lock().registration_generation = 2;
-    ext.process_event(serde_json::json!({"id":15,"type":"message","message":{"id":504,"type":"private","sender_id":42,"content":"stale","flags":[]}}), generation, 1, 99);
+    ext.process_event(
+        serde_json::json!({"id":16,"type":"message","message":{"id":505,"type":"private","sender_id":42,"content":"stale","flags":[],"display_recipient":[{"id":42},{"id":99}]}}),
+        generation,
+        registration,
+        99,
+    );
     assert!(rx.try_recv().is_err());
+    let state = ext.state.lock();
+    assert!(
+        !state
+            .owners
+            .contains_key(message_fact_id(&cfg(), 505).as_str())
+    );
+    assert!(!state.recent_set.contains("message:505"));
 }
 
 /// A later unregister intent synchronously supersedes an earlier queue
@@ -2562,8 +2651,9 @@ fn queue_reregistration_log_redacts_rejection_code() {
     }
 }
 
-/// Edit, delete, and reaction events reference only a previously admitted owned
-/// message and deletion revokes its route.
+/// Mutation reports preserve their opaque base correlation, untrusted payload,
+/// and authenticated actor without exposing native Zulip routing; deletion then
+/// revokes the source route.
 #[test]
 fn mutations_emit_immutable_reports_and_delete_revokes() {
     let (ext, rx, _) = extension();
@@ -2573,7 +2663,7 @@ fn mutations_emit_immutable_reports_and_delete_revokes() {
     drop(state);
     ext.process_event(serde_json::json!({"id":20,"type":"message","message":{"id":600,"type":"private","sender_id":42,"content":"base","flags":[],"display_recipient":[{"id":42},{"id":99}]}}), generation, registration, 99);
     let _ = rx.recv().expect("base report");
-    ext.process_event(serde_json::json!({"id":21,"type":"update_message","message_id":600,"user_id":42,"message":{"content":"edited"}}), generation, registration, 99);
+    ext.process_event(serde_json::json!({"id":21,"type":"update_message","message_id":600,"user_id":42,"message":{"content":"**edited**\n\n[details](https://example.test)"}}), generation, registration, 99);
     ext.process_event(serde_json::json!({"id":22,"type":"reaction","message_id":600,"user_id":42,"op":"add","emoji_name":"thumbs_up"}), generation, registration, 99);
     ext.process_event(
         serde_json::json!({"id":23,"type":"delete_message","message_id":600,"user_id":42}),
@@ -2581,18 +2671,70 @@ fn mutations_emit_immutable_reports_and_delete_revokes() {
         registration,
         99,
     );
-    assert!(matches!(
-        event_from(rx.recv().expect("edit")),
-        Event::MessageEditedReported(_)
-    ));
-    assert!(matches!(
-        event_from(rx.recv().expect("reaction")),
-        Event::MessageReactionAddedReported(_)
-    ));
-    assert!(matches!(
-        event_from(rx.recv().expect("delete")),
-        Event::MessageDeletedReported(_)
-    ));
+    let edit = event_from(rx.recv().expect("edit"));
+    let reaction = event_from(rx.recv().expect("reaction"));
+    let deletion = event_from(rx.recv().expect("delete"));
+    let expected_fact_id = message_fact_id(&cfg(), 600);
+    let expected_actor = sender_party(&cfg(), 42, Some("alice".to_owned()));
+
+    let Event::MessageEditedReported(edit_report) = &edit else {
+        panic!("expected edit report");
+    };
+    assert_eq!(edit_report.target.message_id, expected_fact_id);
+    assert_eq!(
+        edit_report.target.publisher_extension_id.as_str(),
+        publisher().as_str()
+    );
+    assert_eq!(
+        edit_report.text,
+        "**edited**\n\n[details](https://example.test)"
+    );
+    assert_eq!(edit_report.actor.as_ref(), Some(&expected_actor));
+
+    let Event::MessageReactionAddedReported(reaction_report) = &reaction else {
+        panic!("expected added-reaction report");
+    };
+    assert_eq!(reaction_report.target.message_id, expected_fact_id);
+    assert_eq!(
+        reaction_report.target.publisher_extension_id.as_str(),
+        publisher().as_str()
+    );
+    assert_eq!(reaction_report.reaction, "thumbs_up");
+    assert_eq!(reaction_report.actor.as_ref(), Some(&expected_actor));
+
+    let Event::MessageDeletedReported(delete_report) = &deletion else {
+        panic!("expected delete report");
+    };
+    assert_eq!(delete_report.target.message_id, expected_fact_id);
+    assert_eq!(
+        delete_report.target.publisher_extension_id.as_str(),
+        publisher().as_str()
+    );
+    assert_eq!(delete_report.actor.as_ref(), Some(&expected_actor));
+
+    let serialized =
+        serde_json::to_value(&[edit, reaction, deletion]).expect("serialize mutation reports");
+    fn contains_native_detail(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null | serde_json::Value::Bool(_) => false,
+            serde_json::Value::Number(number) => {
+                matches!(number.as_u64(), Some(42 | 99 | 600))
+            }
+            serde_json::Value::String(value) => matches!(
+                value.as_str(),
+                "42" | "99" | "600" | "display_recipient" | "stream_id" | "private"
+            ),
+            serde_json::Value::Array(values) => values.iter().any(contains_native_detail),
+            serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+                matches!(key.as_str(), "display_recipient" | "stream_id" | "private")
+                    || contains_native_detail(value)
+            }),
+        }
+    }
+    assert!(
+        !contains_native_detail(&serialized),
+        "serialized report leaked native route detail"
+    );
     assert!(
         !ext.state
             .lock()
