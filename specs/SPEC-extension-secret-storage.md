@@ -76,8 +76,9 @@ copying component suffix tokens. Omission selects only `provider-builtin`;
 renamed or duplicate instances require `--extension`, and missing, disabled,
 wrong-role, or wrong-component targets fail rather than being guessed.
 
-Authenticated add writes the secret first and settings last. Keyless add writes
-only settings. Remove deletes settings first and any secret last. There is no
+Immediately materialized authenticated add writes the secret first and settings
+last. Explicit deferred named-secret add and keyless add write only settings.
+Remove deletes settings first and any secret last. There is no
 cross-file transaction or automatic orphan collector. Runtime reads referenced
 credentials through Secret RPC before use and reloads them for prompt-time
 rotation. OAuth refresh replaces only its complete typed secret with
@@ -90,12 +91,13 @@ profile in the other source, and it aborts if the profile source or bytes change
 while authentication is in progress. Config profile leaf symlinks remain
 untouched. A cross-source duplicate remains an error.
 
-An API-key settings reference may bind the canonical record to one declared
-named harness secret without serializing its value. The shared closed parser
-rejects malformed sources, OAuth bindings, noncanonical paths, unknown fields,
-and unsafe or whitespace names for setup, startup, and provider runtime alike.
-The bound declaration is materialization authority and its value is omitted from
-`Configure.secrets`.
+An API-key settings reference may name the source for its canonical record
+without serializing its value. The shared closed parser rejects malformed
+sources, OAuth bindings, noncanonical paths, unknown fields, and unsafe or
+whitespace names for setup, startup, and provider runtime alike. When the exact
+targeted-instance declaration exists at persistent startup, that declaration is
+materialization authority and its value is omitted from `Configure.secrets`. A
+name alone grants no authority or secret delivery.
 
 Setup defaults to mutable state and can explicitly target config or emit canonical
 JSON to standard output for dotfiles deployment. Bare ChatGPT add offers login
@@ -110,9 +112,11 @@ directory as lifecycle metadata for a config-only deployment; it never locks or
 writes config and never imports a profile. Memory-only startup locks that
 directory only when it already exists and otherwise performs a non-transactional
 read-only config snapshot without creating host state. Stored-credential setup
-resolves the selected declaration while holding the instance lock, writes the
-complete typed secret, and writes settings last as activation. Keyless setup
-writes settings without opening Secret scope. Removal deletes settings first as deactivation, then removes
+resolves an existing selected declaration while holding the instance lock,
+writes the complete typed secret, and writes settings last as activation. An
+explicit forward reference instead writes settings without a Secret record; it
+remains disabled until persistent startup sees the exact authorized declaration
+and value. Keyless setup writes settings without opening Secret scope. Removal deletes settings first as deactivation, then removes
 closed credential slots. Startup takes the same locks in the same order: under
 the instance lock it captures one bounded disjoint-union generation, resolves every
 valid named binding from the one-shot source snapshot, and under one Secret lock

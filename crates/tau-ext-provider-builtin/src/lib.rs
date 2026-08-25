@@ -999,6 +999,7 @@ fn cmd_add(
             PROVIDER_KINDS[Select::new()
                 .with_prompt("Provider kind")
                 .items(&labels)
+                .default(0)
                 .interact()?]
             .token
         }
@@ -1038,18 +1039,19 @@ fn cmd_add_responses(
         .with_prompt("Models (comma-separated)")
         .interact_text()?;
     let models = parse_responses_model_list(&models_input)?;
-    let transport_options = ["sse", "websocket"];
-    let default_transport =
-        usize::from(recommended_responses_transport(&base_url) == ResponsesTransport::Websocket);
+    let transport_options = match recommended_responses_transport(&base_url) {
+        ResponsesTransport::Sse => ["sse", "websocket"],
+        ResponsesTransport::Websocket => ["websocket", "sse"],
+    };
     let transport = Select::new()
         .with_prompt("Transport")
         .items(&transport_options)
-        .default(default_transport)
+        .default(0)
         .interact()?;
-    let transport = match transport {
-        0 => ResponsesTransport::Sse,
-        1 => ResponsesTransport::Websocket,
-        _ => unreachable!("dialoguer returns an offered transport"),
+    let transport = match transport_options[transport] {
+        "sse" => ResponsesTransport::Sse,
+        "websocket" => ResponsesTransport::Websocket,
+        _ => unreachable!("transport came from the closed picker choices"),
     };
     save_profile(
         extension_instance,
@@ -1741,11 +1743,16 @@ enum ApiKeySource {
     /// The profile is genuinely keyless.
     Keyless,
     /// Trusted setup materialized this configured secret name.
-    Named {
+    ConfiguredNamed {
         /// Exact configured source name serialized into provider settings.
         name: String,
         /// Declaration captured from the targeted extension configuration.
         declaration: tau_config::settings::ExtensionSecretEntry,
+    },
+    /// The profile explicitly forward-references a source not yet declared.
+    DeferredNamed {
+        /// Exact future source name serialized into provider settings.
+        name: String,
     },
 }
 
@@ -1762,7 +1769,9 @@ impl ApiKeySource {
     fn value(&self) -> String {
         match self {
             Self::Direct(value) => value.expose_secret().to_owned(),
-            Self::Keyless | Self::Named { .. } => String::new(),
+            Self::Keyless | Self::ConfiguredNamed { .. } | Self::DeferredNamed { .. } => {
+                String::new()
+            }
         }
     }
 }
@@ -1774,35 +1783,69 @@ fn prompt_api_key(
 ) -> Result<ApiKeySource, Box<dyn Error>> {
     let named_secrets = configured_secrets(extension_instance)?;
     let mut choices = vec!["Enter API key now"];
-    if !named_secrets.is_empty() {
-        choices.push("Use configured named secret");
-    }
+    choices.push("Use named secret");
     if allow_keyless {
         choices.push("No API key");
     }
     let selected = choices[Select::new()
         .with_prompt("API key source")
         .items(&choices)
+        .default(0)
         .interact()?];
     match selected {
         "Enter API key now" => Ok(ApiKeySource::Direct(SecretValue::new(
             Password::new().with_prompt("API key").interact()?,
         ))),
-        "Use configured named secret" => {
-            let names = named_secrets
+        "Use named secret" => {
+            const ENTER_ANOTHER: &str = "Enter another secret name…";
+            if named_secrets.is_empty() {
+                return prompt_deferred_secret_name(&named_secrets);
+            }
+            let mut names = named_secrets
                 .iter()
-                .map(|(name, _)| name.as_str())
+                .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
+            names.push(ENTER_ANOTHER.to_owned());
             let index = Select::new()
                 .with_prompt("Configured named secret")
                 .items(&names)
+                .default(0)
                 .interact()?;
-            let (name, declaration) = named_secrets[index].clone();
-            Ok(ApiKeySource::Named { name, declaration })
+            if index == named_secrets.len() {
+                prompt_deferred_secret_name(&named_secrets)
+            } else {
+                let (name, declaration) = named_secrets[index].clone();
+                Ok(ApiKeySource::ConfiguredNamed { name, declaration })
+            }
         }
         "No API key" => Ok(ApiKeySource::Keyless),
         _ => unreachable!("API-key source came from the offered picker choices"),
     }
+}
+
+/// Prompt for one valid, not-currently-declared forward-reference source name.
+fn prompt_deferred_secret_name(
+    configured: &[(String, tau_config::settings::ExtensionSecretEntry)],
+) -> Result<ApiKeySource, Box<dyn Error>> {
+    let name = Input::<String>::new()
+        .with_prompt("New named secret")
+        .validate_with(|name: &String| validate_deferred_secret_name(name, configured))
+        .interact_text()?;
+    Ok(ApiKeySource::DeferredNamed { name })
+}
+
+/// Validate a future source name without letting the explicit deferred path
+/// bypass eager resolution of an already configured declaration.
+fn validate_deferred_secret_name(
+    name: &str,
+    configured: &[(String, tau_config::settings::ExtensionSecretEntry)],
+) -> Result<(), String> {
+    tau_config::secret_sources::validate_secret_name(name)
+        .map_err(|_| "use letters, digits, '.', '_', or '-' (but not '.' or '..')".to_owned())?;
+    if configured.iter().any(|(configured, _)| configured == name) {
+        return Err("that secret is already configured; select it from the list".to_owned());
+    }
+    Ok(())
 }
 
 /// Return secret declarations for the exact targeted provider instance.
@@ -1836,7 +1879,11 @@ fn save_profile(
         settings,
         credential,
     } = provider_setup_payload(name, profile, credential_input)?;
-    let publishes_secret = matches!(credential, setup_store::CredentialSetup::Stored { .. });
+    let publication = match &credential {
+        setup_store::CredentialSetup::Stored { .. } => CredentialPublication::Published,
+        setup_store::CredentialSetup::DeferredNamed { .. } => CredentialPublication::Deferred,
+        setup_store::CredentialSetup::Keyless => CredentialPublication::Keyless,
+    };
     let settings_output = settings.clone();
     let settings_path = setup_store::SetupStore::open_default()?.apply_to(
         &setup_store::ProviderSetupPlan {
@@ -1850,7 +1897,7 @@ fn save_profile(
     if target == setup_store::ProfileTarget::Stdout {
         write_dotfiles_profile(
             &settings_output,
-            publishes_secret,
+            publication,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )?;
@@ -1871,24 +1918,38 @@ fn save_profile(
 
 fn write_dotfiles_profile(
     settings: &[u8],
-    publishes_secret: bool,
+    publication: CredentialPublication,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> path_std_io::Result<()> {
     stdout.write_all(settings)?;
     stdout.write_all(b"\n")?;
-    if publishes_secret {
-        writeln!(
+    match publication {
+        CredentialPublication::Published => writeln!(
             stderr,
             "Published the host-local credential; deploy this config profile before restart."
-        )?;
-    } else {
-        writeln!(
+        )?,
+        CredentialPublication::Deferred => writeln!(
+            stderr,
+            "No host-local credential was written; declare and provide the named secret before restarting Tau."
+        )?,
+        CredentialPublication::Keyless => writeln!(
             stderr,
             "This keyless profile needs no host-local credential; deploy it before restart."
-        )?;
+        )?,
     }
     Ok(())
+}
+
+/// User-visible credential publication effect of provider setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CredentialPublication {
+    /// Setup published a complete host-local typed record.
+    Published,
+    /// Setup wrote only a future named-source binding.
+    Deferred,
+    /// The profile explicitly needs no credential.
+    Keyless,
 }
 
 /// Credential-free settings and an exhaustive credential publication plan.
@@ -1904,7 +1965,7 @@ fn provider_setup_payload(
     profile: &BuiltinProviderProfile,
     credential_input: ProviderSetupInput,
 ) -> Result<ProviderSetupPayload, Box<dyn Error>> {
-    use credential_record::{ApiKeyCredential, ChatGptOAuthCredential};
+    use credential_record::ChatGptOAuthCredential;
 
     let mut settings = serde_json::to_value(profile)?;
     let object = settings
@@ -1933,7 +1994,9 @@ fn provider_setup_payload(
             object.remove("auth");
             (
                 ProviderCredentialSlot::OAuth,
-                serde_json::to_vec(&ChatGptOAuthCredential::from(profile.auth.clone()))?,
+                Some(serde_json::to_vec(&ChatGptOAuthCredential::from(
+                    profile.auth.clone(),
+                ))?),
             )
         }
         BuiltinProviderProfile::ChatCompletions(profile) => {
@@ -1941,7 +2004,7 @@ fn provider_setup_payload(
             object.remove("api_key_secret");
             (
                 ProviderCredentialSlot::ApiKey,
-                serde_json::to_vec(&ApiKeyCredential::new(profile.api_key.clone()))?,
+                api_key_record(profile.api_key.clone(), api_key_source.as_ref())?,
             )
         }
         BuiltinProviderProfile::OpenRouter(profile) => {
@@ -1949,7 +2012,7 @@ fn provider_setup_payload(
             object.remove("api_key_secret");
             (
                 ProviderCredentialSlot::ApiKey,
-                serde_json::to_vec(&ApiKeyCredential::new(profile.api_key.clone()))?,
+                api_key_record(profile.api_key.clone(), api_key_source.as_ref())?,
             )
         }
         BuiltinProviderProfile::Responses(profile) => {
@@ -1957,7 +2020,7 @@ fn provider_setup_payload(
             object.remove("api_key_secret");
             (
                 ProviderCredentialSlot::ApiKey,
-                serde_json::to_vec(&ApiKeyCredential::new(profile.api_key.clone()))?,
+                api_key_record(profile.api_key.clone(), api_key_source.as_ref())?,
             )
         }
     };
@@ -1983,7 +2046,10 @@ fn provider_setup_payload(
                 ProviderCredentialIdentity::random(),
                 slot,
                 match api_key_source.as_ref() {
-                    Some(ApiKeySource::Named { name, .. }) => Some(name.as_str()),
+                    Some(
+                        ApiKeySource::ConfiguredNamed { name, .. }
+                        | ApiKeySource::DeferredNamed { name },
+                    ) => Some(name.as_str()),
                     None | Some(ApiKeySource::Direct(_) | ApiKeySource::Keyless) => None,
                 },
             )
@@ -2000,20 +2066,46 @@ fn provider_setup_payload(
         settings: serde_json::to_vec_pretty(&settings)?,
         credential: match reference {
             None => setup_store::CredentialSetup::Keyless,
+            Some(reference)
+                if matches!(api_key_source, Some(ApiKeySource::DeferredNamed { .. })) =>
+            {
+                setup_store::CredentialSetup::DeferredNamed {
+                    path: reference.path().clone(),
+                }
+            }
             Some(reference) => setup_store::CredentialSetup::Stored {
                 secret: setup_store::SecretWrite {
                     path: reference.path().clone(),
-                    contents: setup_store::SecretBytes::new(secret),
+                    contents: setup_store::SecretBytes::new(
+                        secret.ok_or("stored credential setup requires credential bytes")?,
+                    ),
                 },
                 named_source: match api_key_source {
-                    Some(ApiKeySource::Named { name, declaration }) => {
+                    Some(ApiKeySource::ConfiguredNamed { name, declaration }) => {
                         Some(setup_store::NamedSecretSource { name, declaration })
                     }
-                    None | Some(ApiKeySource::Direct(_) | ApiKeySource::Keyless) => None,
+                    None
+                    | Some(
+                        ApiKeySource::Direct(_)
+                        | ApiKeySource::Keyless
+                        | ApiKeySource::DeferredNamed { .. },
+                    ) => None,
                 },
             },
         },
     })
+}
+
+/// Serialize an API-key record only for setup paths that publish it now.
+fn api_key_record(
+    value: String,
+    source: Option<&ApiKeySource>,
+) -> Result<Option<Vec<u8>>, serde_json::Error> {
+    if matches!(source, Some(ApiKeySource::DeferredNamed { .. })) {
+        Ok(None)
+    } else {
+        serde_json::to_vec(&credential_record::ApiKeyCredential::new(value)).map(Some)
+    }
 }
 
 /// Closed, redacted reason that one credential-free provider profile is

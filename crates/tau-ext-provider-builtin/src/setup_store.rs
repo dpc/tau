@@ -41,6 +41,14 @@ pub(crate) enum CredentialSetup {
         /// Configured named source resolved inside the instance transaction.
         named_source: Option<NamedSecretSource>,
     },
+    /// Activate a stored-credential profile without publishing a credential.
+    ///
+    /// A later persistent harness startup may materialize the named binding
+    /// recorded in settings after the matching declaration and value exist.
+    DeferredNamed {
+        /// Canonical future credential path used for replacement cleanup.
+        path: tau_proto::ExtensionDataPath,
+    },
 }
 
 /// Destination selected for a provider profile created by the CLI.
@@ -340,12 +348,13 @@ impl SetupStore {
             }
             Some(_) | None => None,
         };
-        let (secret, named_source) = match &plan.credential {
-            CredentialSetup::Keyless => (None, None),
+        let (secret, named_source, deferred_path) = match &plan.credential {
+            CredentialSetup::Keyless => (None, None, None),
             CredentialSetup::Stored {
                 secret,
                 named_source,
-            } => (Some(secret), named_source.as_ref()),
+            } => (Some(secret), named_source.as_ref(), None),
+            CredentialSetup::DeferredNamed { path } => (None, None, Some(path)),
         };
         let named_contents = named_source
             .map(|source| self.materialize_named_secret(&plan.extension_instance, source))
@@ -373,7 +382,8 @@ impl SetupStore {
             ProfileTarget::Stdout => None,
         };
         if let Some(ProviderCredential::Stored(reference)) = replaced_credential
-            && secret.is_none_or(|new_secret| new_secret.path != *reference.path())
+            && (deferred_path.is_some()
+                || secret.is_none_or(|new_secret| new_secret.path != *reference.path()))
         {
             self.remove_credential(&plan.extension_instance, &reference)?;
         }

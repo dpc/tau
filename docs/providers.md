@@ -802,13 +802,17 @@ leave the existing Secret records in place.
 
 `tau provider add [KIND]` accepts exactly `chatgpt`, `chat-completions`,
 `responses`, or `openrouter`; without `KIND` it presents those same choices in
-a picker. API-key profiles explicitly select direct masked entry, a configured
-named secret, or (only for keyless/local-compatible backends) no key. A named
-source is recorded without its value, materialized into the canonical Secret
-record by setup and again on harness restart, and never read by provider runtime
-except through Secret RPC. If the named source is unavailable, setup fails before
-activating settings; a later restart invalidates its old materialization, omits
-the profile, and publishes a source-name-only warning. A bound declaration is
+a picker. API-key profiles explicitly select direct masked entry, a named
+secret, or (only for keyless/local-compatible backends) no key. Existing
+configured names resolve eagerly. The name picker also offers `Enter another
+secret name…`; this explicit forward-reference path writes the credential-free
+profile without a Secret record. This supports deploying the declaration and
+value later through Nix. The profile stays disabled until a persistent restart
+sees the exact authorized declaration and value and materializes the canonical
+typed record. An unavailable existing selection still fails setup rather than
+silently becoming a forward reference. A later unavailable restart invalidates
+its old materialization, omits the profile, and publishes a source-name-only
+warning. A bound declaration is
 consumed for materialization and is not copied into `Configure.secrets`.
 Provider setup/login/removal and startup serialize per configured instance; the exact
 startup settings snapshot that selects the source also becomes the immutable
@@ -867,10 +871,11 @@ API-key HTTP/SSE or WebSocket for the `responses` profile. The
 Completions` and `OpenAI Responses API`.
 Responses profiles require a base URL, explicit models, and a `transport` value
 spelled `sse` or `websocket`; omitted values from older profiles mean `sse`.
-For API-key profiles, the wizard first selects `Enter API key now`, `Use
-configured named secret` when declarations exist, or `No API key` where
-keyless operation is supported. Only direct entry opens the masked value
-prompt. It asks for transport after the endpoint, API-key authority, and models. It
+For API-key profiles, the wizard first selects `Enter API key now`, `Use named
+secret`, or `No API key` where keyless operation is supported. Existing
+declarations appear before `Enter another secret name…`; with none configured,
+Tau prompts for the future name directly. Only direct entry opens the masked
+value prompt. It asks for transport after the endpoint, API-key authority, and models. It
 preselects WebSocket only for the exact official
 `https://api.openai.com/v1` base URL and otherwise preselects SSE. Tau does not
 infer endpoint support at runtime or discover models. Every turn sends the complete typed

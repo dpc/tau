@@ -486,7 +486,13 @@ fn provider_dotfiles_output_separates_json_and_status() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
-    write_dotfiles_profile(settings, true, &mut stdout, &mut stderr).expect("output");
+    write_dotfiles_profile(
+        settings,
+        CredentialPublication::Published,
+        &mut stdout,
+        &mut stderr,
+    )
+    .expect("output");
 
     assert_eq!(stdout, [settings.as_slice(), b"\n"].concat());
     assert_eq!(
@@ -649,6 +655,78 @@ fn keyless_setup_requires_no_secret_publication() {
     let settings: serde_json::Value =
         serde_json::from_slice(&payload.settings).expect("keyless settings");
     assert_eq!(settings["credential"], serde_json::json!({"kind": "none"}));
+}
+
+/// Proves an explicit future source emits a closed typed reference but never
+/// constructs a placeholder credential publication plan.
+#[test]
+fn deferred_named_setup_writes_only_credential_free_binding() {
+    let provider = ProviderName::new("future");
+    let profile = BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+        base_url: "https://example.invalid/v1".to_owned(),
+        api_key: String::new(),
+        models: vec![test_chat_model("model")],
+        max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
+        extra_body: BTreeMap::new(),
+        tags: Vec::new(),
+        compat: ChatCompletionsCompat::default(),
+    });
+
+    let payload = provider_setup_payload(
+        &provider,
+        &profile,
+        ProviderSetupInput::ApiKey(ApiKeySource::DeferredNamed {
+            name: "Future_Key".to_owned(),
+        }),
+    )
+    .expect("deferred setup payload");
+
+    let setup_store::CredentialSetup::DeferredNamed { path } = payload.credential else {
+        panic!("future source must not publish a credential");
+    };
+    assert!(path.as_str().ends_with("/api-key.json"));
+    let settings: serde_json::Value = serde_json::from_slice(&payload.settings).expect("settings");
+    assert_eq!(
+        settings["credential"]["source"],
+        serde_json::json!({"kind": "named_secret", "name": "Future_Key"})
+    );
+}
+
+/// Proves future names use the shared grammar and cannot bypass eager
+/// configured-source resolution by retyping an existing declaration.
+#[test]
+fn deferred_named_setup_validates_name_and_configured_collision() {
+    let configured = vec![(
+        "configured_key".to_owned(),
+        tau_config::settings::ExtensionSecretEntry { optional: false },
+    )];
+
+    assert!(validate_deferred_secret_name("Future.Key-1", &configured).is_ok());
+    assert!(validate_deferred_secret_name("../bad", &configured).is_err());
+    assert!(validate_deferred_secret_name("configured_key", &configured).is_err());
+    assert!(validate_deferred_secret_name("CONFIGURED_KEY", &configured).is_ok());
+}
+
+/// Proves stdout status distinguishes a portable future binding from both a
+/// host-local credential publication and explicit keyless operation.
+#[test]
+fn deferred_dotfiles_output_reports_no_host_secret_write() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    write_dotfiles_profile(
+        br#"{"kind":"responses"}"#,
+        CredentialPublication::Deferred,
+        &mut stdout,
+        &mut stderr,
+    )
+    .expect("output");
+
+    assert!(
+        String::from_utf8(stderr)
+            .expect("status")
+            .contains("declare and provide")
+    );
 }
 
 /// Proves the canonical built-in name inherits identity only while its command

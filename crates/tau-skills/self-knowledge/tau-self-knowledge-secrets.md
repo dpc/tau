@@ -105,11 +105,15 @@ Provider settings are credential-free files under
 Provider gets one bounded immutable `Configure.settings_files` snapshot at
 startup. Typed credentials live in that Provider instance's Secret scope.
 
-An API-key settings record can refer to one declared named secret without
-serializing its value. The named declaration is excluded from
-`Configure.secrets`. Setup resolves its named source and must succeed before it
-writes settings last as activation. Persistent harness startup resolves valid
-bindings and materializes the resulting typed API-key record in Secret storage.
+An API-key settings record can name one current or future secret source without
+serializing its value. When the exact targeted-instance declaration exists, it
+is materialization authority and is excluded from `Configure.secrets`; the name
+alone grants no authority. Setup eagerly resolves a selected configured name and must
+succeed before it writes settings last as activation. An explicit new-name
+forward reference instead writes only credential-free settings and stays
+disabled until its declaration and value are deployed. Persistent harness
+startup resolves valid bindings and materializes the resulting typed API-key
+record in Secret storage.
 At that persistent startup only, an unavailable or undeclared bound source
 replaces the old record with an empty API-key record and suppresses the profile;
 source I/O or decoding failures do not overwrite an older record. Memory-only
@@ -121,9 +125,10 @@ reread the named source.
 At prompt time, the Provider reads credentials through Secret RPC, so it reloads
 the stored record for rotation. OAuth refresh uses compare-and-swap to replace
 the complete typed record; a concurrent loser reloads the winning generation
-instead of reusing its stale token. Provider setup writes secret first and
-settings last; removal deletes settings first and secret last. There is no
-cross-file transaction or orphan collector.
+instead of reusing its stale token. Immediately materialized provider setup
+writes secret first and settings last; explicit deferred setup writes only
+settings. Removal deletes settings first and secret last. There is no cross-file
+transaction or orphan collector.
 
 ## Redaction and limits
 

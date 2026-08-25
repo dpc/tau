@@ -79,10 +79,15 @@ list rows show that exact command.
 or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked
 direct entry, a configured named secret, or keyless mode where supported.
 Named-secret values are materialized only into the instance's canonical Secret
-record. Setup refuses an unavailable selected source before writing settings;
-restart re-imports the current source and disables the profile with a redacted,
-source-name-only notice if it has become unavailable. Bound declarations do not
-enter `Configure.secrets`; one per-instance lifecycle lock binds startup source
+record. Selecting an existing configured name remains eager: setup refuses an
+unavailable source before writing settings. The picker also offers `Enter
+another secret name…`, or prompts for a name directly when no declarations
+exist. This explicit forward reference writes credential-free settings but no
+Secret record, so a declaratively managed profile can exist disabled until the
+exact declaration and value are deployed and Tau is restarted. Restart
+re-imports the current source and disables the profile with a redacted,
+source-name-only notice if it is unavailable. Bound declarations do not enter
+`Configure.secrets`; one per-instance lifecycle lock binds startup source
 selection, typed-secret publication, and the retained Configure settings
 snapshot.
 
@@ -119,8 +124,9 @@ publishes `read_image` and lowers its typed result as one correlated multimodal
 Tau never infers this capability from Qwen or other model names.
 
 For API-key profiles, setup asks for the authority first: `Enter API key now`,
-`Use configured named secret` when declarations exist, or `No API key` where
-the profile kind supports keyless operation. Only direct entry opens the masked
+`Use named secret`, or `No API key` where the profile kind supports keyless
+operation. Existing configured names remain eager; `Enter another secret
+name…` creates an explicit deferred binding. Only direct entry opens the masked
 value prompt.
 
 Settings contain either a stable opaque Secret-scope credential identity with a

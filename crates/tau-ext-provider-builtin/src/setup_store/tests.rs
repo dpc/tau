@@ -286,6 +286,76 @@ fn named_plan() -> ProviderSetupPlan {
     }
 }
 
+fn deferred_named_plan() -> ProviderSetupPlan {
+    ProviderSetupPlan {
+        settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","identity":"0123456789abcdef0123456789abcdef","source":{"kind":"named_secret","name":"future_key"}}}"#.to_vec(),
+        credential: CredentialSetup::DeferredNamed {
+            path: tau_proto::ExtensionDataPath::new(
+                "providers/0123456789abcdef0123456789abcdef/api-key.json".to_owned(),
+            ),
+        },
+        ..plan()
+    }
+}
+
+/// Proves state, config, and stdout forward-reference publication never writes
+/// a placeholder Secret record while preserving the exact portable settings.
+#[test]
+fn deferred_named_setup_never_writes_secret_state() {
+    for target in [
+        ProfileTarget::State,
+        ProfileTarget::Config,
+        ProfileTarget::Stdout,
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SetupStore::open_in(temp.path());
+        let plan = deferred_named_plan();
+
+        store.apply_to(&plan, target).expect("deferred setup");
+
+        assert!(
+            !temp
+                .path()
+                .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/api-key.json")
+                .exists()
+        );
+        if target != ProfileTarget::Stdout {
+            let profile = store
+                .snapshot(&extension())
+                .expect("snapshot")
+                .profiles
+                .pop()
+                .expect("profile");
+            assert_eq!(profile.contents, plan.settings);
+        }
+    }
+}
+
+/// Proves replacing an active profile with a future binding removes even a
+/// same-identity stale credential after settings activation.
+#[test]
+fn deferred_named_replacement_removes_stale_same_identity_credential() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SetupStore::open_in(temp.path());
+    let direct = plan();
+    store.apply(&direct).expect("direct setup");
+    let credential = temp
+        .path()
+        .join("secrets/ext/provider-work/providers/0123456789abcdef0123456789abcdef/oauth.json");
+    assert!(credential.exists());
+
+    let mut deferred = deferred_named_plan();
+    deferred.provider = direct.provider;
+    deferred.credential = CredentialSetup::DeferredNamed {
+        path: tau_proto::ExtensionDataPath::new(
+            "providers/0123456789abcdef0123456789abcdef/oauth.json".to_owned(),
+        ),
+    };
+    store.apply(&deferred).expect("deferred replacement");
+
+    assert!(!credential.exists());
+}
+
 fn direct_plan_with(settings_marker: &str, secret: &str) -> ProviderSetupPlan {
     ProviderSetupPlan {
         extension_instance: extension(),
