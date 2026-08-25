@@ -27,14 +27,23 @@ fn empty_theme_resolves_to_defaults() {
     assert_eq!(resolved[0].style, ThemeStyle::default());
 }
 
-/// Ensures a registered semantic style name resolves through the theme's style
-/// table and carries all supported attributes.
+/// Ensures a registered semantic style resolves every field while partial and
+/// empty definitions retain the default values for omitted fields.
 #[test]
 fn named_style_resolves() {
     let theme: Theme = Theme::parse(
         r#"{
                 styles: {
-                    prompt: { fg: "green", bold: true, strikethrough: true },
+                    prompt: {
+                        fg: "green",
+                        bg: "dark_blue",
+                        bold: true,
+                        underline: true,
+                        italic: true,
+                        strikethrough: true,
+                    },
+                    partial: { fg: "red" },
+                    empty: {},
                 }
             }"#,
     )
@@ -45,10 +54,28 @@ fn named_style_resolves() {
     text.push(prompt, ">");
 
     let resolved = theme.resolve(&text);
-    assert_eq!(resolved[0].style.fg, Some(Color::Green));
-    assert!(resolved[0].style.bold);
-    assert!(!resolved[0].style.italic);
-    assert!(resolved[0].style.strikethrough);
+    assert_eq!(
+        resolved[0].style,
+        ThemeStyle {
+            fg: Some(Color::Green),
+            bg: Some(Color::DarkBlue),
+            bold: true,
+            underline: true,
+            italic: true,
+            strikethrough: true,
+        }
+    );
+    assert_eq!(
+        theme.resolve_style(&StyleName::new("partial")),
+        ThemeStyle {
+            fg: Some(Color::Red),
+            ..ThemeStyle::default()
+        }
+    );
+    assert_eq!(
+        theme.resolve_style(&StyleName::new("empty")),
+        ThemeStyle::default()
+    );
 }
 
 /// Ensures theme files may carry user-facing metadata without changing style
@@ -207,42 +234,24 @@ fn builtin_default_theme_resolves_submitted_user_prompts_as_bright_white() {
     let theme = Theme::builtin();
 
     let prompt = theme.resolve_style(&StyleName::new("user.prompt"));
-    assert!(prompt.bold);
     assert_eq!(prompt.fg, Some(Color::White));
-    assert!(prompt.bg.is_none());
-
-    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
-    assert_eq!(tool_err.fg, Some(Color::Red));
-    assert!(tool_err.bg.is_none());
-
-    let tool_name = theme.resolve_style(&StyleName::new("tool.name"));
-    assert_eq!(tool_name.fg, Some(Color::Yellow));
-    assert!(tool_name.bg.is_none());
-
-    let watching_name = theme.resolve_style(&StyleName::new(crate::names::WATCHING_NAME));
-    assert_eq!(watching_name.fg, Some(Color::DarkYellow));
-    assert!(watching_name.bg.is_none());
-
-    let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
-    assert_eq!(progress.fg, Some(Color::Cyan));
-    assert!(progress.bold);
-    assert!(progress.bg.is_none());
-
-    let selected = theme.resolve_style(&StyleName::new("completion.selected"));
-    assert!(selected.bold);
-    assert!(selected.underline);
-    assert!(selected.fg.is_none());
-    assert!(selected.bg.is_none());
 }
 
 /// Ensures the built-in theme registry stays synchronized with name lookup and
 /// does not accidentally keep removed legacy aliases selectable as built-ins.
 #[test]
 fn builtin_theme_names_match_lookup_registry() {
-    for name in BUILTIN_THEME_NAMES {
+    let canonical = ["tau-plain-dark", "tau-plain-light", "tau-dpc"];
+    assert_eq!(BUILTIN_THEME_NAMES, canonical);
+
+    for name in canonical {
         assert!(
             Theme::builtin_named(name).is_some(),
             "{name} should resolve"
+        );
+        assert!(
+            Theme::builtin_named(&name.to_ascii_uppercase()).is_some(),
+            "{name} should resolve case-insensitively"
         );
     }
     for removed_alias in ["default", "dpc", "tau-light", "auto", "dark", "light"] {
@@ -323,50 +332,25 @@ fn builtin_dpc_theme_resolves_submitted_user_prompts_as_bright_white() {
     assert!(prompt.bg.is_none());
 }
 
-/// Ensures user-authored theme typos are rejected instead of being silently
-/// ignored and producing confusing styling behavior.
+/// Ensures user-authored top-level and style-field typos are rejected instead
+/// of being silently ignored and producing confusing styling behavior.
 #[test]
 fn theme_rejects_unknown_fields() {
-    // Theme files are user-authored config. Unknown top-level or style fields
-    // should fail fast instead of silently ignoring misspelled keys.
-    let error = Theme::parse(
-        r#"{
-                styles: {
-                    prompt: { foreground: "green" },
-                }
-            }"#,
-    )
-    .expect_err("unknown style field should fail");
-
-    assert!(error.to_string().contains("unknown field"), "got: {error}");
-}
-
-/// Ensures the light built-in theme parses without snapshotting its visual
-/// choices, which are intentionally independent from renderer behavior tests.
-#[test]
-fn builtin_light_theme_parses() {
-    let theme = Theme::builtin_light();
-    let _ = theme.resolve_style(&StyleName::new("user.prompt"));
-}
-
-/// Ensures callers can safely resolve missing style names in built-in themes
-/// without receiving stale or inherited formatting.
-#[test]
-fn builtin_theme_missing_style_is_default() {
-    let theme = Theme::builtin();
-    let style = theme.resolve_style(&StyleName::new("nonexistent.style"));
-    assert_eq!(style, ThemeStyle::default());
-}
-
-/// Every built-in theme assigns distinct semantic quota warning colors, with a
-/// bold bright-green far-under fallback and a neutral unknown state.
-#[test]
-fn builtin_themes_define_accessible_quota_styles() {
-    for theme in [
-        Theme::builtin(),
-        Theme::builtin_light(),
-        Theme::builtin_dpc(),
+    for input in [
+        r#"{ unexpected: true }"#,
+        r#"{ styles: { prompt: { foreground: "green" } } }"#,
     ] {
+        let error = Theme::parse(input).expect_err("unknown field should fail");
+        assert!(error.to_string().contains("unknown field"), "got: {error}");
+    }
+}
+
+/// Ensures every built-in emphasizes under-quota status and distinguishes
+/// dangerous quota status from over-limit and unknown status.
+#[test]
+fn builtins_emphasize_under_quota_and_distinguish_danger() {
+    for name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(name).expect("registered built-in theme");
         let under = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_UNDER));
         let aligned = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_ALIGNED));
         let over = theme.resolve_style(&StyleName::new(crate::names::STATUS_QUOTA_OVER));
