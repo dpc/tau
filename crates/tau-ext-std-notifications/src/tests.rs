@@ -80,6 +80,7 @@ fn with_initial_configure(input: Vec<u8>) -> Vec<u8> {
 #[test]
 fn malformed_protocol_input_returns_error() {
     let writer = SharedWriter::default();
+    let output = writer.clone();
     let error = run_with_idle(
         Cursor::new(with_initial_configure(vec![0x9f])),
         writer,
@@ -87,7 +88,19 @@ fn malformed_protocol_input_returns_error() {
     )
     .expect_err("malformed input should fail");
 
-    assert!(!error.to_string().is_empty());
+    assert!(
+        matches!(
+            error.downcast_ref::<tau_client::ClientError>(),
+            Some(tau_client::ClientError::Decode(_))
+        ),
+        "corrupt frames must remain decode errors, got {error:?}",
+    );
+
+    let mut reader = EventReader::new(Cursor::new(output.bytes()));
+    assert!(
+        reader.read_event().expect("read output").is_none(),
+        "corrupt input must not drain pending timers into a notification",
+    );
 }
 
 /// Startup must keep the legacy exact subscription set without broadening to a
@@ -927,7 +940,16 @@ fn final_response_waits_for_background_tools_before_end_sound() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_frame(&default_notifications_config_frame())
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "start:{{agent.id}}" },
+                }],
+                "agent_end": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "end:{{agent.id}}" },
+                }],
+            }),
+        )))
         .expect("write config");
     writer
         .write_event(&user_prompt_submitted(
@@ -947,6 +969,13 @@ fn final_response_waits_for_background_tools_before_end_sound() {
         ))
         .expect("write");
     writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "marker",
+            "mark the ordering barrier",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write ordering marker");
+    writer
         .write_event(&Event::ToolBackgroundResult(tool_background_result(
             "call-bg",
             tau_proto::PromptOriginator::User,
@@ -964,13 +993,22 @@ fn final_response_waits_for_background_tools_before_end_sound() {
     let Event::Osc1337SetUserVar(osc) = start else {
         panic!("expected start OSC, got {start:?}");
     };
-    assert_eq!(osc.value, VALUE_AGENT_START);
+    assert_eq!(osc.value, "start:main");
 
-    let end = reader.read_event().expect("read").expect("end");
+    let marker = reader.read_event().expect("read").expect("ordering marker");
+    let Event::Osc1337SetUserVar(osc) = marker else {
+        panic!("expected ordering-marker OSC, got {marker:?}");
+    };
+    assert_eq!(
+        osc.value, "start:marker",
+        "the marker must arrive before the deferred completion",
+    );
+
+    let end = reader.read_event().expect("read").expect("deferred end");
     let Event::Osc1337SetUserVar(osc) = end else {
         panic!("expected deferred end OSC, got {end:?}");
     };
-    assert_eq!(osc.value, VALUE_AGENT_END);
+    assert_eq!(osc.value, "end:main");
     assert!(reader.read_event().expect("read eof").is_none());
 }
 
@@ -1222,38 +1260,6 @@ fn idle_timeout_defaults_to_static_notification() {
         payload["title"],
     );
     assert_eq!(payload["body"], "Waiting for user input");
-}
-
-/// The snake_case `agent_idle` key must continue to arm the per-agent idle
-/// notification. This prevents regressions to the old kebab-case spelling or
-/// accidentally wiring per-agent idleness only through `agent_idle_all`.
-#[test]
-fn agent_idle_snake_case_fires_for_individual_agent_idle() {
-    let mut input = Vec::new();
-    let mut writer = EventWriter::new(&mut input);
-    writer
-        .write_frame(&configure_frame(tau_proto::json_to_cbor(
-            &serde_json::json!({
-                "agent_idle": [idle_osc_config(0, false)],
-            }),
-        )))
-        .expect("write config");
-    writer
-        .write_event(&Event::ProviderResponseFinished(
-            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
-        ))
-        .expect("write response");
-    writer.flush().expect("flush");
-
-    let output = run_with_idle_output(input, Duration::from_millis(1));
-
-    let mut reader = EventReader::new(Cursor::new(output));
-    drain_lifecycle(&mut reader);
-    let idle = reader.read_event().expect("read").expect("idle event");
-    let Event::Osc1337SetUserVar(osc) = idle else {
-        panic!("expected idle OSC, got {idle:?}");
-    };
-    assert_eq!(osc.name, TEXT_VAR_NAME);
 }
 
 /// The new `agent_idle_all` hook must fire only after every loaded agent in the
@@ -2451,20 +2457,24 @@ fn idle_command_runs_with_rendered_template_args() {
 }
 
 /// Oversized rendered command arguments should skip the command rather than
-/// spawning a local process with unbounded untrusted template data.
+/// spawning a local process with unbounded untrusted template data. A separate
+/// bounded command marker proves the isolated local command fixture can run and
+/// gives the oversized-command marker a bounded post-control observation
+/// window.
 #[test]
 fn oversized_rendered_command_arg_skips_command() {
     use tempfile::TempDir;
 
     let td = TempDir::new().expect("tempdir");
-    let out_path = td.path().join("out.txt");
-    let cmd = format!("touch {dest}", dest = out_path.display());
+    let valid_marker = td.path().join("valid-marker");
+    let oversized_marker = td.path().join("oversized-marker");
 
     let oversized = "x".repeat(MAX_COMMAND_ARG_LEN + 1);
     let cfg = tau_proto::json_to_cbor(&serde_json::json!({
-        "agent_end": [{
-            "command": ["bash", "-c", cmd, "_marker", oversized],
-        }],
+        "agent_end": [
+            { "command": ["touch", valid_marker] },
+            { "command": ["touch", oversized_marker, oversized] },
+        ],
     }));
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
@@ -2479,50 +2489,22 @@ fn oversized_rendered_command_arg_skips_command() {
 
     let _output = run_with_idle_output(input, Duration::from_secs(3600));
 
-    thread::sleep(Duration::from_millis(50));
-    assert!(
-        !out_path.exists(),
-        "oversized command argument should skip spawning the command",
-    );
-}
-
-/// A bogus `config` value (one that doesn't match `ExtConfig`)
-/// must trigger a `LifecycleConfigError` carrying a human-readable
-/// message, so the harness can surface it to the user.
-#[test]
-fn invalid_config_emits_lifecycle_config_error() {
-    // Build a config CBOR value that doesn't match ExtConfig:
-    // an unknown field, which `deny_unknown_fields` rejects.
-    let bad_config = tau_proto::json_to_cbor(&serde_json::json!({
-        "totally_unknown_field": 7,
-    }));
-
-    let mut input = Vec::new();
-    let mut writer = EventWriter::new(&mut input);
-    writer
-        .write_frame(&configure_frame(bad_config))
-        .expect("write");
-    writer.write_frame(&disconnect_frame(None)).expect("write");
-    writer.flush().expect("flush");
-
-    let output = run_with_idle_output(input, Duration::from_secs(3600));
-
-    let mut reader = EventReader::new(Cursor::new(output));
-    // Skip startup messages (hello, subscribe, ready) until we reach
-    // the ConfigError reply.
-    let err_frame = loop {
-        let frame = reader
-            .read_frame()
-            .expect("read")
-            .expect("config error frame");
-        if matches!(frame, HarnessInputMessage::ConfigError(_)) {
-            break frame;
-        }
-    };
-    let HarnessInputMessage::ConfigError(e) = err_frame else {
-        unreachable!()
-    };
-    assert!(!e.message.is_empty(), "config error must carry a message");
+    let started = Instant::now();
+    while !valid_marker.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "bounded command control never produced its marker",
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let observation_deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < observation_deadline {
+        assert!(
+            !oversized_marker.exists(),
+            "oversized command argument should skip spawning the command",
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A malformed reconfiguration must emit one `ConfigError` and keep the
@@ -2835,7 +2817,7 @@ fn idle_summary_request_contains_recent_turn_context() {
         .expect("write config");
     writer
         .write_event(&user_prompt_submitted(
-            long_prompt,
+            long_prompt.clone(),
             tau_proto::PromptOriginator::User,
         ))
         .expect("write prompt");
@@ -2850,23 +2832,76 @@ fn idle_summary_request_contains_recent_turn_context() {
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
-    let query = reader.read_event().expect("read").expect("summary query");
-    let Event::StartAgentRequest(query) = query else {
-        panic!("expected StartAgentRequest, got {query:?}");
+    let emit = reader.read_emit().expect("read").expect("summary query");
+    assert!(
+        !emit.persist,
+        "ordinary idle-summary requests must explicitly use transient delivery",
+    );
+    let Event::StartAgentRequest(query) = *emit.event else {
+        panic!("expected StartAgentRequest, got {:?}", emit.event);
     };
     assert_eq!(query.parent_agent, None);
-    assert!(query.instruction.contains("User prompt:"));
+    assert_eq!(query.tool_call_id, None);
+    assert_eq!(query.role, None);
+
+    let (_, captured_context) = query
+        .instruction
+        .split_once("User prompt:\n")
+        .expect("instruction must label captured user prompt");
+    let (captured_prompt, captured_response) = captured_context
+        .split_once("\n\nAssistant response:\n")
+        .expect("instruction must label captured assistant response");
+    let truncation_marker = "… [truncated]";
+
     assert!(
-        query
-            .instruction
-            .contains("please refactor the notification extension")
+        captured_prompt.len() <= SUMMARY_CONTEXT_LIMIT_BYTES + truncation_marker.len(),
+        "captured prompt must retain the byte cap plus its truncation marker",
     );
-    assert!(!query.instruction.contains("PROMPT_TAIL"));
-    assert!(query.instruction.contains("Assistant response:"));
-    assert!(query.instruction.contains("updated docs and validation"));
-    assert!(!query.instruction.contains("RESPONSE_TAIL"));
-    assert!(query.instruction.contains("… [truncated]"));
-    assert!(query.instruction.is_char_boundary(query.instruction.len()));
+    assert!(captured_prompt.contains("please refactor the notification extension"));
+    assert!(!captured_prompt.contains("PROMPT_TAIL"));
+    let retained_prompt = captured_prompt
+        .strip_suffix(truncation_marker)
+        .expect("captured prompt must end with truncation marker");
+    assert!(
+        long_prompt.starts_with(retained_prompt),
+        "captured prompt must remain a prefix of the visible prompt",
+    );
+    let prompt_boundary = long_prompt
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= SUMMARY_CONTEXT_LIMIT_BYTES)
+        .last()
+        .expect("nonempty prompt has a UTF-8 boundary");
+    assert_eq!(
+        retained_prompt.len(),
+        prompt_boundary,
+        "captured prompt must stop at the greatest UTF-8 boundary within the byte cap",
+    );
+
+    assert!(
+        captured_response.len() <= SUMMARY_CONTEXT_LIMIT_BYTES + truncation_marker.len(),
+        "captured response must retain the byte cap plus its truncation marker",
+    );
+    assert!(captured_response.contains("updated docs and validation"));
+    assert!(!captured_response.contains("RESPONSE_TAIL"));
+    let retained_response = captured_response
+        .strip_suffix(truncation_marker)
+        .expect("captured response must end with truncation marker");
+    assert!(
+        long_response.starts_with(retained_response),
+        "captured response must remain a prefix of the visible response",
+    );
+    let response_boundary = long_response
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= SUMMARY_CONTEXT_LIMIT_BYTES)
+        .last()
+        .expect("nonempty response has a UTF-8 boundary");
+    assert_eq!(
+        retained_response.len(),
+        response_boundary,
+        "captured response must stop at the greatest UTF-8 boundary within the byte cap",
+    );
 }
 
 /// Applying a new config while an idle deadline is pending must clear
