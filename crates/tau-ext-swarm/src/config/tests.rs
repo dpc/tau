@@ -82,29 +82,135 @@ fn rejects_duplicate_direct_address() {
     assert!(config.resolve(&secrets).is_err());
 }
 
-/// Corrected command, blocker, and update byte ceilings accept their inclusive
-/// extrema.
+/// Every configurable state and queue bound accepts its inclusive extrema and
+/// reports the exact field when rejecting adjacent values.
 #[test]
-fn accepts_corrected_state_byte_extrema() {
-    let limits = Limits {
-        command_bytes: 1,
-        blocker_bytes: 256 * 1024,
-        update_bytes: 64 * 1024 * 1024,
-        ..Limits::default()
-    };
-    limits.validate().expect("inclusive corrected extrema");
-    Limits {
-        command_bytes: 0,
-        ..Limits::default()
+fn validates_all_limit_extrema() {
+    /// One configurable state or queue bound and its test mutation.
+    struct Limit {
+        /// Fully qualified configuration field name.
+        name: &'static str,
+        /// Inclusive lower bound.
+        minimum: usize,
+        /// Inclusive upper bound.
+        maximum: usize,
+        /// Installs a candidate value in one Limits field.
+        set: fn(&mut Limits, usize),
     }
-    .validate()
-    .expect_err("zero command bytes");
-    Limits {
-        command_bytes: 256 * 1024 * 1024,
-        ..Limits::default()
+
+    let Limits {
+        command_entries: _,
+        command_bytes: _,
+        blocker_entries: _,
+        blocker_bytes: _,
+        update_entries: _,
+        update_bytes: _,
+        task_info_entries: _,
+        change_history_entries: _,
+        change_history_bytes: _,
+        publication_bytes: _,
+        agent_entries: _,
+        watch_entries: _,
+        submission_queue_entries: _,
+    } = Limits::default();
+    let limits = [
+        Limit {
+            name: "limits.command_entries",
+            minimum: 1,
+            maximum: 16_384,
+            set: |limits, value| limits.command_entries = value,
+        },
+        Limit {
+            name: "limits.command_bytes",
+            minimum: 1,
+            maximum: 256 * 1024 * 1024,
+            set: |limits, value| limits.command_bytes = value,
+        },
+        Limit {
+            name: "limits.blocker_entries",
+            minimum: 1,
+            maximum: 4_096,
+            set: |limits, value| limits.blocker_entries = value,
+        },
+        Limit {
+            name: "limits.blocker_bytes",
+            minimum: 256 * 1024,
+            maximum: 4 * 1024 * 1024,
+            set: |limits, value| limits.blocker_bytes = value,
+        },
+        Limit {
+            name: "limits.update_entries",
+            minimum: 1,
+            maximum: 4_096,
+            set: |limits, value| limits.update_entries = value,
+        },
+        Limit {
+            name: "limits.update_bytes",
+            minimum: 256 * 1024,
+            maximum: 64 * 1024 * 1024,
+            set: |limits, value| limits.update_bytes = value,
+        },
+        Limit {
+            name: "limits.task_info_entries",
+            minimum: 1,
+            maximum: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
+            set: |limits, value| limits.task_info_entries = value,
+        },
+        Limit {
+            name: "limits.change_history_entries",
+            minimum: 1,
+            maximum: 65_536,
+            set: |limits, value| limits.change_history_entries = value,
+        },
+        Limit {
+            name: "limits.change_history_bytes",
+            minimum: 1024 * 1024,
+            maximum: 128 * 1024 * 1024,
+            set: |limits, value| limits.change_history_bytes = value,
+        },
+        Limit {
+            name: "limits.publication_bytes",
+            minimum: 1024 * 1024,
+            maximum: 8 * 1024 * 1024,
+            set: |limits, value| limits.publication_bytes = value,
+        },
+        Limit {
+            name: "limits.agent_entries",
+            minimum: 1,
+            maximum: 65_536,
+            set: |limits, value| limits.agent_entries = value,
+        },
+        Limit {
+            name: "limits.watch_entries",
+            minimum: 1,
+            maximum: 262_144,
+            set: |limits, value| limits.watch_entries = value,
+        },
+        Limit {
+            name: "limits.submission_queue_entries",
+            minimum: 1,
+            maximum: 64,
+            set: |limits, value| limits.submission_queue_entries = value,
+        },
+    ];
+    for limit in limits {
+        for value in [limit.minimum, limit.maximum] {
+            let mut configured = Limits::default();
+            (limit.set)(&mut configured, value);
+            configured.validate().expect("inclusive bound");
+        }
+        for value in [limit.minimum - 1, limit.maximum + 1] {
+            let mut configured = Limits::default();
+            (limit.set)(&mut configured, value);
+            assert_eq!(
+                configured.validate().expect_err("adjacent bound"),
+                format!(
+                    "{} is outside {}..={}",
+                    limit.name, limit.minimum, limit.maximum
+                )
+            );
+        }
     }
-    .validate()
-    .expect("maximum command bytes");
 }
 
 /// Local task-info retention may be lowered but can never exceed the shared

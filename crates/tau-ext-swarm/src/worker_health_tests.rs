@@ -1,4 +1,3 @@
-use std::process::Command;
 use std::sync::mpsc;
 
 use crate::worker_health::WorkerHealth;
@@ -47,32 +46,20 @@ fn retirement_serializes_with_complete_mutation_authority() {
     assert!(health.mutation_authority().is_err());
 }
 
-/// A real panic terminates the worker child process, so it cannot continue
-/// serving tools with stale publication authority.
+/// A worker panic unwind retires publication health, preventing later mutation
+/// admission after the worker can no longer publish.
 #[test]
-fn panic_terminates_worker_process() {
-    let status = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--ignored",
-            "--exact",
-            "worker_health_tests::panic_child_terminates",
-        ])
-        .env("TAU_SWARM_PANIC_CHILD", "1")
-        .status()
-        .expect("run panicking worker child");
-
-    assert!(!status.success());
-}
-
-/// Subprocess-only panic entry point used to verify actual panic termination
-/// without failing the parent test process.
-#[test]
-#[ignore = "invoked by panic_terminates_worker_process in a subprocess"]
-fn panic_child_terminates() {
-    if std::env::var_os("TAU_SWARM_PANIC_CHILD").is_none() {
-        return;
-    }
+fn panic_unwind_retires_worker_health() {
     let health = WorkerHealth::running();
-    let _terminal = health.terminal_guard();
-    panic!("forced worker panic");
+    let result = std::panic::catch_unwind(|| {
+        let _terminal = health.terminal_guard();
+        panic!("forced worker panic");
+    });
+
+    assert!(
+        result.is_err(),
+        "test panic must unwind through terminal guard"
+    );
+    assert!(!health.is_running());
+    assert!(health.mutation_authority().is_err());
 }

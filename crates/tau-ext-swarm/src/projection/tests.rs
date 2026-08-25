@@ -172,10 +172,34 @@ fn equal_task_info_upsert_does_not_advance_revision() {
     projection
         .upsert_task_info(info.clone())
         .expect("first metadata");
+    let before_snapshot = projection.snapshot();
+    let before_changes = projection
+        .changes_after(PublicationRevision(0))
+        .expect("retained first metadata");
+
     projection
         .upsert_task_info(info)
         .expect("equal replacement");
-    assert_eq!(projection.snapshot().revision, PublicationRevision(1));
+    assert_eq!(projection.snapshot(), before_snapshot);
+    assert_eq!(
+        projection
+            .changes_after(PublicationRevision(0))
+            .expect("retained unchanged metadata"),
+        before_changes
+    );
+
+    let replacement = task_info("task", "Replacement");
+    projection
+        .upsert_task_info(replacement.clone())
+        .expect("changed replacement");
+    assert_eq!(projection.snapshot().revision, PublicationRevision(2));
+    assert_eq!(
+        projection
+            .changes_after(PublicationRevision(1))
+            .expect("retained replacement")
+            .changes,
+        [SessionChange::UpsertTaskInfo(replacement)]
+    );
 }
 
 /// Replacement remains allowed at the configured entry ceiling, but a distinct

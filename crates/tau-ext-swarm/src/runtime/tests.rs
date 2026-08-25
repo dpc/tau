@@ -36,14 +36,21 @@ fn resolved_config() -> ResolvedConfig {
         .expect("resolved config")
 }
 
-/// Worker notices preserve UTF-8 boundaries while bounding untrusted remote
-/// diagnostics.
+/// Worker notices preserve short diagnostics and retain an exact UTF-8 prefix
+/// when bounding oversized remote diagnostics.
 #[test]
 fn bounds_terminal_worker_error() {
-    let error = "é".repeat(4 * 1024);
-    let bounded = bounded_error(&error);
-    assert!(bounded.len() <= 4 * 1024);
-    assert!(bounded.is_char_boundary(bounded.len()));
+    let short = "peer rejected credential";
+    assert_eq!(bounded_error(short), short);
+
+    let ascii = "x".repeat(4 * 1024 + 1);
+    assert_eq!(bounded_error(&ascii), "x".repeat(4 * 1024));
+
+    let multibyte = format!("{}ésuffix", "x".repeat(4 * 1024 - 1));
+    let bounded = bounded_error(&multibyte);
+    assert_eq!(bounded, "x".repeat(4 * 1024 - 1));
+    assert_eq!(bounded.len(), 4 * 1024 - 1);
+    assert!(multibyte.is_char_boundary(bounded.len()));
 }
 
 /// The production worker completion boundary retires authoritative health

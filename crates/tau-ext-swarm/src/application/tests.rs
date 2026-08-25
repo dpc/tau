@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
-use std::sync as path_std_sync;
+use std::future::Future;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
 use iroh::endpoint as path_iroh_endpoint;
@@ -75,12 +77,15 @@ fn application(
 async fn cancelled_changes_wait_does_not_consume_task_info() {
     let (application, _, _) = application(true);
     let cut = application.snapshot().await.expect("snapshot").revision;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(5), application.changes_after(cut))
-            .await
-            .is_err(),
-        "unchanged projection should keep waiting"
-    );
+    {
+        let mut wait = std::pin::pin!(application.changes_after(cut));
+        let mut context = Context::from_waker(Waker::noop());
+        assert_eq!(
+            wait.as_mut().poll(&mut context),
+            Poll::Pending,
+            "unchanged projection should keep waiting"
+        );
+    }
     application
         .projection
         .lock()
@@ -100,6 +105,7 @@ async fn cancelled_changes_wait_does_not_consume_task_info() {
         batch.changes.as_slice(),
         [SessionChange::UpsertTaskInfo(info)] if info.task_id == TaskId::new("task")
     ));
+    assert_eq!(batch.revision, PublicationRevision(cut.0 + 1));
 }
 
 /// Admission charges the command table, queued/pending loopback copies,
@@ -239,9 +245,10 @@ async fn scopes_shared_command_state_by_session_identity() {
         DeliverPromptResponse::Accepted
     );
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), first_prompts.recv())
-            .await
-            .is_err(),
+        matches!(
+            first_prompts.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
         "return to first session must not submit the command again"
     );
 }
@@ -402,15 +409,40 @@ impl SessionTransport for RejectingTransport {
     }
 }
 
-/// Connector whose generations synchronize then fail indeterminately.
+/// Connector whose first generation fails after a live change while later
+/// generations stay connected for resnapshot observation.
 #[derive(Clone)]
 struct ResnapshotConnector {
-    /// Exact declarations observed across connection generations.
-    declarations: Arc<std::sync::Mutex<Vec<DeclareSessionRequest>>>,
-    /// Exact snapshots observed across connection generations.
-    snapshots: Arc<std::sync::Mutex<Vec<SubmitSnapshotRequest>>>,
-    /// Releases the first synchronized generation after test mutation.
-    disconnect: Arc<Notify>,
+    /// Complete per-generation publication observations.
+    observations: mpsc::UnboundedSender<ResnapshotObservation>,
+    /// Allocates the fixture generation that owns each transport.
+    generations: Arc<AtomicUsize>,
+}
+
+/// Exact client activity observed from one transport generation.
+#[derive(Debug)]
+enum ResnapshotObservation {
+    /// Complete declaration and snapshot that synchronized a generation.
+    Snapshot {
+        /// Transport generation that submitted this snapshot.
+        generation: usize,
+        /// Session declaration preceding the observed snapshot.
+        declaration: DeclareSessionRequest,
+        /// Complete snapshot that synchronized the generation.
+        snapshot: SubmitSnapshotRequest,
+    },
+    /// The generation has entered its live select after synchronizing.
+    LiveWait {
+        /// Transport generation waiting for commands and changes.
+        generation: usize,
+    },
+    /// Indeterminate submission of the first live projection change.
+    Change {
+        /// Transport generation that submitted this change.
+        generation: usize,
+        /// Exact live change request that caused reconnect.
+        request: SubmitChangeRequest,
+    },
 }
 
 #[async_trait]
@@ -419,21 +451,22 @@ impl Connector for ResnapshotConnector {
 
     async fn connect(&self, _expected_peer: &ExpectedPeer) -> ClientResult<Self::Transport> {
         Ok(ResnapshotTransport {
-            declarations: Arc::clone(&self.declarations),
-            snapshots: Arc::clone(&self.snapshots),
-            disconnect: Arc::clone(&self.disconnect),
+            declaration: StdMutex::new(None),
+            observations: self.observations.clone(),
+            generation: self.generations.fetch_add(1, Ordering::SeqCst),
         })
     }
 }
 
-/// Successful transport that drops after installing each snapshot.
+/// Transport that reports its initial synchronization and first live
+/// submission.
 struct ResnapshotTransport {
-    /// Cross-generation exact declaration requests.
-    declarations: Arc<std::sync::Mutex<Vec<DeclareSessionRequest>>>,
-    /// Cross-generation exact snapshot requests.
-    snapshots: Arc<std::sync::Mutex<Vec<SubmitSnapshotRequest>>>,
-    /// First-generation disconnect gate.
-    disconnect: Arc<Notify>,
+    /// Declaration retained until this generation submits its snapshot.
+    declaration: StdMutex<Option<DeclareSessionRequest>>,
+    /// Sends complete publication observations to the test.
+    observations: mpsc::UnboundedSender<ResnapshotObservation>,
+    /// Connection generation allocated by the fixture connector.
+    generation: usize,
 }
 
 #[async_trait]
@@ -453,10 +486,7 @@ impl SessionTransport for ResnapshotTransport {
         &self,
         request: DeclareSessionRequest,
     ) -> ClientResult<DeclareSessionResponse> {
-        self.declarations
-            .lock()
-            .expect("declarations")
-            .push(request);
+        *self.declaration.lock().expect("declaration") = Some(request);
         Ok(DeclareSessionResponse::Accepted)
     }
 
@@ -464,24 +494,41 @@ impl SessionTransport for ResnapshotTransport {
         &self,
         request: SubmitSnapshotRequest,
     ) -> ClientResult<SubmitSnapshotResponse> {
-        self.snapshots.lock().expect("snapshots").push(request);
+        self.observations
+            .send(ResnapshotObservation::Snapshot {
+                generation: self.generation,
+                declaration: self
+                    .declaration
+                    .lock()
+                    .expect("declaration")
+                    .clone()
+                    .expect("declare before snapshot"),
+                snapshot: request,
+            })
+            .expect("test receives snapshot");
         Ok(SubmitSnapshotResponse::Accepted)
     }
 
     async fn submit_change(
         &self,
-        _request: SubmitChangeRequest,
+        request: SubmitChangeRequest,
     ) -> ClientResult<SubmitChangeResponse> {
+        self.observations
+            .send(ResnapshotObservation::Change {
+                generation: self.generation,
+                request,
+            })
+            .expect("test receives live change");
         Err(ClientError::transport("generation disconnected"))
     }
 
     async fn next_command(&self) -> ClientResult<IncomingCommand> {
-        if self.snapshots.lock().expect("snapshots").len() == 1 {
-            self.disconnect.notified().await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-        Err(ClientError::transport("generation disconnected"))
+        self.observations
+            .send(ResnapshotObservation::LiveWait {
+                generation: self.generation,
+            })
+            .expect("test observes live wait");
+        std::future::pending::<ClientResult<IncomingCommand>>().await
     }
 }
 
@@ -525,17 +572,14 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
             .snapshot
             .into(),
     };
-    let snapshots = Arc::new(path_std_sync::Mutex::new(Vec::new()));
-    let declarations = Arc::new(path_std_sync::Mutex::new(Vec::new()));
-    let disconnect = Arc::new(Notify::new());
+    let (observations_tx, mut observations) = mpsc::unbounded_channel();
     let application_incarnation_id = incarnation(1);
     let client = tau_swarm_client::Client::new(
         Arc::clone(&application),
         application_incarnation_id.clone(),
         ResnapshotConnector {
-            declarations: Arc::clone(&declarations),
-            snapshots: Arc::clone(&snapshots),
-            disconnect: Arc::clone(&disconnect),
+            observations: observations_tx,
+            generations: Arc::new(AtomicUsize::new(0)),
         },
         ExpectedPeer::new(b"peer".to_vec()),
         Credential {
@@ -546,49 +590,79 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
     );
     let task = tokio::spawn(client.run());
     tokio::time::timeout(Duration::from_secs(2), async {
-        while snapshots.lock().expect("snapshots").is_empty() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .expect("first synchronized generation");
-    application
-        .projection
-        .lock()
-        .await
-        .upsert_task_info(TaskInfo {
+        let ResnapshotObservation::Snapshot {
+            generation,
+            declaration,
+            snapshot,
+        } = observations.recv().await.expect("first observation")
+        else {
+            panic!("first observation must be a snapshot");
+        };
+        assert_eq!(generation, 0);
+        assert_eq!(snapshot, expected_before);
+        assert_eq!(
+            declaration.application_incarnation_id,
+            application_incarnation_id.clone().into()
+        );
+        assert!(matches!(
+            observations.recv().await.expect("first live wait"),
+            ResnapshotObservation::LiveWait { generation: 0 }
+        ));
+        let task_info = TaskInfo {
             task_id: TaskId::new("task"),
             title: TaskTitle::new("Current title").expect("task title"),
             description: None,
-        })
-        .expect("new projection head");
-    let expected_after = SubmitSnapshotRequest {
-        snapshot: application
-            .snapshot()
+        };
+        application
+            .projection
+            .lock()
             .await
-            .expect("mutated snapshot")
-            .snapshot
-            .into(),
-    };
-    disconnect.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while snapshots.lock().expect("snapshots").len() < 2 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+            .upsert_task_info(task_info.clone())
+            .expect("new projection head");
+        let expected_after = SubmitSnapshotRequest {
+            snapshot: application
+                .snapshot()
+                .await
+                .expect("mutated snapshot")
+                .snapshot
+                .into(),
+        };
+        application.changed.notify_waiters();
+        let ResnapshotObservation::Change {
+            generation,
+            request,
+        } = observations
+            .recv()
+            .await
+            .expect("indeterminate live change")
+        else {
+            panic!("second observation must be a live change");
+        };
+        assert_eq!(generation, 0);
+        assert_eq!(
+            request,
+            SubmitChangeRequest {
+                sequence: 1,
+                change: SessionChange::UpsertTaskInfo(task_info).into(),
+            }
+        );
+        let ResnapshotObservation::Snapshot {
+            generation,
+            declaration,
+            snapshot,
+        } = observations.recv().await.expect("second snapshot")
+        else {
+            panic!("third observation must be a snapshot");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(snapshot, expected_after);
+        assert_eq!(
+            declaration.application_incarnation_id,
+            application_incarnation_id.into()
+        );
     })
     .await
-    .expect("second synchronized generation");
-    {
-        let snapshots = snapshots.lock().expect("snapshots");
-        assert_eq!(snapshots.as_slice(), [expected_before, expected_after]);
-    }
-    {
-        let declarations = declarations.lock().expect("declarations");
-        assert_eq!(declarations.len(), 2);
-        assert!(declarations.iter().all(|request| {
-            request.application_incarnation_id == application_incarnation_id.clone().into()
-        }));
-    }
+    .expect("two synchronized generations");
     task.abort();
     let _ = task.await;
 }

@@ -146,9 +146,10 @@ loopback. A composed
 `TauExtensionRunner` vertical additionally drives Configure, replay boundaries,
 worker startup, published snapshot observation, transient internal-prompt
 emission, matching canonical Tau submission, and the accepted remote result.
-Worker return, retirement ordering, and panic-process coverage verifies health
-authority, tool-result authority, unchanged state after rejection, and bounded
-cleanup. A production-FIFO saturation regression verifies that detached
-internal-prompt overload remains a cached indeterminate command result.
+Coverage of worker return, retirement ordering, and panic-unwind retirement
+verifies health authority, tool-result authority, unchanged state after
+rejection, and bounded cleanup. A production-FIFO saturation regression
+verifies that detached internal-prompt overload remains a cached indeterminate
+command result.
 Tau's workspace checks also build the bundled component and default-disabled
 harness configuration.
