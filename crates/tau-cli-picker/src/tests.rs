@@ -3,11 +3,10 @@ use std::error as path_std_error;
 use std::io::{self, Cursor};
 use std::sync::{Arc, Mutex};
 
-use crate::key::{PickerEvent, PickerKey, read_byte_key};
+use crate::key::{PickerEvent, PickerKey};
 use crate::raw_mode::RawModeCleanup;
 use crate::{
-    PickerError, PickerItem, pick_with_event_reader, pick_with_io, pick_with_raw_mode,
-    picker_lines, resize_dimension,
+    PickerError, PickerItem, pick_with_event_reader, pick_with_io, pick_with_raw_mode, picker_lines,
 };
 
 struct InterruptedReader {
@@ -227,6 +226,28 @@ fn raw_mode_picker_validates_items_before_enabling_raw_mode() {
     assert!(!raw_enabled, "raw mode should not be enabled");
 }
 
+/// Ensures a raw-mode setup failure reaches callers unchanged and prevents the
+/// picker from sampling, rendering, or reading while terminal ownership is
+/// absent.
+#[test]
+fn raw_mode_setup_failure_short_circuits_picker() {
+    let it = items(&["one"]);
+    let err = pick_with_raw_mode(
+        "pick",
+        &it,
+        Vec::<u8>::new(),
+        || Err::<FailingRawModeGuard, _>(io::Error::other("synthetic raw setup error")),
+        || panic!("raw-mode setup failure should not read input"),
+        || panic!("raw-mode setup failure should not sample terminal size"),
+    )
+    .expect_err("raw-mode setup failure should propagate");
+
+    match err {
+        PickerError::Io(source) => assert_eq!(source.to_string(), "synthetic raw setup error"),
+        other => panic!("expected raw setup IO error, got {other:?}"),
+    }
+}
+
 /// Ensures disabled rows stay visible but are skipped by navigation and cannot
 /// become the selected result.
 #[test]
@@ -261,19 +282,6 @@ fn byte_reader_ignores_unknown_chars() {
     // Random printable ASCII not in the keymap → Ignored, picker keeps reading.
     let it = items(&["a", "b"]);
     assert_eq!(run(b"xy\n", &it).expect("unknown then enter"), 0);
-}
-
-/// Protects direct byte-reader decoding of CSI arrow sequences independently
-/// from the full picker event loop.
-#[test]
-fn byte_reader_decodes_csi_arrows() {
-    let mut reader = Cursor::new(b"\x1b[A".to_vec());
-    assert_eq!(read_byte_key(&mut reader).expect("up arrow"), PickerKey::Up);
-    let mut reader = Cursor::new(b"\x1b[B".to_vec());
-    assert_eq!(
-        read_byte_key(&mut reader).expect("down arrow"),
-        PickerKey::Down
-    );
 }
 
 /// Verifies viewport calculations keep the selected item visible and centered
@@ -316,17 +324,22 @@ fn compact_frame_prioritizes_selected_item_when_truncated() {
     assert_eq!(line_text(&lines[0]), "> selec…");
 }
 
-/// Verifies normal-height rendering includes the prompt and item rows with the
-/// cursor positioned on the selected item.
+/// Verifies normal-height rendering preserves every row's marker and bounded
+/// text while positioning the cursor on the selected enabled item.
 #[test]
 fn normal_terminal_uses_prompt_plus_items() {
-    let it = items(&["one", "two"]);
-    let (lines, cursor_row) = picker_lines("pick", &it, 1, 80, 3);
+    let it = vec![
+        PickerItem::enabled("ordinary"),
+        PickerItem::disabled("unavailable"),
+        PickerItem::enabled("selected label"),
+    ];
+    let (lines, cursor_row) = picker_lines("pick", &it, 2, 12, 4);
 
-    assert_eq!(lines.len(), 3);
-    assert_eq!(cursor_row, 2);
-    assert_eq!(line_text(&lines[0]), "? pick");
-    assert_eq!(line_text(&lines[2]), "> two");
+    assert_eq!(cursor_row, 3);
+    assert_eq!(
+        lines.iter().map(|line| line_text(line)).collect::<Vec<_>>(),
+        ["? pick", "  ordinary", "X unavailab…", "> selected …"]
+    );
 }
 
 #[derive(Clone, Default)]
@@ -398,52 +411,76 @@ fn resize_event_redraws_without_waiting_for_key_resample() {
         },
         PickerEvent::Key(PickerKey::Enter),
     ]);
+    let mut size_samples = 0;
     let picked = pick_with_event_reader(
         "choose a thing",
         &it,
         writer,
         || Ok(events.pop_front().expect("test event available")),
-        || (40, 5),
+        || {
+            size_samples += 1;
+            (40, 5)
+        },
     )
     .expect("picker should accept after resize");
 
     assert_eq!(picked, 0);
+    assert_eq!(
+        size_samples, 1,
+        "resize events should use their reported dimensions rather than resampling"
+    );
     let bytes = output.bytes();
     let text = String::from_utf8_lossy(&bytes);
     assert!(
-        text.contains("…"),
-        "resized redraw should use narrow-width truncation: {text:?}"
+        text.contains("? choos…") && text.contains("> very …"),
+        "resized redraw should contain the narrow prompt and item rows: {text:?}"
     );
 }
 
-/// Verifies zero resize dimensions are ignored, protecting platforms that may
-/// report transient zero terminal sizes.
+/// Ensures zero-sized resize reports preserve the current dimensions and redraw
+/// immediately without sampling ambient terminal state again.
 #[test]
-fn zero_resize_dimensions_keep_current_size() {
-    assert_eq!(resize_dimension(0, 40), 40);
-    assert_eq!(resize_dimension(10, 40), 10);
-}
-
-/// Ensures input errors trigger best-effort frame cleanup so failed prompts do
-/// not leave stale picker rows on screen.
-#[test]
-fn picker_clears_frame_on_input_error() {
-    let it = items(&["one", "two"]);
+fn zero_resize_keeps_current_size_without_resampling_terminal() {
+    let it = items(&["first row", "second row"]);
     let writer = SharedWriter::default();
     let output = writer.clone();
-    let err = pick_with_event_reader(
-        "pick",
+    let mut events = VecDeque::from([
+        PickerEvent::Resize {
+            width: 0,
+            height: 0,
+        },
+        PickerEvent::Key(PickerKey::Enter),
+    ]);
+    let mut size_samples = 0;
+    let picked = pick_with_event_reader(
+        "distinct prompt",
         &it,
         writer,
-        || Err(io::Error::other("synthetic input error")),
-        || (40, 5),
+        || Ok(events.pop_front().expect("test event available")),
+        || {
+            size_samples += 1;
+            (12, 3)
+        },
     )
-    .expect_err("input error should propagate");
+    .expect("picker should accept after zero-sized resize");
 
-    assert!(matches!(err, PickerError::Io(_)));
+    assert_eq!(picked, 0);
+    assert_eq!(
+        size_samples, 1,
+        "zero-sized resize should retain the initial terminal dimensions"
+    );
     let bytes = output.bytes();
     let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("[J"), "cleanup should clear frame: {text:?}");
+    assert_eq!(
+        text.matches("? distinct …").count(),
+        2,
+        "initial and zero-resize frames should both use the original width and height: {text:?}"
+    );
+    assert_eq!(
+        text.matches("  second row").count(),
+        2,
+        "initial and zero-resize frames should both retain the second item row: {text:?}"
+    );
 }
 
 /// Ensures user cancellation also clears the frame, covering the cancellation
