@@ -604,25 +604,107 @@ fn manual_compaction_request_stays_memory_only_for_ephemeral_agent() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
+/// Whitespace-only display names leave durable and cached agent state
+/// unchanged; a later valid retry reuses the sequence and survives cold replay.
 #[test]
 fn agent_store_rejects_empty_display_name() {
-    // Display names are user-visible labels. Blank durable updates must not
-    // suppress the id fallback in UIs or extensions.
     let agents_dir = temp_dir("empty-display-name");
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+                agent_id: agent_id.clone(),
+                parent_agent: None,
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed valid agent");
+    let journal_path = agents_dir.join(agent_id.as_str()).join("events.cbor");
+    let checkpoint_path = agents_dir.join(agent_id.as_str()).join("meta.json");
+    let journal_before = std::fs::read(&journal_path).expect("baseline journal");
+    let checkpoint_before = std::fs::read(&checkpoint_path).expect("baseline checkpoint");
+    let events_before = store
+        .agent_events(agent_id.as_str())
+        .expect("baseline events");
+    let tree_before = store
+        .agent(agent_id.as_str())
+        .expect("baseline tree")
+        .clone();
 
     let error = store
         .append_agent_event(
-            "agent-1",
+            agent_id.as_str(),
             None,
             Event::AgentDisplayNameSet(AgentDisplayNameSet {
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                agent_id: agent_id.clone(),
                 display_name: "   ".to_owned(),
             }),
         )
         .expect_err("blank display names are invalid");
 
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
+    assert_eq!(
+        std::fs::read(&journal_path).expect("journal remains"),
+        journal_before
+    );
+    assert_eq!(
+        std::fs::read(&checkpoint_path).expect("checkpoint remains"),
+        checkpoint_before
+    );
+    assert_eq!(
+        store
+            .agent_events(agent_id.as_str())
+            .expect("events remain"),
+        events_before
+    );
+    let tree = store.agent(agent_id.as_str()).expect("tree remains");
+    assert_eq!(tree, &tree_before);
+    assert_eq!(tree.head(), tree_before.head());
+    assert_eq!(tree.next_event_seq(), tree_before.next_event_seq());
+
+    let retry = store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentDisplayNameSet(AgentDisplayNameSet {
+                agent_id: agent_id.clone(),
+                display_name: "Research".to_owned(),
+            }),
+        )
+        .expect("valid display name appends");
+    assert_eq!(retry.seq, PersistedAgentEventSeq::new(1));
+    drop(store);
+
+    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    reopened
+        .lock_and_recover_agent(agent_id.as_str())
+        .expect("reopen agent");
+    assert_eq!(
+        reopened
+            .agent(agent_id.as_str())
+            .expect("replayed agent")
+            .display_name(),
+        Some("Research")
+    );
+    assert_eq!(
+        reopened
+            .agent_events(agent_id.as_str())
+            .expect("replayed events")
+            .into_iter()
+            .map(|record| record.seq)
+            .collect::<Vec<_>>(),
+        vec![
+            PersistedAgentEventSeq::new(0),
+            PersistedAgentEventSeq::new(1)
+        ]
+    );
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1868,7 +1950,8 @@ fn session_store_persists_fallback_message_facts_without_membership_fold() {
 }
 
 /// Session fallback accepts every message variant and preserves unresolved
-/// references exactly without attempting native-message validation.
+/// references without native-message validation, including after cold replay
+/// of the exact ordered records and sequences.
 #[test]
 fn session_store_preserves_all_message_fact_variants_and_unresolved_refs() {
     let sessions_dir = temp_dir("session-all-message-facts");
@@ -1880,13 +1963,32 @@ fn session_store_preserves_all_message_fact_variants_and_unresolved_refs() {
             .expect("append fallback fact");
         assert_eq!(outcome.seq.get(), index as u64);
     }
-    let records = store.session_events("session-1").expect("fallback records");
+    let expected = facts
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (PersistedSessionEventSeq::new(index as u64), event))
+        .collect::<Vec<_>>();
+    let records = store
+        .session_events("session-1")
+        .expect("live fallback records");
     assert_eq!(
         records
             .into_iter()
-            .map(|record| record.event)
+            .map(|record| (record.seq, record.event))
             .collect::<Vec<_>>(),
-        facts
+        expected
+    );
+    drop(store);
+
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
+    assert_eq!(
+        reopened
+            .session_events("session-1")
+            .expect("replayed fallback records")
+            .into_iter()
+            .map(|record| (record.seq, record.event))
+            .collect::<Vec<_>>(),
+        expected
     );
     let _ = std::fs::remove_dir_all(sessions_dir);
 }

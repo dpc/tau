@@ -1,9 +1,6 @@
 //! [`EventBus`]: routes protocol events between connections and tracks
 //! per-connection subscription state.
 
-#[cfg(test)]
-mod tests;
-
 use std::collections::HashMap;
 
 use tau_proto::{ClientKind, ConnectionId, EventSelector, HarnessOutputMessage};

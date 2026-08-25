@@ -149,12 +149,87 @@ fn memory_only_store_never_touches_durable_root() {
     assert!(!agents_dir.join(agent_id.as_str()).exists());
 }
 
-/// Ensures the writer rejects a record length that the matching loader would
-/// reject, before opening or mutating the journal.
+/// Returns the CBOR payload size of the representative oversized agent record.
+fn encoded_record_length(text_len: usize, seq: u64) -> usize {
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let event = injected_message_event(&agent_id, "x".repeat(text_len));
+    let fold_semantics = AgentJournalFoldSemantics::for_new_event(&event);
+    let record = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([7; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::InheritHead,
+        fold_semantics,
+        recorded_at: UnixMicros::new(42),
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&record, &mut encoded).expect("test record encodes");
+    encoded.len()
+}
+
+/// Builds a message injection whose text can exercise the encoded record bound.
+fn injected_message_event(agent_id: &AgentId, text: String) -> Event {
+    Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        agent_id: agent_id.clone(),
+        text,
+        inference_activation: false,
+        message_class: Default::default(),
+    })
+}
+
+/// Produces a message body whose agent record has the requested encoded size.
+fn body_for_encoded_length(encoded_length: usize, seq: u64) -> String {
+    const PROBE_BODY_BYTES: usize = 1024 * 1024;
+    let overhead = encoded_record_length(PROBE_BODY_BYTES, seq) - PROBE_BODY_BYTES;
+    let body = "x".repeat(encoded_length - overhead);
+    assert_eq!(
+        encoded_record_length(body.len(), seq),
+        encoded_length,
+        "large-record CBOR overhead should remain stable"
+    );
+    body
+}
+
+/// An oversized durable append leaves the journal, cached fold, sequence, and
+/// checkpoint unchanged, then permits a retry at the rejected sequence.
 #[test]
-fn write_record_limit_matches_read_limit() {
-    let error = validate_record_length(Path::new("/not/opened/events.cbor"), MAX_RECORD_BYTES + 1)
-        .expect_err("oversized record must be rejected");
+fn oversized_agent_append_is_atomic() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            UnixMicros::new(41),
+        )
+        .expect("baseline appends");
+    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    let checkpoint_path = store.agent_dir(agent_id.as_str()).join("meta.json");
+    let journal_before = fs::read(&journal_path).expect("baseline journal");
+    let checkpoint_before = fs::read(&checkpoint_path).expect("baseline checkpoint");
+    let events_before = store
+        .agent_events(agent_id.as_str())
+        .expect("baseline events");
+    let tree_before = store
+        .agent(agent_id.as_str())
+        .expect("baseline tree")
+        .clone();
+    let oversized_body = body_for_encoded_length((MAX_RECORD_BYTES + 1) as usize, 1);
+
+    let error = store
+        .append_agent_event_at_with_observation_id(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            injected_message_event(&agent_id, oversized_body),
+            UnixMicros::new(42),
+            tau_proto::ObservationId::from_bytes([7; 16]),
+        )
+        .expect_err("oversized record must fail");
     assert!(matches!(
         error,
         AgentStoreError::RecordTooLarge {
@@ -163,6 +238,58 @@ fn write_record_limit_matches_read_limit() {
             ..
         } if record_length == MAX_RECORD_BYTES + 1
     ));
+    assert_eq!(
+        fs::read(&journal_path).expect("journal remains"),
+        journal_before
+    );
+    assert_eq!(
+        fs::read(&checkpoint_path).expect("checkpoint remains"),
+        checkpoint_before
+    );
+    assert_eq!(
+        store
+            .agent_events(agent_id.as_str())
+            .expect("events remain"),
+        events_before
+    );
+    let tree = store.agent(agent_id.as_str()).expect("tree remains");
+    assert_eq!(tree, &tree_before);
+    assert_eq!(tree.head(), tree_before.head());
+    assert_eq!(tree.next_event_seq(), tree_before.next_event_seq());
+
+    let retry = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "retry"),
+            UnixMicros::new(43),
+        )
+        .expect("later bounded record appends");
+    assert_eq!(retry.seq, PersistedAgentEventSeq::new(1));
+    drop(store);
+
+    let mut reopened = AgentStore::open_lazy(temp.path()).expect("reopen store");
+    reopened
+        .lock_and_recover_agent(agent_id.as_str())
+        .expect("replay succeeds");
+    assert_eq!(
+        reopened
+            .agent_events(agent_id.as_str())
+            .expect("replayed events"),
+        vec![
+            events_before[0].clone(),
+            PersistedAgentEvent {
+                observation_id: retry.observation_id,
+                seq: retry.seq,
+                source: None,
+                event: display_name_event(&agent_id, "retry"),
+                parent: AgentEventParent::InheritHead,
+                fold_semantics: AgentJournalFoldSemantics::Legacy,
+                recorded_at: UnixMicros::new(43),
+            },
+        ]
+    );
 }
 
 /// A later semantic append and fold complete while prior journal sync remains

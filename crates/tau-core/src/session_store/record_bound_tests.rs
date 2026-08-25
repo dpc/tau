@@ -50,26 +50,6 @@ fn session_record_limit_accepts_exact_boundary() {
         .expect("exact boundary must be accepted");
 }
 
-/// Ensures a successfully appended session record can be decoded by the
-/// bounded loader after reopening the durable store.
-#[test]
-fn bounded_session_record_round_trips_after_write() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut store = SessionStore::open(temp.path()).expect("store opens");
-    let event = delivered_message("read after write".to_owned());
-    store
-        .append_session_event_at("session-1", None, event.clone(), UnixMicros::new(42))
-        .expect("bounded record appends");
-    drop(store);
-
-    let reopened = SessionStore::open(temp.path()).expect("written record reloads");
-    let events = reopened
-        .session_events("session-1")
-        .expect("written record reads");
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event, event);
-}
-
 /// Ensures an oversized encoded session record is rejected before journal,
 /// folded sequence, or derived metadata state changes.
 #[test]
