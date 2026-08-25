@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::io::BufReader;
 use std::os::unix as path_std_os_unix;
@@ -26,12 +27,12 @@ use tau_proto::{
 use super::agent_navigation::AgentNavigationState;
 use super::chat::cold_attach_stager::ShellStartPresentation;
 use super::chat::{
-    DraftSlot, UiIoMeter, UiWriter, custom_prompt_replacement, debounce_loop_with_wait,
-    invalidate_pending_draft, is_known_static_command, leading_command_token,
-    next_agent_cycle_selection, queue_prompt_draft_snapshot, redacted_command_echo_line,
-    redacted_prompt_history_line, retarget_prompt_draft_snapshot, role_cycling_enabled,
-    send_draft_snapshot_with_before_writer, should_send_draft_snapshot,
-    terminal_options_from_settings,
+    DraftSlot, UiIoMeter, UiWriter, custom_prompt_replacement,
+    custom_prompt_replacement_from_snapshot, debounce_loop_with_wait, invalidate_pending_draft,
+    is_known_static_command, leading_command_token, next_agent_cycle_selection,
+    queue_prompt_draft_snapshot, redacted_command_echo_line, redacted_prompt_history_line,
+    retarget_prompt_draft_snapshot, role_cycling_enabled, send_draft_snapshot_with_before_writer,
+    should_send_draft_snapshot, terminal_options_from_settings,
 };
 use super::cli::{Command as CliCommand, DevCommand};
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
@@ -1170,6 +1171,35 @@ fn custom_prompt_command_reports_unknown_id() {
 
     assert!(error.contains("unknown custom prompt `missing`"));
     assert!(error.contains("available: review"));
+}
+
+/// Ensures ordinary prose does not take a custom-prompt payload snapshot before
+/// the command token gate, while whitespace-leading `:prompt` still does.
+#[test]
+fn ordinary_prose_skips_custom_prompt_payload_work() {
+    let snapshot_count = Cell::new(0);
+    let snapshot = || {
+        snapshot_count.set(snapshot_count.get() + 1);
+        vec![tau_proto::HarnessCustomPrompt {
+            id: "review".to_owned(),
+            text: "Review this patch carefully".to_owned(),
+        }]
+    };
+
+    assert!(
+        custom_prompt_replacement_from_snapshot("review this patch carefully", snapshot).is_none()
+    );
+    assert_eq!(snapshot_count.get(), 0);
+    assert!(custom_prompt_replacement_from_snapshot("::prompt review", snapshot).is_none());
+    assert_eq!(snapshot_count.get(), 0);
+
+    let replacement =
+        custom_prompt_replacement_from_snapshot(" \t:prompt review", snapshot).expect("command");
+    assert_eq!(
+        replacement.expect("configured prompt"),
+        "Review this patch carefully"
+    );
+    assert_eq!(snapshot_count.get(), 1);
 }
 
 /// Ensures the CLI uses the running harness announcement as the custom-prompt

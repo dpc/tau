@@ -2535,13 +2535,13 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_custom_prompt_command(&mut self, text: &str) -> bool {
-        let prompts = self
-            .ctx
-            .custom_prompts
-            .lock()
-            .map(|prompts| prompts.clone())
-            .unwrap_or_default();
-        let Some(result) = custom_prompt_replacement(text, &prompts) else {
+        let Some(result) = custom_prompt_replacement_from_snapshot(text, || {
+            self.ctx
+                .custom_prompts
+                .lock()
+                .map(|prompts| prompts.clone())
+                .unwrap_or_default()
+        }) else {
             return false;
         };
         match result {
@@ -4056,10 +4056,12 @@ pub(crate) fn custom_prompt_replacement(
     text: &str,
     prompts: &[tau_proto::HarnessCustomPrompt],
 ) -> Option<Result<String, String>> {
-    let mut parts = text.split_whitespace();
-    if parts.next() != Some(":prompt") {
+    if !is_custom_prompt_command(text) {
         return None;
     }
+    let mut parts = text.split_whitespace();
+    let command = parts.next();
+    debug_assert_eq!(command, Some(":prompt"));
 
     let id = parts.next();
     let extra = parts.next();
@@ -4081,6 +4083,24 @@ pub(crate) fn custom_prompt_replacement(
         })),
         _ => Some(Err("usage: :prompt <id>".to_owned())),
     }
+}
+
+/// Returns whether the first whitespace-delimited input token is `:prompt`.
+pub(crate) fn is_custom_prompt_command(text: &str) -> bool {
+    text.split_whitespace().next() == Some(":prompt")
+}
+
+/// Parses a custom prompt command after taking its payload snapshot only when
+/// needed.
+pub(crate) fn custom_prompt_replacement_from_snapshot(
+    text: &str,
+    snapshot: impl FnOnce() -> Vec<tau_proto::HarnessCustomPrompt>,
+) -> Option<Result<String, String>> {
+    if !is_custom_prompt_command(text) {
+        return None;
+    }
+    let prompts = snapshot();
+    custom_prompt_replacement(text, &prompts)
 }
 
 fn custom_prompt_hint(prompts: &[tau_proto::HarnessCustomPrompt]) -> String {
