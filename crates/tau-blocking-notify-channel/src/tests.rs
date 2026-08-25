@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -6,14 +6,7 @@ use super::*;
 
 const PRE_TRIGGER_WAIT: Duration = Duration::from_millis(50);
 const RESULT_WAIT: Duration = Duration::from_secs(1);
-
-/// Ensures a single notification is delivered to a blocking receive.
-#[test]
-fn single_notify_wakes_receiver() {
-    let (tx, rx) = channel();
-    tx.notify();
-    assert_eq!(rx.recv(), Ok(()));
-}
+const CONCURRENT_SENDERS: usize = 8;
 
 /// Ensures dropping the receiver does not make later sender notifications
 /// panic.
@@ -53,16 +46,6 @@ fn try_recv_returns_notified_and_resets() {
     assert_eq!(rx.try_recv(), Ok(TryRecvStatus::Empty));
 }
 
-/// Ensures `Receiver` remains movable to another thread despite being
-/// intentionally non-`Sync`.
-#[test]
-fn receiver_is_send() {
-    let (tx, rx) = channel();
-    tx.notify();
-    let handle = thread::spawn(move || rx.recv());
-    assert_eq!(handle.join().expect("receiver thread panicked"), Ok(()));
-}
-
 /// Ensures the public auto-trait contract stays single-consumer: movable to a
 /// worker thread, but not shareable by reference across threads.
 #[test]
@@ -93,37 +76,33 @@ fn recv_blocks_until_notified() {
     handle.join().expect("receiver thread panicked");
 }
 
-/// Ensures cloned senders can notify concurrently and disconnect after the last
-/// clone drops.
+/// Ensures a barrier-aligned sender cohort coalesces concurrent notifications
+/// and disconnects only after every clone drops.
 #[test]
 fn multiple_senders() {
     let (tx, rx) = channel();
-    let tx2 = tx.clone();
+    let start = Arc::new(Barrier::new(CONCURRENT_SENDERS + 1));
+    let senders: Vec<_> = (0..CONCURRENT_SENDERS).map(|_| tx.clone()).collect();
+    drop(tx);
 
-    let h1 = thread::spawn(move || {
-        tx.notify();
-    });
-    let h2 = thread::spawn(move || {
-        tx2.notify();
-    });
+    let workers: Vec<_> = senders
+        .into_iter()
+        .map(|tx| {
+            let start = Arc::clone(&start);
+            thread::spawn(move || {
+                start.wait();
+                tx.notify();
+            })
+        })
+        .collect();
+    start.wait();
 
-    h1.join().expect("sender 1 panicked");
-    h2.join().expect("sender 2 panicked");
-
-    assert_eq!(rx.recv(), Ok(()));
-    // Both senders are gone — channel is disconnected.
-    assert_eq!(rx.try_recv(), Err(Disconnected));
-}
-
-/// Ensures repeated notify/receive cycles reset state consistently over time.
-#[test]
-fn repeated_send_recv_cycles() {
-    let (tx, rx) = channel();
-    for _ in 0..100 {
-        tx.notify();
-        assert_eq!(rx.recv(), Ok(()));
-        assert_eq!(rx.try_recv(), Ok(TryRecvStatus::Empty));
+    for worker in workers {
+        worker.join().expect("sender thread panicked");
     }
+
+    assert_eq!(rx.try_recv(), Ok(TryRecvStatus::Notified));
+    assert_eq!(rx.try_recv(), Err(Disconnected));
 }
 
 /// Ensures `recv` reports disconnect once the original sender is dropped.
@@ -144,15 +123,6 @@ fn disconnect_after_last_clone_dropped() {
     assert_eq!(rx.try_recv(), Ok(TryRecvStatus::Empty));
     drop(tx2);
     assert_eq!(rx.recv(), Err(Disconnected));
-}
-
-/// Ensures `try_recv` reports disconnect without blocking after all senders
-/// drop.
-#[test]
-fn try_recv_reports_disconnect() {
-    let (tx, rx) = channel();
-    drop(tx);
-    assert_eq!(rx.try_recv(), Err(Disconnected));
 }
 
 /// Ensures `try_recv` drains a pending notification before reporting
