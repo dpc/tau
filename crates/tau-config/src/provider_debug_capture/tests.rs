@@ -1,49 +1,52 @@
 use super::{ProviderDebugCaptureClass, ProviderDebugCaptureFilename};
 
-/// Ensures construction and parsing agree for every supported compressed
-/// capture class, while legacy uncompressed names are rejected.
+/// Ensures every capture class has one exact canonical compressed basename,
+/// parses back to that basename, and rejects the legacy uncompressed form.
 #[test]
 fn filename_round_trips_every_supported_compressed_class_only() {
     let prompt = tau_proto::AgentPromptId::parse("sp-6").expect("prompt id");
-    for class in [
-        ProviderDebugCaptureClass::HttpSseRequest,
-        ProviderDebugCaptureClass::WebsocketRequest,
-        ProviderDebugCaptureClass::HttpSseResponse,
-        ProviderDebugCaptureClass::WebsocketResponse,
-        ProviderDebugCaptureClass::UnknownResponse,
-        ProviderDebugCaptureClass::ResponsesAttemptFailure,
-        ProviderDebugCaptureClass::CompactHttpFailure,
+    for (class, expected) in [
+        (
+            ProviderDebugCaptureClass::HttpSseRequest,
+            "123-sp-6-http-sse-request.json.zst",
+        ),
+        (
+            ProviderDebugCaptureClass::WebsocketRequest,
+            "123-sp-6-websocket-request.json.zst",
+        ),
+        (
+            ProviderDebugCaptureClass::HttpSseResponse,
+            "123-sp-6-http-sse-response.json.zst",
+        ),
+        (
+            ProviderDebugCaptureClass::WebsocketResponse,
+            "123-sp-6-websocket-response.json.zst",
+        ),
+        (
+            ProviderDebugCaptureClass::UnknownResponse,
+            "123-sp-6-unknown-response.json.zst",
+        ),
+        (
+            ProviderDebugCaptureClass::ResponsesAttemptFailure,
+            "123-sp-6-responses-attempt-failure.json.zst",
+        ),
+        (
+            ProviderDebugCaptureClass::CompactHttpFailure,
+            "123-sp-6-compact-http-failure.json.zst",
+        ),
     ] {
         let filename = ProviderDebugCaptureFilename::new(123, &prompt, class);
+        assert_eq!(filename.as_str(), expected);
         assert_eq!(
-            ProviderDebugCaptureFilename::parse(filename.as_str()),
+            ProviderDebugCaptureFilename::parse(expected),
             Some(filename.clone())
         );
-        let legacy = filename
-            .as_str()
-            .strip_suffix(".zst")
-            .expect("compressed suffix");
+        let legacy = expected.strip_suffix(".zst").expect("compressed suffix");
         assert!(
             ProviderDebugCaptureFilename::parse(legacy).is_none(),
             "{legacy} must remain unsupported"
         );
     }
-}
-
-/// Compact HTTP failure artifacts need a distinct stable basename so retention
-/// cleanup and forensic tooling cannot confuse them with normalized responses.
-#[test]
-fn compact_http_failure_has_distinct_compressed_filename() {
-    let prompt = tau_proto::AgentPromptId::parse("compact-7").expect("prompt id");
-    let filename = ProviderDebugCaptureFilename::new(
-        123,
-        &prompt,
-        ProviderDebugCaptureClass::CompactHttpFailure,
-    );
-    assert_eq!(
-        filename.as_str(),
-        "123-compact-7-compact-http-failure.json.zst"
-    );
 }
 
 /// Ensures unrelated suffix collisions and malformed timestamp/prompt

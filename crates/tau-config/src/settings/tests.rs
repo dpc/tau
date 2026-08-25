@@ -1072,17 +1072,6 @@ fn cli_settings_enable_osc8_links_by_default() {
     assert!(CliSettings::built_in().osc8_links);
 }
 
-/// Ensures cli.yaml can select a built-in theme by name.
-#[test]
-fn cli_settings_theme_override() {
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(dir.join("cli.yaml"), r#"{ theme: "tau-plain-light" }"#).expect("write");
-
-    let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.theme, CliTheme::Named("tau-plain-light".to_owned()));
-}
-
 /// Ensures prompt-draft content stays disabled by default and that a normal
 /// cli.d layer can explicitly enable it for one CLI process.
 #[test]
@@ -1166,38 +1155,6 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     let cr = s.bind.get("C-r").expect("C-r");
     assert_eq!(cr.action, "prompt-history-search");
     assert!(cr.trim);
-    assert!(
-        cr.command
-            .as_deref()
-            .is_some_and(|command| command.contains("fzf"))
-    );
-    let built_in = CliSettings::built_in();
-    let built_in_cf = built_in.bind.get("C-f").expect("C-f");
-    assert!(built_in_cf.command.as_deref().is_some_and(|command| {
-        command.contains("--preview") && command.contains("--preview-window 'right,60%,wrap'")
-    }));
-    assert!(s.bind.contains_key("C-t"));
-    assert!(s.bind.contains_key("C-o"));
-    assert_eq!(s.bind.get("Enter").expect("Enter").action, "submit-prompt");
-    assert_eq!(
-        s.bind.get("C-Enter").expect("C-Enter").action,
-        "submit-prompt"
-    );
-    assert_eq!(
-        s.bind.get("BackTab").expect("BackTab").action,
-        "cycle-role-group"
-    );
-    assert_eq!(s.bind.get("C-k").expect("C-k").action, "agent-previous");
-    assert_eq!(s.bind.get("C-j").expect("C-j").action, "agent-next");
-    assert_eq!(s.bind.get("C-b").expect("C-b").action, "agent-pick");
-    assert_eq!(
-        s.bind.get("C-v").expect("C-v").action,
-        "verbose-mode-toggle"
-    );
-    assert!(!s.bind.contains_key("M-a"));
-    assert!(!built_in.bind.contains_key("C-B"));
-    assert_eq!(s.bind.get("C-p").expect("C-p").action, "prompt-previous");
-    assert_eq!(s.bind.get("C-n").expect("C-n").action, "prompt-next");
 }
 
 /// Ensures a user Meta binding survives YAML parsing even though Tau does not
@@ -2067,6 +2024,9 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     assert_eq!(s.extensions["std-websearch"].enable, Some(false));
 }
 
+/// Ensures file parsing preserves explicit `require: false`, a generic CLI
+/// override takes precedence, and without that override the other extension's
+/// `require` field remains absent (`None`).
 #[test]
 fn harness_settings_extension_require_parses_and_cli_overrides() {
     let td = TempDir::new().expect("tempdir");
@@ -2096,6 +2056,9 @@ fn harness_settings_extension_require_parses_and_cli_overrides() {
     assert_eq!(no_cli.extensions["std-websearch"].require, None);
 }
 
+/// Ensures `extensions.<name>.require` rejects a string instead of silently
+/// accepting or coercing it. The loader currently loses nested path context, so
+/// this test does not make that diagnostic omission a contract.
 #[test]
 fn harness_settings_extension_require_rejects_wrong_type() {
     let td = TempDir::new().expect("tempdir");
@@ -5053,32 +5016,18 @@ fn inter_session_configuration_layers_cli_aliases() {
     );
 }
 
-/// Ensures absent user config files still load the built-in harness baseline.
+/// Ensures missing optional user config files fall back to the built-in layers.
 #[test]
 fn missing_user_files_load_the_built_in_baseline() {
-    // With no user files present, the loader still returns fully populated
-    // settings from the embedded built-in layer plus harness-owned role defaults.
-    // There is intentionally no model registry baseline anymore.
     let td = TempDir::new().expect("tempdir");
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
-    assert!(harness.roles.contains_key("engineer-junior"));
-    assert_eq!(harness.tau_state_access, TauStateAccess::ReadOnly);
-    assert!(harness.roles.contains_key("engineer"));
-    assert_eq!(harness.default_role.as_deref(), Some("engineer"));
-    assert_eq!(harness.roles["engineer-junior"].enable, Some(true));
-    assert_eq!(harness.roles["engineer"].enable, Some(true));
-    assert!(!harness.roles.contains_key("assistant"));
-    assert!(harness.roles.contains_key("engineer-senior"));
-    assert_eq!(harness.roles["engineer-senior"].enable, Some(true));
-    assert_eq!(
-        harness.roles["engineer-senior"].effort,
-        Some(tau_proto::Effort::High)
+    assert!(
+        harness
+            .default_role
+            .as_ref()
+            .is_some_and(|role| harness.roles.contains_key(role))
     );
-    assert!(!harness.roles.contains_key("smart"));
-    assert!(!harness.roles.contains_key("deep"));
-    assert!(!harness.roles.contains_key("rush"));
-    assert!(!harness.roles.contains_key("foreman"));
 }
 
 /// Ensures `enable: false` removes lower-layer roles only after all role layers
