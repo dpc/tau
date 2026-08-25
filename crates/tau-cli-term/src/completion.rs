@@ -432,6 +432,41 @@ pub(crate) fn build_candidates_with_home_and_rules(
     cursor: usize,
     home_dir: Option<&Path>,
 ) -> Vec<Candidate> {
+    build_candidates_with_home_and_rules_at_cwd(
+        commands, data, rules, buffer, cursor, home_dir, None,
+    )
+}
+
+/// Builds candidates against an injected current directory for hermetic tests.
+#[cfg(test)]
+pub(crate) fn build_candidates_with_home_and_cwd(
+    commands: &[CommandCompletion],
+    data: &CompletionData,
+    buffer: &str,
+    cursor: usize,
+    home_dir: Option<&Path>,
+    cwd: &Path,
+) -> Vec<Candidate> {
+    build_candidates_with_home_and_rules_at_cwd(
+        commands,
+        data,
+        &CompletionRules::default(),
+        buffer,
+        cursor,
+        home_dir,
+        Some(cwd),
+    )
+}
+
+fn build_candidates_with_home_and_rules_at_cwd(
+    commands: &[CommandCompletion],
+    data: &CompletionData,
+    rules: &CompletionRules,
+    buffer: &str,
+    cursor: usize,
+    home_dir: Option<&Path>,
+    working_dir: Option<&Path>,
+) -> Vec<Candidate> {
     if first_non_whitespace_starts_command(buffer) {
         let leading_len = buffer.len() - buffer.trim_start().len();
         let view = &buffer[leading_len..];
@@ -474,9 +509,11 @@ pub(crate) fn build_candidates_with_home_and_rules(
 
     match &rule.kind {
         CompletionRuleKind::Agents => build_agent_mention_candidates(data, &token, &rule.prefix),
-        CompletionRuleKind::Path => build_filesystem_candidates_with_home(&token, home_dir, false),
+        CompletionRuleKind::Path => {
+            build_filesystem_candidates_with_home(&token, home_dir, false, working_dir)
+        }
         CompletionRuleKind::PathFuzzy => {
-            build_filesystem_candidates_with_home(&token, home_dir, true)
+            build_filesystem_candidates_with_home(&token, home_dir, true, working_dir)
         }
         CompletionRuleKind::Actions => {
             build_action_token_candidates(commands, &data.dynamic_commands(), &token, &rule.prefix)
@@ -653,6 +690,7 @@ fn build_filesystem_candidates_with_home(
     path_token: &PathToken<'_>,
     home_dir: Option<&Path>,
     fuzzy_git_files: bool,
+    working_dir: Option<&Path>,
 ) -> Vec<Candidate> {
     let prefix = path_token.prefix;
     let Some(lookup_path) = home_expanded_path(prefix, home_dir) else {
@@ -688,7 +726,7 @@ fn build_filesystem_candidates_with_home(
     };
 
     if fuzzy_git_files && prefix.starts_with("./") && !partial.is_empty() {
-        let cwd = cwd();
+        let cwd = working_dir.map(Path::to_path_buf).unwrap_or_else(cwd);
         if let Some((repo_root, files)) = git_files::git_repo_files(&cwd) {
             let matches = git_files::fuzzy_match_git_files(partial, &files);
             if !matches.is_empty() {
@@ -713,6 +751,9 @@ fn build_filesystem_candidates_with_home(
         }
     }
 
+    let lookup_dir = working_dir
+        .filter(|_| lookup_dir.is_relative())
+        .map_or(lookup_dir.clone(), |cwd| cwd.join(lookup_dir));
     let Ok(entries) = std::fs::read_dir(lookup_dir) else {
         return Vec::new();
     };

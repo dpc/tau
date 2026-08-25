@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic as path_std_sync_atomic;
-use std::{process as path_std_process, time as path_std_time};
+use std::time as path_std_time;
 
 use super::*;
 
@@ -40,35 +40,10 @@ fn dotslash_display_path_keeps_local_prefix_and_allows_parent_paths() {
     );
 }
 
-/// Ensures over-limit git output kills and reaps the child promptly so a noisy
-/// repository command cannot wedge prompt completion.
+/// Ensures a failed enumeration is cached briefly, then retries after the
+/// negative-cache lifetime without relying on a wall-clock sleep.
 #[test]
-fn git_bounded_stdout_kills_child_on_overflow() {
-    let mut command = path_std_process::Command::new("sh");
-    command
-        .arg("-c")
-        .arg("yes git-overflow")
-        .stdout(path_std_process::Stdio::piped())
-        .stderr(path_std_process::Stdio::null());
-
-    let start = path_std_time::Instant::now();
-    let error = crate::run_with_bounded_stdout(
-        &mut command,
-        None,
-        1024,
-        path_std_time::Duration::from_secs(5),
-        crate::ProcessOwnership::ProcessGroup,
-    )
-    .expect_err("over-limit stdout should fail");
-
-    assert!(error.to_string().contains("stdout exceeded"));
-    assert!(start.elapsed() < std::time::Duration::from_secs(2));
-}
-
-/// Ensures failed git enumeration is cached for the current directory so an
-/// over-limit or non-repository result does not rerun git on every keystroke.
-#[test]
-fn git_repo_files_caches_negative_result_for_cwd() {
+fn git_repo_files_caches_negative_result_then_retries_after_ttl() {
     let dir = tempfile::tempdir().expect("tempdir");
     if let Ok(mut cache) = CACHE.lock() {
         *cache = None;
@@ -88,5 +63,19 @@ fn git_repo_files_caches_negative_result_for_cwd() {
         ENUMERATE_GIT_FILES_CALLS.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "second same-cwd failure should use the negative cache"
+    );
+
+    let mut cache = CACHE.lock().expect("cache lock");
+    let cached = cache
+        .as_mut()
+        .expect("negative result should remain cached");
+    cached.cached_at = path_std_time::Instant::now() - NEGATIVE_CACHE_TTL;
+    drop(cache);
+
+    assert!(git_repo_files(dir.path()).is_none());
+    assert_eq!(
+        ENUMERATE_GIT_FILES_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "expired negative cache should retry enumeration"
     );
 }

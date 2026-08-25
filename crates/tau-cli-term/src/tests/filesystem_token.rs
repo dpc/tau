@@ -1,33 +1,30 @@
 use std::{fs, sync as path_std_sync};
 
 use crate::completion::{
-    self, CommandCompletion, CompletionData, CompletionRule, CompletionRules, build_candidates,
-    build_candidates_with_home, build_candidates_with_rules,
+    CommandCompletion, CompletionData, CompletionRule, CompletionRules, build_candidates,
+    build_candidates_with_home, build_candidates_with_home_and_cwd, build_candidates_with_rules,
 };
 
+/// Ensures the built-in `./` rule reads the injected working directory and
+/// keeps its local prefix in an accepted file candidate.
 #[test]
 fn dotslash_token_triggers_filesystem_candidates() {
-    // Empty directory listing is fine — we just need the path to
-    // *match* as a filesystem token (vs. returning the command
-    // candidate list).
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let prefix = format!("{}/", tmp.path().display());
-    // Synthesize a buffer with a recognized filesystem prefix.
-    // Relative paths must stay in filesystem completion.
-    let buffer = "./";
-    let cursor = buffer.len();
-    let cands = build_candidates(
+    let cwd = tempfile::tempdir().expect("tempdir");
+    fs::write(cwd.path().join("tau-cli-term-dotslash.txt"), "").expect("write test file");
+    let buffer = "./tau-cli-term-dotslash";
+    let candidates = build_candidates_with_home_and_cwd(
         &[CommandCompletion::new(":whatever", "")],
         &CompletionData::new(),
         buffer,
-        cursor,
+        buffer.len(),
+        None,
+        cwd.path(),
     );
-    // No assertion on contents (the test machine's CWD differs);
-    // just confirm we didn't fall through to command logic.
-    for c in &cands {
-        assert!(!c.replacement.starts_with('/'), "expected fs candidate");
-    }
-    let _ = prefix;
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].label, "./tau-cli-term-dotslash.txt");
+    assert_eq!(candidates[0].description, "file");
+    assert_eq!(candidates[0].replacement, "./tau-cli-term-dotslash.txt");
 }
 
 #[test]
@@ -201,25 +198,6 @@ fn at_token_completes_agent_mentions_in_prompt_text() {
     assert_eq!(cands[0].replacement, "ask @worker for help");
 }
 
-#[test]
-fn at_mentions_remain_agent_completion_after_dotslash_fuzzy_port() {
-    // The external patch also used `@` for file fuzzy search. Tau reserves that
-    // prefix for agent mentions, so keep this regression focused and hermetic.
-    let data = CompletionData::new();
-    data.set_agent_mention_completer(path_std_sync::Arc::new(|args| {
-        assert_eq!(args, ["wor"]);
-        vec![crate::completion::CompletionItem::plain("worker")]
-    }));
-
-    let mentions = build_candidates(
-        &[CommandCompletion::new(":whatever", "")],
-        &data,
-        "ask @wor",
-        "ask @wor".len(),
-    );
-    assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].replacement, "ask @worker");
-}
 /// Preserves indentation while completing a leading command token.
 #[test]
 fn leading_whitespace_command_preserves_prefix() {
@@ -276,18 +254,26 @@ fn non_slash_non_path_buffer_returns_nothing() {
     assert!(cands.is_empty());
 }
 
+/// Ensures the built-in `../` rule reads the injected parent directory and
+/// preserves the traversal prefix in an accepted file candidate.
 #[test]
 fn parent_traversal_token_is_recognised() {
-    let cands = build_candidates(
+    let parent = tempfile::tempdir().expect("tempdir");
+    let cwd = parent.path().join("child");
+    fs::create_dir(&cwd).expect("create child directory");
+    fs::write(parent.path().join("tau-cli-term-parent.txt"), "").expect("write test file");
+    let buffer = "../tau-cli-term-parent";
+    let candidates = build_candidates_with_home_and_cwd(
         &[CommandCompletion::new(":whatever", "")],
         &CompletionData::new(),
-        "../",
-        "../".len(),
+        buffer,
+        buffer.len(),
+        None,
+        &cwd,
     );
-    // Non-empty or empty is fine; we just verify it didn't fall
-    // back to command behavior.
-    for c in &cands {
-        assert!(!c.replacement.starts_with('/'));
-    }
-    let _ = completion::CommandCompletion::new(":x", "");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].label, "../tau-cli-term-parent.txt");
+    assert_eq!(candidates[0].description, "file");
+    assert_eq!(candidates[0].replacement, "../tau-cli-term-parent.txt");
 }

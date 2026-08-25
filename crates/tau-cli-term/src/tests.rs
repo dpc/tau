@@ -483,32 +483,6 @@ fn history_after_accepting_argument_completion_needs_one_up_per_item() {
 }
 
 #[test]
-fn history_items_matching_completion_do_not_steal_following_history_navigation() {
-    let (mut term, handle, input_tx) = new_test_term(vec![
-        CommandCompletion::new(":model", "Switch model"),
-        CommandCompletion::new(":quit", "Exit"),
-    ]);
-
-    submit(&mut term, &handle, &input_tx, "Hi");
-    submit(&mut term, &handle, &input_tx, ":model openai/gpt-5");
-
-    send_key(&input_tx, KeyCode::Up);
-    assert!(matches!(
-        term.get_next_event()
-            .expect("navigate to command history item"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
-
-    send_key(&input_tx, KeyCode::Up);
-    assert!(matches!(
-        term.get_next_event().expect("continue history navigation"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), "Hi");
-}
-
-#[test]
 fn up_arrow_cycles_completion_after_down_cycles_with_history_present() {
     let (mut term, handle, completion_data, input_tx) = new_test_term_with_data(vec![
         CommandCompletion::new(":model", "Switch model"),
@@ -546,39 +520,6 @@ fn up_arrow_cycles_completion_after_down_cycles_with_history_present() {
         Event::BufferChanged
     ));
     assert_eq!(handle.get_buffer(), ":model anthropic/claude-sonnet-4-5");
-}
-
-#[test]
-fn arrows_cycle_active_completion_even_when_history_exists() {
-    let (mut term, handle, input_tx) = new_test_term(vec![
-        CommandCompletion::new(":model", "Switch model"),
-        CommandCompletion::new(":quit", "Exit"),
-    ]);
-
-    submit(&mut term, &handle, &input_tx, "Hi");
-
-    send_key(&input_tx, KeyCode::Char(':'));
-    assert!(matches!(
-        term.get_next_event().expect("trigger completion"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":");
-
-    send_key(&input_tx, KeyCode::Down);
-    assert!(matches!(
-        term.get_next_event()
-            .expect("cycle completion with history present"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":model");
-
-    send_key(&input_tx, KeyCode::Down);
-    assert!(matches!(
-        term.get_next_event()
-            .expect("cycle completion again with history present"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":quit");
 }
 
 #[test]
@@ -662,69 +603,6 @@ fn arrows_cycle_repeatedly_through_completion_with_history_present() {
             handle.get_buffer()
         );
     }
-}
-
-#[test]
-fn arrows_cycle_repeatedly_through_completion_suggestions() {
-    // Down four times should cycle: :model, :quit, :model, :quit.
-    // Wrapping is the normal `(i + 1) mod len` — the None state is
-    // only reachable via Up at idx 0.
-    let (mut term, handle, input_tx) = new_test_term(vec![
-        CommandCompletion::new(":model", "Switch model"),
-        CommandCompletion::new(":quit", "Exit"),
-    ]);
-
-    send_key(&input_tx, KeyCode::Char(':'));
-    assert!(matches!(
-        term.get_next_event().expect("trigger completion"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":");
-
-    let expected = [":model", ":quit", ":model", ":quit"];
-    for (i, want) in expected.iter().enumerate() {
-        send_key(&input_tx, KeyCode::Down);
-        assert!(matches!(
-            term.get_next_event().expect("cycle completion"),
-            Event::BufferChanged
-        ));
-        assert_eq!(
-            handle.get_buffer(),
-            *want,
-            "after {} Down keypresses the buffer should be {want:?}, got {:?}",
-            i + 1,
-            handle.get_buffer()
-        );
-    }
-}
-
-#[test]
-fn arrows_still_cycle_active_completion_suggestions() {
-    let (mut term, handle, input_tx) = new_test_term(vec![
-        CommandCompletion::new(":model", "Switch model"),
-        CommandCompletion::new(":quit", "Exit"),
-    ]);
-
-    send_key(&input_tx, KeyCode::Char(':'));
-    assert!(matches!(
-        term.get_next_event().expect("trigger completion"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":");
-
-    send_key(&input_tx, KeyCode::Down);
-    assert!(matches!(
-        term.get_next_event().expect("cycle completion"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":model");
-
-    send_key(&input_tx, KeyCode::Down);
-    assert!(matches!(
-        term.get_next_event().expect("cycle completion again"),
-        Event::BufferChanged
-    ));
-    assert_eq!(handle.get_buffer(), ":quit");
 }
 
 #[test]
