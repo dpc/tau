@@ -3581,8 +3581,9 @@ fn same_agent_edit_reenters_manual_lock_while_shell_auto_lock_is_active() {
     writer.flush().expect("flush");
 }
 
-/// The two shell registrations must advertise only their respective
-/// provider-facing directory spellings and keep timeout schema differences.
+/// The two shell registrations must advertise noninteractive command guidance,
+/// their respective provider-facing directory spellings, and timeout schema
+/// differences.
 #[test]
 fn startup_registers_surface_specific_shell_workdir_schemas() {
     // The model-visible schema must advertise the implemented working-directory
@@ -3603,6 +3604,9 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
         };
         if register.tool.name == SHELL_TOOL_NAME || register.tool.name == GPT_SHELL_TOOL_NAME {
             let description = register.tool.description.as_deref().expect("description");
+            assert!(description.contains(
+                "Stdin is closed and commands cannot receive interactive input. Stdout and stderr may be TTY-backed even though no controlling terminal exists. Use explicit noninteractive flags/messages; do not launch prompts, pagers, or editors."
+            ));
             if register.tool.name == SHELL_TOOL_NAME {
                 assert!(description.contains("structured command results"));
             }
