@@ -5,6 +5,15 @@ use super::*;
 const TOOL_VERIFICATION_ROOT: &str = "tau-tool-verification";
 const TEST_DIRECTORY_ENTRY_LIMIT: usize = 3;
 
+#[cfg(unix)]
+fn write_skill(path: &Path, name: &str) {
+    fs::write(
+        path,
+        format!("---\nname: {name}\ndescription: Fixture skill\n---\n"),
+    )
+    .expect("write skill");
+}
+
 fn repository_tool_verification_skills() -> Vec<Skill> {
     let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -46,25 +55,6 @@ fn parse_frontmatter_basic() {
 }
 
 #[test]
-fn parse_frontmatter_quoted_values() {
-    let content = "---\nname: \"my-skill\"\ndescription: 'A quoted description'\n---\nBody";
-    let (fm, body) = parse_frontmatter(content);
-    assert_eq!(fm.get("name").map(String::as_str), Some("my-skill"));
-    assert_eq!(
-        fm.get("description").map(String::as_str),
-        Some("A quoted description")
-    );
-    assert_eq!(body, "Body");
-}
-
-#[test]
-fn parse_frontmatter_boolean_field() {
-    let content = "---\nname: shown\ndescription: An advertised skill\nadvertise: true\n---\n";
-    let (fm, _body) = parse_frontmatter(content);
-    assert_eq!(fm.get("advertise").map(String::as_str), Some("true"));
-}
-
-#[test]
 fn parse_frontmatter_none_when_missing() {
     let content = "# No frontmatter\nJust body content.";
     let (fm, body) = parse_frontmatter(content);
@@ -89,16 +79,6 @@ fn parse_frontmatter_bom() {
 }
 
 #[test]
-fn parse_frontmatter_comments_and_blanks() {
-    let content = "---\n# comment\n\nname: foo\ndescription: bar\n---\n";
-    let (fm, _body) = parse_frontmatter(content);
-    assert_eq!(fm.get("name").map(String::as_str), Some("foo"));
-    assert_eq!(fm.get("description").map(String::as_str), Some("bar"));
-}
-
-// -- Skill loading from content -----------------------------------------
-
-#[test]
 fn load_skill_valid_defaults_to_not_advertised() {
     let content = "---\nname: my-skill\ndescription: Does useful things\n---\n# Instructions";
     let path = Path::new("/skills/my-skill/SKILL.md");
@@ -113,17 +93,8 @@ fn load_skill_valid_defaults_to_not_advertised() {
     assert!(diags.is_empty());
 }
 
-#[test]
-fn load_skill_advertise_true_opts_into_prompt() {
-    let content = "---\nname: shown\ndescription: visible\nadvertise: true\n---\nBody";
-    let path = Path::new("/skills/shown/SKILL.md");
-    let (skill, _diags) = load_skill_from_content(content, path);
-    let skill = skill.expect("should load");
-    assert!(skill.add_to_prompt);
-}
-
-/// Keeps the shared verification index in initial context without making every
-/// focused verification plan consume prompt space in every repository session.
+/// Ensures the repository verification index alone is advertised while every
+/// focused plan remains available to exact-name loading.
 #[test]
 fn repository_tool_verification_prompt_listing_only_advertises_root() {
     let skills = repository_tool_verification_skills();
@@ -175,22 +146,31 @@ fn repository_tool_verification_root_references_every_focused_skill() {
     assert_eq!(referenced_names, focused_names);
 }
 
+/// Ensures every YAML representation of a missing description is rejected by
+/// Tau's loader with the stable skip diagnostic, rather than relying on YAML's
+/// null and empty-scalar details.
 #[test]
-fn load_skill_missing_description() {
-    let content = "---\nname: no-desc\n---\n# Body";
-    let path = Path::new("/skills/no-desc/SKILL.md");
-    let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none());
-    assert!(diags.iter().any(|d| d.kind == DiagnosticKind::Skipped));
-}
-
-#[test]
-fn load_skill_empty_description() {
-    let content = "---\nname: empty\ndescription:\n---\nBody";
-    let path = Path::new("/skills/empty/SKILL.md");
-    let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none());
-    assert!(diags.iter().any(|d| d.kind == DiagnosticKind::Skipped));
+fn load_skill_missing_or_blank_descriptions_are_skipped() {
+    let path = Path::new("/skills/no-description/SKILL.md");
+    for (label, description) in [
+        ("omitted", ""),
+        ("yaml null", "description: null\n"),
+        ("empty quoted", "description: \"\"\n"),
+        ("whitespace", "description: \"   \"\n"),
+    ] {
+        let content = format!("---\nname: no-description\n{description}---\nBody");
+        let (skill, diagnostics) = load_skill_from_content(&content, path);
+        assert!(skill.is_none(), "{label} description must not load");
+        assert_eq!(
+            diagnostics,
+            [SkillDiagnostic {
+                path: path.to_owned(),
+                kind: DiagnosticKind::Skipped,
+                message: "description is required".to_owned(),
+            }],
+            "{label} description"
+        );
+    }
 }
 
 #[test]
@@ -210,15 +190,6 @@ fn load_skill_truncates_long_description() {
 }
 
 #[test]
-fn load_skill_advertise_false_or_missing_keeps_default() {
-    let content = "---\nname: hidden\ndescription: A hidden skill\nadvertise: false\n---\n";
-    let path = Path::new("/skills/hidden/SKILL.md");
-    let (skill, _diags) = load_skill_from_content(content, path);
-    let skill = skill.expect("should load");
-    assert!(!skill.add_to_prompt);
-}
-
-#[test]
 fn load_skill_name_fallback_to_parent_dir() {
     let content = "---\ndescription: Inferred name\n---\n";
     let path = Path::new("/skills/inferred-name/SKILL.md");
@@ -235,58 +206,75 @@ fn load_skill_name_mismatch_warning() {
     assert!(diags.iter().any(|d| d.message.contains("does not match")));
 }
 
+/// Exercises every loader validation branch so malformed frontmatter cannot
+/// become a discoverable skill while the maximum valid name remains accepted.
 #[test]
-fn load_skill_invalid_name_chars() {
-    let content = "---\nname: Bad_Name\ndescription: Invalid chars\n---\n";
-    let path = Path::new("/skills/Bad_Name/SKILL.md");
-    let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none(), "invalid name should skip the skill");
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("invalid characters"))
-    );
-}
-
-#[test]
-fn load_skill_hyphen_edges_are_skipped() {
-    let content = "---\nname: -bad-\ndescription: bad\n---\n";
-    let path = Path::new("/skills/-bad-/SKILL.md");
-    let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none());
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("hyphen"))
-    );
-}
-
-#[test]
-fn load_skill_consecutive_hyphens_are_skipped() {
-    let content = "---\nname: a--b\ndescription: bad\n---\n";
-    let path = Path::new("/skills/a--b/SKILL.md");
-    let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none());
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("consecutive"))
-    );
-}
-
-#[test]
-fn load_skill_empty_name_is_skipped() {
-    // No `name:` field and a parent file_name that won't yield one either
-    // (root path has no `file_name()`).
-    let content = "---\ndescription: nameless\n---\n";
+fn load_skill_name_validation_cases_are_skipped_or_accepted() {
     let path = Path::new("/");
-    let (skill, diags) = load_skill_from_content(content, path);
-    assert!(skill.is_none(), "empty name should skip the skill");
-    assert!(
-        diags
+    let too_long = "a".repeat(MAX_NAME_LENGTH + 1);
+    let boundary = "a".repeat(MAX_NAME_LENGTH);
+    for (name, expected_skip) in [
+        (
+            "",
+            Some("name is empty (no `name:` field and no usable parent directory name)"),
+        ),
+        (too_long.as_str(), Some("name exceeds 64 characters (65)")),
+        (
+            "Bad",
+            Some("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"),
+        ),
+        (
+            "bad_name",
+            Some("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"),
+        ),
+        ("-bad", Some("name must not start or end with a hyphen")),
+        ("bad-", Some("name must not start or end with a hyphen")),
+        ("a--b", Some("name must not contain consecutive hyphens")),
+        (boundary.as_str(), None),
+    ] {
+        let content = format!("---\nname: {name}\ndescription: Valid description\n---\n");
+        let (skill, diagnostics) = load_skill_from_content(&content, path);
+        assert_eq!(skill.is_none(), expected_skip.is_some(), "{name:?}");
+        let skipped = diagnostics
             .iter()
-            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("name is empty"))
-    );
+            .find(|diagnostic| diagnostic.kind == DiagnosticKind::Skipped);
+        assert_eq!(
+            skipped.map(|diagnostic| diagnostic.path.as_path()),
+            expected_skip.map(|_| path)
+        );
+        assert_eq!(
+            skipped.map(|diagnostic| diagnostic.message.as_str()),
+            expected_skip,
+            "{name:?}"
+        );
+    }
+}
+
+/// Keeps the public validation helpers aligned with all name-rule branches and
+/// their first-error messages, independently from loader fallback behavior.
+#[test]
+fn skill_name_validation_helpers_cover_each_rule() {
+    let too_long = "a".repeat(MAX_NAME_LENGTH + 1);
+    let boundary = "a".repeat(MAX_NAME_LENGTH);
+    for (name, expected) in [
+        ("", Some("name is empty")),
+        (too_long.as_str(), Some("name exceeds 64 characters (65)")),
+        (
+            "Bad",
+            Some("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"),
+        ),
+        (
+            "bad_name",
+            Some("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"),
+        ),
+        ("-bad", Some("name must not start or end with a hyphen")),
+        ("bad-", Some("name must not start or end with a hyphen")),
+        ("a--b", Some("name must not contain consecutive hyphens")),
+        (boundary.as_str(), None),
+    ] {
+        assert_eq!(skill_name_validation_message(name).as_deref(), expected);
+        assert_eq!(is_valid_skill_name(name), expected.is_none());
+    }
 }
 
 #[test]
@@ -312,31 +300,57 @@ fn load_skill_advertise_rejects_other_truthy_words() {
     assert!(!skill.expect("should load").add_to_prompt);
 }
 
+/// Keeps user invocation and model-visibility policy independent, including the
+/// forced user invocation required by a model-disabled skill.
 #[test]
-fn load_skill_user_invocation_metadata_defaults_and_explicit_values() {
-    let content = "---\nname: manual\ndescription: Manual skill\nuser-invocable: false\ndisable-model-invocation: true\nargument-hint: '[topic]'\n---\n";
+fn load_skill_user_invocation_policy_combinations() {
     let path = Path::new("/skills/manual/SKILL.md");
-    let (skill, diags) = load_skill_from_content(content, path);
-    let skill = skill.expect("should load");
-    assert!(skill.user_invocable);
-    assert!(skill.user_invocable_explicit);
-    assert!(skill.disable_model_invocation);
-    assert_eq!(skill.argument_hint.as_deref(), Some("[topic]"));
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.kind == DiagnosticKind::Warning
-                && d.message.contains("implies user-invocable"))
-    );
-
-    let defaults = "---\nname: defaults\ndescription: Default skill\n---\n";
-    let (skill, diags) = load_skill_from_content(defaults, Path::new("/skills/defaults/SKILL.md"));
-    let skill = skill.expect("should load");
-    assert!(skill.user_invocable);
-    assert!(!skill.user_invocable_explicit);
-    assert!(!skill.disable_model_invocation);
-    assert!(skill.argument_hint.is_none());
-    assert!(diags.is_empty());
+    for (label, fields, explicit, disabled, invocable, warns) in [
+        ("defaults", "", false, false, true, false),
+        (
+            "explicitly not user invocable",
+            "user-invocable: false\n",
+            true,
+            false,
+            false,
+            false,
+        ),
+        (
+            "model disabled",
+            "disable-model-invocation: true\n",
+            false,
+            true,
+            true,
+            false,
+        ),
+        (
+            "model disabled forces user invocation",
+            "user-invocable: false\ndisable-model-invocation: true\n",
+            true,
+            true,
+            true,
+            true,
+        ),
+    ] {
+        let content = format!("---\nname: manual\ndescription: Manual skill\n{fields}---\n");
+        let (skill, diagnostics) = load_skill_from_content(&content, path);
+        let skill = skill.expect(label);
+        assert_eq!(skill.user_invocable_explicit, explicit, "{label}");
+        assert_eq!(skill.disable_model_invocation, disabled, "{label}");
+        assert_eq!(skill.user_invocable, invocable, "{label}");
+        assert!(
+            !skill.add_to_prompt,
+            "model-disabled skills must not become advertised: {label}"
+        );
+        assert_eq!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.kind == DiagnosticKind::Warning
+                    && diagnostic.message.contains("implies user-invocable")
+            }),
+            warns,
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -356,31 +370,30 @@ fn load_skill_invalid_bool_warns_and_uses_defaults() {
     );
 }
 
+/// Ensures a byte-limited argument hint truncates at a character boundary and
+/// retains both the warning category and its owning skill path.
 #[test]
-fn load_skill_truncates_argument_hint() {
-    let hint = "x".repeat(MAX_ARGUMENT_HINT_LENGTH + 10);
+fn load_skill_truncates_multibyte_argument_hint() {
+    let hint = "é".repeat(MAX_ARGUMENT_HINT_LENGTH);
     let content = format!("---\nname: hint\ndescription: Hint skill\nargument-hint: {hint}\n---\n");
     let path = Path::new("/skills/hint/SKILL.md");
     let (skill, diags) = load_skill_from_content(&content, path);
     let skill = skill.expect("should load");
+    let hint = skill.argument_hint.expect("hint");
+    assert!(hint.len() <= MAX_ARGUMENT_HINT_LENGTH);
+    assert!(hint.is_char_boundary(hint.len()));
+    assert!(hint.ends_with('…'));
     assert_eq!(
-        skill.argument_hint.expect("hint").len(),
-        MAX_ARGUMENT_HINT_LENGTH
+        diags,
+        [SkillDiagnostic {
+            path: path.to_owned(),
+            kind: DiagnosticKind::Warning,
+            message: format!(
+                "argument-hint exceeds {MAX_ARGUMENT_HINT_LENGTH} bytes ({}); truncating",
+                "é".len() * MAX_ARGUMENT_HINT_LENGTH
+            ),
+        }]
     );
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.message.contains("argument-hint") && d.message.contains("truncating"))
-    );
-}
-
-#[test]
-fn parse_frontmatter_crlf() {
-    let content = "---\r\nname: crlf\r\ndescription: Has CRLF\r\n---\r\nBody line";
-    let (fm, body) = parse_frontmatter(content);
-    assert_eq!(fm.get("name").map(String::as_str), Some("crlf"));
-    assert_eq!(fm.get("description").map(String::as_str), Some("Has CRLF"));
-    assert_eq!(body, "Body line");
 }
 
 #[test]
@@ -481,17 +494,6 @@ fn root_md_without_name_uses_file_stem() {
 }
 
 #[test]
-fn skill_base_dir_matches_parent() {
-    let content = "---\nname: my-skill\ndescription: x\n---\n";
-    let path = Path::new("/skills/my-skill/SKILL.md");
-    let (skill, _) = load_skill_from_content(content, path);
-    let skill = skill.expect("should load");
-    assert_eq!(skill.base_dir(), Path::new("/skills/my-skill"));
-}
-
-// -- Directory scanning -------------------------------------------------
-
-#[test]
 fn discover_skill_md_in_subdir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let skill_dir = tmp.path().join("my-skill");
@@ -581,7 +583,9 @@ fn discover_does_not_recurse_past_skill_md() {
 
 #[test]
 fn discover_nonexistent_dir() {
-    let paths = discover_skill_paths(Path::new("/nonexistent/path"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("missing");
+    let paths = discover_skill_paths(&missing);
     assert!(paths.is_empty());
 }
 
@@ -709,13 +713,6 @@ fn load_from_dir_collision_newest_beats_path_sort() {
 }
 
 #[test]
-fn load_from_empty_dirs() {
-    let result = load_skills_from_dirs(&[]);
-    assert!(result.skills.is_empty());
-    assert!(result.diagnostics.is_empty());
-}
-
-#[test]
 fn load_from_dirs_reads_only_bounded_discovery_metadata_for_large_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let skill_dir = tmp.path().join("large-body");
@@ -731,6 +728,29 @@ fn load_from_dirs_reads_only_bounded_discovery_metadata_for_large_body() {
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
     assert_eq!(result.skills.len(), 1);
     assert_eq!(result.skills[0].name, "large-body");
+    assert!(result.diagnostics.is_empty());
+}
+
+/// Ensures a multibyte body character cut by the bounded discovery read cannot
+/// corrupt already-closed UTF-8 frontmatter or make metadata loading panic.
+#[test]
+fn load_from_dirs_accepts_utf8_body_crossing_discovery_cut() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = tmp.path().join("utf8-cut");
+    fs::create_dir_all(&skill_dir).expect("mkdir");
+    let frontmatter = "---\nname: utf8-cut\ndescription: café\n---\n";
+    let body_prefix = MAX_SKILL_DISCOVERY_BYTES - frontmatter.len() - 1;
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("{frontmatter}{}éignored", "x".repeat(body_prefix)),
+    )
+    .expect("write");
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name, "utf8-cut");
+    assert_eq!(result.skills[0].description, "café");
     assert!(result.diagnostics.is_empty());
 }
 
@@ -756,357 +776,131 @@ fn load_from_dirs_skips_oversized_unclosed_frontmatter() {
     }));
 }
 
-/// The self-knowledge overview is the sole default prompt entry, while its
-/// indexed onboarding guide remains available by exact name.
+const BUILT_IN_SKILL_NAMES: &[&str] = &[
+    "tau-self-knowledge",
+    "tau-self-knowledge-introduction",
+    "tau-self-knowledge-architecture",
+    "tau-self-knowledge-harness",
+    "tau-self-knowledge-config",
+    "tau-self-knowledge-secrets",
+    "tau-self-knowledge-isolation",
+    "tau-self-knowledge-cli-ui",
+    "tau-self-knowledge-email",
+    "tau-self-knowledge-ext-pim",
+    "tau-self-knowledge-ext-rostra",
+    "tau-self-knowledge-ext-provider-builtin",
+    "tau-self-knowledge-ext-rhai",
+    "tau-self-knowledge-ext-shell",
+    "tau-self-knowledge-ext-slack",
+    "tau-self-knowledge-ext-zulip",
+    "tau-self-knowledge-ext-swarm",
+    "tau-self-knowledge-ext-std-notifications",
+    "tau-self-knowledge-ext-test-dummy",
+    "tau-self-knowledge-ext-websearch",
+    "tau-self-knowledge-prompt-templating",
+    "tau-self-knowledge-source-code",
+    "tau-self-knowledge-community",
+    "tau-self-knowledge-debugging",
+    "tau-self-knowledge-tracing",
+    "tau-self-knowledge-e2e-testing",
+];
+
+/// Ensures every embedded Markdown source satisfies the ordinary loader's
+/// frontmatter contract before `built_in_skills` converts a skip into a panic.
 #[test]
-fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
-    let skills = built_in_skills();
-    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec![
-            "tau-self-knowledge",
-            "tau-self-knowledge-introduction",
-            "tau-self-knowledge-architecture",
-            "tau-self-knowledge-harness",
-            "tau-self-knowledge-config",
-            "tau-self-knowledge-secrets",
-            "tau-self-knowledge-isolation",
-            "tau-self-knowledge-cli-ui",
-            "tau-self-knowledge-email",
-            "tau-self-knowledge-ext-pim",
-            "tau-self-knowledge-ext-rostra",
-            "tau-self-knowledge-ext-provider-builtin",
-            "tau-self-knowledge-ext-rhai",
-            "tau-self-knowledge-ext-shell",
-            "tau-self-knowledge-ext-slack",
-            "tau-self-knowledge-ext-zulip",
-            "tau-self-knowledge-ext-swarm",
-            "tau-self-knowledge-ext-std-notifications",
-            "tau-self-knowledge-ext-test-dummy",
-            "tau-self-knowledge-ext-websearch",
-            "tau-self-knowledge-prompt-templating",
-            "tau-self-knowledge-source-code",
-            "tau-self-knowledge-community",
-            "tau-self-knowledge-debugging",
-            "tau-self-knowledge-tracing",
-            "tau-self-knowledge-e2e-testing",
-        ]
-    );
-    let advertised: Vec<&str> = skills
-        .iter()
-        .filter(|skill| skill.add_to_prompt)
-        .map(|skill| skill.name.as_str())
-        .collect();
-    assert_eq!(advertised, ["tau-self-knowledge"]);
-
-    let skill = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge")
-        .expect("built-in tau self-knowledge skill");
-    assert_eq!(
-        skill.description,
-        "Use this skill when the user asks about the Tau coding agent they are running in, including what Tau is, how it works, built-in self-knowledge, configuration, debugging, source code, community links, or where to find Tau-specific help."
-    );
-    assert!(skill.add_to_prompt);
-    assert!(skill.content.contains("# Tau self-knowledge"));
-    assert!(!skill.content.contains(SELF_KNOWLEDGE_VERSION_TOKEN));
-    assert!(
-        skill
-            .content
-            .contains(&format!("Tau version `{TAU_VERSION}`"))
-    );
-    assert!(skill.content.contains("tau-self-knowledge-architecture"));
-    assert!(skill.content.contains("tau-self-knowledge-introduction"));
-    assert!(skill.content.contains("tau-self-knowledge-harness"));
-    assert!(skill.content.contains("tau-self-knowledge-config"));
-    assert!(skill.content.contains("tau-self-knowledge-secrets"));
-    assert!(skill.content.contains("tau-self-knowledge-isolation"));
-    assert!(skill.content.contains("tau-self-knowledge-cli-ui"));
-    assert!(skill.content.contains("tau-self-knowledge-email"));
-    assert!(skill.content.contains("tau-self-knowledge-ext-pim"));
-    assert!(skill.content.contains("tau-self-knowledge-ext-rostra"));
-    assert!(
-        skill
-            .content
-            .contains("tau-self-knowledge-ext-provider-builtin")
-    );
-    assert!(skill.content.contains("tau-self-knowledge-ext-rhai"));
-    assert!(skill.content.contains("tau-self-knowledge-ext-shell"));
-    assert!(skill.content.contains("tau-self-knowledge-ext-slack"));
-    assert!(skill.content.contains("tau-self-knowledge-ext-swarm"));
-    assert!(
-        skill
-            .content
-            .contains("tau-self-knowledge-ext-std-notifications")
-    );
-    assert!(skill.content.contains("tau-self-knowledge-ext-test-dummy"));
-    assert!(skill.content.contains("tau-self-knowledge-ext-websearch"));
-    assert!(
-        skill
-            .content
-            .contains("tau-self-knowledge-prompt-templating")
-    );
-    assert!(skill.content.contains("tau-self-knowledge-source-code"));
-    assert!(skill.content.contains("tau-self-knowledge-community"));
-    assert!(skill.content.contains("tau-self-knowledge-debugging"));
-    assert!(skill.content.contains("tau-self-knowledge-tracing"));
-    assert!(skill.content.contains("tau-self-knowledge-e2e-testing"));
-
-    let slack = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-slack")
-        .expect("built-in Slack self-knowledge skill");
-    assert!(!slack.add_to_prompt);
-    assert!(slack.description.contains("Slack Socket Mode"));
-    assert!(slack.content.contains("Every setup needs"));
-    assert!(slack.content.contains("users:read"));
-    assert!(slack.content.contains("chat:write"));
-    assert!(slack.content.contains("message.channels"));
-    assert!(slack.content.contains("reactions:read"));
-    assert!(slack.content.contains("slack_register"));
-
-    let architecture = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-architecture")
-        .expect("built-in architecture skill");
-    assert!(!architecture.add_to_prompt);
-    assert!(architecture.content.contains("# Tau architecture overview"));
-
-    let introduction = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-introduction")
-        .expect("built-in introduction skill");
-    assert!(!introduction.add_to_prompt);
-    for required in [
-        "one selected topic",
-        "show_introduction_notice: false",
-        ":verbose-mode-toggle",
-        "Isolate sister project",
-        "not a hostile-code sandbox",
-        "https://tauofunix.zulipchat.com/",
-        "tau dev print-prompt --role ROLE",
-    ] {
+fn built_in_skill_sources_load_with_matching_frontmatter_names() {
+    for source in BUILT_IN_SKILL_SOURCES {
+        let content = render_built_in_skill_content(source.content);
+        let path = Path::new(source.diagnostic_path);
+        let (skill, diagnostics) = load_skill_from_content(&content, path);
         assert!(
-            introduction.content.contains(required),
-            "introduction skill missing {required:?}"
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.kind != DiagnosticKind::Skipped),
+            "{}: {diagnostics:?}",
+            source.diagnostic_path
+        );
+        let skill = skill.expect("embedded source must load");
+        assert_eq!(
+            parse_frontmatter(&content).0.get("name"),
+            Some(&skill.name),
+            "{}",
+            source.diagnostic_path
         );
     }
-
-    let harness = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-harness")
-        .expect("built-in harness skill");
-    assert!(!harness.add_to_prompt);
-    assert!(harness.content.contains("# Tau harness daemon"));
-    assert!(harness.content.contains("Socket activation"));
-
-    let config = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-config")
-        .expect("built-in config skill");
-    assert!(!config.add_to_prompt);
-    assert!(config.content.contains("tau provider add"));
-
-    let secrets = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-secrets")
-        .expect("built-in secret-handling self-knowledge skill");
-    assert!(!secrets.add_to_prompt);
-    assert!(secrets.content.contains("TAU_SECRET_<NAME>"));
-    assert!(secrets.content.contains("Secret RPC"));
-    assert!(secrets.content.contains("provider"));
-
-    let isolation = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-isolation")
-        .expect("built-in isolation self-knowledge skill");
-    assert!(!isolation.add_to_prompt);
-    assert!(isolation.content.contains("tau_state_access"));
-    assert!(isolation.content.contains("read_only"));
-    assert!(isolation.content.contains("defense in depth"));
-
-    let cli_ui = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-cli-ui")
-        .expect("built-in CLI UI skill");
-    assert!(!cli_ui.add_to_prompt);
-    assert!(cli_ui.content.contains("complete_with_command"));
-    assert!(cli_ui.content.contains("command/action completion"));
-
-    let prompt_templating = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-prompt-templating")
-        .expect("built-in prompt templating skill");
-    assert!(!prompt_templating.add_to_prompt);
-    assert!(prompt_templating.content.contains("prompt_fragments"));
-    assert!(prompt_templating.content.contains("starts_with"));
-
-    let email = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-email")
-        .expect("built-in email skill");
-    assert!(!email.add_to_prompt);
-    assert!(email.content.contains("std-email"));
-    assert!(email.content.contains("trusted_authserv_ids"));
-    assert!(email.content.contains("Authentication-Results"));
-
-    let pim = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-pim")
-        .expect("built-in pim extension skill");
-    assert!(!pim.add_to_prompt);
-    assert!(pim.content.contains("{pim_config}"));
-    assert!(pim.content.contains("Google Calendar authorization"));
-
-    let rostra = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-rostra")
-        .expect("built-in Rostra extension skill");
-    assert!(!rostra.add_to_prompt);
-    assert!(rostra.content.contains("std-rostra"));
-    for tool in [
-        "rostra_status",
-        "rostra_list_posts",
-        "rostra_read_post",
-        "rostra_get_profile",
-        "rostra_post",
-        "rostra_react",
-        "rostra_follow",
-        "rostra_unfollow",
-        "rostra_update_profile",
-        "rostra_vote",
-        "rostra_notifications",
-    ] {
-        assert!(
-            rostra.content.contains(tool),
-            "missing {tool} documentation"
-        );
-    }
-    for behavior in [
-        "post_rate_limit",
-        "relay-only Iroh",
-        "locally durable signed transaction",
-        "publication is asynchronous best effort",
-        "unknown\noutcome",
-        "`message.delivered` echo",
-        "retry_after_seconds",
-    ] {
-        assert!(
-            rostra.content.contains(behavior),
-            "missing {behavior} documentation"
-        );
-    }
-
-    let provider_builtin = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-provider-builtin")
-        .expect("built-in provider extension skill");
-    assert!(!provider_builtin.add_to_prompt);
-    assert!(provider_builtin.content.contains("tau provider add"));
-    assert!(provider_builtin.content.contains("ChatGPT/Codex"));
-
-    let rhai = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-rhai")
-        .expect("built-in rhai extension skill");
-    assert!(!rhai.add_to_prompt);
-    assert!(rhai.content.contains("std-rhai"));
-    assert!(rhai.content.contains("on_intercept"));
-
-    let shell = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-shell")
-        .expect("built-in shell extension skill");
-    assert!(!shell.add_to_prompt);
-    assert!(shell.content.contains("core-shell"));
-    assert!(shell.content.contains("dir_lock"));
-
-    let swarm = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-swarm")
-        .expect("built-in swarm extension skill");
-    assert!(!swarm.add_to_prompt);
-    assert!(swarm.content.contains("endpoint.peer_id"));
-    assert!(swarm.content.contains("process memory"));
-
-    let notifications = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-std-notifications")
-        .expect("built-in notifications extension skill");
-    assert!(!notifications.add_to_prompt);
-    assert!(notifications.content.contains("std-notifications"));
-    assert!(notifications.content.contains("agent_idle"));
-
-    let test_dummy = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-test-dummy")
-        .expect("built-in test dummy extension skill");
-    assert!(!test_dummy.add_to_prompt);
-    assert!(test_dummy.content.contains("restart_test_dummy"));
-
-    let websearch = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-ext-websearch")
-        .expect("built-in websearch extension skill");
-    assert!(!websearch.add_to_prompt);
-    assert!(websearch.content.contains("std-websearch"));
-    assert!(websearch.content.contains("Parallel.ai"));
-
-    let source_code = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-source-code")
-        .expect("built-in source code skill");
-    assert!(!source_code.add_to_prompt);
-    assert!(
-        source_code
-            .content
-            .contains("rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4")
-    );
-
-    let community = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-community")
-        .expect("built-in community skill");
-    assert!(!community.add_to_prompt);
-    assert!(
-        community
-            .content
-            .contains("https://tauofunix.zulipchat.com/")
-    );
-    assert!(community.content.contains("official and preferred"));
-    assert!(community.content.contains("GitHub Discussions"));
-
-    let debugging = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-debugging")
-        .expect("built-in debugging skill");
-    assert!(!debugging.add_to_prompt);
-    assert!(debugging.content.contains("## Important paths"));
-
-    let tracing = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-tracing")
-        .expect("built-in tracing skill");
-    assert!(!tracing.add_to_prompt);
-    assert!(tracing.content.contains("--format agent-tools-toon"));
-    assert!(tracing.content.contains("--format agent-performance-jsonl"));
-    assert!(tracing.content.contains("--format agent-tools-jsonl"));
-    assert!(tracing.content.contains("jq -c"));
-    assert!(tracing.content.contains("output_bytes"));
-
-    let e2e_testing = skills
-        .iter()
-        .find(|skill| skill.name == "tau-self-knowledge-e2e-testing")
-        .expect("built-in E2E testing skill");
-    assert!(!e2e_testing.add_to_prompt);
-    assert!(e2e_testing.content.contains("testing_providers"));
-    assert!(e2e_testing.content.contains("tau dev tmux"));
 }
 
-/// Ensures scoped skill directories still apply their configured default
-/// prompt visibility only when skill frontmatter omits an explicit advertise
-/// setting, preventing root-precedence metadata from changing prompt behavior.
+/// Pins the built-in loader's stable source order and complete name inventory.
+#[test]
+fn built_in_skills_have_expected_name_order_and_set() {
+    let skills = built_in_skills();
+    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+    assert_eq!(names, BUILT_IN_SKILL_NAMES);
+    assert_eq!(
+        names.into_iter().collect::<BTreeSet<_>>(),
+        BUILT_IN_SKILL_NAMES.iter().copied().collect()
+    );
+}
+
+/// Ensures only the overview is advertised while every focused built-in remains
+/// available for user invocation and model-side loading.
+#[test]
+fn built_in_skills_keep_expected_visibility() {
+    let skills = built_in_skills();
+    assert_eq!(
+        skills
+            .iter()
+            .filter(|skill| skill.add_to_prompt)
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tau-self-knowledge"]
+    );
+    assert!(
+        skills
+            .iter()
+            .all(|skill| { skill.user_invocable && !skill.disable_model_invocation })
+    );
+}
+
+/// Ensures the advertised overview indexes every and only focused built-in by
+/// exact name, preventing stale references and orphaned bundled sources.
+#[test]
+fn built_in_skill_root_indexes_exactly_the_focused_built_ins() {
+    let skills = built_in_skills();
+    let root = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge")
+        .expect("built-in root");
+    let focused_names: BTreeSet<&str> = skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .filter(|name| *name != root.name)
+        .collect();
+    let referenced_names: BTreeSet<&str> = root
+        .content
+        .split('`')
+        .filter(|token| token.starts_with("tau-self-knowledge-"))
+        .collect();
+    assert_eq!(referenced_names, focused_names);
+}
+
+/// Ensures embedded content resolves the package version token before callers
+/// receive it, rather than exposing an unreplaced build-time placeholder.
+#[test]
+fn built_in_skill_content_resolves_runtime_version() {
+    let root = built_in_skills()
+        .into_iter()
+        .find(|skill| skill.name == "tau-self-knowledge")
+        .expect("built-in root");
+    assert!(!root.content.contains(SELF_KNOWLEDGE_VERSION_TOKEN));
+    assert!(
+        root.content
+            .contains(&format!("Tau version `{TAU_VERSION}`"))
+    );
+}
+
+/// Ensures a root-level prompt default applies only when a skill omits
+/// `advertise:`, preserving explicit visibility choices.
 #[test]
 fn load_from_scoped_dirs_applies_prompt_default_when_advertise_is_omitted() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1171,25 +965,24 @@ fn discover_follows_symlinked_dirs() {
     let real = outside.path().join("real-skill");
     let nested = real.join("nested");
     fs::create_dir_all(&nested).expect("mkdir");
-    fs::write(
-        nested.join("SKILL.md"),
-        "---\nname: nested\ndescription: real skill\n---\n",
-    )
-    .expect("write");
+    write_skill(&nested.join("SKILL.md"), "nested");
 
     let link = tmp.path().join("link");
     symlink(&real, &link).expect("symlink");
 
     let paths = discover_skill_paths(tmp.path());
-    assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with("link/nested/SKILL.md"));
+    assert_eq!(paths, [link.join("nested/SKILL.md")]);
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
-    assert_eq!(result.skills.len(), 1);
-    assert_eq!(result.skills[0].name, "nested");
-    assert!(!result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
-    }));
+    assert_eq!(
+        result
+            .skills
+            .iter()
+            .map(|skill| &skill.name)
+            .collect::<Vec<_>>(),
+        ["nested"]
+    );
+    assert!(result.diagnostics.is_empty());
 }
 
 /// Ensures direct symlinked Markdown files at a skill root are discovered and
@@ -1201,23 +994,23 @@ fn discover_follows_symlinked_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("outside tempdir");
     let target = outside.path().join("external.md");
-    fs::write(
-        &target,
-        "---\nname: external\ndescription: External skill\n---\n",
-    )
-    .expect("write");
-    symlink(&target, tmp.path().join("external.md")).expect("symlink");
+    write_skill(&target, "external");
+    let link = tmp.path().join("external.md");
+    symlink(&target, &link).expect("symlink");
 
     let paths = discover_skill_paths(tmp.path());
-    assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with("external.md"));
+    assert_eq!(paths, [link]);
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
-    assert_eq!(result.skills.len(), 1);
-    assert_eq!(result.skills[0].name, "external");
-    assert!(!result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
-    }));
+    assert_eq!(
+        result
+            .skills
+            .iter()
+            .map(|skill| &skill.name)
+            .collect::<Vec<_>>(),
+        ["external"]
+    );
+    assert!(result.diagnostics.is_empty());
 }
 
 /// Ensures a directory-level `SKILL.md` may be a symlink and still causes that
@@ -1229,28 +1022,26 @@ fn discover_follows_symlinked_skill_md() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("outside tempdir");
     let target = outside.path().join("SKILL.md");
-    fs::write(
-        &target,
-        "---\nname: linked\ndescription: Linked skill\n---\n",
-    )
-    .expect("write");
+    write_skill(&target, "linked");
     let skill_dir = tmp.path().join("linked");
     fs::create_dir_all(&skill_dir).expect("mkdir");
     symlink(&target, skill_dir.join("SKILL.md")).expect("symlink");
     fs::create_dir_all(skill_dir.join("nested")).expect("mkdir nested");
-    fs::write(
-        skill_dir.join("nested").join("SKILL.md"),
-        "---\nname: nested\ndescription: Nested skill\n---\n",
-    )
-    .expect("write nested");
+    write_skill(&skill_dir.join("nested").join("SKILL.md"), "nested");
 
     let paths = discover_skill_paths(tmp.path());
-    assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with("linked/SKILL.md"));
+    assert_eq!(paths, [skill_dir.join("SKILL.md")]);
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
-    assert_eq!(result.skills.len(), 1);
-    assert_eq!(result.skills[0].name, "linked");
+    assert_eq!(
+        result
+            .skills
+            .iter()
+            .map(|skill| &skill.name)
+            .collect::<Vec<_>>(),
+        ["linked"]
+    );
+    assert!(result.diagnostics.is_empty());
 }
 
 /// Ensures a configured skill root may itself be a symlink, matching common
@@ -1264,20 +1055,20 @@ fn load_from_dirs_follows_symlinked_root() {
     let real = outside.path().join("skills");
     let skill_dir = real.join("outside-skill");
     fs::create_dir_all(&skill_dir).expect("mkdir");
-    fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: outside-skill\ndescription: Outside skill\n---\n",
-    )
-    .expect("write");
+    write_skill(&skill_dir.join("SKILL.md"), "outside-skill");
     let link = tmp.path().join("skills");
     symlink(&real, &link).expect("symlink");
 
     let result = load_skills_from_dirs(&[link]);
-    assert_eq!(result.skills.len(), 1);
-    assert_eq!(result.skills[0].name, "outside-skill");
-    assert!(!result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
-    }));
+    assert_eq!(
+        result
+            .skills
+            .iter()
+            .map(|skill| &skill.name)
+            .collect::<Vec<_>>(),
+        ["outside-skill"]
+    );
+    assert!(result.diagnostics.is_empty());
 }
 
 fn create_entry_budget_overflow_fixture(dir: &Path) {
@@ -1294,9 +1085,12 @@ fn load_from_dirs_diagnoses_overlarge_skill_root() {
     let tmp = tempfile::tempdir().expect("tempdir");
     create_entry_budget_overflow_fixture(tmp.path());
 
-    let result = load_skills_from_dirs_with_entry_limit(
+    let result = load_skills_from_dirs_with_test_limits(
         &[tmp.path().to_owned()],
-        TEST_DIRECTORY_ENTRY_LIMIT,
+        DiscoveryLimits {
+            entries_per_dir: TEST_DIRECTORY_ENTRY_LIMIT,
+            ..DEFAULT_DISCOVERY_LIMITS
+        },
     );
     assert!(result.skills.is_empty());
     assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -1317,9 +1111,12 @@ fn load_from_dirs_diagnoses_overlarge_symlinked_directory() {
     create_entry_budget_overflow_fixture(outside.path());
     symlink(outside.path(), tmp.path().join("link")).expect("symlink");
 
-    let result = load_skills_from_dirs_with_entry_limit(
+    let result = load_skills_from_dirs_with_test_limits(
         &[tmp.path().to_owned()],
-        TEST_DIRECTORY_ENTRY_LIMIT,
+        DiscoveryLimits {
+            entries_per_dir: TEST_DIRECTORY_ENTRY_LIMIT,
+            ..DEFAULT_DISCOVERY_LIMITS
+        },
     );
     assert!(result.skills.is_empty());
     assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -1327,6 +1124,92 @@ fn load_from_dirs_diagnoses_overlarge_symlinked_directory() {
             && diagnostic.path.ends_with("link")
             && diagnostic.message.contains("entry budget exceeded")
     }));
+}
+
+/// Ensures a per-root directory budget stops traversal at the first unvisited
+/// sibling, so later directories cannot bypass the aggregate limit.
+#[test]
+fn discovery_directory_budget_stops_the_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for name in ["a-first", "b-over-budget", "c-not-visited"] {
+        let dir = tmp.path().join(name);
+        fs::create_dir(&dir).expect("mkdir");
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture\n---\n"),
+        )
+        .expect("write skill");
+    }
+    let limits = DiscoveryLimits {
+        dirs_per_root: 2,
+        ..DEFAULT_DISCOVERY_LIMITS
+    };
+
+    let (paths, diagnostics) = discover_skill_paths_with_test_limits(tmp.path(), limits);
+
+    assert_eq!(paths, [tmp.path().join("a-first/SKILL.md")]);
+    assert_eq!(
+        diagnostics,
+        [SkillDiagnostic {
+            path: tmp.path().join("b-over-budget"),
+            kind: DiagnosticKind::Warning,
+            message: "stopping skill discovery: directory budget exceeded (max 2 per root)"
+                .to_owned(),
+        }]
+    );
+}
+
+/// Ensures a per-root entry budget stops before traversing any accepted child,
+/// unlike a per-directory overflow that only skips the offending subtree.
+#[test]
+fn discovery_entry_budget_stops_root_but_directory_overflow_allows_siblings() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let over_budget = tmp.path().join("a-over-budget");
+    let accepted = tmp.path().join("b-accepted");
+    fs::create_dir(&over_budget).expect("mkdir over-budget");
+    fs::create_dir(&accepted).expect("mkdir accepted");
+    create_entry_budget_overflow_fixture(&over_budget);
+    fs::write(
+        accepted.join("SKILL.md"),
+        "---\nname: b-accepted\ndescription: Accepted sibling\n---\n",
+    )
+    .expect("write accepted");
+
+    let (paths, diagnostics) = discover_skill_paths_with_test_limits(
+        tmp.path(),
+        DiscoveryLimits {
+            entries_per_dir: TEST_DIRECTORY_ENTRY_LIMIT,
+            ..DEFAULT_DISCOVERY_LIMITS
+        },
+    );
+    assert_eq!(paths, [accepted.join("SKILL.md")]);
+    assert_eq!(
+        diagnostics,
+        [SkillDiagnostic {
+            path: over_budget.clone(),
+            kind: DiagnosticKind::Warning,
+            message: format!(
+                "skipping skill directory: entry budget exceeded (max {TEST_DIRECTORY_ENTRY_LIMIT} per directory)"
+            ),
+        }]
+    );
+
+    let (paths, diagnostics) = discover_skill_paths_with_test_limits(
+        tmp.path(),
+        DiscoveryLimits {
+            entries_per_root: 1,
+            ..DEFAULT_DISCOVERY_LIMITS
+        },
+    );
+    assert!(paths.is_empty());
+    assert_eq!(
+        diagnostics,
+        [SkillDiagnostic {
+            path: tmp.path().to_owned(),
+            kind: DiagnosticKind::Warning,
+            message: "stopping skill discovery: entry budget exceeded (max 1 per root)".to_owned(),
+        }]
+    );
 }
 
 /// Ensures deeply nested skill trees are bounded so accidental or malicious
@@ -1381,37 +1264,12 @@ fn truncate_description_is_utf8_safe_and_marks_truncation() {
     assert!(truncated.ends_with('…'));
 }
 
-#[test]
-fn skill_name_validation_helpers_report_first_error() {
-    assert!(is_valid_skill_name("valid-skill-1"));
-    assert_eq!(
-        skill_name_validation_message("").as_deref(),
-        Some("name is empty")
-    );
-    assert!(
-        skill_name_validation_message("Bad_Name")
-            .expect("invalid name")
-            .contains("invalid characters")
-    );
-    assert!(
-        skill_name_validation_message("-bad")
-            .expect("invalid name")
-            .contains("hyphen")
-    );
-}
-
 // -- strip_frontmatter --------------------------------------------------
 
 #[test]
 fn strip_frontmatter_returns_body() {
     let content = "---\nname: x\n---\nThe body.";
     assert_eq!(strip_frontmatter(content), "The body.");
-}
-
-#[test]
-fn strip_frontmatter_no_frontmatter() {
-    let content = "Just content.";
-    assert_eq!(strip_frontmatter(content), "Just content.");
 }
 
 #[test]

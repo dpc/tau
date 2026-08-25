@@ -734,6 +734,26 @@ const MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT: usize = 8192;
 /// Maximum recursive directory depth below a skill root.
 const MAX_SKILL_DISCOVERY_DEPTH: usize = 32;
 
+/// Private traversal limits used by the production walker and focused tests.
+#[derive(Clone, Copy)]
+struct DiscoveryLimits {
+    /// Maximum directories visited below one discovery root.
+    dirs_per_root: usize,
+    /// Maximum entries inspected in each directory.
+    entries_per_dir: usize,
+    /// Maximum entries inspected below one discovery root.
+    entries_per_root: usize,
+    /// Maximum recursive depth below the discovery root.
+    depth: usize,
+}
+
+const DEFAULT_DISCOVERY_LIMITS: DiscoveryLimits = DiscoveryLimits {
+    dirs_per_root: MAX_SKILL_DISCOVERY_DIRS_PER_ROOT,
+    entries_per_dir: MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR,
+    entries_per_root: MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT,
+    depth: MAX_SKILL_DISCOVERY_DEPTH,
+};
+
 /// Mutable traversal state for one skill discovery root.
 struct DiscoveryState {
     /// Canonical directory paths already visited, used to avoid symlink cycles.
@@ -790,16 +810,24 @@ pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 fn discover_skill_paths_with_diagnostics(root: &Path) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
-    discover_skill_paths_with_entry_limit(root, MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR)
+    discover_skill_paths_with_limits(root, DEFAULT_DISCOVERY_LIMITS)
 }
 
-fn discover_skill_paths_with_entry_limit(
+#[cfg(test)]
+fn discover_skill_paths_with_test_limits(
     root: &Path,
-    entry_limit: usize,
+    limits: DiscoveryLimits,
+) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
+    discover_skill_paths_with_limits(root, limits)
+}
+
+fn discover_skill_paths_with_limits(
+    root: &Path,
+    limits: DiscoveryLimits,
 ) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
     let mut paths = Vec::new();
     let mut state = DiscoveryState::new();
-    discover_skill_paths_inner(root, true, 0, entry_limit, &mut paths, &mut state);
+    discover_skill_paths_inner(root, true, 0, limits, &mut paths, &mut state);
     (paths, state.diagnostics)
 }
 
@@ -807,7 +835,7 @@ fn discover_skill_paths_inner(
     dir: &Path,
     is_root: bool,
     depth: usize,
-    entry_limit: usize,
+    limits: DiscoveryLimits,
     out: &mut Vec<PathBuf>,
     state: &mut DiscoveryState,
 ) {
@@ -815,11 +843,12 @@ fn discover_skill_paths_inner(
         return;
     }
 
-    if MAX_SKILL_DISCOVERY_DEPTH < depth {
+    if limits.depth < depth {
         state.push_warning(
             dir,
             format!(
-                "skipping skill directory: discovery depth budget exceeded (max {MAX_SKILL_DISCOVERY_DEPTH})"
+                "skipping skill directory: discovery depth budget exceeded (max {})",
+                limits.depth
             ),
         );
         return;
@@ -831,11 +860,12 @@ fn discover_skill_paths_inner(
         return;
     }
 
-    if state.visited_dir_count >= MAX_SKILL_DISCOVERY_DIRS_PER_ROOT {
+    if state.visited_dir_count >= limits.dirs_per_root {
         state.push_warning(
             dir,
             format!(
-                "stopping skill discovery: directory budget exceeded (max {MAX_SKILL_DISCOVERY_DIRS_PER_ROOT} per root)"
+                "stopping skill discovery: directory budget exceeded (max {} per root)",
+                limits.dirs_per_root
             ),
         );
         state.stop_root = true;
@@ -850,20 +880,22 @@ fn discover_skill_paths_inner(
 
     let mut children = Vec::new();
     for entry in entries.flatten() {
-        if children.len() >= entry_limit {
+        if children.len() >= limits.entries_per_dir {
             state.push_warning(
                 dir,
                 format!(
-                    "skipping skill directory: entry budget exceeded (max {entry_limit} per directory)"
+                    "skipping skill directory: entry budget exceeded (max {} per directory)",
+                    limits.entries_per_dir
                 ),
             );
             return;
         }
-        if state.inspected_entry_count >= MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT {
+        if state.inspected_entry_count >= limits.entries_per_root {
             state.push_warning(
                 dir,
                 format!(
-                    "stopping skill discovery: entry budget exceeded (max {MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT} per root)"
+                    "stopping skill discovery: entry budget exceeded (max {} per root)",
+                    limits.entries_per_root
                 ),
             );
             state.stop_root = true;
@@ -909,7 +941,7 @@ fn discover_skill_paths_inner(
         };
 
         if metadata.is_dir() {
-            discover_skill_paths_inner(&path, false, depth + 1, entry_limit, out, state);
+            discover_skill_paths_inner(&path, false, depth + 1, limits, out, state);
         } else if metadata.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
@@ -1010,12 +1042,20 @@ fn read_skill_discovery_content(path: &Path) -> Result<String, SkillDiagnostic> 
 /// diagnostic. Output skills are sorted by name so successive runs see the same
 /// order.
 pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
-    load_skills_from_dirs_with_entry_limit(dirs, MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR)
+    load_skills_from_dirs_with_limits(dirs, DEFAULT_DISCOVERY_LIMITS)
 }
 
-fn load_skills_from_dirs_with_entry_limit(
+#[cfg(test)]
+fn load_skills_from_dirs_with_test_limits(
     dirs: &[PathBuf],
-    entry_limit: usize,
+    limits: DiscoveryLimits,
+) -> LoadSkillsResult {
+    load_skills_from_dirs_with_limits(dirs, limits)
+}
+
+fn load_skills_from_dirs_with_limits(
+    dirs: &[PathBuf],
+    limits: DiscoveryLimits,
 ) -> LoadSkillsResult {
     let dirs = dirs
         .iter()
@@ -1026,7 +1066,7 @@ fn load_skills_from_dirs_with_entry_limit(
             source_precedence: None,
         })
         .collect::<Vec<_>>();
-    load_skills_from_skill_dirs_with_entry_limit(&dirs, entry_limit)
+    load_skills_from_skill_dirs_with_limits(&dirs, limits)
 }
 
 /// Load skills from scoped directories, deduplicating by name.
@@ -1036,19 +1076,18 @@ fn load_skills_from_dirs_with_entry_limit(
 /// current repository. When both colliding roots provide explicit source
 /// precedence, lower precedence wins before modified time is considered.
 pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
-    load_skills_from_skill_dirs_with_entry_limit(dirs, MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR)
+    load_skills_from_skill_dirs_with_limits(dirs, DEFAULT_DISCOVERY_LIMITS)
 }
 
-fn load_skills_from_skill_dirs_with_entry_limit(
+fn load_skills_from_skill_dirs_with_limits(
     dirs: &[SkillDir],
-    entry_limit: usize,
+    limits: DiscoveryLimits,
 ) -> LoadSkillsResult {
     let mut skills_by_name: BTreeMap<String, SelectedSkill> = BTreeMap::new();
     let mut all_diagnostics = Vec::new();
 
     for dir in dirs {
-        let (paths, discovery_diagnostics) =
-            discover_skill_paths_with_entry_limit(&dir.path, entry_limit);
+        let (paths, discovery_diagnostics) = discover_skill_paths_with_limits(&dir.path, limits);
         all_diagnostics.extend(discovery_diagnostics);
         for path in paths {
             let content = match read_skill_discovery_content(&path) {
