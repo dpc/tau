@@ -18,6 +18,21 @@ fn read_lines(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Reproduces the former generic input projection for regression comparisons.
+fn legacy_debug_harness_input_json(message: &HarnessInputMessage) -> serde_json::Value {
+    let mut redacted = message.clone();
+    redact_harness_input_message_binary_content(&mut redacted);
+    serde_json::to_value(redacted).unwrap_or_default()
+}
+
+/// Applies the established string compaction before comparing complete JSON
+/// rows.
+fn compacted_json_bytes(value: serde_json::Value) -> Vec<u8> {
+    let mut value = value;
+    compact_debug_json_strings(&mut value);
+    serde_json::to_vec(&value).expect("serialize compacted debug JSON")
+}
+
 /// Append timing must report exact content-free EOF boundaries so slow-write
 /// diagnostics can distinguish file position from current-line size.
 #[test]
@@ -464,6 +479,63 @@ fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
     assert!(raw.contains("\"arguments\":\"<redacted>\""));
 }
 
+/// Ordinary submitted prompts retain the former byte-exact debug JSON while the
+/// projection borrows the original message instead of cloning its prompt text.
+#[test]
+fn submitted_prompt_debug_projection_borrows_and_matches_legacy_json() {
+    let text = format!("prefix-{}-suffix", "prompt-body-".repeat(1_000));
+    let message =
+        HarnessInputMessage::emit(Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            session_id: SessionId::parse("s1").expect("session id"),
+            text,
+            literal: true,
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            message_class: Default::default(),
+            originator: PromptOriginator::User,
+            ctx_id: Some("ctx-1".to_owned()),
+        }));
+
+    let projection = debug_harness_input_projection(&message);
+    let DebugHarnessInputProjection::Borrowed(borrowed) = projection else {
+        panic!("ordinary prompt must not require an owned redaction copy");
+    };
+    assert!(
+        std::ptr::eq(borrowed, &message),
+        "borrowed projection must retain the inbound message identity"
+    );
+
+    let legacy = legacy_debug_harness_input_json(&message);
+    let current = debug_harness_input_json(&message);
+    assert_eq!(
+        serde_json::to_vec(&current).expect("serialize current JSON"),
+        serde_json::to_vec(&legacy).expect("serialize legacy JSON")
+    );
+    assert_eq!(
+        compacted_json_bytes(current),
+        compacted_json_bytes(legacy),
+        "bounded debug output must remain byte-exact"
+    );
+}
+
+/// A large malformed-config diagnostic remains borrowed and receives the same
+/// bounded debug JSON compaction as the previous clone-and-redact path.
+#[test]
+fn large_malformed_config_error_debug_projection_matches_legacy_json() {
+    let message = HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+        message: format!("invalid config: \0{}: unexpected token", "x".repeat(1_024)),
+    });
+
+    assert!(matches!(
+        debug_harness_input_projection(&message),
+        DebugHarnessInputProjection::Borrowed(_)
+    ));
+    assert_eq!(
+        compacted_json_bytes(debug_harness_input_json(&message)),
+        compacted_json_bytes(legacy_debug_harness_input_json(&message)),
+        "malformed diagnostic projection changed"
+    );
+}
+
 #[test]
 fn compact_debug_string_keeps_short_strings() {
     assert_eq!(compact_debug_string(&"x".repeat(100)), "x".repeat(100));
@@ -656,7 +728,7 @@ fn tool_result_report_image_bytes_are_redacted_before_debug_json() {
 /// nesting a replacement event outside `HarnessInputMessage::Emit`.
 #[test]
 fn intercept_reply_nested_event_redacts_provider_image_bytes() {
-    let mut message = HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
+    let message = HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
         action: tau_proto::InterceptAction::Pass(Some(Box::new(Event::ProviderToolResult(
             tau_proto::ToolResult {
                 presentation: Default::default(),
@@ -680,6 +752,17 @@ fn intercept_reply_nested_event_redacts_provider_image_bytes() {
         )))),
     });
 
+    assert!(matches!(
+        debug_harness_input_projection(&message),
+        DebugHarnessInputProjection::Redacted(_)
+    ));
+    assert_eq!(
+        compacted_json_bytes(debug_harness_input_json(&message)),
+        compacted_json_bytes(legacy_debug_harness_input_json(&message)),
+        "redacted binary input changed its bounded JSON projection"
+    );
+
+    let mut message = message;
     redact_harness_input_message_binary_content(&mut message);
     let HarnessInputMessage::InterceptReply(reply) = message else {
         panic!("intercept reply");
@@ -848,7 +931,7 @@ fn provider_debug_captures_are_not_logged() {
 /// bytes into debug JSONL.
 #[test]
 fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
-    let mut event = Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+    let event = Event::ProviderResponseFinishedReported(ProviderResponseFinished {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -890,6 +973,18 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
         ws_pool_delta: None,
     });
 
+    let message = HarnessInputMessage::emit(event.clone());
+    assert!(matches!(
+        debug_harness_input_projection(&message),
+        DebugHarnessInputProjection::Redacted(_)
+    ));
+    assert_eq!(
+        compacted_json_bytes(debug_harness_input_json(&message)),
+        compacted_json_bytes(legacy_debug_harness_input_json(&message)),
+        "provider terminal image redaction changed its bounded JSON projection"
+    );
+
+    let mut event = event;
     redact_event_binary_content(&mut event);
     let Event::ProviderResponseFinishedReported(finished) = event else {
         unreachable!("report variant")
@@ -899,4 +994,55 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
     };
     let tau_proto::ToolResultContentPart::Image(image) = &result.provider_content[0];
     assert!(image.data.is_empty());
+}
+
+/// A compacted replacement window with an image still takes the owned redaction
+/// path and retains the former byte-exact bounded debug projection.
+#[test]
+fn compacted_window_image_debug_projection_matches_legacy_json() {
+    let message = HarnessInputMessage::emit(Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
+        compact_prompt_id: None,
+        model: None,
+        operation: None,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
+        replacement_window: vec![tau_proto::ContextItem::ToolResult(
+            tau_proto::ToolResultItem {
+                presentation: Default::default(),
+                call_id: "call-image".into(),
+                tool_type: tau_proto::ToolType::Function,
+                status: tau_proto::ToolResultStatus::Success,
+                output: tau_proto::ToolResponse::from_cbor(&CborValue::Null),
+                provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                    tau_proto::ImageContent {
+                        media_type: tau_proto::ImageMediaType::Png,
+                        data: b"compacted-window-image-sentinel".to_vec().into(),
+                        width: 1,
+                        height: 1,
+                        detail: tau_proto::ImageDetail::High,
+                    },
+                )],
+            },
+        )],
+    }));
+
+    assert!(matches!(
+        debug_harness_input_projection(&message),
+        DebugHarnessInputProjection::Redacted(_)
+    ));
+    let json = debug_harness_input_json(&message);
+    assert_eq!(
+        compacted_json_bytes(json.clone()),
+        compacted_json_bytes(legacy_debug_harness_input_json(&message)),
+        "compacted-window image redaction changed its bounded JSON projection"
+    );
+    assert_eq!(
+        json["payload"]["event"]["payload"]["replacement_window"][0]["payload"]["provider_content"]
+            [0]["content"]["data"],
+        serde_json::json!([])
+    );
 }

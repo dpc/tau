@@ -632,13 +632,13 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
             else {
                 unreachable!();
             };
-            serde_json::json!({
+            return serde_json::json!({
                 "message": "emit",
                 "payload": {
                     "event": provider_retry_debug_projection(emit.event.name(), updated),
                     "persist": emit.persist,
                 },
-            })
+            });
         }
         tau_proto::HarnessInputMessage::Emit(emit)
             if matches!(emit.event.as_ref(), Event::AgentPromptCreated(_)) =>
@@ -646,13 +646,13 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
             let Event::AgentPromptCreated(prompt) = emit.event.as_ref() else {
                 unreachable!();
             };
-            serde_json::json!({
+            return serde_json::json!({
                 "message": "emit",
                 "payload": {
                     "event": prompt_created_debug_summary(prompt),
                     "persist": emit.persist,
                 },
-            })
+            });
         }
         tau_proto::HarnessInputMessage::InterceptReply(reply) => {
             if let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action
@@ -687,16 +687,98 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
                     },
                 });
             }
-            let mut redacted = message.clone();
-            redact_harness_input_message_binary_content(&mut redacted);
-            serde_json::to_value(redacted).unwrap_or_default()
         }
-        _ => {
-            let mut redacted = message.clone();
-            redact_harness_input_message_binary_content(&mut redacted);
-            serde_json::to_value(redacted).unwrap_or_default()
+        _ => {}
+    }
+
+    debug_harness_input_projection(message).into_json()
+}
+
+/// The borrowed or binary-redacted input selected for debug JSON serialization.
+enum DebugHarnessInputProjection<'message> {
+    /// The original input, which has no image bytes requiring redaction.
+    Borrowed(&'message tau_proto::HarnessInputMessage),
+    /// A copy whose image bytes have been cleared before serialization.
+    Redacted(tau_proto::HarnessInputMessage),
+}
+
+impl DebugHarnessInputProjection<'_> {
+    /// Converts this selected projection into the established debug JSON shape.
+    fn into_json(self) -> serde_json::Value {
+        match self {
+            Self::Borrowed(message) => serde_json::to_value(message).unwrap_or_default(),
+            Self::Redacted(message) => serde_json::to_value(message).unwrap_or_default(),
         }
     }
+}
+
+/// Selects borrowed serialization unless binary redaction needs an owned copy.
+fn debug_harness_input_projection(
+    message: &tau_proto::HarnessInputMessage,
+) -> DebugHarnessInputProjection<'_> {
+    if harness_input_message_has_binary_content(message) {
+        let mut redacted = message.clone();
+        redact_harness_input_message_binary_content(&mut redacted);
+        DebugHarnessInputProjection::Redacted(redacted)
+    } else {
+        DebugHarnessInputProjection::Borrowed(message)
+    }
+}
+
+/// Reports whether input serialization must clear nonempty provider image
+/// bytes.
+fn harness_input_message_has_binary_content(message: &tau_proto::HarnessInputMessage) -> bool {
+    match message {
+        tau_proto::HarnessInputMessage::Emit(emit) => event_has_binary_content(emit.event.as_ref()),
+        tau_proto::HarnessInputMessage::InterceptReply(reply) => {
+            let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action else {
+                return false;
+            };
+            event_has_binary_content(event)
+        }
+        _ => false,
+    }
+}
+
+/// Reports whether an event has image bytes that the debug projection must
+/// clear.
+fn event_has_binary_content(event: &Event) -> bool {
+    match event {
+        Event::ToolResultReported(result)
+        | Event::ToolResult(result)
+        | Event::ProviderToolResult(result) => tool_result_has_binary_content(result),
+        Event::AgentCompacted(compacted) => {
+            context_items_have_binary_content(&compacted.replacement_window)
+        }
+        Event::ProviderResponseFinishedReported(finished)
+        | Event::ProviderResponseFinished(finished) => {
+            context_items_have_binary_content(&finished.output_items)
+        }
+        _ => false,
+    }
+}
+
+/// Reports whether one tool result contains provider image bytes.
+fn tool_result_has_binary_content(result: &tau_proto::ToolResult) -> bool {
+    provider_content_has_binary_content(&result.provider_content)
+}
+
+/// Reports whether provider content includes nonempty image bytes.
+fn provider_content_has_binary_content(parts: &[tau_proto::ToolResultContentPart]) -> bool {
+    parts.iter().any(|part| {
+        let tau_proto::ToolResultContentPart::Image(image) = part;
+        !image.data.is_empty()
+    })
+}
+
+/// Reports whether one context-item slice contains provider image bytes.
+fn context_items_have_binary_content(items: &[tau_proto::ContextItem]) -> bool {
+    items.iter().any(|item| {
+        let tau_proto::ContextItem::ToolResult(result) = item else {
+            return false;
+        };
+        provider_content_has_binary_content(&result.provider_content)
+    })
 }
 
 fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessInputMessage) {
