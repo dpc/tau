@@ -81,8 +81,9 @@ direct entry, a configured named secret, or keyless mode where supported.
 Named-secret values are materialized only into the instance's canonical Secret
 record. Selecting an existing configured name remains eager: setup refuses an
 unavailable source before writing settings. The picker also offers `Enter
-another secret name…`, or prompts for a name directly when no declarations
-exist. This explicit forward reference writes credential-free settings but no
+secret name for deferred binding…`, or opens that prompt directly when no
+declarations exist. This distinct deferred mode accepts any valid source name,
+including an existing declaration, and writes credential-free settings but no
 Secret record, so a declaratively managed profile can exist disabled until the
 exact declaration and value are deployed and Tau is restarted. Restart
 re-imports the current source and disables the profile with a redacted,
@@ -125,9 +126,10 @@ Tau never infers this capability from Qwen or other model names.
 
 For API-key profiles, setup asks for the authority first: `Enter API key now`,
 `Use named secret`, or `No API key` where the profile kind supports keyless
-operation. Existing configured names remain eager; `Enter another secret
-name…` creates an explicit deferred binding. Only direct entry opens the masked
-value prompt.
+operation. Existing configured names remain eager; `Enter secret
+name for deferred binding…` creates an explicit deferred binding for any valid
+source name, including an existing declaration. Only direct entry opens the
+masked value prompt.
 
 Settings contain either a stable opaque Secret-scope credential identity with a
 closed credential-slot kind or,

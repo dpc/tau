@@ -288,7 +288,7 @@ fn named_plan() -> ProviderSetupPlan {
 
 fn deferred_named_plan() -> ProviderSetupPlan {
     ProviderSetupPlan {
-        settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","identity":"0123456789abcdef0123456789abcdef","source":{"kind":"named_secret","name":"future_key"}}}"#.to_vec(),
+        settings: br#"{"kind":"chat_completions","credential":{"kind":"api_key","identity":"0123456789abcdef0123456789abcdef","source":{"kind":"named_secret","name":"configured_key"}}}"#.to_vec(),
         credential: CredentialSetup::DeferredNamed {
             path: tau_proto::ExtensionDataPath::new(
                 "providers/0123456789abcdef0123456789abcdef/api-key.json".to_owned(),
@@ -298,10 +298,10 @@ fn deferred_named_plan() -> ProviderSetupPlan {
     }
 }
 
-/// Proves state, config, and stdout forward-reference publication never writes
-/// a placeholder Secret record while preserving the exact portable settings.
+/// Proves an explicit deferred binding leaves a same-named available source
+/// unmaterialized and writes no Secret record for any SetupStore target.
 #[test]
-fn deferred_named_setup_never_writes_secret_state() {
+fn deferred_named_setup_never_materializes_or_writes_secret_state() {
     for target in [
         ProfileTarget::State,
         ProfileTarget::Config,
@@ -310,8 +310,15 @@ fn deferred_named_setup_never_writes_secret_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = SetupStore::open_in(temp.path());
         let plan = deferred_named_plan();
+        let source = temp.path().join("secrets/configured_key.yaml");
+        std::fs::create_dir_all(source.parent().expect("source root")).expect("source root");
+        std::fs::write(&source, "available-deferred-source").expect("available deferred source");
 
         store.apply_to(&plan, target).expect("deferred setup");
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("unmodified source"),
+            "available-deferred-source"
+        );
 
         assert!(
             !temp

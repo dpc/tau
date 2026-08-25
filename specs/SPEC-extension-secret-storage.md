@@ -113,10 +113,12 @@ writes config and never imports a profile. Memory-only startup locks that
 directory only when it already exists and otherwise performs a non-transactional
 read-only config snapshot without creating host state. Stored-credential setup
 resolves an existing selected declaration while holding the instance lock,
-writes the complete typed secret, and writes settings last as activation. An
-explicit forward reference instead writes settings without a Secret record; it
-remains disabled until persistent startup sees the exact authorized declaration
-and value. Keyless setup writes settings without opening Secret scope. Removal deletes settings first as deactivation, then removes
+writes the complete typed secret, and writes settings last as activation. A
+separate explicit deferred binding instead accepts any valid source name,
+including an existing declaration, and writes settings without a Secret record;
+it remains disabled until persistent startup sees the exact authorized
+declaration and value. Keyless setup writes settings without opening Secret
+scope. Removal deletes settings first as deactivation, then removes
 closed credential slots. Startup takes the same locks in the same order: under
 the instance lock it captures one bounded disjoint-union generation, resolves every
 valid named binding from the one-shot source snapshot, and under one Secret lock

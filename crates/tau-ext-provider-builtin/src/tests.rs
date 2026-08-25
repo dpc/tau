@@ -657,7 +657,7 @@ fn keyless_setup_requires_no_secret_publication() {
     assert_eq!(settings["credential"], serde_json::json!({"kind": "none"}));
 }
 
-/// Proves an explicit future source emits a closed typed reference but never
+/// Proves an explicit deferred source emits a closed typed reference but never
 /// constructs a placeholder credential publication plan.
 #[test]
 fn deferred_named_setup_writes_only_credential_free_binding() {
@@ -682,7 +682,7 @@ fn deferred_named_setup_writes_only_credential_free_binding() {
     .expect("deferred setup payload");
 
     let setup_store::CredentialSetup::DeferredNamed { path } = payload.credential else {
-        panic!("future source must not publish a credential");
+        panic!("deferred source must not publish a credential");
     };
     assert!(path.as_str().ends_with("/api-key.json"));
     let settings: serde_json::Value = serde_json::from_slice(&payload.settings).expect("settings");
@@ -692,22 +692,17 @@ fn deferred_named_setup_writes_only_credential_free_binding() {
     );
 }
 
-/// Proves future names use the shared grammar and cannot bypass eager
-/// configured-source resolution by retyping an existing declaration.
+/// Proves an explicit deferred binding accepts an exact configured name while
+/// retaining the shared source-name grammar.
 #[test]
-fn deferred_named_setup_validates_name_and_configured_collision() {
-    let configured = vec![(
-        "configured_key".to_owned(),
-        tau_config::settings::ExtensionSecretEntry { optional: false },
-    )];
-
-    assert!(validate_deferred_secret_name("Future.Key-1", &configured).is_ok());
-    assert!(validate_deferred_secret_name("../bad", &configured).is_err());
-    assert!(validate_deferred_secret_name("configured_key", &configured).is_err());
-    assert!(validate_deferred_secret_name("CONFIGURED_KEY", &configured).is_ok());
+fn deferred_named_setup_accepts_configured_name_but_rejects_invalid_name() {
+    assert!(validate_deferred_secret_name("Future.Key-1").is_ok());
+    assert!(validate_deferred_secret_name("configured_key").is_ok());
+    assert!(validate_deferred_secret_name("CONFIGURED_KEY").is_ok());
+    assert!(validate_deferred_secret_name("../bad").is_err());
 }
 
-/// Proves stdout status distinguishes a portable future binding from both a
+/// Proves stdout status distinguishes a portable deferred binding from both a
 /// host-local credential publication and explicit keyless operation.
 #[test]
 fn deferred_dotfiles_output_reports_no_host_secret_write() {

@@ -804,13 +804,15 @@ leave the existing Secret records in place.
 `responses`, or `openrouter`; without `KIND` it presents those same choices in
 a picker. API-key profiles explicitly select direct masked entry, a named
 secret, or (only for keyless/local-compatible backends) no key. Existing
-configured names resolve eagerly. The name picker also offers `Enter another
-secret name…`; this explicit forward-reference path writes the credential-free
-profile without a Secret record. This supports deploying the declaration and
-value later through Nix. The profile stays disabled until a persistent restart
-sees the exact authorized declaration and value and materializes the canonical
-typed record. An unavailable existing selection still fails setup rather than
-silently becoming a forward reference. A later unavailable restart invalidates
+configured names resolve eagerly. The named-secret picker separately offers
+`Enter secret name for deferred binding…`; this intentional deferred path accepts
+any valid source name, including an existing declaration, and writes the
+credential-free profile without a Secret record. This supports deploying the
+declaration and value later through Nix. The profile stays disabled until a
+persistent restart sees the exact authorized declaration and value and
+materializes the canonical typed record. An unavailable ordinary existing
+selection still fails setup rather than silently becoming deferred. A later
+unavailable restart invalidates
 its old materialization, omits the profile, and publishes a source-name-only
 warning. A bound declaration is
 consumed for materialization and is not copied into `Configure.secrets`.
@@ -873,9 +875,11 @@ Responses profiles require a base URL, explicit models, and a `transport` value
 spelled `sse` or `websocket`; omitted values from older profiles mean `sse`.
 For API-key profiles, the wizard first selects `Enter API key now`, `Use named
 secret`, or `No API key` where keyless operation is supported. Existing
-declarations appear before `Enter another secret name…`; with none configured,
-Tau prompts for the future name directly. Only direct entry opens the masked
-value prompt. It asks for transport after the endpoint, API-key authority, and models. It
+declarations appear before `Enter secret name for deferred binding…`; selecting
+that separate choice accepts any valid name, including one already declared.
+With none configured, Tau opens that explicit deferred-name prompt directly.
+Only direct entry opens the masked value prompt. It asks for transport after the
+endpoint, API-key authority, and models. It
 preselects WebSocket only for the exact official
 `https://api.openai.com/v1` base URL and otherwise preselects SSE. Tau does not
 infer endpoint support at runtime or discover models. Every turn sends the complete typed

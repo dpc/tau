@@ -1749,9 +1749,10 @@ enum ApiKeySource {
         /// Declaration captured from the targeted extension configuration.
         declaration: tau_config::settings::ExtensionSecretEntry,
     },
-    /// The profile explicitly forward-references a source not yet declared.
+    /// The profile explicitly defers binding this source until persistent
+    /// startup.
     DeferredNamed {
-        /// Exact future source name serialized into provider settings.
+        /// Exact source name serialized into provider settings.
         name: String,
     },
 }
@@ -1797,22 +1798,22 @@ fn prompt_api_key(
             Password::new().with_prompt("API key").interact()?,
         ))),
         "Use named secret" => {
-            const ENTER_ANOTHER: &str = "Enter another secret name…";
+            const ENTER_DEFERRED: &str = "Enter secret name for deferred binding…";
             if named_secrets.is_empty() {
-                return prompt_deferred_secret_name(&named_secrets);
+                return prompt_deferred_secret_name();
             }
             let mut names = named_secrets
                 .iter()
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
-            names.push(ENTER_ANOTHER.to_owned());
+            names.push(ENTER_DEFERRED.to_owned());
             let index = Select::new()
                 .with_prompt("Configured named secret")
                 .items(&names)
                 .default(0)
                 .interact()?;
             if index == named_secrets.len() {
-                prompt_deferred_secret_name(&named_secrets)
+                prompt_deferred_secret_name()
             } else {
                 let (name, declaration) = named_secrets[index].clone();
                 Ok(ApiKeySource::ConfiguredNamed { name, declaration })
@@ -1823,28 +1824,19 @@ fn prompt_api_key(
     }
 }
 
-/// Prompt for one valid, not-currently-declared forward-reference source name.
-fn prompt_deferred_secret_name(
-    configured: &[(String, tau_config::settings::ExtensionSecretEntry)],
-) -> Result<ApiKeySource, Box<dyn Error>> {
+/// Prompt for one valid source name to bind only at persistent startup.
+fn prompt_deferred_secret_name() -> Result<ApiKeySource, Box<dyn Error>> {
     let name = Input::<String>::new()
-        .with_prompt("New named secret")
-        .validate_with(|name: &String| validate_deferred_secret_name(name, configured))
+        .with_prompt("Secret name for deferred binding")
+        .validate_with(|name: &String| validate_deferred_secret_name(name))
         .interact_text()?;
     Ok(ApiKeySource::DeferredNamed { name })
 }
 
-/// Validate a future source name without letting the explicit deferred path
-/// bypass eager resolution of an already configured declaration.
-fn validate_deferred_secret_name(
-    name: &str,
-    configured: &[(String, tau_config::settings::ExtensionSecretEntry)],
-) -> Result<(), String> {
+/// Validate the opaque source name retained by an explicit deferred binding.
+fn validate_deferred_secret_name(name: &str) -> Result<(), String> {
     tau_config::secret_sources::validate_secret_name(name)
         .map_err(|_| "use letters, digits, '.', '_', or '-' (but not '.' or '..')".to_owned())?;
-    if configured.iter().any(|(configured, _)| configured == name) {
-        return Err("that secret is already configured; select it from the list".to_owned());
-    }
     Ok(())
 }
 
@@ -1946,7 +1938,7 @@ fn write_dotfiles_profile(
 enum CredentialPublication {
     /// Setup published a complete host-local typed record.
     Published,
-    /// Setup wrote only a future named-source binding.
+    /// Setup wrote only an explicitly deferred named-source binding.
     Deferred,
     /// The profile explicitly needs no credential.
     Keyless,
