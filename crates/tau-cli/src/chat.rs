@@ -1148,11 +1148,6 @@ pub(crate) fn run_chat(
     let home_dir = dirs::home_dir();
     let right_prompt =
         crate::theme::right_prompt_context(&theme, &cwd, home_dir.as_deref(), session_id.as_str());
-    let cursor_shape = if settings.bar_cursor {
-        tau_cli_term::CursorShape::Bar
-    } else {
-        tau_cli_term::CursorShape::Block
-    };
     let completions = settings
         .completions
         .iter()
@@ -1177,14 +1172,15 @@ pub(crate) fn run_chat(
             Vec::new()
         }
     };
+    let terminal_options = terminal_options_from_settings(&settings);
     let (mut term, handle, completion_data) = HighTerm::new_with_completion_rules(
         prompt,
         commands,
         theme.clone(),
-        cursor_shape,
         bindings,
         input_history,
         completion_rules,
+        terminal_options,
     )?;
     *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
     if remote_disconnected.load(Ordering::Acquire) {
@@ -1498,6 +1494,20 @@ pub(crate) fn run_chat(
     match foreground_ownership_error {
         Some(message) => Err(CliError::ForegroundOwnershipUnconfirmed(message)),
         None => Ok(()),
+    }
+}
+
+/// Translates static CLI settings into the immutable raw-terminal policy.
+pub(crate) fn terminal_options_from_settings(
+    settings: &path_tau_config_settings::CliSettings,
+) -> tau_cli_term::TerminalOptions {
+    tau_cli_term::TerminalOptions {
+        cursor_shape: if settings.bar_cursor {
+            tau_cli_term::CursorShape::Bar
+        } else {
+            tau_cli_term::CursorShape::Block
+        },
+        mouse: settings.mouse,
     }
 }
 

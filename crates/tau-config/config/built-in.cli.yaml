@@ -1,6 +1,7 @@
 greeting: true
 show_logo: true
 bar_cursor: true
+mouse: true
 send_prompt_draft_content: false
 prompt_symbol: "◯"
 submitted_prompt_symbol: "⬤"

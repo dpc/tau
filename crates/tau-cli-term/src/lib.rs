@@ -34,7 +34,7 @@ pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
     Align, BlockId, Cell, Color, CursorShape, OutputSnapshot, PriorityLine, PriorityLineAlignment,
     PriorityLinePriority, PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TermHandle,
-    TwoLineElision, sanitize_hyperlink_target,
+    TerminalOptions, TwoLineElision, sanitize_hyperlink_target,
 };
 use tau_cli_term_raw::{Candidate, Event as RawEvent};
 use tau_term_screen::{display_width, truncate_to_width};
@@ -288,17 +288,17 @@ impl HighTerm {
         left_prompt: impl Into<StyledText>,
         commands: Vec<CommandCompletion>,
         theme: Theme,
-        cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
+        terminal_options: TerminalOptions,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
         Self::new_with_completion_rules(
             left_prompt,
             commands,
             theme,
-            cursor_shape,
             bindings,
             std::iter::empty(),
             CompletionRules::default(),
+            terminal_options,
         )
     }
 
@@ -307,18 +307,18 @@ impl HighTerm {
         left_prompt: impl Into<StyledText>,
         commands: Vec<CommandCompletion>,
         theme: Theme,
-        cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
         input_history: impl IntoIterator<Item = String>,
+        terminal_options: TerminalOptions,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
         Self::new_with_completion_rules(
             left_prompt,
             commands,
             theme,
-            cursor_shape,
             bindings,
             input_history,
             CompletionRules::default(),
+            terminal_options,
         )
     }
 
@@ -327,13 +327,13 @@ impl HighTerm {
         left_prompt: impl Into<StyledText>,
         commands: Vec<CommandCompletion>,
         theme: Theme,
-        cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
         input_history: impl IntoIterator<Item = String>,
         completion_rules: CompletionRules,
+        terminal_options: TerminalOptions,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
         let input_history: Vec<String> = input_history.into_iter().collect();
-        let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
+        let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, terminal_options)?;
         term.seed_input_history(input_history.clone());
         term.set_bindings(bindings);
         let handle_clone = handle.clone();

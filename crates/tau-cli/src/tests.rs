@@ -30,7 +30,7 @@ use super::chat::{
     invalidate_pending_draft, is_known_static_command, leading_command_token,
     next_agent_cycle_selection, queue_prompt_draft_snapshot, redacted_command_echo_line,
     redacted_prompt_history_line, retarget_prompt_draft_snapshot, role_cycling_enabled,
-    should_send_draft_snapshot,
+    should_send_draft_snapshot, terminal_options_from_settings,
 };
 use super::cli::{Command as CliCommand, DevCommand};
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
@@ -93,6 +93,22 @@ fn harness_settings_validation_is_limited_to_config_consumers() {
             command: path_super_cli::DevCommand::PrintSystemPrompt,
         })
     ));
+}
+
+/// Static CLI mouse configuration must reach the terminal layer unchanged so
+/// the raw terminal can select its ownership-safe capture behavior once.
+#[test]
+fn static_mouse_setting_propagates_to_terminal_options() {
+    let mut settings = path_tau_config_settings::CliSettings::built_in();
+    settings.mouse = false;
+
+    assert_eq!(
+        terminal_options_from_settings(&settings),
+        tau_cli_term::TerminalOptions {
+            cursor_shape: tau_cli_term::CursorShape::Bar,
+            mouse: false,
+        }
+    );
 }
 
 /// Dynamic action IDs use the bounded ASCII short-ID producer shape accepted by

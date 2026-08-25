@@ -57,8 +57,9 @@ fn admit_stall_warning() -> bool {
 
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
 use crossterm::event::{
-    self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
@@ -131,6 +132,28 @@ impl CursorShape {
         match self {
             Self::Bar => path_crossterm_cursor::SetCursorStyle::SteadyBar,
             Self::Block => path_crossterm_cursor::SetCursorStyle::SteadyBlock,
+        }
+    }
+}
+
+/// Immutable terminal behavior selected before Tau acquires the terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalOptions {
+    /// Cursor shape Tau uses while it owns raw terminal input.
+    pub cursor_shape: CursorShape,
+    /// Whether mouse activity remains enabled for the CLI UI.
+    ///
+    /// When false, the raw terminal layer captures and discards mouse events
+    /// while Tau owns the terminal. This prevents terminals from translating
+    /// wheel input into prompt-history navigation.
+    pub mouse: bool,
+}
+
+impl Default for TerminalOptions {
+    fn default() -> Self {
+        Self {
+            cursor_shape: CursorShape::Bar,
+            mouse: true,
         }
     }
 }
@@ -1750,7 +1773,8 @@ pub struct Term {
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
     owns_raw_mode: bool,
-    cursor_shape: CursorShape,
+    /// Immutable terminal behavior selected before raw mode was acquired.
+    terminal_options: TerminalOptions,
     /// Plugged in by callers that want completion. When `None`, the
     /// completion menu never opens; Tab/Esc are no-ops.
     completion_source: Option<Box<dyn CompletionSource>>,
@@ -1768,7 +1792,7 @@ impl std::ops::Deref for Term {
 impl Term {
     /// Creates a new terminal prompt.
     ///
-    /// Enters raw mode and spawns the redraw thread.
+    /// Enters raw mode with `terminal_options` and spawns the redraw thread.
     /// Returns the prompt engine and a cloneable [`TermHandle`].
     ///
     /// # Errors
@@ -1778,7 +1802,7 @@ impl Term {
     /// disabled on a best-effort basis before returning the error.
     pub fn new(
         left_prompt: impl Into<StyledText>,
-        cursor_shape: CursorShape,
+        terminal_options: TerminalOptions,
     ) -> io::Result<(Self, TermHandle)> {
         let (width, height) = term_size();
         let state = Arc::new(Mutex::new(SharedState::new(
@@ -1804,7 +1828,11 @@ impl Term {
         // `Ctrl+Enter` that vanilla terminals collapse into a bare
         // `\r`. Terminals that don't implement the protocol silently
         // ignore the escape and we keep the legacy behavior.
-        if let Err(error) = write_external_resume_features(&mut io::stdout(), cursor_shape) {
+        if let Err(error) = initialize_terminal_features(
+            &mut io::stdout(),
+            terminal_options.cursor_shape,
+            terminal_options,
+        ) {
             let _ = terminal::disable_raw_mode();
             return Err(error);
         }
@@ -1833,7 +1861,7 @@ impl Term {
                 input_rx,
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
-                cursor_shape,
+                terminal_options,
                 completion_source: None,
                 bindings: HashMap::new(),
             },
@@ -1897,7 +1925,10 @@ impl Term {
             input_rx,
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
-            cursor_shape,
+            terminal_options: TerminalOptions {
+                cursor_shape,
+                ..TerminalOptions::default()
+            },
             completion_source: None,
             bindings: HashMap::new(),
         };
@@ -2151,7 +2182,7 @@ impl Term {
         }
         self.pause_for_external_with_release(|| {
             let mut stdout = io::stdout();
-            write_external_pause_features(&mut stdout)?;
+            write_external_pause_features(&mut stdout, self.terminal_options)?;
             terminal::disable_raw_mode()?;
             crossterm::execute!(
                 io::stdout(),
@@ -2202,7 +2233,11 @@ impl Term {
         let result = (|| -> io::Result<()> {
             terminal::enable_raw_mode()?;
             let mut stdout = io::stdout();
-            write_external_resume_features(&mut stdout, self.cursor_shape)?;
+            write_external_resume_features(
+                &mut stdout,
+                self.terminal_options.cursor_shape,
+                self.terminal_options,
+            )?;
             crossterm::execute!(
                 io::stdout(),
                 crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -2937,7 +2972,13 @@ fn read_real_raw_event(
     }
 }
 
-fn write_external_pause_features(writer: &mut impl Write) -> io::Result<()> {
+fn write_external_pause_features(
+    writer: &mut impl Write,
+    terminal_options: TerminalOptions,
+) -> io::Result<()> {
+    if !terminal_options.mouse {
+        crossterm::execute!(writer, DisableMouseCapture)?;
+    }
     crossterm::execute!(
         writer,
         PopKeyboardEnhancementFlags,
@@ -2950,7 +2991,11 @@ fn write_external_pause_features(writer: &mut impl Write) -> io::Result<()> {
 fn write_external_resume_features(
     writer: &mut impl Write,
     cursor_shape: CursorShape,
+    terminal_options: TerminalOptions,
 ) -> io::Result<()> {
+    if !terminal_options.mouse {
+        crossterm::execute!(writer, EnableMouseCapture)?;
+    }
     crossterm::execute!(
         writer,
         crossterm::event::EnableBracketedPaste,
@@ -2958,6 +3003,21 @@ fn write_external_resume_features(
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         cursor_shape.crossterm_style()
     )
+}
+
+fn initialize_terminal_features(
+    writer: &mut impl Write,
+    cursor_shape: CursorShape,
+    terminal_options: TerminalOptions,
+) -> io::Result<()> {
+    if let Err(error) = write_external_resume_features(writer, cursor_shape, terminal_options) {
+        // A failed write may have reached the terminal after enabling mouse
+        // capture. While Tau still owns this terminal, best-effort cleanup
+        // prevents that partial acquisition from leaking to the caller.
+        let _ = write_external_pause_features(writer, terminal_options);
+        return Err(error);
+    }
+    Ok(())
 }
 
 impl Drop for Term {
@@ -2968,7 +3028,7 @@ impl Drop for Term {
             // pop the keyboard-protocol push, and return cursor shape to the
             // user's configured default so shells and other programs don't
             // inherit Tau's prompt cursor.
-            let _ = write_drop_terminal_cleanup(&mut io::stdout());
+            let _ = write_drop_terminal_cleanup(&mut io::stdout(), self.terminal_options);
             let _ = terminal::disable_raw_mode();
         }
     }
@@ -2980,14 +3040,11 @@ impl Term {
     }
 }
 
-fn write_drop_terminal_cleanup(writer: &mut impl Write) -> io::Result<()> {
-    crossterm::execute!(
-        writer,
-        PopKeyboardEnhancementFlags,
-        crossterm::event::DisableFocusChange,
-        crossterm::event::DisableBracketedPaste,
-        SetCursorStyle::DefaultUserShape,
-    )
+fn write_drop_terminal_cleanup(
+    writer: &mut impl Write,
+    terminal_options: TerminalOptions,
+) -> io::Result<()> {
+    write_external_pause_features(writer, terminal_options)
 }
 
 // --- Rendering helpers ---

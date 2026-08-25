@@ -19,6 +19,20 @@ CLI UI configuration lives under `~/.config/tau/`:
 
 Runtime UI toggles changed with `:set` are stored in the state directory as `cli.json`.
 
+## Mouse handling
+
+Mouse handling is enabled by default. To make the CLI UI ignore mouse activity,
+including wheel-driven prompt-history navigation, set this static option in
+`cli.yaml` or a `cli.d` drop-in:
+
+```yaml
+mouse: false
+```
+
+Tau captures and discards mouse events only while it owns the terminal, then
+releases that capture before external editors and pickers run. This option is
+not a `:set` toggle and does not affect the harness, project state, or session.
+
 ## Agent message labels
 
 Harness-owned `message` activity keeps each agent's `@`-prefixed routing id

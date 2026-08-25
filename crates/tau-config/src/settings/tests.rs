@@ -1051,7 +1051,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     let dir = td.path();
     std::fs::write(
         dir.join("cli.yaml"),
-        r#"{ greeting: false, show_thinking: false, osc8_links: false, show_tools: "compact", show_messages: "self-summary", show_status: "minimal" }"#,
+        r#"{ greeting: false, show_thinking: false, osc8_links: false, mouse: false, show_tools: "compact", show_messages: "self-summary", show_status: "minimal" }"#,
     )
     .expect("write");
 
@@ -1059,6 +1059,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert!(!s.greeting);
     assert!(!s.show_thinking);
     assert!(!s.osc8_links);
+    assert!(!s.mouse);
     assert_eq!(s.show_tools, ShowTools::Compact);
     assert_eq!(s.show_messages, ShowMessages::SelfSummary);
     assert_eq!(s.show_status, ShowStatus::Minimal);
@@ -1070,6 +1071,12 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
 #[test]
 fn cli_settings_enable_osc8_links_by_default() {
     assert!(CliSettings::built_in().osc8_links);
+}
+
+/// Mouse input remains enabled unless the user opts out in static CLI config.
+#[test]
+fn cli_settings_mouse_defaults_true() {
+    assert!(CliSettings::built_in().mouse);
 }
 
 /// Ensures prompt-draft content stays disabled by default and that a normal
@@ -1103,6 +1110,22 @@ fn cli_settings_reject_unknown_top_level_fields() {
 
     assert!(
         error.to_string().contains("show_thnking"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Rejects retired mechanism-oriented mouse names so only the public `mouse`
+/// setting can configure the CLI behavior.
+#[test]
+fn cli_settings_reject_mouse_capture_alias() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("cli.yaml"), "mouse_capture: false\n").expect("write");
+
+    let error = load_cli_settings_in(&dirs_with_config(dir)).expect_err("unknown key should fail");
+
+    assert!(
+        error.to_string().contains("mouse_capture"),
         "unexpected error: {error}"
     );
 }
@@ -5311,12 +5334,13 @@ fn sample_configs_deserialize() {
     // loader.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
+    let cli_sample = include_str!("../../../../config/cli.yaml");
+    assert!(
+        cli_sample.contains("mouse: false"),
+        "sample must show the static mouse opt-out"
+    );
 
-    std::fs::write(
-        dir.join("cli.yaml"),
-        include_str!("../../../../config/cli.yaml"),
-    )
-    .expect("write cli");
+    std::fs::write(dir.join("cli.yaml"), cli_sample).expect("write cli");
     std::fs::write(
         dir.join("harness.yaml"),
         include_str!("../../../../config/harness.yaml"),

@@ -211,6 +211,14 @@ pub struct CliSettings {
     /// Use a bar-shaped cursor in the CLI. When false, use a steady
     /// block cursor instead.
     pub bar_cursor: bool,
+    /// Whether the CLI UI responds to mouse activity.
+    ///
+    /// This static `cli.yaml` setting defaults to true. When false, the CLI
+    /// captures and discards mouse input only while it owns the terminal, so
+    /// mouse activity cannot navigate the prompt history or drive another UI
+    /// action. It is not a runtime `:set` option because terminal feature
+    /// ownership is acquired when the CLI starts.
+    pub mouse: bool,
     /// Whether prompt-draft liveness events include the current prompt buffer.
     ///
     /// This static `cli.yaml` setting defaults to false. It is intentionally

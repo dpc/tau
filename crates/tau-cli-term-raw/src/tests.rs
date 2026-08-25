@@ -66,19 +66,129 @@ fn visible_rows(term: &vt100::Parser) -> Vec<String> {
     term.screen().rows(0, cols).collect()
 }
 
+const MOUSE_CAPTURE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+const MOUSE_CAPTURE_DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+/// Returns the ordered exact mouse-capture command blocks emitted in `bytes`.
+fn mouse_capture_transitions(bytes: &[u8]) -> Vec<&'static str> {
+    let mut transitions = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset..].starts_with(MOUSE_CAPTURE_ENABLE) {
+            transitions.push("enable");
+            offset += MOUSE_CAPTURE_ENABLE.len();
+        } else if bytes[offset..].starts_with(MOUSE_CAPTURE_DISABLE) {
+            transitions.push("disable");
+            offset += MOUSE_CAPTURE_DISABLE.len();
+        } else {
+            offset += 1;
+        }
+    }
+    transitions
+}
+
+/// Stores terminal bytes while making the first flush fail after those bytes
+/// have been accepted, simulating an uncertain terminal feature write.
+struct FlushFailsOnce {
+    /// Bytes accepted before or after the injected flush failure.
+    bytes: Vec<u8>,
+    /// Whether the next flush reports the injected I/O failure.
+    fail_next_flush: bool,
+}
+
+impl Write for FlushFailsOnce {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.fail_next_flush {
+            self.fail_next_flush = false;
+            Err(io::Error::other("simulated flush failure"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// External-program pause must release terminal feature modes that Tau enabled
 /// so child editors do not receive focus-reporting escape sequences.
 #[test]
 fn external_pause_disables_and_resume_enables_focus_reporting() {
     let mut pause = Vec::new();
-    write_external_pause_features(&mut pause).expect("pause features");
+    write_external_pause_features(&mut pause, TerminalOptions::default()).expect("pause features");
     let pause = String::from_utf8(pause).expect("utf8 pause escapes");
     assert!(pause.contains("\u{1b}[?1004l"), "pause: {pause:?}");
 
     let mut resume = Vec::new();
-    write_external_resume_features(&mut resume, CursorShape::Bar).expect("resume features");
+    write_external_resume_features(&mut resume, CursorShape::Bar, TerminalOptions::default())
+        .expect("resume features");
     let resume = String::from_utf8(resume).expect("utf8 resume escapes");
     assert!(resume.contains("\u{1b}[?1004h"), "resume: {resume:?}");
+}
+
+/// A disabled mouse setting must acquire discardable mouse events at every Tau
+/// terminal acquisition and release them before each handoff or normal cleanup.
+#[test]
+fn mouse_disabled_balances_capture_across_terminal_lifecycle() {
+    let options = TerminalOptions {
+        mouse: false,
+        ..TerminalOptions::default()
+    };
+    let mut bytes = Vec::new();
+
+    write_external_resume_features(&mut bytes, CursorShape::Bar, options)
+        .expect("initial terminal acquisition");
+    write_external_pause_features(&mut bytes, options).expect("external handoff");
+    write_external_resume_features(&mut bytes, CursorShape::Bar, options).expect("external resume");
+    write_drop_terminal_cleanup(&mut bytes, options).expect("terminal cleanup");
+
+    assert_eq!(
+        mouse_capture_transitions(&bytes),
+        ["enable", "disable", "enable", "disable"]
+    );
+}
+
+/// The default enabled mouse setting preserves existing terminal behavior by
+/// emitting no mouse-capture control sequences in any ownership phase.
+#[test]
+fn mouse_enabled_emits_no_capture_sequences() {
+    let options = TerminalOptions::default();
+    let mut bytes = Vec::new();
+
+    write_external_resume_features(&mut bytes, CursorShape::Bar, options)
+        .expect("initial terminal acquisition");
+    write_external_pause_features(&mut bytes, options).expect("external handoff");
+    write_external_resume_features(&mut bytes, CursorShape::Bar, options).expect("external resume");
+    write_drop_terminal_cleanup(&mut bytes, options).expect("terminal cleanup");
+
+    assert!(
+        mouse_capture_transitions(&bytes).is_empty(),
+        "bytes: {bytes:?}"
+    );
+}
+
+/// Initial feature setup must release mouse capture after a write fails because
+/// the terminal may have accepted the preceding enable sequence.
+#[test]
+fn mouse_disabled_setup_failure_releases_partial_capture() {
+    let options = TerminalOptions {
+        mouse: false,
+        ..TerminalOptions::default()
+    };
+    let mut writer = FlushFailsOnce {
+        bytes: Vec::new(),
+        fail_next_flush: true,
+    };
+
+    initialize_terminal_features(&mut writer, CursorShape::Bar, options)
+        .expect_err("injected initial feature flush failure");
+
+    assert_eq!(
+        mouse_capture_transitions(&writer.bytes),
+        ["enable", "disable"]
+    );
 }
 
 /// Dropping the prompt while an external program owns the terminal must not
@@ -111,6 +221,10 @@ fn drop_cleanup_is_skipped_while_external_paused() {
     let (mut term, _handle, _input_tx) =
         Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
     term.owns_raw_mode = true;
+    term.terminal_options = TerminalOptions {
+        mouse: false,
+        ..TerminalOptions::default()
+    };
 
     assert!(term.should_write_drop_terminal_cleanup());
     term.pause_for_external_with_release(|| Ok(()))
