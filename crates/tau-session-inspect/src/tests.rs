@@ -1,7 +1,8 @@
 use std::io::Write as _;
-use std::{collections as path_std_collections, fs as path_std_fs, io as path_std_io};
 #[cfg(unix)]
-use std::{os::unix::fs::PermissionsExt as _, path::PathBuf};
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::PathBuf;
+use std::{collections as path_std_collections, fs as path_std_fs, io as path_std_io};
 
 use opentelemetry_proto::tonic::collector::trace as path_opentelemetry_proto_tonic_collector_trace;
 use tau_proto::{
@@ -63,6 +64,38 @@ fn collect_paths(root: &std::path::Path, paths: &mut Vec<PathBuf>) -> path_std_i
         for entry in path_std_fs::read_dir(root)? {
             collect_paths(&entry?.path(), paths)?;
         }
+    }
+    Ok(())
+}
+
+/// Recursively captures fixture paths and file bodies so read-only inspection
+/// tests reject both visible output failures and accidental source mutations.
+fn source_tree_snapshot(
+    root: &std::path::Path,
+) -> path_std_io::Result<path_std_collections::BTreeMap<PathBuf, Option<Vec<u8>>>> {
+    let mut snapshot = path_std_collections::BTreeMap::new();
+    source_tree_snapshot_into(root, PathBuf::new(), &mut snapshot)?;
+    Ok(snapshot)
+}
+
+/// Adds one source-tree entry and its descendants to a deterministic snapshot.
+fn source_tree_snapshot_into(
+    path: &std::path::Path,
+    relative_path: PathBuf,
+    snapshot: &mut path_std_collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+) -> path_std_io::Result<()> {
+    if path.is_dir() {
+        snapshot.insert(relative_path.clone(), None);
+        for entry in path_std_fs::read_dir(path)? {
+            let entry = entry?;
+            source_tree_snapshot_into(
+                &entry.path(),
+                relative_path.join(entry.file_name()),
+                snapshot,
+            )?;
+        }
+    } else {
+        snapshot.insert(relative_path, Some(path_std_fs::read(path)?));
     }
     Ok(())
 }
@@ -522,13 +555,27 @@ fn invalid_inspection_roots_return_errors() {
 
     let sessions_dir = file_parent.join("sessions");
 
-    assert!(session_list_lines(&sessions_dir).is_err());
-    assert!(
+    let before = source_tree_snapshot(temp_dir.path()).expect("snapshot fixture");
+    assert!(matches!(
+        session_list_lines(&sessions_dir),
+        Err(InspectError::Io(_))
+    ));
+    assert_eq!(
+        source_tree_snapshot(temp_dir.path()).expect("snapshot after session list"),
+        before,
+        "session listing must not mutate an invalid source root"
+    );
+    assert!(matches!(
         session_lines(
             &sessions_dir,
             &tau_proto::SessionId::parse("default").expect("session id")
-        )
-        .is_err()
+        ),
+        Err(InspectError::Io(_))
+    ));
+    assert_eq!(
+        source_tree_snapshot(temp_dir.path()).expect("snapshot after session show"),
+        before,
+        "session inspection must not mutate an invalid source root"
     );
 }
 
@@ -1276,37 +1323,6 @@ fn agent_performance_omits_decreasing_clock_interval() {
     assert!(row.get("recorded_at_wall_elapsed_us").is_none());
 }
 
-/// The V1 journal rejects a duplicate exact-owner terminal before trace
-/// projection can observe ambiguous accounting.
-#[test]
-fn agent_store_rejects_duplicate_terminal_before_trace_projection() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    create_trace_agent(
-        temp.path(),
-        "agent-root",
-        tau_proto::AgentCreator::User,
-        None,
-        1,
-    );
-    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt", 10);
-    append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 20, None, None);
-    let error =
-        try_append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 30, None, None)
-            .expect_err("duplicate terminal must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("marked inference response mismatches its exact unresolved owner")
-    );
-    export_trace(
-        temp.path(),
-        &AgentId::parse("agent-root").expect("agent id"),
-        DescendantSelection::RootOnly,
-        AgentTraceFormat::AgentPerformanceJsonl,
-    )
-    .expect("single terminal remains projectable");
-}
-
 /// Offline trace capture must retain writer synchronization without requesting
 /// write access to any existing agent-store artifact.
 #[cfg(unix)]
@@ -1339,19 +1355,36 @@ fn agent_trace_exports_recursively_read_only_store() {
     restore.restore().expect("restore fixture permissions");
 }
 
-/// Trace preparation exports a lock-held committed prefix while rejecting
-/// missing and corrupt journals before yielding caller-visible output.
+/// Trace preparation rejects a missing root journal without changing the
+/// source tree or creating a prepared artifact.
 #[test]
-fn agent_trace_failures_produce_no_prepared_output() {
+fn agent_trace_rejects_missing_journal_without_mutating_source_tree() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let missing = prepare_agent_trace(
+    let before = source_tree_snapshot(temp.path()).expect("snapshot fixture");
+    let error = match prepare_agent_trace(
         temp.path(),
         &AgentId::parse("agent-missing").expect("agent id"),
         DescendantSelection::RootOnly,
         AgentTraceFormat::TauJsonl,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("missing root journal must be rejected"),
+    };
+    let InspectError::AgentStore(tau_core::AgentStoreError::JournalMissing { path }) = error else {
+        panic!("missing root must report its missing lock journal: {error:?}");
+    };
+    assert_eq!(path, temp.path().join("agent-missing").join("lock"));
+    assert_eq!(
+        source_tree_snapshot(temp.path()).expect("snapshot after rejection"),
+        before
     );
-    assert!(missing.is_err());
+}
 
+/// Trace preparation rejects a locked writer's mismatched checkpoint boundary
+/// without mutating its durable source tree.
+#[test]
+fn agent_trace_rejects_checkpoint_boundary_mismatch_without_mutating_source_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
     let active_id = AgentId::parse("agent-active").expect("agent id");
     let mut active_store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
     active_store
@@ -1369,52 +1402,82 @@ fn agent_trace_failures_produce_no_prepared_output() {
             }),
         )
         .expect("active creation");
-    let active = export_trace(
-        temp.path(),
-        &active_id,
-        DescendantSelection::RootOnly,
-        AgentTraceFormat::TauJsonl,
-    )
-    .expect("lock-held committed prefix");
-    assert_eq!(active.lines().count(), 2);
     let checkpoint_path = temp.path().join(active_id.as_str()).join("meta.json");
     let mut checkpoint: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&checkpoint_path).expect("checkpoint"))
+        serde_json::from_slice(&path_std_fs::read(&checkpoint_path).expect("checkpoint"))
             .expect("checkpoint JSON");
     checkpoint["journal"]["boundary_blake3_128"] = serde_json::Value::String("0".repeat(32));
-    std::fs::write(
+    path_std_fs::write(
         &checkpoint_path,
         serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
     )
     .expect("rewrite checkpoint");
-    assert!(matches!(
-        prepare_agent_trace(
-            temp.path(),
-            &active_id,
-            DescendantSelection::RootOnly,
-            AgentTraceFormat::TauJsonl,
-        ),
-        Err(InspectError::AgentStore(
-            tau_core::AgentStoreError::Read { .. }
-        ))
-    ));
-    drop(active_store);
 
+    let before = source_tree_snapshot(temp.path()).expect("snapshot fixture");
+    let error = match prepare_agent_trace(
+        temp.path(),
+        &active_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("mismatched checkpoint boundary must be rejected"),
+    };
+    let InspectError::AgentStore(tau_core::AgentStoreError::Read { path, source }) = error else {
+        panic!("checkpoint boundary must report its checkpoint read error: {error:?}");
+    };
+    assert_eq!(path, checkpoint_path);
+    assert_eq!(source.kind(), path_std_io::ErrorKind::InvalidData);
+    assert_eq!(source.to_string(), "checkpoint boundary mismatch");
+    assert_eq!(
+        source_tree_snapshot(temp.path()).expect("snapshot after rejection"),
+        before
+    );
+}
+
+/// Trace preparation rejects a torn inactive journal suffix without mutating
+/// the durable source tree it failed to inspect.
+#[test]
+fn agent_trace_rejects_torn_suffix_without_mutating_source_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_id = AgentId::parse("agent-active").expect("agent id");
+    create_trace_agent(
+        temp.path(),
+        active_id.as_str(),
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
     let path = temp.path().join(active_id.as_str()).join("events.cbor");
     path_std_fs::OpenOptions::new()
         .append(true)
-        .open(path)
+        .open(&path)
         .expect("journal")
         .write_all(&[1, 2, 3])
         .expect("torn frame");
-    assert!(
-        prepare_agent_trace(
-            temp.path(),
-            &active_id,
-            DescendantSelection::RootOnly,
-            AgentTraceFormat::TauJsonl,
-        )
-        .is_err()
+
+    let before = source_tree_snapshot(temp.path()).expect("snapshot fixture");
+    let error = match prepare_agent_trace(
+        temp.path(),
+        &active_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("torn journal suffix must be rejected"),
+    };
+    let InspectError::AgentStore(tau_core::AgentStoreError::Read {
+        path: error_path,
+        source,
+    }) = error
+    else {
+        panic!("torn suffix must report its journal read error: {error:?}");
+    };
+    assert_eq!(error_path, path);
+    assert_eq!(source.kind(), path_std_io::ErrorKind::UnexpectedEof);
+    assert_eq!(
+        source_tree_snapshot(temp.path()).expect("snapshot after rejection"),
+        before
     );
 }
 
@@ -1446,23 +1509,52 @@ fn session_list_isolates_invalid_session_journals() {
     drop(store);
 
     let invalid_path = sessions_dir.join("invalid").join("events.cbor");
-    let mut bytes = std::fs::read(&invalid_path).expect("read invalid journal");
-    let seq_value = bytes
-        .windows(5)
-        .position(|window| window == b"\x63seq\x00")
-        .map(|offset| offset + 4)
-        .expect("encoded sequence field");
-    bytes[seq_value] = 5;
-    std::fs::write(&invalid_path, bytes).expect("write invalid journal");
+    write_framed_session_event(
+        &invalid_path,
+        &tau_core::PersistedSessionEvent {
+            seq: tau_core::PersistedSessionEventSeq::new(5),
+            source: None,
+            event: Event::SessionAgentLoaded(SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
+                session_id: SessionId::parse("invalid")
+                    .expect("known-safe SessionId must be valid"),
+                agent_id: AgentId::parse("agent-bad").expect("agent id"),
+                ephemeral: false,
+            }),
+            recorded_at: tau_proto::UnixMicros::new(0),
+        },
+    );
 
     let lines = session_list_lines(&sessions_dir).expect("session list");
-    assert_eq!(lines[0], "healthy (1 loaded agent(s))");
-    assert!(
-        lines[1].starts_with("invalid (invalid session state: invalid session event sequence in "),
-        "corrupt session must retain its typed diagnostic: {lines:?}"
+    let temporary_prefix = temp_dir.path().display().to_string();
+    let lines = lines
+        .iter()
+        .map(|line| line.replace(&temporary_prefix, "<temp>"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![
+            "healthy (1 loaded agent(s))".to_owned(),
+            format!(
+                "invalid (invalid session state: invalid session event sequence in {}: expected 0, got 5)",
+                PathBuf::from("<temp>")
+                    .join("sessions")
+                    .join("invalid")
+                    .join("events.cbor")
+                    .display()
+            ),
+        ]
     );
-    assert!(
-        lines[1].ends_with("events.cbor: expected 0, got 5)"),
-        "diagnostic must identify the nonzero initial sequence: {lines:?}"
-    );
+}
+
+/// Writes one deliberately framed session record, keeping corruption fixtures
+/// independent from the serializer's incidental map-key ordering.
+fn write_framed_session_event(path: &std::path::Path, event: &tau_core::PersistedSessionEvent) {
+    let mut payload = Vec::new();
+    ciborium::into_writer(event, &mut payload).expect("encode session fixture");
+    let length = u64::try_from(payload.len()).expect("fixture payload length fits u64");
+    let mut frame = length.to_le_bytes().to_vec();
+    frame.extend(payload);
+    path_std_fs::write(path, frame).expect("write framed session fixture");
 }

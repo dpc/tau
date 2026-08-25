@@ -71,7 +71,15 @@ fn prepare_fixture() -> (tempfile::TempDir, PreparedAgentTrace) {
 /// decoded from the durable envelope.
 #[test]
 fn native_occurrence_exposes_canonical_observation_id() {
-    let (_root, mut prepared) = prepare_fixture();
+    let (root, mut prepared) = prepare_fixture();
+    let durable_id = AgentStore::open(root.path())
+        .expect("read durable fixture")
+        .agent_events("agent-stage")
+        .expect("read durable events")
+        .first()
+        .expect("creation event")
+        .observation_id
+        .to_string();
     let mut bytes = Vec::new();
     prepared.copy_to(&mut bytes).expect("copy trace");
     let lines = std::str::from_utf8(&bytes)
@@ -80,13 +88,12 @@ fn native_occurrence_exposes_canonical_observation_id() {
         .collect::<Vec<_>>();
     let occurrence: serde_json::Value =
         serde_json::from_str(lines.get(1).expect("event line")).expect("JSON event");
-    let id = occurrence["observation_id"]
-        .as_str()
-        .expect("observation id string");
-    assert_eq!(id.len(), 32);
-    assert!(
-        id.bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    assert_eq!(
+        occurrence["observation_id"]
+            .as_str()
+            .expect("observation id string"),
+        durable_id,
+        "native projection must preserve the durable observation identity"
     );
     assert_eq!(
         occurrence["source"],
