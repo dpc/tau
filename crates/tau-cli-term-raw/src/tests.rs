@@ -716,6 +716,95 @@ fn set_buffer_clamps_cursor_to_grapheme_boundary() {
     drop(term);
 }
 
+/// A large submitted undo/redo stack must transfer its existing allocations
+/// into raw history rather than deep-cloning snapshots that canonical history
+/// replacement immediately discards.
+#[test]
+fn submission_moves_large_undo_and_redo_stacks_without_materializing_copies() {
+    const SNAPSHOT_COUNT: usize = 64;
+    const SNAPSHOT_BYTES: usize = 64 * 1024;
+
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    let (undo_allocation, redo_allocation, undo_buffers, redo_buffers) = {
+        let mut st = handle.lock();
+        st.buffer = "submitted".to_owned();
+        st.cursor = st.buffer.len();
+        st.current_undo = (0..SNAPSHOT_COUNT)
+            .map(|index| PromptSnapshot {
+                buffer: char::from(b'a' + (index % 26) as u8)
+                    .to_string()
+                    .repeat(SNAPSHOT_BYTES),
+                cursor: index,
+            })
+            .collect();
+        st.current_redo = (0..SNAPSHOT_COUNT)
+            .map(|index| PromptSnapshot {
+                buffer: char::from(b'A' + (index % 26) as u8)
+                    .to_string()
+                    .repeat(SNAPSHOT_BYTES),
+                cursor: index,
+            })
+            .collect();
+        (
+            st.current_undo.as_ptr() as usize,
+            st.current_redo.as_ptr() as usize,
+            st.current_undo
+                .iter()
+                .map(|snapshot| snapshot.buffer.as_ptr() as usize)
+                .collect::<Vec<_>>(),
+            st.current_redo
+                .iter()
+                .map(|snapshot| snapshot.buffer.as_ptr() as usize)
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )))
+        .expect("submit prompt");
+    assert!(matches!(
+        term.get_next_event().expect("submitted line"),
+        Event::Line(line) if line == "submitted"
+    ));
+
+    {
+        let st = handle.lock();
+        let submitted = st.input_history.last().expect("submitted history entry");
+        assert_eq!(submitted.undo.as_ptr() as usize, undo_allocation);
+        assert_eq!(submitted.redo.as_ptr() as usize, redo_allocation);
+        assert_eq!(
+            submitted
+                .undo
+                .iter()
+                .map(|snapshot| snapshot.buffer.as_ptr() as usize)
+                .collect::<Vec<_>>(),
+            undo_buffers
+        );
+        assert_eq!(
+            submitted
+                .redo
+                .iter()
+                .map(|snapshot| snapshot.buffer.as_ptr() as usize)
+                .collect::<Vec<_>>(),
+            redo_buffers
+        );
+        assert!(st.current_undo.is_empty());
+        assert!(st.current_redo.is_empty());
+    }
+
+    term.replace_last_submitted_input("canonical".to_owned());
+    let st = handle.lock();
+    let submitted = st.input_history.last().expect("canonical history entry");
+    assert_eq!(submitted.buffer, "canonical");
+    assert!(submitted.undo.is_empty());
+    assert!(submitted.redo.is_empty());
+}
+
 /// Redraw suppression must be scoped: callers use it around arbitrary snapshot
 /// updates, and the counter must be restored after the closure returns so
 /// future redraws are not permanently suppressed.

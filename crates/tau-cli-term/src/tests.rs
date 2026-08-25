@@ -228,6 +228,55 @@ fn submit_typed(
     ));
 }
 
+/// Ordinary submission must return the typed line, retain it for navigation,
+/// and expose the canonical submitted draft with no undo/redo state.
+#[test]
+fn ordinary_submission_preserves_line_and_clears_recalled_undo_state() {
+    let (mut term, handle, input_tx) = new_test_term(Vec::new());
+
+    submit_typed(&mut term, &input_tx, "ordinary prompt");
+    send_key(&input_tx, KeyCode::Up);
+    assert!(matches!(
+        term.get_next_event().expect("recall ordinary prompt"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "ordinary prompt");
+    assert!(!term.term.trigger_undo());
+    assert!(!term.term.trigger_redo());
+}
+
+/// Submitting an edited recalled entry must still replace both its source and
+/// appended navigation entries while clearing the submitted edit stacks.
+#[test]
+fn recalled_submission_preserves_source_replacement_and_clears_undo_state() {
+    let (mut term, handle, input_tx) = new_test_term(Vec::new());
+
+    submit_typed(&mut term, &input_tx, "recalled");
+    send_key(&input_tx, KeyCode::Up);
+    assert!(matches!(
+        term.get_next_event().expect("recall submitted prompt"),
+        Event::BufferChanged
+    ));
+    send_key(&input_tx, KeyCode::End);
+    type_text(&mut term, &input_tx, " edit");
+    send_submit(&input_tx);
+    let submitted = match term
+        .get_next_event()
+        .expect("submit edited recalled prompt")
+    {
+        Event::Line(line) => line,
+        _ => panic!("expected submitted line"),
+    };
+    assert_eq!(submitted, "recalled edit");
+
+    for expected_position in ["latest submission", "recalled source"] {
+        term.term.trigger_history_step(-1);
+        assert_eq!(handle.get_buffer(), "recalled edit", "{expected_position}");
+        assert!(!term.term.trigger_undo());
+        assert!(!term.term.trigger_redo());
+    }
+}
+
 /// Ensures every rendered completion menu uses the same suggestion block id, so
 /// reopening or refreshing a menu replaces any stale menu rows left behind by a
 /// missed high-level cleanup path instead of appending another visible block.
@@ -420,6 +469,8 @@ fn literal_colon_escape_is_canonicalized_in_prompt_history() {
         Event::BufferChanged
     ));
     assert_eq!(handle.get_buffer(), "  :literal");
+    assert!(!term.term.trigger_undo());
+    assert!(!term.term.trigger_redo());
 }
 
 /// Documents exact escape canonicalization, including leading whitespace and
@@ -473,6 +524,8 @@ fn history_after_accepting_argument_completion_needs_one_up_per_item() {
         Event::BufferChanged
     ));
     assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
+    assert!(!term.term.trigger_undo());
+    assert!(!term.term.trigger_redo());
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(

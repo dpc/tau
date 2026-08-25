@@ -471,6 +471,20 @@ impl SharedState {
         }
     }
 
+    /// Takes the current undo state into a submitted history entry.
+    ///
+    /// Submission clears the live prompt, so moving these stacks preserves raw
+    /// history semantics without cloning snapshots that a higher layer may
+    /// immediately replace with a canonical submitted draft.
+    fn take_submitted_draft(&mut self) -> PromptDraft {
+        PromptDraft {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+            undo: std::mem::take(&mut self.current_undo),
+            redo: std::mem::take(&mut self.current_redo),
+        }
+    }
+
     fn load_draft(&mut self, draft: PromptDraft) {
         self.buffer = draft.buffer;
         self.current_undo = draft.undo;
@@ -585,10 +599,9 @@ impl SharedState {
         if self.buffer.is_empty() {
             return false;
         }
-        self.input_history.push(self.current_draft());
+        let draft = self.take_submitted_draft();
+        self.input_history.push(draft);
         self.buffer.clear();
-        self.current_undo.clear();
-        self.current_redo.clear();
         self.write_cursor(0);
         true
     }
