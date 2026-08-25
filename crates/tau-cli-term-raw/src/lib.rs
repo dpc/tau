@@ -1052,6 +1052,10 @@ pub struct TermHandle {
     input_tx: path_std_sync::mpsc::Sender<InputMessage>,
     /// Number of transcript-sized output snapshot clones requested.
     output_snapshot_count: Arc<path_std_sync::atomic::AtomicU64>,
+    /// Number of asynchronous redraw requests made through this handle in
+    /// redraw-count tests.
+    #[cfg(feature = "redraw-test-counter")]
+    redraw_request_count: Arc<path_std_sync::atomic::AtomicU64>,
 }
 
 thread_local! {
@@ -1197,6 +1201,9 @@ impl TermHandle {
     }
 
     fn notify_redraw(&self) {
+        #[cfg(feature = "redraw-test-counter")]
+        self.redraw_request_count
+            .fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
         let notify = {
             let mut st = self.lock();
             Self::request_redraw_locked(&mut st)
@@ -1256,6 +1263,16 @@ impl TermHandle {
     /// full rule.
     pub fn redraw(&self) {
         self.notify_redraw();
+    }
+
+    /// Returns how many asynchronous redraw requests this handle has made.
+    ///
+    /// This excludes synchronous redraw barriers, which directly notify the
+    /// renderer so callers can wait for their completion.
+    #[cfg(feature = "redraw-test-counter")]
+    pub fn redraw_request_count(&self) -> u64 {
+        self.redraw_request_count
+            .load(path_std_sync_atomic::Ordering::Relaxed)
     }
 
     /// Drops every rendered block from every output zone and forces a
@@ -1864,6 +1881,8 @@ impl Term {
             redraw: redraw_tx,
             input_tx,
             output_snapshot_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
+            #[cfg(feature = "redraw-test-counter")]
+            redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
         handle.redraw.notify();
@@ -1929,6 +1948,8 @@ impl Term {
             redraw: redraw_tx,
             input_tx,
             output_snapshot_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
+            #[cfg(feature = "redraw-test-counter")]
+            redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
         handle.redraw.notify();

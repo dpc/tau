@@ -30,3 +30,4 @@ which.workspace = true
 
 [dev-dependencies]
 crossterm.workspace = true
+tau-cli-term-raw = { workspace = true, features = ["redraw-test-counter"] }

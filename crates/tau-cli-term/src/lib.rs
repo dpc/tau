@@ -617,8 +617,9 @@ impl HighTerm {
 
     fn handle_line_event(&mut self, line: String) -> NextEventStep {
         self.record_submitted_prompt(&line);
-        self.sync_menu_block();
-        self.handle.redraw();
+        if self.sync_menu_block() {
+            self.handle.redraw();
+        }
         NextEventStep::Return(Event::Line(line))
     }
 
@@ -650,10 +651,12 @@ impl HighTerm {
         outcome.into_next_event_step()
     }
 
-    /// Updates the suggestion block to match the raw term's
-    /// completion state: renders the menu when one is open, hides
-    /// the block otherwise.
-    fn sync_menu_block(&mut self) {
+    /// Updates the suggestion block to match the raw term's completion state.
+    ///
+    /// Returns whether synchronization wrote visible menu state.
+    /// Callers that already have a redraw request for another prompt mutation
+    /// can skip a second request when this returns `false`.
+    fn sync_menu_block(&mut self) -> bool {
         match self.term.completion_state() {
             Some(view) => {
                 let (width, height) = self.handle.size();
@@ -669,11 +672,15 @@ impl HighTerm {
                     }
                 };
                 self.handle.set_block(id, block);
+                true
             }
             None => {
                 if let Some(id) = self.menu_block_id.take() {
                     self.handle.remove_suggestions(id);
                     self.handle.remove_block(id);
+                    true
+                } else {
+                    false
                 }
             }
         }

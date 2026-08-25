@@ -228,6 +228,78 @@ fn submit_typed(
     ));
 }
 
+/// A plain submission needs only raw terminal's asynchronous clear redraw:
+/// high-level history synchronization has no visible menu to remove.
+#[test]
+fn plain_submission_does_not_request_a_second_redraw() {
+    let (mut term, handle, input_tx) = new_test_term(Vec::new());
+    handle.set_buffer("plain prompt".to_owned(), "plain prompt".len());
+    let before = handle.redraw_request_count();
+
+    send_submit(&input_tx);
+
+    assert!(matches!(
+        term.get_next_event().expect("submit plain prompt"),
+        Event::Line(line) if line == "plain prompt"
+    ));
+    assert_eq!(handle.redraw_request_count(), before + 1);
+}
+
+/// Submission must request a redraw after removing an already-visible
+/// completion menu; raw terminal's input-clear redraw alone cannot erase that
+/// menu.
+#[test]
+fn submission_with_visible_menu_requests_menu_removal_redraw() {
+    let (mut term, handle, input_tx) = new_test_term(vec![
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
+    ]);
+    type_text(&mut term, &input_tx, ":");
+    assert_eq!(
+        handle.output_snapshot().suggestion_ids(),
+        [COMPLETION_MENU_BLOCK_ID]
+    );
+    let before = handle.redraw_request_count();
+
+    send_submit(&input_tx);
+
+    assert!(matches!(
+        term.get_next_event().expect("submit completion prefix"),
+        Event::Line(line) if line == ":"
+    ));
+    assert!(handle.output_snapshot().suggestion_ids().is_empty());
+    assert_eq!(handle.redraw_request_count(), before + 2);
+}
+
+/// Accepting a preview updates its menu, then submission clears the accepted
+/// buffer and removes that menu, with no further redundant redraw request.
+#[test]
+fn completion_accept_then_submit_keeps_exact_redraw_requests() {
+    let (mut term, handle, input_tx) = new_test_term(vec![
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
+    ]);
+    type_text(&mut term, &input_tx, ":");
+    send_key(&input_tx, KeyCode::Down);
+    assert!(matches!(
+        term.get_next_event().expect("preview first completion"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), ":model");
+    let before = handle.redraw_request_count();
+
+    send_submit(&input_tx);
+    send_submit(&input_tx);
+
+    assert!(matches!(
+        term.get_next_event().expect("accept then submit completion"),
+        Event::Line(line) if line == ":model"
+    ));
+    assert_eq!(handle.get_buffer(), "");
+    assert!(handle.output_snapshot().suggestion_ids().is_empty());
+    assert_eq!(handle.redraw_request_count(), before + 4);
+}
+
 /// Ordinary submission must return the typed line, retain it for navigation,
 /// and expose the canonical submitted draft with no undo/redo state.
 #[test]

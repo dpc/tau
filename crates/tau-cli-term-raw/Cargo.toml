@@ -14,6 +14,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+redraw-test-counter = []
+
 [dependencies]
 base64.workspace = true
 bon.workspace = true
