@@ -5308,6 +5308,30 @@ impl Harness {
         source_call: Option<tau_proto::ToolCallRef>,
     ) -> tau_proto::ObservationId {
         let observation_id = tau_proto::ObservationId::random();
+        self.observe_activation_queued_with_id(
+            cid,
+            observation_id,
+            kind,
+            source_observation,
+            source_call,
+        );
+        observation_id
+    }
+
+    /// Append and time one activation observation with a caller-provided
+    /// identity.
+    ///
+    /// Immediate acceptance allocates that identity here. Queued UI acceptance
+    /// reuses the identity retained by its prompt, so each path emits the same
+    /// content-free trace exactly once.
+    fn observe_activation_queued_with_id(
+        &mut self,
+        cid: &AgentId,
+        observation_id: tau_proto::ObservationId,
+        kind: tau_proto::ActivationKind,
+        source_observation: Option<tau_proto::ObservationId>,
+        source_call: Option<tau_proto::ToolCallRef>,
+    ) {
         let started = Instant::now();
         let succeeded = self.append_activation_queued(
             cid,
@@ -5325,7 +5349,6 @@ impl Harness {
             activation_append_us = started.elapsed().as_micros(),
             "content-free prompt acceptance precursor"
         );
-        observation_id
     }
 
     /// Allocate and append one queued-activation observation for a prompt that
@@ -5339,6 +5362,25 @@ impl Harness {
         if prompt.creates_inference_activation() && prompt.activation_observation.is_none() {
             prompt.activation_observation =
                 Some(self.observe_activation_queued(cid, prompt.activation_kind(), None, None));
+        }
+    }
+
+    /// Append one already-allocated prompt activation, tracing only
+    /// authenticated UI prompt acceptance.
+    fn append_prompt_activation_queued(
+        &mut self,
+        cid: &AgentId,
+        observation_id: tau_proto::ObservationId,
+        kind: tau_proto::ActivationKind,
+        submission_source: &tau_proto::PromptSubmissionSource,
+    ) {
+        if matches!(
+            submission_source,
+            tau_proto::PromptSubmissionSource::HumanUi
+        ) {
+            self.observe_activation_queued_with_id(cid, observation_id, kind, None, None);
+        } else {
+            self.append_activation_queued(cid, observation_id, kind, None, None);
         }
     }
 
@@ -24076,7 +24118,12 @@ impl Harness {
                 conv.pending_prompts.push_back(queued_prompt);
             }
             if let Some(activation) = activation {
-                self.append_activation_queued(&cid, activation, activation_kind, None, None);
+                self.append_prompt_activation_queued(
+                    &cid,
+                    activation,
+                    activation_kind,
+                    &prompt.submission_source,
+                );
             }
             self.publish_event(
                 None,
@@ -24105,7 +24152,12 @@ impl Harness {
                 conv.pending_prompts.push_back(queued_prompt);
             }
             if let Some(activation) = activation {
-                self.append_activation_queued(&cid, activation, activation_kind, None, None);
+                self.append_prompt_activation_queued(
+                    &cid,
+                    activation,
+                    activation_kind,
+                    &prompt.submission_source,
+                );
             }
             self.publish_event(
                 None,

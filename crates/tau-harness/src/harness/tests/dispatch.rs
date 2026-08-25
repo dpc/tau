@@ -6,6 +6,10 @@ use std::{
 };
 
 use tau_config::settings as path_tau_config_settings;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
 
 use super::*;
 use crate::agent::{ActivationDispatchState, Agent, AgentTurnState, PendingPrompt};
@@ -25,6 +29,75 @@ use crate::{
     extension as path_crate_extension, harness as path_crate_harness,
     internal_tools as path_crate_internal_tools,
 };
+
+/// Shared structured events captured by one thread-local tracing subscriber.
+#[derive(Clone, Default)]
+struct TraceCapture {
+    /// Events accepted by the test tracing layer.
+    events: path_std_sync::Arc<path_std_sync::Mutex<Vec<CapturedTrace>>>,
+}
+
+/// One content-free prompt-acceptance trace with its fixed target and fields.
+#[derive(Debug)]
+struct CapturedTrace {
+    /// Tracing target selected by the callsite.
+    target: String,
+    /// Exact structured field names and rendered values.
+    fields: path_std_collections::BTreeMap<String, String>,
+}
+
+/// Subscriber layer that retains only structured prompt-acceptance trace
+/// events.
+struct TraceCaptureLayer {
+    /// Destination for this layer's captured events.
+    capture: TraceCapture,
+}
+
+impl<S> Layer<S> for TraceCaptureLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if event.metadata().target() != "tau_harness::prompt_acceptance" {
+            return;
+        }
+        let mut visitor = TraceFieldVisitor::default();
+        event.record(&mut visitor);
+        self.capture
+            .events
+            .lock()
+            .expect("trace capture lock")
+            .push(CapturedTrace {
+                target: event.metadata().target().to_owned(),
+                fields: visitor.fields,
+            });
+    }
+}
+
+/// Field visitor that retains only a trace event's rendered, content-free
+/// values.
+#[derive(Default)]
+struct TraceFieldVisitor {
+    /// Field names and values recorded by the tracing callsite.
+    fields: path_std_collections::BTreeMap<String, String>,
+}
+
+impl TraceFieldVisitor {
+    /// Record one field under its static tracing name.
+    fn record(&mut self, field: &Field, value: String) {
+        self.fields.insert(field.name().to_owned(), value);
+    }
+}
+
+impl Visit for TraceFieldVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record(field, value.to_owned());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.record(field, format!("{value:?}"));
+    }
+}
 
 /// Final-status steering uses the concise generic wording approved for both
 /// unresolved phases.
@@ -448,6 +521,191 @@ fn prompt_activation_observation_is_allocated_once_and_skips_passive_notices() {
     let mut passive = PendingPrompt::passive_background_completion("passive".into());
     harness.ensure_prompt_activation_observed(&cid, &mut passive);
     assert!(passive.activation_observation.is_none());
+}
+
+/// UI activation appends emit one fixed, content-free trace whether they
+/// dispatch immediately or wait in the queue, while internal queue traffic
+/// remains outside the prompt-acceptance diagnostic.
+#[test]
+fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+
+    tracing::subscriber::with_default(subscriber, || {
+        let activation_count = || {
+            capture
+                .events
+                .lock()
+                .expect("trace capture lock")
+                .iter()
+                .filter(|trace| trace.fields.contains_key("activation_append_us"))
+                .count()
+        };
+        assert_eq!(
+            harness
+                .submit_prompt_to_agent(
+                    harness.current_session_id.clone(),
+                    agent_id.as_str(),
+                    PendingPrompt::human_ui("IMMEDIATE-UI-CANARY".to_owned()),
+                )
+                .expect("submit immediate UI prompt"),
+            PromptSubmission::Dispatched
+        );
+        assert_eq!(activation_count(), 1, "immediate UI append traces once");
+
+        assert_eq!(
+            harness
+                .submit_prompt_to_agent(
+                    harness.current_session_id.clone(),
+                    agent_id.as_str(),
+                    PendingPrompt::human_ui("QUEUED-UI-CANARY".to_owned()),
+                )
+                .expect("queue UI prompt"),
+            PromptSubmission::Queued
+        );
+        assert_eq!(
+            activation_count(),
+            2,
+            "the startup-or-global-turn queued UI branch traces once"
+        );
+        harness.turn_state = TurnState::Idle;
+        assert_eq!(
+            harness
+                .submit_prompt_to_agent(
+                    harness.current_session_id.clone(),
+                    agent_id.as_str(),
+                    PendingPrompt::human_ui("BLOCKED-UI-CANARY".to_owned()),
+                )
+                .expect("queue blocked UI prompt"),
+            PromptSubmission::Queued
+        );
+        assert_eq!(
+            activation_count(),
+            3,
+            "the per-agent dispatch-blocked queued UI branch traces once"
+        );
+        assert_eq!(
+            harness
+                .submit_prompt_to_agent(
+                    harness.current_session_id.clone(),
+                    agent_id.as_str(),
+                    PendingPrompt::internal("INTERNAL-QUEUE-CANARY".to_owned()),
+                )
+                .expect("queue internal prompt"),
+            PromptSubmission::Queued
+        );
+        assert_eq!(
+            activation_count(),
+            3,
+            "queued internal activation remains outside the UI diagnostic"
+        );
+        assert_eq!(
+            harness.agents[&cid]
+                .pending_prompts
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "QUEUED-UI-CANARY",
+                "BLOCKED-UI-CANARY",
+                "INTERNAL-QUEUE-CANARY"
+            ],
+            "instrumentation must not change queue order"
+        );
+
+        harness.observe_activation_queued_with_id(
+            &AgentId::parse("missing-ui-agent").expect("agent id"),
+            tau_proto::ObservationId::random(),
+            tau_proto::ActivationKind::VisibleUser,
+            None,
+            None,
+        );
+        assert_eq!(activation_count(), 4, "failed append traces once");
+    });
+
+    let captured_traces = capture.events.lock().expect("trace capture lock");
+    let activation_traces = captured_traces
+        .iter()
+        .filter(|trace| trace.fields.contains_key("activation_append_us"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activation_traces.len(),
+        4,
+        "immediate UI, both queued UI branches, and forced append failure trace exactly once"
+    );
+    assert!(
+        activation_traces.iter().all(|trace| {
+            trace.target == "tau_harness::prompt_acceptance"
+                && trace.fields.keys().map(String::as_str).eq([
+                    "activation_append_us",
+                    "agent_id",
+                    "event_class",
+                    "message",
+                    "result_class",
+                    "stage",
+                ])
+                && trace
+                    .fields
+                    .get("stage")
+                    .is_some_and(|value| value == "activation_append")
+                && trace
+                    .fields
+                    .get("event_class")
+                    .is_some_and(|value| value == "agent.activation_queued")
+                && trace
+                    .fields
+                    .get("message")
+                    .is_some_and(|value| value == "content-free prompt acceptance precursor")
+        }),
+        "every record keeps the fixed prompt-acceptance classes: {activation_traces:?}"
+    );
+    assert_eq!(
+        activation_traces
+            .iter()
+            .filter(|trace| {
+                trace
+                    .fields
+                    .get("result_class")
+                    .is_some_and(|value| value == "success")
+            })
+            .count(),
+        3,
+        "immediate and both queued UI paths retain success classification"
+    );
+    assert_eq!(
+        activation_traces
+            .iter()
+            .filter(|trace| {
+                trace
+                    .fields
+                    .get("result_class")
+                    .is_some_and(|value| value == "failure")
+            })
+            .count(),
+        1,
+        "failed append retains failure classification"
+    );
+    assert!(
+        activation_traces.iter().all(|trace| {
+            !trace.fields.values().any(|value| {
+                value.contains("IMMEDIATE-UI-CANARY")
+                    || value.contains("QUEUED-UI-CANARY")
+                    || value.contains("BLOCKED-UI-CANARY")
+                    || value.contains("INTERNAL-QUEUE-CANARY")
+            })
+        }),
+        "trace output must not retain prompt content"
+    );
+    harness.shutdown().expect("shutdown");
 }
 
 /// Publish the canonical declaration required before a background terminal can

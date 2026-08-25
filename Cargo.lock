@@ -6162,6 +6162,7 @@ dependencies = [
  "tau-util-fs-err",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
