@@ -52,6 +52,16 @@ pub(crate) struct FrameAppend {
     pub end_offset: u64,
 }
 
+/// A journal path that [`FramedAppendState::ensure_appendable`] accepted.
+///
+/// The token separates callers that need the public checked append contract
+/// from store helpers that already preserve their earlier error precedence.
+#[derive(Debug)]
+pub(crate) struct AppendableJournalPath<'a> {
+    /// The accepted journal path.
+    path: &'a Path,
+}
+
 /// Records retained by recovery and whether it truncated an incomplete EOF
 /// tail.
 pub(crate) struct RecoveredRecords<T> {
@@ -115,24 +125,46 @@ pub(crate) struct FramedAppendState {
 impl FramedAppendState {
     /// Rejects a poisoned journal before its caller opens or otherwise mutates
     /// it.
-    pub(crate) fn ensure_appendable(&self, path: &Path) -> io::Result<()> {
+    pub(crate) fn ensure_appendable<'a>(
+        &self,
+        path: &'a Path,
+    ) -> io::Result<AppendableJournalPath<'a>> {
         if self.poisoned.contains(path) {
             Err(io::Error::other(
                 "journal append disabled after an incomplete rollback",
             ))
         } else {
-            Ok(())
+            Ok(AppendableJournalPath { path })
         }
     }
 
     /// Appends one complete frame and records rollback uncertainty.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "store append helpers use the checked prevalidation token"
+        )
+    )]
     pub(crate) fn append(
         &mut self,
         path: &Path,
         file: &mut File,
         payload: &[u8],
     ) -> io::Result<FrameAppend> {
-        self.ensure_appendable(path)?;
+        let path = self.ensure_appendable(path)?;
+        self.append_prevalidated(path, file, payload)
+    }
+
+    /// Appends one complete frame after the caller has checked that `path` is
+    /// appendable.
+    pub(crate) fn append_prevalidated(
+        &mut self,
+        path: AppendableJournalPath<'_>,
+        file: &mut File,
+        payload: &[u8],
+    ) -> io::Result<FrameAppend> {
+        let path = path.path;
         #[cfg(test)]
         let result = if let Some(fault) = self.faults.remove(path) {
             append_frame(&mut FaultInjectingFile::new(file, fault), payload)

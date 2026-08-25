@@ -1317,12 +1317,13 @@ fn append_cbor_record<T: Serialize>(
     path: &Path,
     record: &T,
 ) -> Result<(), SessionStoreError> {
-    framed_appends
-        .ensure_appendable(path)
-        .map_err(|source| SessionStoreError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let appendable_path =
+        framed_appends
+            .ensure_appendable(path)
+            .map_err(|source| SessionStoreError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).map_err(|source| SessionStoreError::Encode {
         path: path.to_path_buf(),
@@ -1343,7 +1344,7 @@ fn append_cbor_record<T: Serialize>(
         framed_appends.note_created_journal(path, &file);
     }
     framed_appends
-        .append(path, &mut file, &encoded)
+        .append_prevalidated(appendable_path, &mut file, &encoded)
         .map(|_| ())
         .map_err(|source| SessionStoreError::Write {
             path: path.to_path_buf(),

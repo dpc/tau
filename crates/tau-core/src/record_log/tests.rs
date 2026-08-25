@@ -136,9 +136,13 @@ fn assert_rollback_failure_poisons(fault: AppendFault) {
     let poisoned = state
         .ensure_appendable(&path)
         .expect_err("rollback uncertainty poisons stream");
+    let later = state
+        .append(&path, &mut file, b"later")
+        .expect_err("poisoned stream rejects later appends");
 
     assert_eq!(original.to_string(), "injected frame write failure");
     assert!(poisoned.to_string().contains("append disabled"));
+    assert_eq!(later.to_string(), poisoned.to_string());
     assert_eq!(
         std::fs::read(&path).expect("read untouched poisoned stream"),
         bytes_after_failure

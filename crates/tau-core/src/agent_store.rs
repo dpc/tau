@@ -1559,12 +1559,13 @@ fn append_cbor_record<T: Serialize>(
     path: &Path,
     record: &T,
 ) -> Result<CommittedJournalPosition, AgentStoreError> {
-    framed_appends
-        .ensure_appendable(path)
-        .map_err(|source| AgentStoreError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let appendable_path =
+        framed_appends
+            .ensure_appendable(path)
+            .map_err(|source| AgentStoreError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
     let newly_created = !path.exists();
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).map_err(|source| AgentStoreError::Encode {
@@ -1597,7 +1598,7 @@ fn append_cbor_record<T: Serialize>(
         committed_boundary.drain(..committed_boundary.len() - 64);
     }
     let appended = framed_appends
-        .append(path, &mut file, &encoded)
+        .append_prevalidated(appendable_path, &mut file, &encoded)
         .map_err(|source| AgentStoreError::Write {
             path: path.to_path_buf(),
             source,

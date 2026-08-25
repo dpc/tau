@@ -786,6 +786,60 @@ fn rollback_failure_poisons_agent_journal() {
     );
 }
 
+/// A poisoned agent journal keeps its early write rejection ahead of later
+/// event validation, so callers receive the established deterministic error.
+#[test]
+fn poisoned_agent_journal_rejection_precedes_event_validation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            UnixMicros::new(41),
+        )
+        .expect("baseline appends");
+    let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    store.framed_appends.inject_fault(
+        &journal_path,
+        AppendFault {
+            fail_write_at: Some(3),
+            fail_truncate: true,
+            ..AppendFault::default()
+        },
+    );
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "failed"),
+            UnixMicros::new(42),
+        )
+        .expect_err("injected append poisons journal");
+
+    let mismatched_agent_id = AgentId::parse("agent-2").expect("agent id");
+    let error = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&mismatched_agent_id, "rejected"),
+            UnixMicros::new(43),
+        )
+        .expect_err("poisoned journal rejects before event validation");
+
+    assert!(matches!(error, AgentStoreError::Write { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("append disabled after an incomplete rollback")
+    );
+}
+
 /// Read-only replay rejects a partial payload at EOF, while the next locked
 /// append keeps the valid prefix and removes only that incomplete crash tail.
 #[test]
