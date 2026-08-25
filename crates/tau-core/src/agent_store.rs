@@ -1018,22 +1018,23 @@ impl AgentStore {
                 ),
             });
         }
-        tree.validate_event_at(parent, &event)
-            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         // Cached: `from_events` populated this from the highest
         // persisted sequence at load time; we keep it advanced below.
         // Avoids re-reading and re-decoding the entire on-disk log
         // on every write.
         let next_seq = tree.next_event_seq();
+        let fold_semantics = AgentJournalFoldSemantics::for_new_event(&event);
         let record = PersistedAgentEvent {
             observation_id,
             seq: next_seq,
             source,
-            event: event.clone(),
+            event,
             parent,
-            fold_semantics: AgentJournalFoldSemantics::for_new_event(&event),
+            fold_semantics,
             recorded_at,
         };
+        // This validates event/parent constraints before record-only
+        // constraints, preserving the established error precedence in one pass.
         tree.validate_persisted_event(&record)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         let committed_position = if persistence.is_durable() {
@@ -1054,7 +1055,7 @@ impl AgentStore {
             .apply_persisted_record(&record)
             .expect("persisted record passed append-time validation");
         let selected_head_id = tree.head();
-        if matches!(event, Event::AgentStarted(_)) {
+        if matches!(&record.event, Event::AgentStarted(_)) {
             self.created_agents.insert(sid.clone());
         }
         // Sidecar metadata is derived from the event stream. Do not let a
@@ -1070,7 +1071,7 @@ impl AgentStore {
         } else {
             touch_ephemeral_meta_for_event(
                 self.ephemeral_meta.entry(sid).or_default(),
-                &event,
+                &record.event,
                 unix_now(),
             );
         }

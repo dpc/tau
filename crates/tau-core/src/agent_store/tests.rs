@@ -11,7 +11,9 @@ fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFac
     }
 }
 
-/// Overlapping V1 owners fail before either the journal or cached tree mutates.
+/// An invalid parent wins over a record-only V1 owner overlap, and each
+/// rejected append leaves the journal and cached tree untouched while replay
+/// still rejects the corrupted overlap.
 #[test]
 fn overlapping_v1_owner_append_rejects_before_mutation() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -54,6 +56,27 @@ fn overlapping_v1_owner_append_rejects_before_mutation() {
     let before_tree = store.agent(agent_id.as_str()).expect("tree").clone();
     let journal = temp.path().join(agent_id.as_str()).join("events.cbor");
     let before_bytes = fs::read(&journal).expect("journal bytes");
+    let parent_error = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::Under(NodeId::new(99)),
+            checkpoint("ap-invalid-parent"),
+            UnixMicros::new(2),
+        )
+        .expect_err("unknown parent must win over owner overlap");
+    assert!(
+        parent_error
+            .to_string()
+            .contains("parent referenced unknown node_id"),
+        "event validation must retain precedence over record-only validation"
+    );
+    assert_eq!(
+        store.agent_events(agent_id.as_str()).expect("events"),
+        before
+    );
+    assert_eq!(store.agent(agent_id.as_str()).expect("tree"), &before_tree);
+    assert_eq!(fs::read(&journal).expect("journal bytes"), before_bytes);
     let error = store
         .append_agent_event_at(
             agent_id.as_str(),
