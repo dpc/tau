@@ -1683,6 +1683,146 @@ fn assert_rendered_bright_white(vt: &VtWriter, width: u16, text: &str) {
     }
 }
 
+fn rendered_cell_attributes(
+    vt: &VtWriter,
+    width: u16,
+    text: &str,
+) -> (vt100::Color, vt100::Color, bool, bool, bool) {
+    let rows = vt.screen_text(width);
+    let (row, byte_column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(text).map(|column| (row as u16, column)))
+        .unwrap_or_else(|| panic!("missing submitted prompt text {text:?}: {rows:?}"));
+    let column = rows[row as usize][..byte_column].chars().count() as u16;
+    let parser = vt.parser.lock().expect("vt");
+    let cell = parser
+        .screen()
+        .cell(row, column)
+        .expect("visible terminal cell");
+    (
+        cell.fgcolor(),
+        cell.bgcolor(),
+        cell.bold(),
+        cell.italic(),
+        cell.underline(),
+    )
+}
+
+fn expected_rendered_color(color: vt100::Color) -> vt100::Color {
+    if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+        vt100::Color::Default
+    } else {
+        color
+    }
+}
+
+/// Ensures live UI submissions and durable replay render the same Markdown
+/// attributes while retaining the exact raw prompt text for routing and
+/// history.
+#[test]
+fn submitted_prompt_markdown_styles_match_live_and_replay_without_mutating_raw_text() {
+    let theme = tau_themes::Theme::parse(
+        r##"{
+            styles: {
+                "user.prompt": { fg: "#f0f0f0", bg: "#101010" },
+                "markdown.strong": { bold: true },
+                "markdown.emphasis": { italic: true },
+                "markdown.code": { fg: "#00d000" },
+                "markdown.link": { fg: "#d00000", bold: true },
+            }
+        }"##,
+    )
+    .expect("valid submitted-prompt Markdown theme");
+    let source = "**strong** _emphasis_ `code` [link](https://example.test/docs)".to_owned();
+
+    for replayed in [false, true] {
+        let (_term, handle, vt) = setup(100, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            theme.clone(),
+        );
+        let event = if replayed {
+            Event::AgentPromptSubmitted(AgentPromptSubmitted {
+                inference_activation: false,
+                agent_id: agent_id("main"),
+                text: source.clone(),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+                display_name: None,
+                ctx_id: None,
+            })
+        } else {
+            Event::UiPromptSubmitted(UiPromptSubmitted {
+                literal: false,
+                session_id: test_session_id("s1"),
+                text: source.clone(),
+                agent_id: agent_id("main"),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            })
+        };
+        renderer.handle(&event);
+        sync(&handle);
+
+        assert_eq!(
+            renderer.last_submitted_user_prompt_text_for_test(),
+            Some(source.as_str()),
+            "the {} projection must retain exact raw prompt bytes",
+            if replayed { "replayed" } else { "live" }
+        );
+        assert_eq!(
+            rendered_cell_attributes(&vt, 100, "**strong**"),
+            (
+                expected_rendered_color(vt100::Color::Rgb(0xf0, 0xf0, 0xf0)),
+                expected_rendered_color(vt100::Color::Rgb(0x10, 0x10, 0x10)),
+                true,
+                false,
+                false,
+            )
+        );
+        assert_eq!(
+            rendered_cell_attributes(&vt, 100, "_emphasis_"),
+            (
+                expected_rendered_color(vt100::Color::Rgb(0xf0, 0xf0, 0xf0)),
+                expected_rendered_color(vt100::Color::Rgb(0x10, 0x10, 0x10)),
+                false,
+                true,
+                false,
+            )
+        );
+        assert_eq!(
+            rendered_cell_attributes(&vt, 100, "`code`"),
+            (
+                expected_rendered_color(vt100::Color::Rgb(0x00, 0xd0, 0x00)),
+                expected_rendered_color(vt100::Color::Rgb(0x10, 0x10, 0x10)),
+                false,
+                false,
+                false,
+            )
+        );
+        assert_eq!(
+            rendered_cell_attributes(&vt, 100, "link"),
+            (
+                expected_rendered_color(vt100::Color::Rgb(0xd0, 0x00, 0x00)),
+                expected_rendered_color(vt100::Color::Rgb(0x10, 0x10, 0x10)),
+                true,
+                false,
+                false,
+            )
+        );
+        assert!(
+            !vt.screen_contains(100, "https://example.test/docs"),
+            "the display-only OSC 8 link projection must not replace retained raw text"
+        );
+    }
+}
+
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))

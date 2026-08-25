@@ -2134,6 +2134,13 @@ impl EventRenderer {
         self.tool_calls.len()
     }
 
+    /// Returns the exact raw text retained for the latest submitted user
+    /// prompt.
+    #[cfg(test)]
+    pub(crate) fn last_submitted_user_prompt_text_for_test(&self) -> Option<&str> {
+        self.last_user_block.as_ref().map(|(_, text)| text.as_str())
+    }
+
     pub(crate) fn set_draft_retargeter(
         &mut self,
         handle: Arc<(Mutex<DraftSlot>, Condvar)>,
