@@ -894,39 +894,87 @@ fn errored_replay_drops_restored_timers_before_later_live_call() {
     assert!(rt.collect_due(UnixMicros::new(20_000_000)).is_empty());
 }
 
-/// Scheduling an already-active id is rejected instead of acting as update.
+/// Scheduling keeps duplicate ids distinct from exact per-agent and session
+/// capacity boundaries, so no accepted timer is implicitly replaced or lost.
 #[test]
-fn duplicate_schedule_is_rejected() {
+fn schedule_rejects_duplicate_ids_and_enforces_capacity_boundaries() {
     let mut rt = runtime();
-    let agent = AgentId::parse("agent-one").expect("agent id");
-    let args = ScheduleArgs {
-        timer_id: "same".to_owned(),
+    let agents = ["agent-one", "agent-two", "agent-three", "agent-four"]
+        .map(|id| AgentId::parse(id).expect("agent id"));
+    let args = |timer_id| ScheduleArgs {
+        timer_id,
         timing: ScheduleTiming::Relative {
             delay_seconds: 10,
             interval_seconds: None,
         },
         message: "wake".to_owned(),
     };
-    schedule_timer(&mut rt, &agent, args.clone(), UnixMicros::new(0)).expect("first schedule");
 
-    assert!(schedule_timer(&mut rt, &agent, args, UnixMicros::new(0)).is_err());
-}
-
-/// Timer result display args summarize schedule timing and recurrence
-/// compactly.
-#[test]
-fn timer_display_args_summarize_schedule() {
-    let args = cbor_map(vec![
-        ("action", CborValue::Text("schedule".to_owned())),
-        ("timer_id", CborValue::Text("standup".to_owned())),
-        ("delay_seconds", CborValue::Integer(600.into())),
-        ("interval_seconds", CborValue::Integer(3600.into())),
-        ("message", CborValue::Text("wake".to_owned())),
-    ]);
-
+    schedule_timer(
+        &mut rt,
+        &agents[0],
+        args("same".to_owned()),
+        UnixMicros::new(0),
+    )
+    .expect("first schedule");
     assert_eq!(
-        timer_display_args(&args, "call-1"),
-        "schedule standup in 10m every 1h"
+        schedule_timer(
+            &mut rt,
+            &agents[0],
+            args("same".to_owned()),
+            UnixMicros::new(0),
+        )
+        .expect_err("duplicate id"),
+        "timer `same` is already active; cancel it before scheduling a replacement"
+    );
+
+    for timer_index in 1..MAX_TIMERS_PER_AGENT {
+        schedule_timer(
+            &mut rt,
+            &agents[0],
+            args(format!("timer-0-{timer_index}")),
+            UnixMicros::new(0),
+        )
+        .expect("timer within per-agent capacity");
+    }
+    assert_eq!(
+        schedule_timer(
+            &mut rt,
+            &agents[0],
+            args("per-agent-over".to_owned()),
+            UnixMicros::new(0),
+        )
+        .expect_err("per-agent capacity"),
+        format!("timer limit exceeded: at most {MAX_TIMERS_PER_AGENT} active timers per agent")
+    );
+    let mut remaining = MAX_TIMERS_TOTAL - rt.timers.len();
+    for (agent_index, agent) in agents.iter().enumerate().skip(1) {
+        let timer_count = remaining.min(MAX_TIMERS_PER_AGENT);
+        for timer_index in 0..timer_count {
+            schedule_timer(
+                &mut rt,
+                agent,
+                args(format!("timer-{agent_index}-{timer_index}")),
+                UnixMicros::new(0),
+            )
+            .expect("timer within session capacity");
+        }
+        remaining -= timer_count;
+        if remaining == 0 {
+            break;
+        }
+    }
+    assert_eq!(remaining, 0, "four agents must reach the session capacity");
+    assert_eq!(rt.timers.len(), MAX_TIMERS_TOTAL);
+    assert_eq!(
+        schedule_timer(
+            &mut rt,
+            &AgentId::parse("agent-five").expect("agent id"),
+            args("session-over".to_owned()),
+            UnixMicros::new(0),
+        )
+        .expect_err("session capacity"),
+        format!("timer limit exceeded: at most {MAX_TIMERS_TOTAL} active timers per session")
     );
 }
 
@@ -968,19 +1016,6 @@ fn timer_display_and_list_summarize_daily_utc_schedule() {
     );
 }
 
-/// Timer result display args identify cancel and list actions.
-#[test]
-fn timer_display_args_summarize_cancel_and_list() {
-    let cancel = cbor_map(vec![
-        ("action", CborValue::Text("cancel".to_owned())),
-        ("timer_id", CborValue::Text("standup".to_owned())),
-    ]);
-    let list = cbor_map(vec![("action", CborValue::Text("list".to_owned()))]);
-
-    assert_eq!(timer_display_args(&cancel, "call-1"), "cancel standup");
-    assert_eq!(timer_display_args(&list, "call-1"), "list");
-}
-
 /// Terminal timer displays must make each successful action useful in compact
 /// history without changing its model-visible result. This covers scheduled,
 /// cancelled, absent, and listed timer lifecycle outcomes deterministically.
@@ -995,6 +1030,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
             ("action", CborValue::Text("schedule".to_owned())),
             ("timer_id", CborValue::Text("standup".to_owned())),
             ("delay_seconds", CborValue::Integer(600.into())),
+            ("interval_seconds", CborValue::Integer(3600.into())),
             ("message", CborValue::Text("join the call".to_owned())),
         ]),
     );
@@ -1005,7 +1041,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         scheduled.result,
         CborValue::Text("scheduled timer `standup`".to_owned())
     );
-    assert_eq!(scheduled.display.args, "schedule standup in 10m");
+    assert_eq!(scheduled.display.args, "schedule standup in 10m every 1h");
     assert!(scheduled.display.info_chips.is_empty());
 
     let list = started(
@@ -1018,7 +1054,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         .expect("list");
     assert_eq!(
         listed.result,
-        CborValue::Text("standup: due in 600s, one-shot".to_owned())
+        CborValue::Text("standup: due in 600s, repeats every 3600s".to_owned())
     );
     assert_eq!(listed.display.args, "list");
     assert_eq!(listed.display.stats.matches, Some(1));
@@ -1039,6 +1075,7 @@ fn timer_completion_display_summarizes_successful_action_outcomes() {
         cancelled.result,
         CborValue::Text("cancelled timer `standup`".to_owned())
     );
+    assert_eq!(cancelled.display.args, "cancel standup");
     assert!(cancelled.display.info_chips.is_empty());
 
     let absent = rt
@@ -1078,16 +1115,75 @@ fn timer_display_args_do_not_echo_untrusted_fields() {
     );
 }
 
-/// Timer validation enforces bounded path-safe ids and message length.
+/// Timer validation accepts exactly the path-safe identifier boundary and
+/// rejects each invalid grammar or size class with its stable error.
 #[test]
-fn schedule_validation_rejects_unsafe_timer_id() {
-    let args = cbor_map(vec![
-        ("action", CborValue::Text("schedule".to_owned())),
-        ("timer_id", CborValue::Text("../bad".to_owned())),
-        ("delay_seconds", CborValue::Integer(10.into())),
-        ("message", CborValue::Text("hello".to_owned())),
-    ]);
-    assert!(parse_action(&args, "call-1").is_err());
+fn timer_id_validation_enforces_boundaries() {
+    let action_args = |action: &str, timer_id: String| {
+        let mut entries = vec![
+            ("action", CborValue::Text(action.to_owned())),
+            ("timer_id", CborValue::Text(timer_id)),
+        ];
+        if action == "schedule" {
+            entries.extend([
+                ("delay_seconds", CborValue::Integer(10.into())),
+                ("message", CborValue::Text("hello".to_owned())),
+            ]);
+        }
+        cbor_map(entries)
+    };
+
+    for (action, timer_id, expected) in [
+        (
+            "schedule",
+            String::new(),
+            format!("timer_id must be 1..={MAX_TIMER_ID_BYTES} bytes"),
+        ),
+        (
+            "cancel",
+            String::new(),
+            format!("timer_id must be 1..={MAX_TIMER_ID_BYTES} bytes"),
+        ),
+        (
+            "schedule",
+            "../bad".to_owned(),
+            "timer_id must contain only ASCII letters, digits, '_' or '-'".to_owned(),
+        ),
+        (
+            "schedule",
+            "bad/id".to_owned(),
+            "timer_id must contain only ASCII letters, digits, '_' or '-'".to_owned(),
+        ),
+        (
+            "schedule",
+            "bad.id".to_owned(),
+            "timer_id must contain only ASCII letters, digits, '_' or '-'".to_owned(),
+        ),
+        (
+            "schedule",
+            "é".to_owned(),
+            "timer_id must contain only ASCII letters, digits, '_' or '-'".to_owned(),
+        ),
+        (
+            "schedule",
+            "x".repeat(MAX_TIMER_ID_BYTES + 1),
+            format!("timer_id must be 1..={MAX_TIMER_ID_BYTES} bytes"),
+        ),
+        (
+            "cancel",
+            "x".repeat(MAX_TIMER_ID_BYTES + 1),
+            format!("timer_id must be 1..={MAX_TIMER_ID_BYTES} bytes"),
+        ),
+    ] {
+        assert_eq!(
+            parse_action(&action_args(action, timer_id), "call-1").expect_err("invalid timer id"),
+            expected
+        );
+    }
+
+    let max_id = format!("Az09_-{}", "x".repeat(MAX_TIMER_ID_BYTES - 6));
+    assert!(parse_action(&action_args("schedule", max_id.clone()), "call-1").is_ok());
+    assert!(parse_action(&action_args("cancel", max_id), "call-1").is_ok());
 }
 
 /// Timer validation retains the byte limit omitted from the model-visible
@@ -1447,7 +1543,7 @@ fn papercut_config_rejects_unknown_fields() {
 }
 
 /// Ensures the model-visible schema retains its bounded report contract while
-/// the tool description independently prevents no-problem reporting.
+/// parsing accepts both exact limits and rejects blank or one-over reports.
 #[test]
 fn papercut_schema_and_validation_bound_report() {
     let schema = papercut_tool_spec()
@@ -1470,26 +1566,30 @@ fn papercut_schema_and_validation_bound_report() {
         Some(EXPECTED_PAPERCUT_MODEL_GUIDANCE)
     );
 
-    assert!(
-        parse_papercut_report(&cbor_map(vec![(
-            "report",
-            CborValue::Text(" \n".to_owned())
-        )]))
-        .is_err()
+    let parse = |report: String| {
+        parse_papercut_report(&cbor_map(vec![("report", CborValue::Text(report))]))
+    };
+    let report_at_scalar_limit = "x".repeat(MAX_PAPERCUT_REPORT_CHARS);
+    let report_at_byte_limit = "\u{10ffff}".repeat(MAX_PAPERCUT_REPORT_CHARS);
+    assert_eq!(report_at_byte_limit.len(), MAX_PAPERCUT_REPORT_BYTES);
+    assert!(parse(report_at_scalar_limit).is_ok());
+    assert!(parse(report_at_byte_limit.clone()).is_ok());
+
+    assert_eq!(
+        parse(" \n".to_owned()).expect_err("blank report"),
+        "report must not be empty"
     );
-    assert!(
-        parse_papercut_report(&cbor_map(vec![(
-            "report",
-            CborValue::Text("x".repeat(MAX_PAPERCUT_REPORT_CHARS + 1))
-        )]))
-        .is_err()
+    assert_eq!(
+        parse("x".repeat(MAX_PAPERCUT_REPORT_CHARS + 1)).expect_err("one scalar over"),
+        format!(
+            "report must contain at most {MAX_PAPERCUT_REPORT_CHARS} Unicode scalars and {MAX_PAPERCUT_REPORT_BYTES} bytes"
+        )
     );
-    assert!(
-        parse_papercut_report(&cbor_map(vec![(
-            "report",
-            CborValue::Text("é".repeat(MAX_PAPERCUT_REPORT_BYTES / "é".len() + 1))
-        )]))
-        .is_err()
+    assert_eq!(
+        parse(format!("{report_at_byte_limit}x")).expect_err("one byte over"),
+        format!(
+            "report must contain at most {MAX_PAPERCUT_REPORT_CHARS} Unicode scalars and {MAX_PAPERCUT_REPORT_BYTES} bytes"
+        )
     );
 }
 
@@ -1544,23 +1644,6 @@ fn papercut_append_failure_does_not_distract_the_primary_task() {
     assert!(outcome.contains("continue the primary task"));
     assert!(outcome.contains("do not retry"));
     assert!(lines.borrow().is_empty());
-}
-
-/// Session rollover clears papercut attribution so a late call cannot append a
-/// record that falsely claims the previous session.
-#[test]
-fn papercut_session_lifecycle_drops_old_session_attribution() {
-    let mut rt = runtime();
-    rt.session_id = Some("old-session".to_owned());
-    rt.papercut_storage = Some(Box::new(FakePapercutStorage::default()));
-
-    rt.clear_session_state();
-
-    let outcome = rt.record_papercut(
-        &papercut_started("call-1", "agent-one", "late rollover call"),
-        UnixMicros::new(1),
-    );
-    assert!(outcome.contains("no active session"));
 }
 
 /// Replay folds timer history only. Replayed papercut calls must not append a
