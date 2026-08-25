@@ -172,9 +172,13 @@ impl<W: std::io::Write> EventWriter<W> {
     }
 }
 
+/// Searcher test double that records calls and accepted endpoint updates.
 struct StubSearcher {
+    /// Search calls received from the extension.
     calls: Mutex<Vec<(String, u32)>>,
-    endpoints: Mutex<Vec<String>>,
+    /// Applied endpoint log and its update notification.
+    endpoints: (Mutex<Vec<String>>, Condvar),
+    /// Result returned for each search call.
     response: Mutex<Result<String, String>>,
 }
 
@@ -182,7 +186,7 @@ impl StubSearcher {
     fn ok(text: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
-            endpoints: Mutex::new(Vec::new()),
+            endpoints: (Mutex::new(Vec::new()), Condvar::new()),
             response: Mutex::new(Ok(text.into())),
         })
     }
@@ -190,9 +194,25 @@ impl StubSearcher {
     fn err(message: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
-            endpoints: Mutex::new(Vec::new()),
+            endpoints: (Mutex::new(Vec::new()), Condvar::new()),
             response: Mutex::new(Err(message.into())),
         })
+    }
+
+    /// Wait for one endpoint application without scheduler-dependent polling.
+    fn wait_for_endpoint_application(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
+        let (endpoints, wake) = &self.endpoints;
+        let endpoints = endpoints.lock().expect("endpoint log");
+        let (endpoints, timeout) = wake
+            .wait_timeout_while(endpoints, Duration::from_secs(1), |endpoints| {
+                endpoints.is_empty()
+            })
+            .expect("endpoint update wait");
+        assert!(
+            !timeout.timed_out(),
+            "extension did not apply its accepted endpoint"
+        );
+        endpoints
     }
 }
 
@@ -206,7 +226,9 @@ impl Searcher for StubSearcher {
     }
 
     fn set_endpoint(&self, endpoint: String) {
-        self.endpoints.lock().expect("lock").push(endpoint);
+        let (endpoints, wake) = &self.endpoints;
+        endpoints.lock().expect("endpoint log").push(endpoint);
+        wake.notify_all();
     }
 }
 
@@ -809,19 +831,6 @@ fn provider_reservation_is_bounded_and_rotating() {
     );
 }
 
-/// Ensures search and fetch admission reserve independent primaries even when
-/// their calls interleave.
-#[test]
-fn search_and_fetch_provider_pools_rotate_independently() {
-    let configured = vec![WebAdapter::Exa, WebAdapter::Parallel];
-    let mut search = ProviderPool::new("search", configured.clone()).expect("search");
-    let mut fetch = ProviderPool::new("fetch", configured).expect("fetch");
-    assert_eq!(search.reserve()[0], WebAdapter::Exa);
-    assert_eq!(fetch.reserve()[0], WebAdapter::Exa);
-    assert_eq!(search.reserve()[0], WebAdapter::Parallel);
-    assert_eq!(fetch.reserve()[0], WebAdapter::Parallel);
-}
-
 /// Ensures the production extension wiring advances interleaved search and
 /// fetch cursors independently.
 #[test]
@@ -863,21 +872,6 @@ fn interleaved_hybrid_search_and_fetch_use_independent_runtime_cursors() {
         };
         assert_eq!(result.display.expect("display").info_chips, [expected]);
     }
-}
-
-/// Ensures fail-fast busy admission does not reserve or advance a provider
-/// cursor before a later accepted call.
-#[test]
-fn busy_rejection_does_not_advance_provider_pool() {
-    let sem = Arc::new(Semaphore::new(1));
-    let mut pool =
-        ProviderPool::new("search", vec![WebAdapter::Exa, WebAdapter::Parallel]).expect("pool");
-    let permit = sem.try_acquire().expect("first admission");
-    assert_eq!(pool.reserve()[0], WebAdapter::Exa);
-    assert!(sem.try_acquire().is_none(), "second admission must be busy");
-    drop(permit);
-    assert!(sem.try_acquire().is_some(), "later admission succeeds");
-    assert_eq!(pool.reserve()[0], WebAdapter::Parallel);
 }
 
 /// Ensures production fail-fast busy rejection does not reserve a composite
@@ -1104,20 +1098,11 @@ fn rest_failures_keep_stable_scheduler_categories() {
     );
 }
 
-/// Ensures optional credentialed providers require named Tau secrets, resolve
-/// them only from the secret channel, and reject unsupported fetch capability.
+/// Ensures credentialed validation preserves configured operation order,
+/// resolves named Tau secrets only from the secret channel, and rejects
+/// missing, empty, or unsupported provider selections.
 #[test]
 fn optional_provider_configuration_resolves_secrets_and_capabilities() {
-    let config: ExtConfig = serde_json::from_value(serde_json::json!({
-        "search_providers": ["brave", "tavily", "firecrawl"],
-        "fetch_providers": ["tavily", "firecrawl"],
-        "brave_api_key_secret": "brave",
-        "tavily_api_key_secret": "tavily",
-        "firecrawl_api_key_secret": "firecrawl"
-    }))
-    .expect("credentialed provider config");
-    assert!(config.validate(&BTreeMap::new()).is_err());
-
     let secrets = [
         ("brave".to_owned(), tau_proto::SecretValue::new("brave-key")),
         (
@@ -1139,15 +1124,68 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
         "firecrawl_api_key_secret": "firecrawl"
     }))
     .expect("credentialed provider config");
-    assert!(config.validate(&secrets).is_ok());
+    let mut validated = config
+        .validate(&secrets)
+        .expect("validated credentialed config");
+    assert_eq!(validated.hosted.brave_api_key.as_deref(), Some("brave-key"));
+    assert_eq!(
+        validated.hosted.tavily_api_key.as_deref(),
+        Some("tavily-key")
+    );
+    assert_eq!(
+        validated.hosted.firecrawl_api_key.as_deref(),
+        Some("firecrawl-key")
+    );
+    assert_eq!(
+        validated.search_pool.reserve().as_ref(),
+        [WebAdapter::Brave, WebAdapter::Tavily, WebAdapter::Firecrawl]
+    );
+    assert_eq!(
+        validated.fetch_pool.reserve().as_ref(),
+        [WebAdapter::Tavily, WebAdapter::Firecrawl]
+    );
 
-    let unsupported: ExtConfig = serde_json::from_value(serde_json::json!({
-        "search_providers": ["you"],
-        "fetch_providers": ["brave"],
-        "brave_api_key_secret": "brave"
-    }))
-    .expect("unsupported capability config");
-    assert!(unsupported.validate(&secrets).is_err());
+    for (name, secrets, expected) in [
+        (
+            "missing named secret",
+            BTreeMap::new(),
+            "references unavailable secret `brave`",
+        ),
+        (
+            "empty named secret",
+            [("brave".to_owned(), tau_proto::SecretValue::new("  "))]
+                .into_iter()
+                .collect(),
+            "secret `brave` referenced by `brave_api_key_secret` is empty",
+        ),
+    ] {
+        let config: ExtConfig = serde_json::from_value(serde_json::json!({
+            "search_providers": ["brave"],
+            "fetch_providers": ["exa"],
+            "brave_api_key_secret": "brave",
+        }))
+        .expect(name);
+        let Err(error) = config.validate(&secrets) else {
+            panic!("{name} unexpectedly validated");
+        };
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+
+    for provider in ["you", "brave"] {
+        let config: ExtConfig = serde_json::from_value(serde_json::json!({
+            "search_providers": ["exa"],
+            "fetch_providers": [provider],
+            "brave_api_key_secret": "brave",
+        }))
+        .expect("unsupported capability config");
+        let Err(error) = config.validate(&secrets) else {
+            panic!("unsupported fetch provider {provider} unexpectedly validated");
+        };
+        assert!(
+            error.contains("search-only provider"),
+            "fetch provider {provider}: {error}"
+        );
+    }
 }
 
 /// Ensures deadline slices divide only the remaining total so unused time
@@ -2169,14 +2207,8 @@ fn equal_endpoint_aliases_are_accepted_and_applied() {
         .expect("write configure");
     writer.flush().expect("flush");
 
-    for _ in 0..100 {
-        if !searcher.endpoints.lock().expect("lock").is_empty() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
     assert_eq!(
-        searcher.endpoints.lock().expect("lock").as_slice(),
+        searcher.wait_for_endpoint_application().as_slice(),
         ["https://exa.example/mcp"]
     );
 }
@@ -2241,14 +2273,8 @@ fn loopback_http_endpoint_is_accepted_and_applied() {
         .expect("write configure");
     writer.flush().expect("flush");
 
-    for _ in 0..100 {
-        if !searcher.endpoints.lock().expect("lock").is_empty() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
     assert_eq!(
-        searcher.endpoints.lock().expect("lock").as_slice(),
+        searcher.wait_for_endpoint_application().as_slice(),
         ["http://127.0.0.1:8080/mcp"]
     );
 }
@@ -2687,6 +2713,36 @@ fn web_content_projection_uses_exact_closed_attributes_for_all_paths() {
             WebAdapter::Exa,
             WebOperation::Fetch,
             "<tau_web_content adapter=\"exa\" operation=\"fetch\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
+        (
+            WebAdapter::You,
+            WebOperation::Search,
+            "<tau_web_content adapter=\"you\" operation=\"search\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
+        (
+            WebAdapter::Brave,
+            WebOperation::Search,
+            "<tau_web_content adapter=\"brave\" operation=\"search\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
+        (
+            WebAdapter::Tavily,
+            WebOperation::Search,
+            "<tau_web_content adapter=\"tavily\" operation=\"search\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
+        (
+            WebAdapter::Tavily,
+            WebOperation::Fetch,
+            "<tau_web_content adapter=\"tavily\" operation=\"fetch\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
+        (
+            WebAdapter::Firecrawl,
+            WebOperation::Search,
+            "<tau_web_content adapter=\"firecrawl\" operation=\"search\" content_trust=\"external\">provider claim</tau_web_content>",
+        ),
+        (
+            WebAdapter::Firecrawl,
+            WebOperation::Fetch,
+            "<tau_web_content adapter=\"firecrawl\" operation=\"fetch\" content_trust=\"external\">provider claim</tau_web_content>",
         ),
     ] {
         assert_eq!(

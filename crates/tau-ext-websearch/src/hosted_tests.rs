@@ -337,7 +337,7 @@ fn brave_search_fixture_is_exact() {
 fn tavily_fetch_fixture_is_exact() {
     let server = FixtureServer::once(
         "200 OK",
-        r#"{"results":[{"url":"https://example.test/","raw_content":"page"}],"failed_results":[]}"#,
+        r#"{"results":[{"url":"https://example.test/","raw_content":"page"}],"failed_results":[],"request_id":"ignored"}"#,
     );
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
@@ -357,7 +357,13 @@ fn tavily_fetch_fixture_is_exact() {
             ),
         )
         .expect("Tavily fixture");
-    assert!(output.contains("\"raw_content\": \"page\""));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).expect("normalized Tavily fetch JSON"),
+        serde_json::json!([{
+            "url": "https://example.test/",
+            "raw_content": "page",
+        }])
+    );
     let request = server.finish();
     assert!(request.starts_with("POST /extract HTTP/1.1\r\n"));
     assert!(request.contains("authorization: Bearer tavily-fixture-secret\r\n"));
@@ -376,7 +382,7 @@ fn tavily_fetch_fixture_is_exact() {
 fn tavily_search_fixture_is_exact() {
     let server = FixtureServer::once(
         "200 OK",
-        r#"{"query":"tau","results":[{"title":"Tau","url":"https://example.test/tau","content":"agent"}],"response_time":0.1}"#,
+        r#"{"query":"tau","results":[{"title":"Tau","url":"https://example.test/tau","content":"agent"}],"response_time":0.1,"request_id":"ignored"}"#,
     );
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
@@ -396,10 +402,17 @@ fn tavily_search_fixture_is_exact() {
             ),
         )
         .expect("Tavily fixture");
-    assert!(!output.contains("response_time"));
-    assert!(output.contains("\"content\": \"agent\""));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).expect("normalized Tavily search JSON"),
+        serde_json::json!([{
+            "title": "Tau",
+            "url": "https://example.test/tau",
+            "content": "agent",
+        }])
+    );
     let request = server.finish();
     assert!(request.starts_with("POST /search HTTP/1.1\r\n"));
+    assert!(request.contains("authorization: Bearer tavily-fixture-secret\r\n"));
     assert_eq!(
         request_json(&request),
         serde_json::json!({
@@ -416,7 +429,7 @@ fn tavily_search_fixture_is_exact() {
 fn firecrawl_search_fixture_is_exact() {
     let server = FixtureServer::once(
         "200 OK",
-        r#"{"success":true,"data":{"web":[{"title":"Tau","url":"https://example.test/tau","description":"agent"}]},"creditsUsed":1}"#,
+        r#"{"success":true,"data":{"web":[{"title":"Tau","url":"https://example.test/tau","description":"agent"}],"metadata":{"requestId":"ignored"}},"creditsUsed":1}"#,
     );
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
@@ -436,8 +449,15 @@ fn firecrawl_search_fixture_is_exact() {
             ),
         )
         .expect("Firecrawl fixture");
-    assert!(!output.contains("creditsUsed"));
-    assert!(output.contains("\"title\": \"Tau\""));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output)
+            .expect("normalized Firecrawl search JSON"),
+        serde_json::json!([{
+            "title": "Tau",
+            "url": "https://example.test/tau",
+            "description": "agent",
+        }])
+    );
     let request = server.finish();
     assert!(request.starts_with("POST /search HTTP/1.1\r\n"));
     assert!(request.contains("authorization: Bearer firecrawl-fixture-secret\r\n"));
