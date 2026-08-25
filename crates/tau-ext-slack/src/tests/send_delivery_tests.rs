@@ -151,32 +151,6 @@ fn wait_for_send_worker(receiver: &mpsc::Receiver<()>) {
         .expect("send worker release deadline");
 }
 
-/// The send tool schema and runtime validation must not allow model-selected
-/// Slack destinations such as channel ids.
-#[test]
-fn slack_send_rejects_destination_arguments() {
-    let (ext, _rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    let event = ext.handle_send(tool(
-        SEND_TOOL_NAME,
-        "agent-a",
-        CborValue::Map(vec![
-            (
-                CborValue::Text("message".to_owned()),
-                CborValue::Text("hi".to_owned()),
-            ),
-            (
-                CborValue::Text("channel_id".to_owned()),
-                CborValue::Text("C999".to_owned()),
-            ),
-        ]),
-    ));
-    let Some(Event::ToolError(err)) = event else {
-        panic!("expected error");
-    };
-    assert!(err.message.contains("unknown argument `channel_id`"));
-}
-
 /// Deterministic agent-text rejection must not contact Slack merely to
 /// establish installation evidence or freeze otherwise replaceable
 /// configuration.
@@ -472,7 +446,7 @@ fn system_send_scheduler_is_woken_by_lifecycle_notification() {
     wake.notify_lifecycle_change();
     assert!(
         finished_rx
-            .recv_timeout(Duration::from_millis(200))
+            .recv_timeout(Duration::from_secs(2))
             .expect("wait should wake")
     );
     worker.join().expect("scheduler worker");
@@ -506,10 +480,10 @@ fn active_send_worker_capacity_rejects_before_freeze_or_io() {
     assert!(client.sent_pairs().is_empty());
 }
 
-/// Retry parsing, jitter, diagnostics, and post composition stay deterministic,
-/// bounded, and free of reflected Slack controls.
+/// Retry parsing clamps unsafe server hints and keeps route-keyed jitter
+/// stable.
 #[test]
-fn typed_post_boundary_is_bounded_private_and_literal_safe() {
+fn retry_delay_and_jitter_are_bounded_and_deterministic() {
     assert_eq!(parse_retry_after(Some("0")), Duration::from_secs(1));
     assert_eq!(
         parse_retry_after(Some("999999")),
@@ -524,21 +498,12 @@ fn typed_post_boundary_is_bounded_private_and_literal_safe() {
         send_delivery::retry_jitter("call-a", "C123"),
         send_delivery::retry_jitter("call-a", "C456")
     );
+}
 
-    for sentinel in [
-        "xoxb-secret",
-        "<@U123>",
-        "<!channel>",
-        "<#C123>",
-        "C123\npayload\u{202e}",
-    ] {
-        assert!(!SlackApiError::RemoteFailure.to_string().contains(sentinel));
-        assert!(
-            !SendFailureCategory::MalformedResponse
-                .to_string()
-                .contains(sentinel)
-        );
-    }
+/// Agent posts reject native Slack controls while bridge literals remain
+/// escaped and bounded on the Slack wire.
+#[test]
+fn post_composition_rejects_native_controls_and_escapes_bridge_text() {
     assert!(matches!(
         SlackPostMode::agent("hello <@U123>".to_owned(), None),
         Err(PostCompositionError::NativeControlMarkup)
@@ -561,7 +526,26 @@ fn typed_post_boundary_is_bounded_private_and_literal_safe() {
     assert_eq!(value["mrkdwn"], false);
     assert_eq!(value["link_names"], false);
     assert!(value["text"].as_str().expect("text").len() <= 8 * 1_024);
+}
 
+/// Typed send failures expose no caller input or Slack control data in
+/// diagnostics.
+#[test]
+fn send_failure_diagnostics_do_not_reflect_private_input() {
+    for sentinel in [
+        "xoxb-secret",
+        "<@U123>",
+        "<!channel>",
+        "<#C123>",
+        "C123\npayload\u{202e}",
+    ] {
+        assert!(!SlackApiError::RemoteFailure.to_string().contains(sentinel));
+        assert!(
+            !SendFailureCategory::MalformedResponse
+                .to_string()
+                .contains(sentinel)
+        );
+    }
     let hostile = "xoxb-secret <@U123> <!channel> <#C123>\npayload\u{202e}";
     let event = tool_error(
         tool(

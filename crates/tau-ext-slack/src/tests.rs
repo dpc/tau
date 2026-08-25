@@ -4223,47 +4223,129 @@ fn mutable_config_replacement_clears_installation_preflight() {
 /// secret values, and a non-empty user allowlist before Slack can be contacted.
 #[test]
 fn config_rejects_missing_tokens_or_empty_allowlist() {
-    let err = ExtConfig::default()
-        .validate(&BTreeMap::new())
-        .err()
-        .expect("missing app token");
-    assert!(err.contains("app_token_secret"));
-
-    let mut secrets = BTreeMap::new();
-    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
-    let err = ExtConfig {
-        app_token_secret: Some("app".to_owned()),
-        bot_token_secret: Some("bot".to_owned()),
-        allowed_user_ids: vec!["U123".to_owned()],
-        ..Default::default()
+    /// One invalid credential or allowlist configuration with its safe error
+    /// category.
+    struct CredentialFailureCase {
+        /// Human-readable invalid-input condition for assertion diagnostics.
+        label: &'static str,
+        /// App-token secret reference supplied in configuration.
+        app_secret: Option<&'static str>,
+        /// Bot-token secret reference supplied in configuration.
+        bot_secret: Option<&'static str>,
+        /// Resolved app-token fixture, if the referenced secret exists.
+        app_value: Option<&'static str>,
+        /// Resolved bot-token fixture, if the referenced secret exists.
+        bot_value: Option<&'static str>,
+        /// Operator user allowlist supplied in configuration.
+        allowed_user_ids: &'static [&'static str],
+        /// Stable diagnostic category expected from validation.
+        category: &'static str,
     }
-    .validate(&secrets)
-    .err()
-    .expect("missing bot token");
-    assert!(err.contains("bot token secret`bot`") || err.contains("bot token secret `bot`"));
 
-    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new(""));
-    let err = ExtConfig {
-        app_token_secret: Some("app".to_owned()),
-        bot_token_secret: Some("bot".to_owned()),
-        allowed_user_ids: vec!["U123".to_owned()],
-        ..Default::default()
+    for case in [
+        CredentialFailureCase {
+            label: "missing app secret reference",
+            app_secret: None,
+            bot_secret: Some("bot"),
+            app_value: Some("xapp-test"),
+            bot_value: Some("xoxb-test"),
+            allowed_user_ids: &["U123"],
+            category: "app_token_secret",
+        },
+        CredentialFailureCase {
+            label: "unresolved app secret",
+            app_secret: Some("app"),
+            bot_secret: Some("bot"),
+            app_value: None,
+            bot_value: Some("xoxb-test"),
+            allowed_user_ids: &["U123"],
+            category: "app token secret",
+        },
+        CredentialFailureCase {
+            label: "empty app secret",
+            app_secret: Some("app"),
+            bot_secret: Some("bot"),
+            app_value: Some(""),
+            bot_value: Some("xoxb-test"),
+            allowed_user_ids: &["U123"],
+            category: "app token secret",
+        },
+        CredentialFailureCase {
+            label: "missing bot secret reference",
+            app_secret: Some("app"),
+            bot_secret: None,
+            app_value: Some("xapp-test"),
+            bot_value: Some("xoxb-test"),
+            allowed_user_ids: &["U123"],
+            category: "bot_token_secret",
+        },
+        CredentialFailureCase {
+            label: "unresolved bot secret",
+            app_secret: Some("app"),
+            bot_secret: Some("bot"),
+            app_value: Some("xapp-test"),
+            bot_value: None,
+            allowed_user_ids: &["U123"],
+            category: "bot token secret",
+        },
+        CredentialFailureCase {
+            label: "empty bot secret",
+            app_secret: Some("app"),
+            bot_secret: Some("bot"),
+            app_value: Some("xapp-test"),
+            bot_value: Some(""),
+            allowed_user_ids: &["U123"],
+            category: "bot token secret",
+        },
+        CredentialFailureCase {
+            label: "empty allowlist",
+            app_secret: Some("app"),
+            bot_secret: Some("bot"),
+            app_value: Some("xapp-test"),
+            bot_value: Some("xoxb-test"),
+            allowed_user_ids: &[],
+            category: "allowed_user_ids",
+        },
+    ] {
+        let mut secrets = BTreeMap::new();
+        if let Some(value) = case.app_value {
+            secrets.insert("app".to_owned(), tau_proto::SecretValue::new(value));
+        }
+        if let Some(value) = case.bot_value {
+            secrets.insert("bot".to_owned(), tau_proto::SecretValue::new(value));
+        }
+        let error = match (ExtConfig {
+            app_token_secret: case.app_secret.map(str::to_owned),
+            bot_token_secret: case.bot_secret.map(str::to_owned),
+            allowed_user_ids: case
+                .allowed_user_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            ..Default::default()
+        })
+        .validate(&secrets)
+        {
+            Err(error) => error,
+            Ok(_) => panic!("{} must fail", case.label),
+        };
+        assert!(
+            error.contains(case.category),
+            "{}: expected {} in {error}",
+            case.label,
+            case.category
+        );
+        assert!(
+            !error.contains("xapp-test"),
+            "{} leaked app fixture",
+            case.label
+        );
+        assert!(
+            !error.contains("xoxb-test"),
+            "{} leaked bot fixture",
+            case.label
+        );
     }
-    .validate(&secrets)
-    .err()
-    .expect("empty bot token");
-    assert!(err.contains("missing or empty"));
-
-    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
-    let err = ExtConfig {
-        app_token_secret: Some("app".to_owned()),
-        bot_token_secret: Some("bot".to_owned()),
-        ..Default::default()
-    }
-    .validate(&secrets)
-    .err()
-    .expect("empty allowlist");
-    assert!(err.contains("allowed_user_ids"));
 }
 
 /// Unknown config keys are rejected instead of being silently ignored, because
@@ -4323,24 +4405,6 @@ fn config_rejects_empty_and_malformed_allowlist_ids() {
         .expect("invalid id must fail");
         assert!(error.contains("invalid Slack id") || error.contains("empty ids"));
     }
-}
-
-/// The obsolete singular destination key is rejected so operators cannot
-/// believe a channel is authorized when the extension ignored it.
-#[test]
-fn config_rejects_singular_channel_id() {
-    let value = tau_proto::json_to_cbor(&serde_json::json!({
-        "app_token_secret": "app",
-        "bot_token_secret": "bot",
-        "allowed_user_ids": ["U123"],
-        "channel_id": "C123"
-    }));
-    let error = value
-        .deserialized::<ExtConfig>()
-        .map_err(|error| format!("{error:?}"))
-        .expect_err("obsolete singular key");
-    assert!(error.contains("unknown field"));
-    assert!(error.contains("channel_id"));
 }
 
 /// Slack Web API endpoint overrides must not downgrade production traffic or
@@ -4481,37 +4545,14 @@ fn run_malformed_pre_start_config_clears_inactive_state() {
     assert_eq!(*client.open_count.lock().expect("lock"), 0);
 }
 
-/// Configuration changes never refresh or expand the fixed send schema.
+/// The one static send declaration precedes readiness and configuration churn
+/// never emits a replacement or leaks configured destinations.
 #[test]
-fn run_config_does_not_refresh_send_schema() {
+fn send_schema_is_static_and_declared_once_before_ready() {
     let frames = run_protocol_messages(
         &[proactive_config_message(), malformed_config_message()],
         FakeClient::new(),
     );
-    let registrations = frames
-        .iter()
-        .filter_map(|frame| match frame {
-            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-                Event::ToolRegistrationDeclared(register)
-                    if register.tool.name.as_str() == SEND_TOOL_NAME =>
-                {
-                    Some(&register.tool)
-                }
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(registrations.len(), 1);
-    let schema = registrations[0].parameters.as_ref().expect("fixed schema");
-    assert!(schema["properties"]["destination"].get("enum").is_none());
-    assert_eq!(schema["required"], serde_json::json!(["message"]));
-}
-
-/// The one static send declaration precedes readiness and has no alias enum.
-#[test]
-fn initial_send_schema_is_static_before_ready() {
-    let frames = run_protocol_messages(&[proactive_config_message()], FakeClient::new());
     let registrations = frames
         .iter()
         .enumerate()
@@ -4529,12 +4570,9 @@ fn initial_send_schema_is_static_before_ready() {
         .collect::<Vec<_>>();
     assert_eq!(registrations.len(), 1);
     let (registration_index, final_tool) = registrations[0];
-    assert!(
-        final_tool
-            .parameters
-            .as_ref()
-            .is_some_and(|schema| schema["properties"]["destination"].get("enum").is_none())
-    );
+    let schema = final_tool.parameters.as_ref().expect("fixed schema");
+    assert!(schema["properties"]["destination"].get("enum").is_none());
+    assert_eq!(schema["required"], serde_json::json!(["message"]));
     let ready_index = frames
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
