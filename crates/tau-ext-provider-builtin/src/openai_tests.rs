@@ -307,6 +307,8 @@ fn session_dir(status: tau_proto::SessionDirStatus) -> tau_proto::HarnessSession
     }
 }
 
+/// Retry status must clear the response without publishing a user-visible
+/// message delta, so transient failure text never enters assistant output.
 #[test]
 fn retry_banner_emits_status_not_message_delta() {
     let mut bytes = Vec::new();
@@ -1967,10 +1969,10 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     ));
 }
 
+/// Registered ChatGPT profiles must publish their models even when credentials
+/// are absent, because authentication affects execution rather than discovery.
 #[test]
 fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
-    // Profile existence is the registration signal. Auth validity affects
-    // prompt execution, not whether the registered account's models are visible.
     let models = models_for_auth(&OpenAiAuth::default());
 
     assert!(model_ids(&models).starts_with(&["chatgpt/gpt-5.6-sol".to_owned()]));
@@ -2097,10 +2099,10 @@ fn xhigh_metadata_is_model_specific() {
     );
 }
 
+/// ChatGPT model declarations must publish accepted verbosity choices so UI
+/// cycling follows the provider snapshot.
 #[test]
 fn verbosity_metadata_is_published_for_chatgpt_models() {
-    // The provider snapshot is authoritative for UI cycling, so ChatGPT
-    // models must publish the verbosity choices they accept.
     let models = models_for_auth(&chatgpt_auth());
     let gpt = models
         .iter()
@@ -2113,12 +2115,10 @@ fn verbosity_metadata_is_published_for_chatgpt_models() {
     );
 }
 
+/// Accepted provider prompts must enter worker execution concurrently rather
+/// than waiting for an earlier prompt to finish.
 #[test]
 fn prompt_workers_start_concurrently() {
-    // Regression coverage for backend-agent parallelism: two accepted
-    // provider prompts must both enter worker execution before the first
-    // one finishes. A serial dispatcher would time out the first worker's
-    // wait and never observe two active starts at once.
     let mut first = prompt();
     first.agent_prompt_id = "sp-par-1"
         .parse::<tau_proto::AgentPromptId>()
@@ -5263,10 +5263,10 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
     );
 }
 
+/// A missing backend remains pending because external repair can restore it;
+/// only disconnect ends the extension's retry loop.
 #[test]
 fn direct_prompt_request_with_missing_backend_remains_pending_until_disconnect() {
-    // Missing credentials/profile state can be repaired externally, so it is not
-    // a proven terminal request failure. Process disconnect still ends retries.
     let input = encode_frames(&[
         live_event(11, Event::AgentPromptCreated(prompt())),
         HarnessOutputMessage::Disconnect(tau_proto::Disconnect {

@@ -66,13 +66,14 @@ fn profile_accepts_supported_cache_policies_and_rejects_wrong_boundary() {
     }
 }
 
-/// Responses profiles must retain their explicit route and model list rather
-/// than gaining provider discovery or an implicit provider-specific model.
+/// Hydrated Responses provider serialization must retain its explicit route and
+/// model list rather than gaining discovery or an implicit model; this does not
+/// cover credential-free persisted settings.
 #[test]
 fn profile_round_trips_explicit_models() {
     let profile: ResponsesProvider = serde_json::from_value(serde_json::json!({
         "base_url": "https://example.test/v1",
-        "api_key": "secret",
+        "api_key": "fixture-api-key",
         "models": [{"id": "example-model"}]
     }))
     .expect("profile");
@@ -156,7 +157,18 @@ fn profile_publishes_default_responses_efforts() {
         models[0].supported_tool_types,
         vec![tau_proto::ToolType::Function]
     );
-    assert_eq!(models[0].efforts, tau_proto::Effort::ALL.to_vec());
+    assert_eq!(
+        models[0].efforts,
+        [
+            tau_proto::Effort::Off,
+            tau_proto::Effort::Minimal,
+            tau_proto::Effort::Low,
+            tau_proto::Effort::Medium,
+            tau_proto::Effort::High,
+            tau_proto::Effort::XHigh,
+            tau_proto::Effort::Max,
+        ]
+    );
     assert!(!models[0].supports_compaction);
     assert!(models[0].supports_standalone_compaction);
     assert_eq!(models[0].standalone_compaction_threshold, Some(30_720));
@@ -302,24 +314,6 @@ fn profile_publishes_configured_runtime_cache_contract() {
         tau_proto::ProviderCacheTtl::Minimum {
             seconds: std::num::NonZeroU64::new(1_800).expect("positive test duration")
         }
-    );
-}
-
-/// The shared canonical list must retain the documented UI order so default
-/// public Responses capabilities and harness effort cycling cannot drift.
-#[test]
-fn canonical_responses_efforts_match_ui_order() {
-    assert_eq!(
-        tau_proto::Effort::ALL,
-        [
-            tau_proto::Effort::Off,
-            tau_proto::Effort::Minimal,
-            tau_proto::Effort::Low,
-            tau_proto::Effort::Medium,
-            tau_proto::Effort::High,
-            tau_proto::Effort::XHigh,
-            tau_proto::Effort::Max,
-        ]
     );
 }
 

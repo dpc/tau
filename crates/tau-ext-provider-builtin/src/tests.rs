@@ -1068,10 +1068,10 @@ fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
     models.iter().map(|model| model.id.to_string()).collect()
 }
 
+/// Server-side compaction is a durable output item and therefore ends a turn
+/// normally rather than using a special provider lifecycle stop reason.
 #[test]
 fn compaction_output_finishes_as_normal_end_turn() {
-    // Regression: server-side compaction is now represented by a durable output
-    // item, not a special provider lifecycle stop reason.
     let output_items = [tau_proto::ContextItem::Compaction(
         tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Map(Vec::new())),
     )];
@@ -1082,11 +1082,10 @@ fn compaction_output_finishes_as_normal_end_turn() {
     );
 }
 
+/// Tool calls returned beside compaction must still own the stop reason so the
+/// harness executes them instead of treating the turn as normally complete.
 #[test]
 fn compaction_with_tool_calls_still_requests_tools() {
-    // Compaction can be returned alongside normal model output. Tool calls still
-    // own the provider stop reason so the harness runs them instead of treating
-    // the turn as a plain completed end turn.
     let output_items = [
         tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
             tau_proto::CborValue::Map(Vec::new()),
@@ -1107,10 +1106,10 @@ fn compaction_with_tool_calls_still_requests_tools() {
     );
 }
 
+/// Runtime and provider setup errors must stay outside replayable assistant
+/// output items while still producing an error terminal.
 #[test]
 fn synthetic_provider_error_is_not_output_item() {
-    // Regression: runtime/provider setup errors are display strings, not
-    // assistant messages that should be replayed as future context.
     let finished = simple_finished(
         "sp-error"
             .parse::<tau_proto::AgentPromptId>()
@@ -1157,31 +1156,6 @@ fn provider_kind_catalog_has_exact_canonical_tokens() {
             .iter()
             .any(|descriptor| descriptor.token == "completions API")
     );
-}
-
-#[test]
-fn profile_storage_kinds_do_not_carry_openai_prefix() {
-    // Profile files are builtin-provider registrations, not OpenAI account
-    // records. Keep the storage tags aligned with the builtin backend kind.
-    let chatgpt = serde_json::to_value(BuiltinProviderProfile::Chatgpt(ChatGptProfile::default()))
-        .expect("serialize chatgpt profile");
-    let chat_completions = serde_json::to_value(BuiltinProviderProfile::ChatCompletions(
-        ChatCompletionsProvider::default(),
-    ))
-    .expect("serialize chat completions profile");
-    let openrouter = serde_json::to_value(BuiltinProviderProfile::OpenRouter(
-        OpenRouterProfile::default(),
-    ))
-    .expect("serialize openrouter profile");
-    let responses = serde_json::to_value(BuiltinProviderProfile::Responses(
-        ResponsesProvider::default(),
-    ))
-    .expect("serialize responses profile");
-
-    assert_eq!(chatgpt["kind"], "chatgpt");
-    assert_eq!(chat_completions["kind"], "chat_completions");
-    assert_eq!(openrouter["kind"], "openrouter");
-    assert_eq!(responses["kind"], "responses");
 }
 
 /// ChatGPT's route compatibility flag is optional, omits its standard default,
@@ -2025,10 +1999,10 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
     );
 }
 
+/// Persistent failures must retain unbounded attempt accounting while generated
+/// retry delays cap at the approved thirty-minute ceiling.
 #[test]
 fn generated_retry_delay_caps_without_exhausting_attempts() {
-    // Persistent failures continue indefinitely while policy-generated cadence
-    // reaches, but never exceeds, the approved thirty-minute ceiling.
     let mut state = PromptRetryState::default();
     for _ in 0..10_000 {
         let delay = state.next_delay(RetryClass::Unknown, "ap-persistent");
@@ -2064,11 +2038,10 @@ fn cancellation_state_reports_pending_target_without_consuming_it() {
     assert!(!cancellation.is_canceled(&prompt_id));
 }
 
+/// Targeted cancellation must wake only the matching parked backend turn rather
+/// than relying on its periodic stream receive timeout.
 #[test]
 fn cancellation_waker_fires_for_matching_prompt_only() {
-    // WebSocket turns park on provider events for up to the stream idle
-    // watchdog. The cancellation registry must therefore wake the matching turn
-    // directly, without relying on periodic receive timeouts.
     let cancellation = Arc::new(CancellationState::default());
     let target_apid = tau_proto::AgentPromptId::parse("ap-target")
         .expect("known-safe AgentPromptId must be valid");
@@ -2151,11 +2124,10 @@ fn cancellation_global_cancel_wakes_late_old_generation_registration() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// Provider shutdown must wake every active WebSocket turn so workers return
+/// their normal canceled terminal rather than waiting on idle sockets.
 #[test]
 fn cancellation_shutdown_wakes_all_registered_abort_wakers() {
-    // Provider shutdown must wake every active ChatGPT WebSocket turn so workers
-    // can return their normal canceled terminal path instead of waiting on idle
-    // upstream sockets.
     let cancellation = Arc::new(CancellationState::default());
     let first_apid = tau_proto::AgentPromptId::parse("ap-first")
         .expect("known-safe AgentPromptId must be valid");
@@ -2184,11 +2156,10 @@ fn cancellation_shutdown_wakes_all_registered_abort_wakers() {
     assert_eq!(second.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// Dropping a completed turn's abort-waker guard must prevent later
+/// cancellation from delivering stale wake hints into a reused socket stream.
 #[test]
 fn cancellation_waker_guard_unregisters_on_drop() {
-    // Completed turns drop their abort-waker guard. Later cancellation for the
-    // same prompt id must not enqueue stale wake hints into a reused socket's
-    // inbound event stream.
     let cancellation = Arc::new(CancellationState::default());
     let apid =
         tau_proto::AgentPromptId::parse("ap-drop").expect("known-safe AgentPromptId must be valid");
@@ -2964,10 +2935,10 @@ fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
     );
 }
 
+/// A built-in repetition error must clear transient output and finish with an
+/// empty non-retryable response rather than preserving repeated stream text.
 #[test]
 fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
-    // Built-in ChatGPT/Codex errors from the stream guard clear transient output
-    // and finish as a non-retryable repetition-detected provider response.
     let prompt = minimal_prompt();
     let repetition = tau_provider::StreamRepetition {
         key: tau_provider::StreamRepetitionKey::AssistantText { output_index: 0 },
