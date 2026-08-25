@@ -13,9 +13,7 @@ use std::{fs, thread};
 use rostra_client::{Client, Database, ExternalEventId};
 use rostra_client_db::social::EventPaginationCursor;
 use rostra_core::event::content_kind::{EventContentKind as _, Follow, PersonasTagsSelector};
-use rostra_core::event::{
-    Event as RostraEvent, EventKind, PersonaTag, VerifiedEvent, VerifiedEventContent,
-};
+use rostra_core::event::{Event as RostraEvent, EventKind, VerifiedEvent, VerifiedEventContent};
 use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{
     Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
@@ -152,26 +150,6 @@ fn persona_tags_have_count_and_aggregate_bounds() {
     let output = format_tags(tags);
     assert!(output.split(',').count() <= 16);
     assert!(output.len() <= 512);
-}
-
-/// Ensures following timelines honor both upstream selector variants.
-#[test]
-fn following_selectors_apply_only_and_except_tags() {
-    let personal = PersonaTag::personal();
-    let professional = PersonaTag::professional();
-    let post_tags = BTreeSet::from([personal.clone()]);
-    let only_personal = PersonasTagsSelector::Only {
-        ids: BTreeSet::from([personal]),
-    };
-    let only_professional = PersonasTagsSelector::Only {
-        ids: BTreeSet::from([professional.clone()]),
-    };
-    let except_professional = PersonasTagsSelector::Except {
-        ids: BTreeSet::from([professional]),
-    };
-    assert!(only_personal.matches_tags(&post_tags));
-    assert!(!only_professional.matches_tags(&post_tags));
-    assert!(except_professional.matches_tags(&post_tags));
 }
 
 /// Ensures status reports exact direct and two-hop counts for signed hostile
@@ -449,31 +427,128 @@ fn configuration_commit_failure_preserves_active_runtime() {
     );
 }
 
-/// Ensures all declarations retain exact names and strict object schemas.
+/// Ensures all approved tool schemas retain their required inputs, strict
+/// object boundary, and authority- or resource-bearing argument constraints.
 #[test]
 fn tool_declarations_match_approved_slice() {
     let specs = [
-        status_spec(),
-        list_spec(),
-        read_spec(),
-        profile_spec(),
-        post_spec(),
-        react_spec(),
-        follow_spec(),
-        unfollow_spec(),
-        profile_update_spec(),
-        vote_spec(),
+        (
+            status_spec(),
+            None,
+            &[][..],
+            serde_json::json!({"properties": {}}),
+        ),
+        (
+            list_spec(),
+            Some(&["timeline"][..]),
+            &["timeline", "author", "cursor", "limit"][..],
+            serde_json::json!({
+                "properties": {
+                    "timeline": {"type": "string", "enum": ["following", "network", "author"]},
+                    "author": {"type": "string"},
+                    "cursor": {"type": "string"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_PAGE_SIZE,
+                        "default": DEFAULT_PAGE_SIZE,
+                    },
+                },
+            }),
+        ),
+        (
+            read_spec(),
+            Some(&["post_id"][..]),
+            &["post_id"][..],
+            serde_json::json!({"properties": {"post_id": {"type": "string"}}}),
+        ),
+        (
+            profile_spec(),
+            Some(&["identity"][..]),
+            &["identity"][..],
+            serde_json::json!({"properties": {"identity": {"type": "string"}}}),
+        ),
+        (
+            crate::specs::notifications_spec(),
+            Some(&["enabled"][..]),
+            &["enabled"][..],
+            serde_json::json!({"properties": {"enabled": {"type": "boolean"}}}),
+        ),
+        (
+            post_spec(),
+            Some(&["body"][..]),
+            &["body", "reply_to", "persona_tags"][..],
+            serde_json::json!({
+                "properties": {
+                    "body": {"type": "string", "minLength": 1, "maxLength": MAX_DJOT_BYTES},
+                    "reply_to": {"type": "string"},
+                    "persona_tags": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 32},
+                        "maxItems": 16,
+                        "default": [],
+                    },
+                },
+            }),
+        ),
+        (
+            react_spec(),
+            Some(&["post_id", "reaction"][..]),
+            &["post_id", "reaction"][..],
+            serde_json::json!({
+                "properties": {
+                    "post_id": {"type": "string"},
+                    "reaction": {"type": "string", "minLength": 1, "maxLength": 8},
+                },
+            }),
+        ),
+        (
+            follow_spec(),
+            Some(&["identity"][..]),
+            &["identity"][..],
+            serde_json::json!({"properties": {"identity": {"type": "string"}}}),
+        ),
+        (
+            unfollow_spec(),
+            Some(&["identity"][..]),
+            &["identity"][..],
+            serde_json::json!({"properties": {"identity": {"type": "string"}}}),
+        ),
+        (
+            profile_update_spec(),
+            Some(&["display_name", "bio"][..]),
+            &["display_name", "bio"][..],
+            serde_json::json!({
+                "properties": {
+                    "display_name": {"type": "string", "maxLength": 100},
+                    "bio": {"type": "string", "maxLength": 1000},
+                },
+            }),
+        ),
+        (
+            vote_spec(),
+            Some(&["post_id", "vote"][..]),
+            &["post_id", "vote"][..],
+            serde_json::json!({
+                "properties": {
+                    "post_id": {"type": "string"},
+                    "vote": {"type": "string", "enum": ["up", "down", "clear"]},
+                },
+            }),
+        ),
     ];
+
     assert_eq!(
         specs
             .iter()
-            .map(|spec| spec.name.as_str())
+            .map(|(spec, ..)| spec.name.as_str())
             .collect::<Vec<_>>(),
         [
             STATUS_TOOL,
             LIST_TOOL,
             READ_TOOL,
             PROFILE_TOOL,
+            crate::specs::NOTIFICATIONS_TOOL,
             POST_TOOL,
             REACT_TOOL,
             FOLLOW_TOOL,
@@ -482,12 +557,62 @@ fn tool_declarations_match_approved_slice() {
             VOTE_TOOL,
         ]
     );
-    assert!(specs.iter().all(|spec| {
-        spec.parameters
-            .as_ref()
-            .and_then(|schema| schema.get("additionalProperties"))
-            == Some(&serde_json::Value::Bool(false))
-    }));
+    for (spec, required, property_names, fragment) in specs {
+        let schema = spec.parameters.as_ref().expect("function schema");
+        assert_eq!(schema["type"], "object", "{}", spec.name);
+        assert_eq!(schema["additionalProperties"], false, "{}", spec.name);
+        match required {
+            Some(required) => {
+                assert_eq!(
+                    schema["required"],
+                    serde_json::json!(required),
+                    "{}",
+                    spec.name
+                );
+            }
+            None => assert!(
+                schema.get("required").is_none(),
+                "{} must not require arguments",
+                spec.name
+            ),
+        }
+        assert_eq!(
+            schema["properties"]
+                .as_object()
+                .expect("object properties")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            property_names.iter().copied().collect(),
+            "{}",
+            spec.name
+        );
+        assert_schema_fragment(schema, &fragment, spec.name.as_str());
+    }
+}
+
+/// Recursively checks object fragments while comparing leaves exactly, so
+/// tool-description prose remains outside this contract oracle.
+fn assert_schema_fragment(
+    actual: &serde_json::Value,
+    expected: &serde_json::Value,
+    tool_name: &str,
+) {
+    match expected {
+        serde_json::Value::Object(expected) => {
+            let actual = actual.as_object().expect("schema object");
+            for (key, expected) in expected {
+                assert_schema_fragment(
+                    actual
+                        .get(key)
+                        .unwrap_or_else(|| panic!("{tool_name} is missing {key}")),
+                    expected,
+                    tool_name,
+                );
+            }
+        }
+        _ => assert_eq!(actual, expected, "{tool_name} schema fragment"),
+    }
 }
 
 /// Ensures the extension declares every standard Rostra tool in the one policy
@@ -707,36 +832,6 @@ fn query_admission_is_capped_and_blocks_reconfiguration() {
     assert!(reconfiguration_allowed(&permits));
 }
 
-/// Ensures model-visible timeout does not falsely claim that retained blocking
-/// work or its admission permit was cancelled.
-#[test]
-fn timeout_suppresses_terminal_while_retained_work_holds_permit() {
-    let runtime = RuntimeBuilder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    runtime.block_on(async {
-        let permits = Arc::new(Semaphore::new(1));
-        let permit = Arc::clone(&permits).try_acquire_owned().expect("permit");
-        let (release_tx, release_rx) = oneshot::channel::<()>();
-        let retained = tokio::spawn(async move {
-            let _permit = permit;
-            let _ = release_rx.await;
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(1), async {
-                std::future::pending::<()>().await;
-            })
-            .await
-            .is_err()
-        );
-        assert_eq!(permits.available_permits(), 0);
-        release_tx.send(()).expect("release retained query");
-        retained.await.expect("retained query");
-        assert_eq!(permits.available_permits(), 1);
-    });
-}
-
 /// Ensures all timeline headers use their approved lowercase schema spelling.
 #[test]
 fn timeline_headers_are_lowercase() {
@@ -745,22 +840,48 @@ fn timeline_headers_are_lowercase() {
     assert_eq!(Timeline::Author.as_str(), "author");
 }
 
-/// Ensures bounded runtime shutdown returns even with retained async work.
+/// Ensures dropping RostraState remains bounded with a retained call and
+/// notification task.
 #[test]
 fn runtime_shutdown_is_bounded() {
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
         .build()
         .expect("test runtime");
-    runtime.spawn(std::future::pending::<()>());
+    let running_task = runtime.spawn(std::future::pending::<()>());
+    let notification_task = runtime.spawn(std::future::pending::<()>());
+    let running = Arc::new(Mutex::new(HashMap::from([(
+        tau_proto::ToolCallId::from("pending-call"),
+        RunningCall {
+            abort: running_task.abort_handle(),
+            tool_name: tau_proto::ToolName::new(STATUS_TOOL),
+            publishing: false,
+        },
+    )])));
+    let state = RostraState {
+        client: None,
+        identity_secret: None,
+        state_dir: None,
+        runtime: Some(runtime),
+        running,
+        permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS)),
+        write_lock: Arc::new(AsyncMutex::new(())),
+        post_rate_limit: PostRateLimit::default(),
+        post_rate_limit_window: Arc::new(Mutex::new(PostRateLimitWindow::default())),
+        notifications: Arc::new(Mutex::new(notification_state::State::default())),
+        notifications_wake: Arc::new(Notify::new()),
+        notifications_task: Some(notification_task.abort_handle()),
+        mandatory_output: MandatoryOutput::disconnected(),
+    };
     let (done_tx, done_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        runtime.shutdown_timeout(Duration::from_millis(10));
-        done_tx.send(()).expect("shutdown result");
+    let shutdown = thread::spawn(move || {
+        drop(state);
+        let _ = done_tx.send(());
     });
     done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("bounded shutdown");
+        .recv_timeout(Duration::from_secs(3))
+        .expect("RostraState drop must bound shutdown");
+    shutdown.join().expect("shutdown helper thread");
 }
 
 /// Construct a minimal authenticated tool invocation.

@@ -89,24 +89,58 @@ fn stored_registration_preserves_first_enable_baseline() {
 /// after restart.
 #[test]
 fn durable_report_spacing_survives_reconstruction() {
-    let stored = StoredRegistration {
-        baseline: cursor(4),
-        committed: cursor(4),
-        last_canonical_report_unix_ms: Some(now_ms()),
-        queued_since_unix_ms: Some(now_ms()),
-    };
-    let mut registration = Registration::from_stored(&stored);
+    const TOLERANCE: Duration = Duration::from_secs(1);
+
+    let (directory, mut state) = configured_state();
+    let agent = AgentId::parse("agent").expect("agent id");
+    state.enable(agent.clone(), cursor(4)).expect("enable");
+    state
+        .registrations
+        .get_mut(&agent)
+        .expect("registration")
+        .inflight_end = Some(cursor(5));
+    assert!(
+        state
+            .acknowledge(&delivered(&agent, cursor(5)))
+            .expect("canonical echo")
+    );
+    drop(state);
+
+    let mut reconstructed = State::default();
+    reconstructed
+        .configure(publisher(), identity(), directory.path())
+        .expect("reopen persisted checkpoint");
+    let registration = reconstructed
+        .registrations
+        .get_mut(&agent)
+        .expect("persisted registration");
+    let last_report = registration
+        .last_canonical_report_unix_ms
+        .expect("persisted canonical report time");
     let now = Instant::now();
+    let wall_clock_now = now_ms().max(last_report);
     registration.pending = Some(Pending {
         end: cursor(5),
         first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("monotonic start"),
         last_queued_at: now.checked_sub(IDLE_DEBOUNCE).expect("monotonic idle"),
         count: 1,
     });
+    let due = registration
+        .due_at(
+            now,
+            wall_clock_now,
+            IDLE_DEBOUNCE,
+            MAX_BATCH_AGE,
+            REPORT_INTERVAL,
+        )
+        .expect("due time");
+    let elapsed = Duration::from_millis(wall_clock_now.saturating_sub(last_report));
+    let expected_remaining = REPORT_INTERVAL.saturating_sub(elapsed);
+    let remaining = due.duration_since(now);
     assert!(
-        now < registration
-            .due_at(now, now_ms(), IDLE_DEBOUNCE, MAX_BATCH_AGE, REPORT_INTERVAL)
-            .expect("due time")
+        expected_remaining.saturating_sub(TOLERANCE) <= remaining
+            && remaining <= expected_remaining + TOLERANCE,
+        "reconstructed report spacing {remaining:?} must remain approximately {expected_remaining:?}"
     );
 }
 

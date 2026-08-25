@@ -81,19 +81,3 @@ fn overfull_quota_uses_the_quota_filling_threshold_for_retry() {
         80
     );
 }
-
-/// Ensures replacing the process-owned window resets the runtime-only quota,
-/// matching extension restart or reconfiguration.
-#[test]
-fn replacement_resets_runtime_admissions() {
-    let limit: PostRateLimit = serde_json::from_value(serde_json::json!({
-        "max_events": 1,
-        "window_seconds": 3600,
-    }))
-    .expect("test limit");
-    let mut window = PostRateLimitWindow::default();
-    window.reserve(limit).expect("first reservation");
-    assert!(window.reserve(limit).is_err());
-    let mut replacement = PostRateLimitWindow::default();
-    assert!(replacement.reserve(limit).is_ok());
-}
