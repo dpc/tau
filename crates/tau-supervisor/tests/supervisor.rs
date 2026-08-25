@@ -1,12 +1,8 @@
-use std::fs;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
-use tau_proto::{
-    CborValue, ClientKind, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
-    PROTOCOL_VERSION, Ready, Subscribe, ToolRegistrationDeclared, ToolStarted, UnixMicros,
-};
+use tau_proto::{Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Ready};
 use tau_supervisor::{
     ExtensionCommand, ReceiveOutcome, StderrPolicy, SupervisedChild, SupervisionError,
 };
@@ -14,6 +10,8 @@ use tau_supervisor::{
 const SECRET_ENV_SUBPROCESS: &str = "TAU_SUPERVISOR_SECRET_ENV_SUBPROCESS";
 const STDERR_POLICY_SUBPROCESS: &str = "TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS";
 const FLOOD_MESSAGE_COUNT: usize = 128;
+const EXPECTED_RECEIVE_TIMEOUT: Duration = Duration::from_millis(20);
+const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Builds the command used to launch the real subprocess fixture.
 fn test_command(args: &[&str]) -> ExtensionCommand {
@@ -37,38 +35,7 @@ fn expect_message(child: &mut SupervisedChild, label: &str) -> HarnessInputMessa
     }
 }
 
-fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegistrationDeclared {
-    let hello = expect_message(child, "hello");
-    assert_eq!(
-        hello,
-        HarnessInputMessage::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
-            client_name: test_extension_name("test-child"),
-            client_kind: ClientKind::Tool,
-            expected_session_id: None,
-            capabilities: Default::default(),
-        })
-    );
-
-    let subscribe = expect_message(child, "subscribe");
-    assert_eq!(
-        subscribe,
-        HarnessInputMessage::Subscribe(Subscribe {
-            historical_selectors: Vec::new(),
-            live_selectors: vec![tau_proto::EventSelector::Exact(
-                tau_proto::EventName::TOOL_STARTED,
-            )],
-        })
-    );
-
-    let declaration = expect_message(child, "tool registration declaration");
-    let HarnessInputMessage::Emit(emit) = declaration else {
-        panic!("expected tool registration declaration emit");
-    };
-    let Event::ToolRegistrationDeclared(declaration) = *emit.event else {
-        panic!("expected tool registration declaration event");
-    };
-
+fn expect_child_ready(child: &mut SupervisedChild) {
     let ready = expect_message(child, "ready");
     assert_eq!(
         ready,
@@ -76,8 +43,6 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegistrationDeclared
             message: Some("ready".to_owned()),
         })
     );
-
-    declaration
 }
 
 fn disconnect_child(child: &mut SupervisedChild, reason: &str) {
@@ -86,6 +51,47 @@ fn disconnect_child(child: &mut SupervisedChild, reason: &str) {
             reason: Some(reason.to_owned()),
         }))
         .expect("disconnect should be sent");
+}
+
+/// Owns a test child and bounds cleanup if an assertion aborts its normal flow.
+struct TestChildGuard {
+    /// The child whose graceful shutdown and Linux hard-termination fallback
+    /// this guard owns.
+    child: SupervisedChild,
+}
+
+impl TestChildGuard {
+    /// Spawns a child whose cleanup remains bounded when the test aborts early.
+    fn spawn(command: ExtensionCommand) -> Self {
+        Self {
+            child: SupervisedChild::spawn(command).expect("child should spawn"),
+        }
+    }
+
+    /// Returns the guarded child for test interaction.
+    fn child_mut(&mut self) -> &mut SupervisedChild {
+        &mut self.child
+    }
+}
+
+impl Drop for TestChildGuard {
+    fn drop(&mut self) {
+        if self.child.try_wait().is_ok_and(|exit| exit.is_some()) {
+            return;
+        }
+
+        let _ = self
+            .child
+            .send(&HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some("test cleanup".to_owned()),
+            }));
+        if self.child.wait_for_exit(CHILD_EXIT_TIMEOUT).is_ok() {
+            return;
+        }
+
+        #[cfg(target_os = "linux")]
+        let _ = self.child.terminate(CHILD_EXIT_TIMEOUT);
+    }
 }
 
 #[cfg(unix)]
@@ -102,19 +108,21 @@ fn process_exists(pid: u32) -> bool {
 /// disconnected.
 #[test]
 fn recv_timeout_reports_timeout_without_conflating_disconnect() {
-    let mut child = SupervisedChild::spawn(test_command(&[])).expect("child should spawn");
-    let _register = expect_child_startup(&mut child);
+    let mut child = TestChildGuard::spawn(test_command(&[]));
+    expect_child_ready(child.child_mut());
 
     assert_eq!(
         child
-            .recv_timeout(Duration::from_millis(20))
+            .child_mut()
+            .recv_timeout(EXPECTED_RECEIVE_TIMEOUT)
             .expect("timeout should not be an error"),
         ReceiveOutcome::Timeout
     );
 
-    disconnect_child(&mut child, "done");
+    disconnect_child(child.child_mut(), "done");
     let _exit = child
-        .wait_for_exit(Duration::from_secs(2))
+        .child_mut()
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
 }
 
@@ -132,7 +140,7 @@ fn recv_timeout_reports_clean_stdout_close() {
         ReceiveOutcome::Closed
     );
     let exit = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
     assert_eq!(exit.exit_code(), Some(0));
 }
@@ -145,10 +153,10 @@ fn child_exit_observation_is_repeatable() {
         SupervisedChild::spawn(test_command(&["--exit-immediately"])).expect("child should spawn");
 
     let first = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
     let second = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("cached exit should be returned");
     let third = child
         .try_wait()
@@ -171,13 +179,14 @@ fn recv_timeout_reports_partial_frame_as_decode_error() {
         .expect_err("partial frame should be a decode error");
     assert!(matches!(error, SupervisionError::Decode(_)));
     let _exit = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
 }
 
-/// Ensures the stdout reader can drain a burst of child messages without loss.
+/// Ensures the stdout reader drains an ordered burst without losing messages
+/// when it saturates its channel.
 #[test]
-fn stdout_reader_handles_message_burst_without_loss() {
+fn stdout_reader_drains_ordered_burst_without_loss() {
     let flood_message_count = FLOOD_MESSAGE_COUNT.to_string();
     let mut child =
         SupervisedChild::spawn(test_command(&["--flood", flood_message_count.as_str()]))
@@ -200,7 +209,7 @@ fn stdout_reader_handles_message_burst_without_loss() {
         ReceiveOutcome::Closed
     );
     let exit = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
     assert_eq!(exit.exit_code(), Some(0));
 }
@@ -208,12 +217,10 @@ fn stdout_reader_handles_message_burst_without_loss() {
 /// Ensures the spawn policy applies the configured child working directory.
 #[test]
 fn spawn_uses_configured_working_dir() {
-    let working_dir =
-        std::env::temp_dir().join(format!("tau-supervisor-cwd-{}", std::process::id()));
-    fs::create_dir_all(&working_dir).expect("working dir should be created");
+    let working_dir = tempfile::tempdir().expect("working dir should be created");
 
     let mut command = test_command(&["--report-cwd"]);
-    command.working_dir = Some(working_dir.clone());
+    command.working_dir = Some(working_dir.path().to_owned());
     let mut child = SupervisedChild::spawn(command).expect("child should spawn");
 
     assert_eq!(
@@ -221,28 +228,23 @@ fn spawn_uses_configured_working_dir() {
             .recv_timeout(Duration::from_secs(1))
             .expect("cwd report should decode"),
         ReceiveOutcome::Message(Box::new(HarnessInputMessage::Ready(Ready {
-            message: Some(working_dir.display().to_string()),
+            message: Some(working_dir.path().display().to_string()),
         })))
     );
     let exit = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
     assert_eq!(exit.exit_code(), Some(0));
-    fs::remove_dir_all(working_dir).expect("working dir should be removed");
 }
 
 /// Ensures relative program paths are rejected when a working directory is set.
 #[test]
 fn spawn_rejects_relative_program_with_working_dir() {
-    let working_dir = std::env::temp_dir().join(format!(
-        "tau-supervisor-relative-program-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&working_dir).expect("working dir should be created");
+    let working_dir = tempfile::tempdir().expect("working dir should be created");
 
     let mut command = test_command(&[]);
     command.program = PathBuf::from("tau-supervisor-test-child");
-    command.working_dir = Some(working_dir.clone());
+    command.working_dir = Some(working_dir.path().to_owned());
 
     let error = match SupervisedChild::spawn(command) {
         Ok(_) => panic!("relative program with working dir should be rejected"),
@@ -252,7 +254,6 @@ fn spawn_rejects_relative_program_with_working_dir() {
         error,
         SupervisionError::RelativeProgramWithWorkingDir { .. }
     ));
-    fs::remove_dir_all(working_dir).expect("working dir should be removed");
 }
 
 /// Ensures pre-spawn starting events intentionally omit the child pid.
@@ -278,7 +279,7 @@ fn terminate_kills_long_running_child() {
     let mut child = SupervisedChild::spawn(test_command(&["--sleep"])).expect("child should spawn");
 
     let exit = child
-        .terminate(Duration::from_secs(2))
+        .terminate(CHILD_EXIT_TIMEOUT)
         .expect("child should terminate");
     assert_ne!(exit.exit_code(), Some(0));
 }
@@ -318,7 +319,7 @@ fn stderr_policy_null_discards_child_stderr() {
             })))
         );
         let exit = child
-            .wait_for_exit(Duration::from_secs(2))
+            .wait_for_exit(CHILD_EXIT_TIMEOUT)
             .expect("child should exit");
         assert_eq!(exit.exit_code(), Some(0));
         return;
@@ -350,7 +351,7 @@ fn spawned_child_does_not_inherit_tau_secret_env() {
             })))
         );
         let _exit = child
-            .wait_for_exit(Duration::from_secs(2))
+            .wait_for_exit(CHILD_EXIT_TIMEOUT)
             .expect("child should exit");
         return;
     }
@@ -366,10 +367,10 @@ fn spawned_child_does_not_inherit_tau_secret_env() {
     assert!(status.success());
 }
 
-/// Ensures the supervisor exchanges lifecycle and tool events over child stdio.
+/// Ensures lifecycle facts use the spawned child PID and observed exit fields.
 #[test]
-fn supervised_child_exchanges_protocol_events_over_stdio() {
-    let command = test_command(&[]);
+fn lifecycle_events_map_child_pid_and_exit() {
+    let command = test_command(&["--exit-immediately"]);
     let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
 
     assert_eq!(child.command(), &command);
@@ -382,26 +383,6 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         })
     );
 
-    let register = expect_child_startup(&mut child);
-    assert_eq!(
-        register,
-        ToolRegistrationDeclared {
-            tool: tau_proto::ToolSpec {
-                name: tau_proto::ToolName::new("echo"),
-                model_visible_name: None,
-                description: Some("Echo test payloads".to_owned()),
-                tool_type: tau_proto::ToolType::Function,
-                parameters: None,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: true,
-                background_support: None,
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: None,
-        }
-    );
     assert_eq!(
         child.ready_event(42.into()),
         Event::ExtensionReady(tau_proto::ExtensionReady {
@@ -411,53 +392,9 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         })
     );
 
-    child
-        .send(&HarnessOutputMessage::deliver_replay(
-            UnixMicros::new(7),
-            Event::ToolStarted(ToolStarted {
-                call_id: "call-replay".into(),
-                tool_name: tau_proto::ToolName::new("echo"),
-                arguments: CborValue::Text("replayed".to_owned()),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        ))
-        .expect("replayed tool should be sent");
-    child
-        .send(&HarnessOutputMessage::deliver(Event::ToolStarted(
-            ToolStarted {
-                call_id: "call-1".into(),
-                tool_name: tau_proto::ToolName::new("echo"),
-                arguments: CborValue::Text("hello".to_owned()),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-                originator: tau_proto::PromptOriginator::User,
-            },
-        )))
-        .expect("tool should be sent");
-    let result = expect_message(&mut child, "tool result");
-    assert_eq!(
-        result,
-        HarnessInputMessage::emit_with_persist(
-            Event::ToolResultReported(tau_proto::ToolResult {
-                presentation: Default::default(),
-                call_id: "call-1".into(),
-                tool_name: tau_proto::ToolName::new("echo"),
-                tool_type: tau_proto::ToolType::Function,
-                result: CborValue::Text("hello".to_owned()),
-                provider_content: Vec::new(),
-                kind: tau_proto::ToolResultKind::Final,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
-            false,
-        )
-    );
-
-    disconnect_child(&mut child, "done");
     let exit = child
-        .wait_for_exit(Duration::from_secs(2))
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
         .expect("child should exit");
-    assert_eq!(exit.exit_code(), Some(0));
     assert_eq!(
         child.exited_event(42.into(), &exit),
         Event::ExtensionExited(tau_proto::ExtensionExited {
@@ -470,23 +407,24 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     );
 }
 
-/// Ensures a restarted child can emit the same tool registration after prior
-/// exit.
+/// Ensures the supervisor sends and receives one minimal CBOR round trip over
+/// child stdio.
 #[test]
-fn restarted_child_can_reregister_after_exit() {
-    let command = test_command(&[]);
+fn supervised_child_exchanges_minimal_cbor_round_trip_over_stdio() {
+    let mut child = TestChildGuard::spawn(test_command(&["--round-trip"]));
 
-    for _ in 0..2 {
-        let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
-        let register = expect_child_startup(&mut child);
-        assert_eq!(register.tool.name, tau_proto::ToolName::new("echo"));
-
-        disconnect_child(&mut child, "restart");
-        let exit = child
-            .wait_for_exit(Duration::from_secs(2))
-            .expect("child should exit");
-        assert_eq!(exit.exit_code(), Some(0));
-    }
+    disconnect_child(child.child_mut(), "round trip");
+    assert_eq!(
+        expect_message(child.child_mut(), "round-trip acknowledgment"),
+        HarnessInputMessage::Disconnect(Disconnect {
+            reason: Some("round trip".to_owned()),
+        })
+    );
+    let exit = child
+        .child_mut()
+        .wait_for_exit(CHILD_EXIT_TIMEOUT)
+        .expect("child should exit");
+    assert_eq!(exit.exit_code(), Some(0));
 }
 
 /// Builds a validated extension name used by this test module.

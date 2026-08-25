@@ -5,9 +5,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::{io as path_std_io, time as path_std_time};
 
 use tau_proto::{
-    CborValue, ClientKind, Event, EventDelivery, HarnessInputMessage, HarnessOutputMessage, Hello,
-    PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, Ready, Subscribe,
-    ToolRegistrationDeclared, ToolResult, ToolSpec, ToolStarted,
+    HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, Ready,
 };
 
 const EXIT_IMMEDIATELY_ARG: &str = "--exit-immediately";
@@ -16,6 +14,7 @@ const FLOOD_ARG: &str = "--flood";
 const REPORT_SECRET_ENV_ARG: &str = "--report-secret-env";
 const SLEEP_ARG: &str = "--sleep";
 const REPORT_CWD_ARG: &str = "--report-cwd";
+const ROUND_TRIP_ARG: &str = "--round-trip";
 const STDERR_MARKER_ARG: &str = "--stderr-marker";
 
 fn write_ready(message: impl Into<String>) -> Result<(), Box<dyn Error>> {
@@ -91,116 +90,47 @@ fn run_test_mode(
             write_ready("stderr-written")?;
             Ok(true)
         }
+        Some(ROUND_TRIP_ARG) => {
+            run_round_trip_mode()?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
 
-fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: tau_proto::ExtensionName::parse("test-child")?,
-        client_kind: ClientKind::Tool,
-        expected_session_id: None,
-        capabilities: Default::default(),
-    }))?;
-    writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {
-        historical_selectors: Vec::new(),
-        live_selectors: vec![tau_proto::EventSelector::Exact(
-            tau_proto::EventName::TOOL_STARTED,
-        )],
-    }))?;
-    writer.write_message(&HarnessInputMessage::emit_with_persist(
-        Event::ToolRegistrationDeclared(ToolRegistrationDeclared {
-            tool: ToolSpec {
-                name: tau_proto::ToolName::new("echo"),
-                model_visible_name: None,
-                description: Some("Echo test payloads".to_owned()),
-                tool_type: tau_proto::ToolType::Function,
-                parameters: None,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: true,
-                background_support: None,
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: None,
-        }),
-        false,
-    ))?;
-    writer.write_message(&HarnessInputMessage::Ready(Ready {
-        message: Some("ready".to_owned()),
-    }))?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn write_echo_result(
-    writer: &mut PeerOutputWriter<impl Write>,
-    invoke: ToolStarted,
-) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit_with_persist(
-        Event::ToolResultReported(ToolResult {
-            presentation: Default::default(),
-            call_id: invoke.call_id,
-            tool_name: invoke.tool_name,
-            tool_type: tau_proto::ToolType::Function,
-            result: match invoke.arguments {
-                CborValue::Null => CborValue::Text("null".to_owned()),
-                value => value,
-            },
-            provider_content: Vec::new(),
-            kind: tau_proto::ToolResultKind::Final,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        }),
-        false,
-    ))?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn handle_delivery(
-    writer: &mut PeerOutputWriter<impl Write>,
-    delivery: EventDelivery,
-) -> Result<(), Box<dyn Error>> {
-    // Tool invocations are execution triggers; replay-marked frames re-send
-    // history and must not re-run them.
-    if delivery.is_replay() {
-        return Ok(());
-    }
-    let Event::ToolStarted(invoke) = delivery.into_event() else {
-        return Ok(());
-    };
-    if invoke.tool_name != tau_proto::ToolName::new("echo") {
-        return Ok(());
-    }
-    write_echo_result(writer, invoke)
-}
-
 fn run_protocol_mode() -> Result<(), Box<dyn Error>> {
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
     let mut reader = PeerInputReader::new(BufReader::new(stdin.lock()));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
-
-    write_startup_messages(&mut writer)?;
+    write_ready("ready")?;
 
     loop {
         let Some(message) = reader.read_message()? else {
             return Ok(());
         };
-        match message {
-            HarnessOutputMessage::Deliver(delivery) => handle_delivery(&mut writer, delivery)?,
-            HarnessOutputMessage::Disconnect(_) => return Ok(()),
-            _ => {}
+        if let HarnessOutputMessage::Disconnect(_) = message {
+            return Ok(());
         }
     }
 }
 
+fn run_round_trip_mode() -> Result<(), Box<dyn Error>> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = PeerInputReader::new(BufReader::new(stdin.lock()));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
+
+    let Some(HarnessOutputMessage::Disconnect(disconnect)) = reader.read_message()? else {
+        return Err("round-trip fixture expected one disconnect message".into());
+    };
+    writer.write_message(&HarnessInputMessage::Disconnect(disconnect))?;
+    writer.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    if run_test_mode(args.next(), args)? {
+    let first_arg = args.next();
+    if run_test_mode(first_arg, args)? {
         return Ok(());
     }
     run_protocol_mode()

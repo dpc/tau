@@ -20,3 +20,6 @@ rustix = { version = "0.38", default-features = false, features = [
   "std",
 ] }
 tau-proto.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
