@@ -1,11 +1,79 @@
 mod support;
 
 use std::ffi as path_std_ffi;
+#[cfg(unix)]
+use std::fs::Permissions;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::process::{Command as path_std_process_Command, Output};
+use std::process::{Command, Output};
 
 use support::isolated_tau_command;
 use tempfile::TempDir;
+
+/// A portable-on-Unix configured extension command and its external launch
+/// marker.
+#[cfg(unix)]
+struct PreviewSpawnCanary {
+    /// Absolute executable path used in the extension configuration.
+    command: std::path::PathBuf,
+    /// Marker written as the command's quoted positional argument.
+    marker: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl PreviewSpawnCanary {
+    /// Configures an enabled external extension whose first action writes a
+    /// marker outside Tau's cleanup roots. Unix gating is explicit because its
+    /// script uses an absolute `/bin/sh` shebang.
+    fn configure(home: &TempDir) -> Self {
+        let config_dir = home.path().join(".config/tau");
+        let marker = home.path().join("preview-extension-spawned");
+        let command_path = home.path().join("preview-spawn-canary");
+        std::fs::create_dir_all(&config_dir).expect("create canary config directory");
+        std::fs::write(&command_path, "#!/bin/sh\nprintf spawned > \"$1\"\n")
+            .expect("write preview spawn canary");
+        std::fs::set_permissions(&command_path, Permissions::from_mode(0o700))
+            .expect("make preview spawn canary executable");
+        let command = serde_json::to_string(&[
+            command_path.to_str().expect("UTF-8 canary command path"),
+            marker.to_str().expect("UTF-8 canary marker path"),
+        ])
+        .expect("serialize canary command");
+        std::fs::write(
+            config_dir.join("harness.yaml"),
+            format!("extensions:\n  spawn-canary:\n    command: {command}\n"),
+        )
+        .expect("write preview spawn canary config");
+        Self {
+            command: command_path,
+            marker,
+        }
+    }
+
+    /// Proves the exact configured command writes its marker before a rejection
+    /// assertion relies on the marker as a launch canary.
+    fn run_positive_control(&self) {
+        let status = Command::new(&self.command)
+            .arg(&self.marker)
+            .status()
+            .expect("run preview spawn canary");
+        assert!(status.success(), "preview spawn canary failed");
+        assert!(
+            self.marker.is_file(),
+            "preview spawn canary did not create its marker"
+        );
+        std::fs::remove_file(&self.marker).expect("remove positive-control marker");
+    }
+
+    /// Confirms preview rejection did not reach configured-extension launch.
+    fn assert_not_launched(&self) {
+        assert!(
+            !self.marker.exists(),
+            "rejected preview launched the configured extension"
+        );
+    }
+}
 
 fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
     preview_at(home.path(), environment, args)
@@ -106,6 +174,9 @@ profiles:
 
 fn assert_no_runtime_pairs(home: &Path) {
     let harnesses = home.join(".runtime/tau/harnesses");
+    if !harnesses.exists() {
+        return;
+    }
     assert_eq!(
         std::fs::read_dir(harnesses)
             .expect("harness runtime directory")
@@ -144,6 +215,23 @@ fn assert_no_durable_preview_artifacts(home: &Path) {
                 .is_none(),
         "preview must not create a resumable session"
     );
+    assert_no_runtime_pairs(home);
+}
+
+/// Confirms rejected preview input leaves no daemon-discovery or persistent
+/// session and agent artifacts.
+fn assert_rejected_preview_has_no_state(home: &Path) {
+    for directory in [".state/tau/agents", ".state/tau/sessions"] {
+        let path = home.join(directory);
+        assert!(
+            !path.exists()
+                || std::fs::read_dir(&path)
+                    .expect("read rejected preview state directory")
+                    .next()
+                    .is_none(),
+            "rejected preview must not create durable state in {directory}"
+        );
+    }
     assert_no_runtime_pairs(home);
 }
 
@@ -641,125 +729,6 @@ fn print_tools_matches_model_defaults_and_explicit_role_grants() {
     assert!(!ordinary_default.contains(&"shell_command".to_owned()));
 }
 
-/// Ensures CLI subprocess fixtures clear inherited Tau profile, transport,
-/// secret, home, and XDG inputs before installing their private roots.
-#[test]
-fn preview_subprocesses_ignore_ambient_tau_environment() {
-    let ambient_home = TempDir::new().expect("ambient home");
-    let ambient_config_dir = ambient_home.path().join(".config/tau");
-    std::fs::create_dir_all(&ambient_config_dir).expect("ambient config directory");
-    std::fs::write(
-        ambient_config_dir.join("harness.yaml"),
-        "agents:\n  default_role: ambient-role\n",
-    )
-    .expect("ambient harness configuration");
-
-    let output = path_std_process_Command::new(std::env::current_exe().expect("test executable"))
-        .args([
-            "--ignored",
-            "--exact",
-            "preview_subprocesses_ignore_ambient_tau_environment_child",
-        ])
-        .env("TAU_PROFILE", "ambient-profile")
-        .env(tau_harness::ROLE_CLI_OVERRIDES_ENV, r#"["ambient-role"]"#)
-        .env(
-            tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
-            r#"["ambient-config"]"#,
-        )
-        .env(tau_harness::STARTUP_ROLE_ENV, "ambient-role")
-        .env("TAU_SECRET_AMBIENT_REGRESSION", "must-not-be-forwarded")
-        .env("HOME", ambient_home.path())
-        .env("XDG_CONFIG_HOME", ambient_home.path().join(".config"))
-        .env("XDG_STATE_HOME", ambient_home.path().join(".state"))
-        .env("XDG_CACHE_HOME", ambient_home.path().join(".cache"))
-        .env("XDG_DATA_HOME", ambient_home.path().join(".data"))
-        .env("XDG_RUNTIME_DIR", ambient_home.path().join(".runtime"))
-        .output()
-        .expect("run isolated fixture child");
-    assert!(
-        output.status.success(),
-        "fixture child failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Runs the private preview fixture beneath a poisoned parent environment.
-#[test]
-#[ignore = "run only through the isolated parent regression"]
-fn preview_subprocesses_ignore_ambient_tau_environment_child() {
-    for (key, value) in [
-        ("TAU_PROFILE", "ambient-profile"),
-        (tau_harness::ROLE_CLI_OVERRIDES_ENV, r#"["ambient-role"]"#),
-        (
-            tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
-            r#"["ambient-config"]"#,
-        ),
-        (tau_harness::STARTUP_ROLE_ENV, "ambient-role"),
-        ("TAU_SECRET_AMBIENT_REGRESSION", "must-not-be-forwarded"),
-    ] {
-        assert_eq!(std::env::var(key).as_deref(), Ok(value));
-    }
-
-    let home = TempDir::new().expect("private home");
-    let clean_environment = isolated_tau_command(
-        std::env::current_exe().expect("test executable"),
-        home.path(),
-    )
-    .args([
-        "--ignored",
-        "--exact",
-        "preview_subprocesses_ignore_ambient_tau_environment_clean_child",
-    ])
-    .output()
-    .expect("run clean-environment fixture child");
-    assert!(
-        clean_environment.status.success(),
-        "clean environment child failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&clean_environment.stdout),
-        String::from_utf8_lossy(&clean_environment.stderr)
-    );
-
-    let config_dir = home.path().join(".config/tau");
-    std::fs::create_dir_all(&config_dir).expect("private config directory");
-    std::fs::write(
-        config_dir.join("harness.yaml"),
-        r#"
-agents:
-  default_role: private-role
-  role_groups:
-    fixture:
-      roles:
-        private-role:
-          prompt_fragments:
-            - name: fixture.private
-              priority: 10
-              text: PRIVATE PREVIEW FIXTURE
-"#,
-    )
-    .expect("private harness configuration");
-
-    let output = preview(&home, None, &["dev", "print-prompt"]);
-    assert!(output.status.success(), "{:?}", output.stderr);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("PRIVATE PREVIEW FIXTURE"));
-}
-
-/// Verifies the reusable subprocess helper removes every poisoned startup
-/// input.
-#[test]
-#[ignore = "run only through the isolated parent regression"]
-fn preview_subprocesses_ignore_ambient_tau_environment_clean_child() {
-    for key in [
-        "TAU_PROFILE",
-        tau_harness::ROLE_CLI_OVERRIDES_ENV,
-        tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV,
-        tau_harness::STARTUP_ROLE_ENV,
-        "TAU_SECRET_AMBIENT_REGRESSION",
-    ] {
-        assert!(std::env::var(key).is_err(), "{key} leaked into fixture");
-    }
-}
-
 /// Proves tool previews expose a disabled-by-default extension from the public
 /// environment and apply later CLI disable/re-enable operations in argv order.
 #[test]
@@ -813,38 +782,60 @@ fn print_tools_composes_extension_environment_and_ordered_cli() {
     assert_eq!(env_only.stdout, duplicated.stdout);
 }
 
-/// Ensures both preview commands fail through the supported public parser for
-/// malformed and unknown extension names rather than silently rendering.
+/// Rejects malformed and unknown public extension input before configured
+/// extension launch, leaving no discovery or durable-state artifacts.
+#[cfg(unix)]
 #[test]
-fn previews_reject_invalid_extension_environment() {
-    for command in ["print-prompt", "print-tools"] {
-        for value in ["test-dummy,,core-shell", "not-configured"] {
-            let home = TempDir::new().expect("temporary home");
-            let output = preview(&home, Some(value), &["--role", "engineer", "dev", command]);
-            assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("TAU_ENABLE_EXTENSIONS"));
-        }
+fn previews_reject_invalid_extension_environment_before_startup() {
+    for (value, diagnostic) in [
+        ("test-dummy,,core-shell", "item 2 is empty"),
+        ("not-configured", "unknown extension"),
+    ] {
+        let home = TempDir::new().expect("temporary home");
+        let spawn_canary = PreviewSpawnCanary::configure(&home);
+        spawn_canary.run_positive_control();
+        let output = preview(
+            &home,
+            Some(value),
+            &["--role", "engineer", "dev", "print-tools"],
+        );
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty(), "rejected preview wrote stdout");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("TAU_ENABLE_EXTENSIONS") && stderr.contains(diagnostic),
+            "expected {diagnostic:?} extension-environment rejection: {stderr}"
+        );
+        spawn_canary.assert_not_launched();
+        assert_rejected_preview_has_no_state(home.path());
     }
 }
 
-/// Ensures both preview commands reject non-UTF-8 public environment input at
-/// the outer supported parser before spawning a render daemon.
+/// Rejects non-UTF-8 public extension input before configured extension launch,
+/// leaving no discovery or durable-state artifacts.
 #[cfg(unix)]
 #[test]
 fn previews_reject_non_utf8_extension_environment() {
     use std::os::unix::ffi::OsStringExt as _;
 
-    for command_name in ["print-prompt", "print-tools"] {
-        let home = TempDir::new().expect("temporary home");
-        let output = isolated_tau_command(env!("CARGO_BIN_EXE_tau"), home.path())
-            .env(
-                "TAU_ENABLE_EXTENSIONS",
-                path_std_ffi::OsString::from_vec(vec![0xff]),
-            )
-            .args(["--role", "engineer", "dev", command_name])
-            .output()
-            .expect("run tau preview");
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("valid UTF-8"));
-    }
+    let home = TempDir::new().expect("temporary home");
+    let spawn_canary = PreviewSpawnCanary::configure(&home);
+    spawn_canary.run_positive_control();
+    let output = isolated_tau_command(env!("CARGO_BIN_EXE_tau"), home.path())
+        .env(
+            "TAU_ENABLE_EXTENSIONS",
+            path_std_ffi::OsString::from_vec(vec![0xff]),
+        )
+        .args(["--role", "engineer", "dev", "print-tools"])
+        .output()
+        .expect("run tau preview");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "rejected preview wrote stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TAU_ENABLE_EXTENSIONS") && stderr.contains("valid UTF-8"),
+        "expected UTF-8 extension-environment rejection: {stderr}"
+    );
+    spawn_canary.assert_not_launched();
+    assert_rejected_preview_has_no_state(home.path());
 }

@@ -1,6 +1,6 @@
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,48 @@ use tau_proto::{
     HarnessOutputMessage, Hello, PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, SessionId,
     Subscribe,
 };
+
+/// Owns an initial-UI child and reaps it if a test exits before clean shutdown.
+struct InitialUiChild {
+    /// Spawned component process.
+    process: Child,
+}
+
+impl InitialUiChild {
+    /// Waits for clean shutdown only until the supplied timeout, then reaps the
+    /// child so a broken lifecycle cannot hang the test suite.
+    fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitStatus, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.process.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) if Instant::now() >= deadline => {
+                    self.stop();
+                    return Err("initial-UI child did not exit after disconnect".to_owned());
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => {
+                    self.stop();
+                    return Err(format!("query initial-UI child: {error}"));
+                }
+            }
+        }
+    }
+
+    /// Stops and reaps a child that cannot complete the protocol under test.
+    fn stop(&mut self) {
+        if !matches!(self.process.try_wait(), Ok(Some(_))) {
+            let _ = self.process.kill();
+            let _ = self.process.wait();
+        }
+    }
+}
+
+impl Drop for InitialUiChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 /// Builds an initial-UI harness command isolated from the test runner's
 /// configuration and launch environment.
@@ -353,8 +395,8 @@ fn resumed_harness_process_does_not_recreate_deleted_session() {
     assert!(!status.success());
 }
 
-/// The configured harness path used by the public component creates the
-/// resumed stderr relay target only after it has acquired the existing lock.
+/// A configured resumed harness completes initial-UI startup and leaves its
+/// relay target in the existing session without allocating another session.
 #[test]
 fn resumed_configured_harness_process_creates_relay_log() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -374,26 +416,102 @@ fn resumed_configured_harness_process_creates_relay_log() {
     .expect("write session metadata");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
-    let mut child =
-        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
+    let mut child = InitialUiChild {
+        process: initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
             .env("TAU_SESSION_ID", "resumed-session")
             .env("TAU_SESSION_STATUS", "resumed")
             .spawn()
-            .expect("spawn resumed tau harness");
-    let harness_log = session_dir.join("logs/tau-harness.log");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && !harness_log.exists() {
-        if child.try_wait().expect("query child").is_some() {
-            break;
+            .expect("spawn resumed tau harness"),
+    };
+    let expected_session = SessionId::parse("resumed-session").expect("valid expected session id");
+    let mut writer =
+        PeerOutputWriter::new(BufWriter::new(child.process.stdin.take().expect("stdin")));
+    write_initial_ui_handshake(&mut writer);
+    let stdout = child.process.stdout.take().expect("stdout");
+    let (sender, receiver) = mpsc::channel();
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = PeerInputReader::new(BufReader::new(stdout));
+        while let Ok(Some(message)) = reader.read_message() {
+            if sender.send(message).is_err() {
+                break;
+            }
         }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    });
 
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let startup = loop {
+        if Instant::now() >= deadline {
+            break Err("resumed harness did not complete startup".to_owned());
+        }
+        let message = match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err("resumed harness disconnected before completing startup".to_owned());
+            }
+        };
+        match message {
+            HarnessOutputMessage::Deliver(delivery) => {
+                if let Event::SessionReplayComplete(replay) = delivery.event() {
+                    if replay.session_id == expected_session && replay.error.is_none() {
+                        break Ok(());
+                    }
+                    break Err(format!(
+                        "resumed harness completed the wrong or failed replay: {replay:?}"
+                    ));
+                }
+            }
+            HarnessOutputMessage::Disconnect(disconnect) => {
+                break Err(format!(
+                    "resumed harness disconnected before completing startup: {:?}",
+                    disconnect.reason
+                ));
+            }
+            _ => {}
+        }
+    };
+    if let Err(error) = startup {
+        drop(writer);
+        child.stop();
+        let _ = reader_thread.join();
+        panic!("{error}");
+    }
+
+    let harness_log = session_dir.join("logs/tau-harness.log");
     assert!(
-        harness_log.exists(),
+        harness_log.is_file(),
         "configured resume must create the parent relay target"
+    );
+    let mut sessions = std::fs::read_dir(state_home.join("tau/sessions"))
+        .expect("read sessions")
+        .map(|entry| entry.expect("read session").file_name())
+        .collect::<Vec<_>>();
+    sessions.sort();
+    assert_eq!(sessions, [std::ffi::OsString::from("resumed-session")]);
+
+    let shutdown = writer
+        .write_message(&HarnessInputMessage::Disconnect(Disconnect {
+            reason: Some("test complete".to_owned()),
+        }))
+        .map_err(|error| format!("write clean shutdown: {error}"))
+        .and_then(|()| {
+            writer
+                .flush()
+                .map_err(|error| format!("flush clean shutdown: {error}"))
+        });
+    drop(writer);
+    let status = match shutdown {
+        Ok(()) => child.wait_for_exit(Duration::from_secs(10)),
+        Err(error) => {
+            child.stop();
+            Err(error)
+        }
+    };
+    reader_thread.join().expect("reader thread");
+    let status = status.unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        status.success(),
+        "resumed initial-UI harness must exit cleanly after disconnect"
     );
 }
 
