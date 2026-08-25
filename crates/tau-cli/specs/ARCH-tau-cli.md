@@ -262,7 +262,12 @@ responses, and thinking text; do not accidentally run it over tool output, shell
 output, or other machine-generated blocks where styling could obscure exact
 results. Markdown table padding is also display-only: it may add spacing around
 cell contents for readability, but must preserve the cell text, avoid code
-contexts, and keep bounded output amplification.
+contexts, and keep bounded output amplification. Its width and alignment
+projection uses the terminal's grapheme display-column rules and the same
+visible-link choice as final span emission, so an OSC 8 label does not reserve
+space for its hidden target. Delimiter markers select left, right, or centered
+cell placement without changing raw provider text; the projection rejects rows
+or aggregate padding beyond its fixed bounds before allocating formatting.
 
 The CLI `redraw_history_size` setting bounds only how many already-rendered
 history rows the terminal UI replays to stdout when rebuilding Tau-owned

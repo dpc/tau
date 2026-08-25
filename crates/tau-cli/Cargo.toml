@@ -36,6 +36,7 @@ tau-harness.workspace = true
 tau-harness-tools.workspace = true
 tau-proto.workspace = true
 tau-session-inspect.workspace = true
+tau-term-screen.workspace = true
 tau-themes.workspace = true
 time.workspace = true
 tracing.workspace = true
@@ -49,7 +50,6 @@ built.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tau-cli-term-raw = { workspace = true }
-tau-term-screen.workspace = true
 tau-test-support.workspace = true
 tempfile.workspace = true
 vt100.workspace = true

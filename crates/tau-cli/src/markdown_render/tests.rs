@@ -111,6 +111,27 @@ fn normalized_spans(
     normalized
 }
 
+/// Returns the terminal display columns occupied by unescaped structural pipes.
+fn table_pipe_display_columns(line: &str) -> Vec<usize> {
+    line.char_indices()
+        .filter_map(|(index, character)| (character == '|').then_some(index))
+        .map(|index| tau_term_screen::display_width(&line[..index]))
+        .collect()
+}
+
+/// Ensures each projected row keeps every structural pipe in the same columns.
+fn assert_table_pipe_columns_align(text: &str) {
+    let mut rows = text.lines();
+    let expected = table_pipe_display_columns(rows.next().expect("table header"));
+    for row in rows {
+        assert_eq!(
+            table_pipe_display_columns(row),
+            expected,
+            "unaligned table row: {row:?}"
+        );
+    }
+}
+
 fn assert_markdown_rendering_property(
     theme: &tau_themes::Theme,
     source: &str,
@@ -747,6 +768,45 @@ fn markdown_tables_are_padded_without_changing_cell_text() {
     );
 }
 
+/// Reproduces the reported ordinary prose table, which previously fell back at
+/// 80 scalar characters, and keeps its numeric-looking effort column right
+/// aligned in one bounded 139-column logical table.
+#[test]
+fn reported_markdown_table_aligns_long_scope_and_right_effort() {
+    let theme = markdown_test_theme();
+    let source = concat!(
+        "| Scope | Effort |\n",
+        "| --- | ---: |\n",
+        "| Formed 7-guardian federation, connected gateway, configured/advertising FLIP, log paths, working `fman-cli` | **4–7 engineer-days** |\n",
+        "| Complete FI-requested/funded liquidity and register the gateway in federation consensus | **8–15 days total** |\n",
+        "| Real `cloud-fman-telemetry` collection | **+3–6 days** |\n",
+        "| Throwaway demo script | **2–3 days**, but brittle |\n",
+    );
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, source);
+
+    assert_eq!(
+        rendered_text(&block),
+        concat!(
+            "| Scope                                                                                                       |                    Effort |\n",
+            "| ----------------------------------------------------------------------------------------------------------- | ------------------------: |\n",
+            "| Formed 7-guardian federation, connected gateway, configured/advertising FLIP, log paths, working `fman-cli` |     **4–7 engineer-days** |\n",
+            "| Complete FI-requested/funded liquidity and register the gateway in federation consensus                     |       **8–15 days total** |\n",
+            "| Real `cloud-fman-telemetry` collection                                                                      |             **+3–6 days** |\n",
+            "| Throwaway demo script                                                                                       | **2–3 days**, but brittle |\n",
+        )
+    );
+    assert_table_pipe_columns_align(&rendered_text(&block));
+    assert_eq!(
+        tau_term_screen::display_width(
+            rendered_text(&block)
+                .lines()
+                .next()
+                .expect("reported table header")
+        ),
+        139
+    );
+}
+
 /// Ensures table padding is not applied inside fenced code blocks.
 #[test]
 fn markdown_tables_inside_code_fences_are_not_padded() {
@@ -757,7 +817,8 @@ fn markdown_tables_inside_code_fences_are_not_padded() {
     assert_eq!(rendered_text(&block), source);
 }
 
-/// Ensures alignment marker colons survive table separator padding.
+/// Ensures delimiter markers select left, right, and deterministic odd-center
+/// alignment while preserving their colons.
 #[test]
 fn markdown_table_separator_alignment_is_preserved() {
     let theme = markdown_test_theme();
@@ -769,7 +830,7 @@ fn markdown_table_separator_alignment_is_preserved() {
 
     assert_eq!(
         rendered_text(&block),
-        "| Left | Right | Center |\n| :--- | ----: | :----: |\n| a    | b     | c      |\n"
+        "| Left | Right | Center |\n| :--- | ----: | :----: |\n| a    |     b |   c    |\n"
     );
 }
 
@@ -805,6 +866,77 @@ fn markdown_table_code_span_pipes_remain_cell_content() {
     );
 }
 
+/// Ensures table columns use the terminal's grapheme-aware display width rather
+/// than Unicode scalar counts for CJK, emoji, and combining sequences.
+#[test]
+fn markdown_table_unicode_cells_align_by_display_width() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "| Text | Amount |\n| --- | ---: |\n| 中 | 1 |\n| 👨‍👩‍👧‍👦 | 22 |\n| e\u{301} | 333 |\n",
+    );
+
+    let rendered = rendered_text(&block);
+    assert_table_pipe_columns_align(&rendered);
+    assert!(
+        rendered.contains("| 中   |      1 |"),
+        "CJK cell receives display-column padding: {rendered:?}"
+    );
+}
+
+/// Ensures table width follows the same explicit-link projection as span
+/// emission for both OSC 8 modes without changing hyperlink metadata rules.
+#[test]
+fn markdown_table_links_measure_visible_osc8_projection() {
+    let theme = markdown_test_theme();
+    let source = "| Link | Value |\n| --- | ---: |\n| [label](https://example.test/target) | 1 |\n";
+    let enabled = markdown_block_with_osc8(&theme, names::SHELL_OUTPUT, source, true);
+    let disabled = markdown_block_with_osc8(&theme, names::SHELL_OUTPUT, source, false);
+
+    let enabled_text = rendered_text(&enabled);
+    let disabled_text = rendered_text(&disabled);
+    assert_table_pipe_columns_align(&enabled_text);
+    assert_table_pipe_columns_align(&disabled_text);
+    assert!(enabled_text.contains("| label |"));
+    assert!(disabled_text.contains("| label (https://example.test/target) |"));
+    assert!(
+        enabled
+            .content
+            .spans()
+            .iter()
+            .any(|span| span.hyperlink.as_deref() == Some("https://example.test/target"))
+    );
+    assert!(
+        disabled
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.hyperlink.is_none())
+    );
+}
+
+/// Ensures an explicit-link-looking sequence split by a structural pipe cannot
+/// hide that pipe after table width measurement has treated it as a boundary.
+#[test]
+fn markdown_table_does_not_parse_links_across_structural_pipes() {
+    let theme = markdown_test_theme();
+    let source = "| A | B |\n| --- | --- |\n| [x | ](https://example.test) |\n";
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, source);
+    let rendered = rendered_text(&block);
+
+    assert!(rendered.contains("| [x  | ](https://example.test) |"));
+    assert_table_pipe_columns_align(&rendered);
+    assert!(
+        block
+            .content
+            .spans()
+            .iter()
+            .all(|span| !(span.hyperlink.is_some() && span.text.contains("x  |"))),
+        "a structural table pipe must not become part of an OSC 8 label"
+    );
+}
+
 /// Ensures indented pipe-shaped text remains code and is not table-padded.
 #[test]
 fn indented_pipe_tables_remain_code() {
@@ -833,16 +965,17 @@ fn no_leading_pipe_tables_are_left_unchanged() {
     assert_eq!(rendered_text(&block), source);
 }
 
-/// Ensures pathological wide tables fall back to source text instead of
-/// expanding output.
+/// Ensures a cell above the former scalar cutoff aligns when its final row
+/// remains inside the display-column bound.
 #[test]
-fn very_wide_tables_are_not_padded() {
+fn table_cells_above_former_cutoff_align_inside_row_bound() {
     let theme = markdown_test_theme();
-    let wide = "x".repeat(TABLE_MAX_CELL_WIDTH + 1);
+    let wide = "x".repeat(81);
     let source = format!("| A | B |\n| --- | --- |\n| {wide} | y |\n| z | q |\n");
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
 
-    assert_eq!(rendered_text(&block), source);
+    assert_ne!(rendered_text(&block), source);
+    assert_table_pipe_columns_align(&rendered_text(&block));
 }
 
 /// Ensures tables with too many columns fall back to source text.
@@ -876,34 +1009,13 @@ fn too_many_table_columns_are_not_padded() {
     assert_eq!(rendered_text(&block), source);
 }
 
-/// Ensures rendered-line byte limits fall back to source text independently of
-/// the per-cell width limit.
+/// Ensures a final logical row above the terminal display-column bound remains
+/// raw Markdown rather than allocating alignment padding.
 #[test]
-fn too_long_rendered_table_lines_are_not_padded() {
+fn table_rows_above_display_width_bound_are_not_padded() {
     let theme = markdown_test_theme();
-    let medium = "x".repeat((TABLE_MAX_RENDERED_LINE_BYTES / TABLE_MAX_COLUMNS) + 1);
-    let header = format!(
-        "| {} |\n",
-        (0..TABLE_MAX_COLUMNS)
-            .map(|_| medium.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    let separator = format!(
-        "| {} |\n",
-        (0..TABLE_MAX_COLUMNS)
-            .map(|_| "---")
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    let row = format!(
-        "| {} |\n",
-        (0..TABLE_MAX_COLUMNS)
-            .map(|_| "x")
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    let source = format!("{header}{separator}{row}");
+    let wide = "x".repeat(TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH);
+    let source = format!("| A | B |\n| --- | --- |\n| {wide} | y |\n");
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
 
     assert_eq!(rendered_text(&block), source);
@@ -914,14 +1026,29 @@ fn too_long_rendered_table_lines_are_not_padded() {
 #[test]
 fn too_much_total_table_padding_is_not_padded() {
     let theme = markdown_test_theme();
-    let wide = "x".repeat(TABLE_MAX_CELL_WIDTH);
+    let wide = "x".repeat(110);
     let mut source = format!("| {wide} | {wide} |\n| --- | --- |\n");
-    let short_rows = (TABLE_MAX_EXTRA_PADDING_BYTES / TABLE_MAX_CELL_WIDTH) + 1;
+    let padding_per_short_row = 2 * (wide.len() - 1);
+    let short_rows = (TABLE_MAX_EXTRA_PADDING_BYTES / padding_per_short_row) + 1;
     for _ in 0..short_rows {
         source.push_str("| a | b |\n");
     }
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
 
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures canonical cell margins count toward the padding budget even when
+/// rows need no additional alignment spaces.
+#[test]
+fn too_many_canonical_table_margins_are_not_padded() {
+    let theme = markdown_test_theme();
+    let mut source = "|abc|def|\n|---|---|\n".to_owned();
+    for _ in 0..=(TABLE_MAX_EXTRA_PADDING_BYTES / 4) {
+        source.push_str("|abc|def|\n");
+    }
+
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
     assert_eq!(rendered_text(&block), source);
 }
 
@@ -936,6 +1063,54 @@ fn live_stream_pads_sealed_markdown_tables() {
     assert_eq!(
         rendered_text(&block),
         "| A   | Longer |\n| --- | ------ |\n| one | two    |\n\n…"
+    );
+}
+
+/// Ensures streaming waits for a complete header and delimiter, then revises
+/// completed rows deterministically until a blank line seals final widths.
+#[test]
+fn live_stream_tables_update_only_complete_lines_and_match_final_parse() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let header = "| A | Longer |\n";
+    let delimiter = "| --- | ---: |\n";
+    let body = "| one | two |\n";
+    let source = format!("{header}{delimiter}{body}");
+
+    assert_eq!(
+        rendered_text(&markdown_streaming_block(
+            &theme,
+            names::SHELL_OUTPUT,
+            header,
+            &mut cache,
+        )),
+        format!("{header}…")
+    );
+    assert_eq!(
+        rendered_text(&markdown_streaming_block(
+            &theme,
+            names::SHELL_OUTPUT,
+            &format!("{header}{delimiter}"),
+            &mut cache,
+        )),
+        "| A   | Longer |\n| --- | -----: |\n…"
+    );
+    assert_eq!(
+        rendered_text(&markdown_streaming_block(
+            &theme,
+            names::SHELL_OUTPUT,
+            &format!("{header}{delimiter}| one |"),
+            &mut cache,
+        )),
+        "| A   | Longer |\n| --- | -----: |\n| one | …"
+    );
+
+    let sealed = format!("{source}\n");
+    let live = markdown_streaming_block(&theme, names::SHELL_OUTPUT, &sealed, &mut cache);
+    let final_block = markdown_block(&theme, names::SHELL_OUTPUT, &sealed);
+    assert_eq!(
+        rendered_text(&live),
+        format!("{}…", rendered_text(&final_block))
     );
 }
 

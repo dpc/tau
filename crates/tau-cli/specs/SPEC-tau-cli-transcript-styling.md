@@ -23,6 +23,14 @@ Markdown-lite styling; escaped marker sequences get escape styling. This keeps
 live terminal wrapping, scrollback, and copy/paste behavior stable outside
 intentional table padding.
 
+Table bounds and alignment use terminal display columns, including the visible
+OSC 8 link-label projection (or the label plus target fallback when OSC 8 is
+disabled), rather than source bytes or Unicode scalar counts. The delimiter row
+selects left (`---`/`:---`), right (`---:`), or centered (`:---:`) placement for
+header and body cells; centered odd spare columns put the smaller share on the
+left. Tau preserves the delimiter colons and bounds the final logical row width
+and aggregate inserted padding before creating the display projection.
+
 Inline links (`[label](target)`), HTTP(S) autolinks (`<url>`), and recognized
 bare HTTP(S) URLs are the other intentional text transformation. With
 `osc8_links: true`, inline links display only their clickable label to conserve

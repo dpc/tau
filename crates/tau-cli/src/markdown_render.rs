@@ -60,16 +60,40 @@ struct TableRow<'line> {
     cells: Vec<&'line str>,
 }
 
+/// Validated display projection inputs for one complete Markdown-lite table.
+///
+/// The projection retains parsed cells instead of reconstructed row strings so
+/// inline parsing cannot consume a structural pipe at a cell boundary.
+#[derive(Debug)]
+struct TableProjection<'line> {
+    /// Parsed header, delimiter, and body rows in source order.
+    rows: Vec<TableRow<'line>>,
+    /// Final terminal display width selected for each cell column.
+    widths: Vec<usize>,
+    /// Placement and delimiter marker selected by the delimiter row.
+    alignments: Vec<TableAlignment>,
+    /// Visible inline width of every non-delimiter cell.
+    visible_widths: Vec<Vec<usize>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TableRowKind {
     Body,
     Separator,
 }
 
+/// Horizontal placement selected by one delimiter-row cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TableAlignment {
+    Left,
+    LeftMarked,
+    Right,
+    Center,
+}
+
 const TABLE_MAX_COLUMNS: usize = 12;
-const TABLE_MAX_CELL_WIDTH: usize = 80;
 const TABLE_MAX_EXTRA_PADDING_BYTES: usize = 4096;
-const TABLE_MAX_RENDERED_LINE_BYTES: usize = 240;
+const TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH: usize = 240;
 
 impl<'line> TableRow<'line> {
     fn parse(line: &'line str) -> Option<Self> {
@@ -94,26 +118,66 @@ impl<'line> TableRow<'line> {
         })
     }
 
-    fn render(&self, widths: &[usize], row_kind: TableRowKind) -> String {
-        let mut rendered = self.indent.to_owned();
-        rendered.push('|');
-        for (index, width) in widths.iter().copied().enumerate() {
-            if 0 < index {
-                rendered.push('|');
-            }
-            rendered.push(' ');
-            let cell = self.cells.get(index).copied().unwrap_or_default();
-            match row_kind {
-                TableRowKind::Separator => rendered.push_str(&render_separator_cell(cell, width)),
-                TableRowKind::Body => {
-                    rendered.push_str(cell);
-                    rendered.push_str(&" ".repeat(width.saturating_sub(cell.chars().count())));
-                }
-            }
-            rendered.push(' ');
+    /// Returns this row's final terminal display width after table projection.
+    fn logical_display_width(&self, widths: &[usize]) -> Option<usize> {
+        let cells_width = widths
+            .iter()
+            .try_fold(0usize, |total, width| total.checked_add(*width))?;
+        let separators_and_cell_margins = widths.len().checked_mul(3)?.checked_add(1)?;
+        tau_term_screen::display_width(self.indent)
+            .checked_add(cells_width)?
+            .checked_add(separators_and_cell_margins)
+    }
+}
+
+impl TableAlignment {
+    /// Parses the deliberately small Markdown-lite delimiter-cell grammar.
+    fn parse(cell: &str) -> Option<Self> {
+        let cell = cell.trim();
+        let left = cell.starts_with(':');
+        let cell = cell.strip_prefix(':').unwrap_or(cell);
+        let right = cell.ends_with(':');
+        let dashes = cell.strip_suffix(':').unwrap_or(cell);
+        if dashes.len() < 3 || !dashes.chars().all(|ch| ch == '-') {
+            return None;
         }
-        rendered.push('|');
-        rendered
+        Some(match (left, right) {
+            (true, true) => Self::Center,
+            (true, false) => Self::LeftMarked,
+            (false, true) => Self::Right,
+            (false, false) => Self::Left,
+        })
+    }
+
+    /// Returns the minimum width which preserves this marker and three dashes.
+    fn minimum_width(self) -> usize {
+        3 + match self {
+            Self::Left => 0,
+            Self::LeftMarked | Self::Right => 1,
+            Self::Center => 2,
+        }
+    }
+
+    /// Splits unused cell columns according to this alignment.
+    fn padding(self, spare: usize) -> (usize, usize) {
+        match self {
+            Self::Left | Self::LeftMarked => (0, spare),
+            Self::Right => (spare, 0),
+            // Keep odd padding deterministic: the left gets floor(spare / 2).
+            Self::Center => (spare / 2, spare - (spare / 2)),
+        }
+    }
+
+    /// Preserves delimiter colons while expanding the dash run to `width`.
+    fn render_separator_cell(self, width: usize) -> String {
+        let (left, right) = match self {
+            Self::Left => ("", ""),
+            Self::LeftMarked => (":", ""),
+            Self::Right => ("", ":"),
+            Self::Center => (":", ":"),
+        };
+        let dash_count = width - left.len() - right.len();
+        format!("{left}{}{right}", "-".repeat(dash_count))
     }
 }
 
@@ -151,6 +215,9 @@ struct MarkdownRun {
 /// text for that range, and `live_runs` may be reused only when both the byte
 /// boundaries and source text still match. The provisional parse uses a local
 /// copy of `in_fence`; only blank-line finalization commits parser state.
+/// `osc8_links` records the visible-link projection used to derive cached table
+/// widths, so changing that setting invalidates the cache rather than retaining
+/// stale alignment spaces.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MarkdownStreamCache {
     source: String,
@@ -161,6 +228,7 @@ pub(crate) struct MarkdownStreamCache {
     live_complete_until: usize,
     live_source: String,
     live_runs: Vec<MarkdownRun>,
+    osc8_links: Option<bool>,
 }
 
 impl MarkdownStreamCache {
@@ -173,12 +241,14 @@ impl MarkdownStreamCache {
         self.live_complete_until = 0;
         self.live_source.clear();
         self.live_runs.clear();
+        self.osc8_links = None;
     }
 
-    fn advance_finalized(&mut self, text: &str, sealed_until: usize) {
+    fn advance_finalized(&mut self, text: &str, sealed_until: usize, osc8_links: bool) {
         self.finalized_runs.extend(parse_markdown_with_state(
             &text[self.finalized_until..sealed_until],
             &mut self.in_fence,
+            osc8_links,
         ));
         self.finalized_until = sealed_until;
         if self.live_start != self.finalized_until {
@@ -189,7 +259,7 @@ impl MarkdownStreamCache {
         }
     }
 
-    fn refresh_live_runs(&mut self, text: &str, complete_until: usize) {
+    fn refresh_live_runs(&mut self, text: &str, complete_until: usize, osc8_links: bool) {
         let live_source = &text[self.finalized_until..complete_until];
         if self.live_start == self.finalized_until
             && self.live_complete_until == complete_until
@@ -199,7 +269,7 @@ impl MarkdownStreamCache {
         }
 
         let mut live_fence = self.in_fence;
-        self.live_runs = parse_markdown_with_state(live_source, &mut live_fence);
+        self.live_runs = parse_markdown_with_state(live_source, &mut live_fence, osc8_links);
         self.live_start = self.finalized_until;
         self.live_complete_until = complete_until;
         self.live_source = live_source.to_owned();
@@ -292,7 +362,7 @@ pub(crate) fn markdown_prefixed_block_with_osc8(
         theme,
         base_style_name,
         &prefix,
-        &parse_markdown_with_state(text, &mut in_fence),
+        &parse_markdown_with_state(text, &mut in_fence, osc8_links),
         false,
         osc8_links,
     )
@@ -317,7 +387,7 @@ pub(crate) fn markdown_prompt_block_with_osc8(
         theme,
         base_style_name,
         &prefix,
-        &parse_markdown_with_state(text, &mut in_fence),
+        &parse_markdown_with_state(text, &mut in_fence, osc8_links),
         false,
         osc8_links,
     )
@@ -346,18 +416,23 @@ pub(crate) fn markdown_prefixed_streaming_block_with_osc8(
     cache: &mut MarkdownStreamCache,
     osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
+    if cache.osc8_links.is_some_and(|cached| cached != osc8_links) {
+        cache.reset_for_replacement();
+    }
+    cache.osc8_links = Some(osc8_links);
     if !text.starts_with(&cache.source) {
         cache.reset_for_replacement();
+        cache.osc8_links = Some(osc8_links);
     }
 
     let sealed_until = latest_sealed_boundary(text).unwrap_or(0);
     if cache.finalized_until < sealed_until {
-        cache.advance_finalized(text, sealed_until);
+        cache.advance_finalized(text, sealed_until, osc8_links);
     }
     let complete_until = latest_complete_line_boundary(text)
         .unwrap_or(cache.finalized_until)
         .max(cache.finalized_until);
-    cache.refresh_live_runs(text, complete_until);
+    cache.refresh_live_runs(text, complete_until, osc8_links);
     cache.source = text.to_owned();
 
     let mut runs = cache.finalized_runs.clone();
@@ -489,16 +564,7 @@ fn push_runs(
             continue;
         }
         let target = run.hyperlink.as_deref();
-        let needs_visible_target = target.is_some_and(|target| {
-            show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none()
-        });
-        let text = if let Some(target) = target.filter(|_| needs_visible_target)
-            && target != run.text
-        {
-            format!("{} ({target})", run.text)
-        } else {
-            run.text.clone()
-        };
+        let text = visible_run_text(run, show_link_target);
         let leaf = if target.is_some() {
             SpanTree::span(styles.link, vec![SpanTree::text(text)])
         } else {
@@ -523,6 +589,25 @@ fn push_runs(
     }
 }
 
+/// Returns exactly the text a Markdown run exposes before terminal layout.
+///
+/// Table width projection and styled span emission share this decision so
+/// explicit link targets occupy columns only when OSC 8 is disabled (or the
+/// target cannot safely become an OSC 8 hyperlink).
+fn visible_run_text(run: &MarkdownRun, show_link_target: bool) -> String {
+    let target = run.hyperlink.as_deref();
+    let needs_visible_target = target.is_some_and(|target| {
+        show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none()
+    });
+    if let Some(target) = target.filter(|_| needs_visible_target)
+        && target != run.text
+    {
+        format!("{} ({target})", run.text)
+    } else {
+        run.text.clone()
+    }
+}
+
 fn latest_sealed_boundary(text: &str) -> Option<usize> {
     let mut offset = 0;
     let mut latest = None;
@@ -539,7 +624,11 @@ fn latest_complete_line_boundary(text: &str) -> Option<usize> {
     text.rfind('\n').map(|index| index + 1)
 }
 
-fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Vec<MarkdownRun> {
+fn parse_markdown_with_state(
+    text: &str,
+    in_fence: &mut Option<FenceKind>,
+    osc8_links: bool,
+) -> Vec<MarkdownRun> {
     let mut runs = Vec::new();
     let lines = text
         .split_inclusive('\n')
@@ -569,10 +658,18 @@ fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Ve
             continue;
         }
         if let Some(table_end) = table_block_end(&lines, index)
-            && let Some(padded_lines) = pad_table_lines(&lines[index..table_end])
+            && let Some(table) = pad_table_lines(&lines[index..table_end], osc8_links)
         {
-            for (padded, (_, newline)) in padded_lines.into_iter().zip(&lines[index..table_end]) {
-                parse_inline(&padded, &mut runs);
+            for (row_index, row) in table.rows.iter().enumerate() {
+                parse_table_row(
+                    row,
+                    &table.widths,
+                    &table.alignments,
+                    &table.visible_widths[row_index],
+                    table_row_kind(row_index),
+                    &mut runs,
+                );
+                let (_, newline) = lines[index + row_index];
                 push_run(&mut runs, newline, MarkdownStyle::Base);
             }
             index = table_end;
@@ -617,7 +714,11 @@ fn table_block_end(lines: &[(&str, &str)], start: usize) -> Option<usize> {
         return None;
     }
     let separator = TableRow::parse(lines[start + 1].0)?;
-    if !separator.cells.iter().all(|cell| is_separator_cell(cell)) {
+    if !separator
+        .cells
+        .iter()
+        .all(|cell| TableAlignment::parse(cell).is_some())
+    {
         return None;
     }
 
@@ -683,14 +784,10 @@ fn ends_with_unescaped_pipe(text: &str) -> bool {
     last_unescaped_pipe
 }
 
-fn is_separator_cell(cell: &str) -> bool {
-    let cell = cell.trim();
-    let cell = cell.strip_prefix(':').unwrap_or(cell);
-    let cell = cell.strip_suffix(':').unwrap_or(cell);
-    3 <= cell.len() && cell.chars().all(|ch| ch == '-')
-}
-
-fn pad_table_lines(lines: &[(&str, &str)]) -> Option<Vec<String>> {
+fn pad_table_lines<'line>(
+    lines: &[(&'line str, &str)],
+    osc8_links: bool,
+) -> Option<TableProjection<'line>> {
     let rows = lines
         .iter()
         .map(|(line, _)| TableRow::parse(line))
@@ -699,52 +796,147 @@ fn pad_table_lines(lines: &[(&str, &str)]) -> Option<Vec<String>> {
     if rows.iter().any(|row| row.cells.len() != columns) {
         return None;
     }
-    let mut widths = vec![3; columns];
+    let alignments = rows[1]
+        .cells
+        .iter()
+        .map(|cell| TableAlignment::parse(cell))
+        .collect::<Option<Vec<_>>>()?;
+    let mut widths = alignments
+        .iter()
+        .zip(&rows[1].cells)
+        .map(|(alignment, cell)| {
+            alignment
+                .minimum_width()
+                .max(tau_term_screen::display_width(cell.trim()))
+        })
+        .collect::<Vec<_>>();
+    let mut visible_widths = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
         if row_index == 1 {
+            visible_widths.push(vec![0; columns]);
             continue;
         }
-        for (index, cell) in row.cells.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+        let row_widths = row
+            .cells
+            .iter()
+            .map(|cell| inline_display_width(cell, osc8_links))
+            .collect::<Vec<_>>();
+        for (index, _) in row.cells.iter().enumerate() {
+            widths[index] = widths[index].max(row_widths[index]);
         }
-    }
-    if widths.iter().any(|width| TABLE_MAX_CELL_WIDTH < *width) {
-        return None;
+        visible_widths.push(row_widths);
     }
 
     let mut extra_padding = 0usize;
-    let mut padded = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
+        if TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH < row.logical_display_width(&widths)? {
+            return None;
+        }
         let row_kind = if row_index == 1 {
             TableRowKind::Separator
         } else {
             TableRowKind::Body
         };
-        let rendered = row.render(&widths, row_kind);
-        if TABLE_MAX_RENDERED_LINE_BYTES < rendered.len() {
-            return None;
-        }
-        extra_padding =
-            extra_padding.saturating_add(rendered.len().saturating_sub(lines[row_index].0.len()));
+        let row_extra =
+            table_row_extra_padding(row, &widths, &visible_widths[row_index], row_kind)?;
+        extra_padding = extra_padding.checked_add(row_extra)?;
         if TABLE_MAX_EXTRA_PADDING_BYTES < extra_padding {
             return None;
         }
-        padded.push(rendered);
     }
-    Some(padded)
+    Some(TableProjection {
+        rows,
+        widths,
+        alignments,
+        visible_widths,
+    })
 }
 
-fn render_separator_cell(cell: &str, width: usize) -> String {
-    let left = cell.trim().starts_with(':');
-    let right = cell.trim().ends_with(':');
-    let dash_count = width.saturating_sub(usize::from(left) + usize::from(right));
-    let dash_count = dash_count.max(3);
-    format!(
-        "{}{}{}",
-        if left { ":" } else { "" },
-        "-".repeat(dash_count),
-        if right { ":" } else { "" }
-    )
+/// Appends one validated table row while parsing each cell independently.
+fn parse_table_row(
+    row: &TableRow<'_>,
+    widths: &[usize],
+    alignments: &[TableAlignment],
+    visible_widths: &[usize],
+    row_kind: TableRowKind,
+    runs: &mut Vec<MarkdownRun>,
+) {
+    push_run(runs, row.indent, MarkdownStyle::Base);
+    push_run(runs, "|", MarkdownStyle::Base);
+    for (index, cell) in row.cells.iter().enumerate() {
+        if index != 0 {
+            push_run(runs, "|", MarkdownStyle::Base);
+        }
+        push_run(runs, " ", MarkdownStyle::Base);
+        match row_kind {
+            TableRowKind::Separator => {
+                let separator = alignments[index].render_separator_cell(widths[index]);
+                push_run(runs, &separator, MarkdownStyle::Base);
+            }
+            TableRowKind::Body => {
+                let spare = widths[index].saturating_sub(visible_widths[index]);
+                let (left, right) = alignments[index].padding(spare);
+                push_table_spaces(runs, left);
+                parse_inline(cell, runs);
+                push_table_spaces(runs, right);
+            }
+        }
+        push_run(runs, " ", MarkdownStyle::Base);
+    }
+    push_run(runs, "|", MarkdownStyle::Base);
+}
+
+/// Appends a bounded run of table-alignment spaces.
+fn push_table_spaces(runs: &mut Vec<MarkdownRun>, count: usize) {
+    if count != 0 {
+        push_run(runs, &" ".repeat(count), MarkdownStyle::Base);
+    }
+}
+
+/// Identifies the delimiter row in a table projection.
+fn table_row_kind(row_index: usize) -> TableRowKind {
+    if row_index == 1 {
+        TableRowKind::Separator
+    } else {
+        TableRowKind::Body
+    }
+}
+
+/// Measures a table cell after the inline renderer's visible-link projection.
+fn inline_display_width(cell: &str, osc8_links: bool) -> usize {
+    let mut runs = Vec::new();
+    parse_inline(cell, &mut runs);
+    let visible = runs
+        .iter()
+        .map(|run| visible_run_text(run, !osc8_links))
+        .collect::<String>();
+    tau_term_screen::display_width(&visible)
+}
+
+/// Counts canonical cell margins, alignment spaces, and delimiter dashes
+/// without comparing rendered bytes to source bytes, because visible OSC 8 link
+/// text may be shorter than its raw Markdown source.
+fn table_row_extra_padding(
+    row: &TableRow<'_>,
+    widths: &[usize],
+    visible_widths: &[usize],
+    row_kind: TableRowKind,
+) -> Option<usize> {
+    row.cells
+        .iter()
+        .enumerate()
+        .try_fold(0usize, |total, (index, cell)| {
+            let alignment_padding = match row_kind {
+                TableRowKind::Body => widths[index].checked_sub(visible_widths[index])?,
+                TableRowKind::Separator => {
+                    widths[index].checked_sub(tau_term_screen::display_width(cell.trim()))?
+                }
+            };
+            // The projection canonicalizes one ASCII space on both sides of
+            // every cell, so account for them even when the source already had
+            // matching whitespace. This keeps row count bounded conservatively.
+            total.checked_add(2)?.checked_add(alignment_padding)
+        })
 }
 
 fn is_heading(line: &str) -> bool {

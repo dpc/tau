@@ -4116,6 +4116,71 @@ fn agent_response_marker_tracks_streaming_and_completed_states() {
     assert!(!vt.screen_contains(80, "◇ marker answer"));
 }
 
+/// Ensures live, final, and cold-replayed assistant tables share the display
+/// projection while provider events and editor context retain the raw Markdown.
+#[test]
+fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
+    let source = concat!(
+        "| Scope | Effort |\n",
+        "| --- | ---: |\n",
+        "| Formed 7-guardian federation, connected gateway, configured/advertising FLIP, log paths, working `fman-cli` | **4–7 engineer-days** |\n",
+        "| Complete FI-requested/funded liquidity and register the gateway in federation consensus | **8–15 days total** |\n",
+        "| Real `cloud-fman-telemetry` collection | **+3–6 days** |\n",
+        "| Throwaway demo script | **2–3 days**, but brittle |\n",
+    );
+    let finished = finished_response("sp-table", vec![assistant_message_item(source)]);
+    let raw_finished = finished.clone();
+
+    let (_term, handle, vt) = setup(160, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-table", "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("sp-table"),
+            source,
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(160, "◇ | Scope"));
+    assert!(vt.screen_contains(160, "                    Effort |"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished.clone()));
+    sync(&handle);
+    assert_eq!(
+        finished, raw_finished,
+        "rendering must not mutate event text"
+    );
+    assert!(vt.screen_contains(160, "◆ | Scope"));
+    let editor_context = renderer.editor_context();
+    assert_eq!(
+        editor_context
+            .lock()
+            .expect("editor context")
+            .last_response
+            .as_deref(),
+        Some(source)
+    );
+
+    let (_cold_term, cold_handle, cold_vt) = setup(160, 24);
+    let mut cold_renderer = EventRenderer::new(
+        cold_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    cold_renderer.handle(&Event::ProviderResponseFinished(finished));
+    sync(&cold_handle);
+    assert!(cold_vt.screen_contains(160, "◆ | Scope"));
+    assert!(cold_vt.screen_contains(160, "                    Effort |"));
+}
+
 /// Ensures streaming Markdown styles are applied as each line completes, so a
 /// later blank-line seal does not restyle already-hidden scrollback and force a
 /// full redraw.
