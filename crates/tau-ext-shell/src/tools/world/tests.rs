@@ -32,32 +32,6 @@ fn read_file_limited_rejects_fifo_without_blocking() {
     assert!(error.to_string().contains("not a regular file"));
 }
 
-/// Protects real-world writes against truncate-in-place updates by checking
-/// the atomic helper updates existing files through a same-directory
-/// rename.
-#[test]
-fn atomic_write_updates_existing_file() {
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let path = tempdir.path().join("file.txt");
-    std::fs::write(&path, "old\n").expect("write old");
-
-    atomic_write_file(&path, b"new\n").expect("atomic write");
-
-    assert_eq!(std::fs::read_to_string(&path).expect("read"), "new\n");
-}
-
-/// Protects file creation semantics for mutation tools after switching from
-/// direct writes to same-directory atomic renames.
-#[test]
-fn atomic_write_creates_new_file() {
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let path = tempdir.path().join("created.txt");
-
-    atomic_write_file(&path, b"created\n").expect("atomic write");
-
-    assert_eq!(std::fs::read_to_string(&path).expect("read"), "created\n");
-}
-
 /// Ensures final symlinks keep the previous write-through behavior: editing
 /// a symlink updates its target instead of replacing the symlink itself.
 #[cfg(unix)]

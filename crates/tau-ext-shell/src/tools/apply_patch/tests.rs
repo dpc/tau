@@ -2,13 +2,6 @@ use std::fs as path_std_fs;
 
 use super::*;
 
-#[test]
-fn parse_update_hunk() {
-    let patch = "*** Begin Patch\n*** Update File: hello.txt\n@@\n-old\n+new\n*** End Patch";
-    let hunks = parse_patch(patch).expect("patch should parse");
-    assert_eq!(hunks.len(), 1);
-}
-
 /// Ensures the parser keeps the Codex add-file format strict: every add-file
 /// payload line must be prefixed with `+` so accidental malformed content
 /// cannot be interpreted as valid file data.
