@@ -583,6 +583,37 @@ fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
     AgentHead::Node(tree.head().expect("input node"))
 }
 
+/// Same-head ancestry must avoid materializing an arbitrarily long selected
+/// branch, while sibling and unknown heads retain their existing answers.
+#[test]
+fn same_current_head_ancestry_skips_branch_materialization() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let branch_point = append_user_input(&mut tree, "branch point");
+    let original_branch = append_user_input(&mut tree, "original branch");
+    tree.apply_event(&Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+        agent_id: agent_id(),
+        head: branch_point,
+    }));
+    let sibling = append_user_input(&mut tree, "sibling");
+    for index in 0..1_024 {
+        append_user_input(&mut tree, &format!("long branch {index}"));
+    }
+    let current = AgentHead::Node(tree.head().expect("current head"));
+
+    BRANCH_PATH_MATERIALIZATIONS.set(0);
+    assert!(tree.is_ancestor_head(current, current));
+    assert_eq!(
+        BRANCH_PATH_MATERIALIZATIONS.get(),
+        0,
+        "same-head ancestry must not materialize the selected branch"
+    );
+
+    assert!(!tree.is_ancestor_head(original_branch, current));
+    assert!(tree.is_ancestor_head(sibling, current));
+    let unknown = AgentHead::Node(NodeId::new(usize::MAX as u64));
+    assert!(!tree.is_ancestor_head(unknown, unknown));
+}
+
 fn fail_compaction(tree: &mut AgentTree, started: &tau_proto::AgentStandaloneCompactionStarted) {
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
     tree.apply_event(&Event::AgentStandaloneCompactionFailed(

@@ -11,6 +11,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io as path_std_io;
 
+#[cfg(test)]
+thread_local! {
+    static BRANCH_PATH_MATERIALIZATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentHead, AgentHeadMoved, AgentId, AgentMessageId, AgentMessageKind, AgentMessageReceived,
@@ -1288,6 +1295,9 @@ impl AgentTree {
     /// Returns node identifiers on the selected branch in root-to-head order.
     #[must_use]
     pub fn branch_node_ids_from(&self, head: Option<NodeId>) -> Vec<NodeId> {
+        #[cfg(test)]
+        BRANCH_PATH_MATERIALIZATIONS.set(BRANCH_PATH_MATERIALIZATIONS.get() + 1);
+
         let mut path = Vec::new();
         let mut current = head;
         while let Some(id) = current {
@@ -1311,9 +1321,13 @@ impl AgentTree {
     ) -> bool {
         match ancestor {
             tau_proto::AgentHead::Root => true,
-            tau_proto::AgentHead::Node(ancestor) => self
-                .branch_node_ids_from(descendant.as_option())
-                .contains(&ancestor),
+            tau_proto::AgentHead::Node(ancestor) => {
+                if descendant == tau_proto::AgentHead::Node(ancestor) {
+                    return self.node(ancestor).is_some();
+                }
+                self.branch_node_ids_from(descendant.as_option())
+                    .contains(&ancestor)
+            }
         }
     }
 
