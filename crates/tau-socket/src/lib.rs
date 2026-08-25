@@ -445,6 +445,27 @@ impl SocketPeer {
         })
     }
 
+    #[cfg(test)]
+    fn new_with_blocked_enqueue_hook(
+        stream: UnixStream,
+        blocked_enqueue: SyncSender<()>,
+    ) -> Result<Self, SocketTransportError> {
+        let writer_stream = stream
+            .try_clone()
+            .map_err(|source| SocketTransportError::Clone { source })?;
+        let shutdown_stream = stream
+            .try_clone()
+            .map_err(|source| SocketTransportError::Clone { source })?;
+        let (reader_frames, reader_thread) =
+            spawn_reader_with_blocked_enqueue_hook(stream, blocked_enqueue)?;
+        Ok(Self {
+            writer: PeerOutputWriter::new(BufWriter::new(writer_stream)),
+            reader_frames: Some(reader_frames),
+            shutdown_stream,
+            reader_thread: Some(reader_thread),
+        })
+    }
+
     /// Sends one peer → harness protocol message over the Unix socket.
     ///
     /// # Errors
@@ -535,6 +556,49 @@ fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessag
                     return;
                 }
             }
+            Ok(None) => return,
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn spawn_reader_with_blocked_enqueue_hook(
+    stream: UnixStream,
+    blocked_enqueue: SyncSender<()>,
+) -> Result<ReaderWorker, SocketTransportError> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader_thread = thread::Builder::new()
+        .name("tau-socket-reader".to_owned())
+        .spawn(move || read_frames_until_blocked_enqueue(stream, sender, blocked_enqueue))
+        .map_err(|source| SocketTransportError::SpawnReader { source })?;
+    Ok((receiver, reader_thread))
+}
+
+#[cfg(test)]
+fn read_frames_until_blocked_enqueue(
+    stream: UnixStream,
+    sender: SyncSender<Result<HarnessOutputMessage, DecodeError>>,
+    blocked_enqueue: SyncSender<()>,
+) {
+    let mut reader = PeerInputReader::new(stream);
+    loop {
+        match reader.read_message() {
+            Ok(Some(frame)) => match sender.try_send(Ok(frame)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(frame)) => {
+                    blocked_enqueue
+                        .send(())
+                        .expect("queue-drop test should wait for blocked enqueue");
+                    if sender.send(frame).is_err() {
+                        return;
+                    }
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            },
             Ok(None) => return,
             Err(error) => {
                 let _ = sender.send(Err(error));

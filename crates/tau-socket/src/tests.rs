@@ -1,8 +1,10 @@
+#[cfg(target_os = "linux")]
+use std::io::ErrorKind;
 use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::UnixListener;
-use std::sync::{Mutex, OnceLock};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use std::{env, fs, thread};
 
@@ -54,8 +56,8 @@ fn bind_accepts_simple_relative_socket_path() {
     );
 }
 
-/// Ensures the public listener accept API uses server-side protocol direction:
-/// accepted clients read peer input messages and write harness output messages.
+/// Ensures the public listener accept API keeps peer and harness protocol
+/// directions distinct while reporting a bounded receive timeout before output.
 #[test]
 fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
     let tempdir = TempDir::new().expect("tempdir should exist");
@@ -66,6 +68,12 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
         let socket_path = socket_path.clone();
         move || {
             let mut client = SocketPeer::connect(socket_path).expect("client should connect");
+            assert_eq!(
+                client
+                    .recv_timeout(Duration::from_millis(50))
+                    .expect("idle connection should time out"),
+                SocketReceive::Timeout
+            );
             client
                 .send(&HarnessInputMessage::Hello(Hello {
                     protocol_version: PROTOCOL_VERSION,
@@ -112,6 +120,32 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
                 reason: Some("server".to_owned()),
             }),
         }
+    );
+}
+
+/// Ensures a peer reports a clean remote close after a complete frame boundary
+/// instead of collapsing that outcome into a timeout or decode error.
+#[test]
+fn frame_boundary_shutdown_is_closed() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let socket_path = tempdir.path().join("tau.sock");
+    let listener = SocketListener::bind(&socket_path).expect("listener should bind");
+
+    let client_thread = thread::spawn({
+        let socket_path = socket_path.clone();
+        move || {
+            let mut client = SocketPeer::connect(socket_path).expect("client should connect");
+            client.recv_timeout(Duration::from_secs(1))
+        }
+    });
+
+    let accepted = listener.accept().expect("server should accept client");
+    drop(accepted);
+
+    let result = client_thread.join().expect("client thread should finish");
+    assert_eq!(
+        result.expect("clean close should not fail"),
+        SocketReceive::Closed
     );
 }
 
@@ -190,6 +224,10 @@ fn bind_refuses_active_socket_path() {
 
 /// Ensures binding fails closed instead of unlinking an existing socket when
 /// the liveness probe cannot determine whether that socket is inactive.
+///
+/// The `000` fixture relies on DAC enforcement. A process with a privilege such
+/// as `CAP_DAC_OVERRIDE` can still connect, so that environment skips this
+/// permission-specific case after proving the fixture is not enforceable.
 #[cfg(target_os = "linux")]
 #[test]
 fn bind_refuses_unprobeable_socket_path() {
@@ -201,6 +239,22 @@ fn bind_refuses_unprobeable_socket_path() {
         .permissions();
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o000))
         .expect("socket permissions should be restricted");
+
+    match UnixStream::connect(&socket_path) {
+        Ok(stream) => {
+            drop(stream);
+            fs::set_permissions(&socket_path, original_permissions)
+                .expect("socket permissions should be restored");
+            drop(active);
+            fs::remove_file(&socket_path).expect("active socket should clean up");
+            eprintln!(
+                "skipping unprobeable socket fixture: this process bypasses Unix DAC permission checks"
+            );
+            return;
+        }
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {}
+        Err(error) => panic!("restricted socket preflight should be permission denied: {error}"),
+    }
 
     let error = match SocketListener::bind(&socket_path) {
         Ok(_) => panic!("bind should refuse unprobeable socket"),
@@ -270,4 +324,44 @@ fn dropping_peer_stops_background_reader() {
         .accept()
         .expect("server should accept client");
     client_thread.join().expect("client drop should not hang");
+}
+
+/// Ensures peer drop first releases a full reader queue, so a reader blocked
+/// enqueueing a second frame can return and join instead of deadlocking drop.
+#[test]
+fn dropping_peer_releases_reader_blocked_on_full_queue() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let socket_path = tempdir.path().join("tau.sock");
+    let listener = SocketListener::bind(&socket_path).expect("listener should bind");
+    let (blocked_enqueue, blocked_enqueue_rx) = mpsc::sync_channel(1);
+
+    let stream = UnixStream::connect(&socket_path).expect("client should connect");
+    let peer = SocketPeer::new_with_blocked_enqueue_hook(stream, blocked_enqueue)
+        .expect("peer should start reader");
+
+    let server_thread = thread::spawn(move || {
+        let mut accepted = listener.accept().expect("server should accept client");
+        let disconnect = HarnessOutputMessage::Disconnect(Disconnect { reason: None });
+        accepted.send(&disconnect).expect("first frame should send");
+        accepted
+            .send(&disconnect)
+            .expect("second frame should send");
+    });
+
+    blocked_enqueue_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second frame should block on the full bounded queue");
+
+    let (drop_finished, drop_finished_rx) = mpsc::sync_channel(1);
+    let drop_thread = thread::spawn(move || {
+        drop(peer);
+        drop_finished
+            .send(())
+            .expect("test should wait for peer drop");
+    });
+    drop_finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("peer drop should release a blocked reader enqueue");
+    drop_thread.join().expect("peer drop thread should finish");
+    server_thread.join().expect("server thread should finish");
 }
