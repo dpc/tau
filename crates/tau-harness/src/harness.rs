@@ -2978,7 +2978,7 @@ where
     R: std::io::Read,
     W: std::io::Write,
 {
-    use std::io::{BufReader, BufWriter};
+    use std::io::BufWriter;
 
     use tau_proto::{
         ContentPart, ContextItem, ContextRole, Effort, EventName, HarnessInputMessage,
@@ -2993,7 +2993,7 @@ where
         materialized
     }
 
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut reader = PeerInputReader::new(reader);
     let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     writer.write_message(&HarnessInputMessage::Hello(Hello {

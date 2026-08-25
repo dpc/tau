@@ -3371,6 +3371,32 @@ fn directional_message_codec_reports_actual_item_sizes() {
     );
 }
 
+/// Ensures a streaming reader accepts EOF only between complete items and
+/// rejects incomplete or syntactically invalid CBOR instead of treating either
+/// as a clean disconnect.
+#[test]
+fn streaming_reader_rejects_partial_and_malformed_protocol_items() {
+    let message = HarnessInputMessage::Ready(Ready { message: None });
+    let mut encoded = encode_harness_input_to_vec(&message).expect("encode message");
+    encoded.pop().expect("encoded message is nonempty");
+
+    let partial = HarnessInputReader::new(path_std_io::Cursor::new(encoded))
+        .read_message()
+        .expect_err("partial item must fail");
+    assert!(
+        !partial.to_string().is_empty(),
+        "partial item must retain its decode error"
+    );
+
+    let malformed = HarnessInputReader::new(path_std_io::Cursor::new(vec![0xff]))
+        .read_message()
+        .expect_err("malformed item must fail");
+    assert!(
+        !malformed.to_string().is_empty(),
+        "malformed item must retain its decode error"
+    );
+}
+
 /// Ensures extension-defined events cannot spoof first-party event categories
 /// that routing and policy code treat as typed protocol events.
 #[test]

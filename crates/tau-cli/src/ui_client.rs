@@ -1,6 +1,6 @@
 //! Shared UI socket client helpers.
 
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
@@ -17,7 +17,7 @@ use tau_proto::{
 
 use crate::daemon::DaemonHandle;
 
-pub(crate) type UiInputReader = PeerInputReader<BufReader<Box<dyn Read + Send>>>;
+pub(crate) type UiInputReader = PeerInputReader<Box<dyn Read + Send>>;
 pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<Box<dyn Write + Send>>>;
 pub(crate) const UI_SESSION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -163,7 +163,7 @@ where
     let mut writer =
         PeerOutputWriter::new(BufWriter::new(Box::new(writer) as Box<dyn Write + Send>));
     send_hello(&mut writer, client_name, expected_session_id)?;
-    let reader = PeerInputReader::new(BufReader::new(Box::new(reader) as Box<dyn Read + Send>));
+    let reader = PeerInputReader::new(Box::new(reader) as Box<dyn Read + Send>);
     let reader = match expected_session_id {
         Some(expected_session_id) => await_ui_session_admission(
             reader,

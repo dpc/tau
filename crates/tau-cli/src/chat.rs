@@ -21,7 +21,9 @@ mod renderer_scheduler;
 mod ui_io_tests;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+#[cfg(test)]
+use std::io::BufReader;
+use std::io::{self, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -353,7 +355,7 @@ fn startup_disconnect_or_io_error(
     read_stream: &mut Box<dyn Read + Send>,
     error: io::Error,
 ) -> CliError {
-    let mut reader = PeerInputReader::new(BufReader::new(read_stream));
+    let mut reader = PeerInputReader::new(read_stream);
     match reader.read_message() {
         Ok(Some(HarnessOutputMessage::Disconnect(disconnect))) => CliError::DaemonExited(
             disconnect
@@ -1640,7 +1642,7 @@ fn await_ui_session_admission(
     shutdown_stream: Option<&UnixStream>,
     timeout: Duration,
 ) -> Result<crate::ui_client::UiInputReader, CliError> {
-    let reader = PeerInputReader::new(BufReader::new(read_stream));
+    let reader = PeerInputReader::new(read_stream);
     crate::ui_client::await_ui_session_admission(
         reader,
         expected_session_id,

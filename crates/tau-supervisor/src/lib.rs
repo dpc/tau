@@ -9,7 +9,7 @@
 //! Lifecycle, transport, and trust boundaries are summarized in
 //! `ARCH-tau-supervisor`.
 
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufWriter};
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
@@ -594,7 +594,7 @@ fn spawn_stdout_reader(
     thread::Builder::new()
         .name("tau-supervisor-stdout".to_owned())
         .spawn(move || {
-            let mut reader = HarnessInputReader::new(BufReader::new(stdout));
+            let mut reader = HarnessInputReader::new(stdout);
             loop {
                 match reader.read_message() {
                     Ok(Some(frame)) => {

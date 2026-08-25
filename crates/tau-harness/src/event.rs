@@ -1,7 +1,9 @@
 //! Internal harness event type and the per-connection reader/writer threads
 //! that funnel decoded protocol events into the central event loop.
 
-use std::io::{self, BufReader, BufWriter, Write};
+#[cfg(test)]
+use std::io::BufReader;
+use std::io::{self, BufWriter, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -694,7 +696,7 @@ fn spawn_reader_thread_inner(
             return;
         }
 
-        let mut reader = HarnessInputReader::new(BufReader::new(stream));
+        let mut reader = HarnessInputReader::new(stream);
         loop {
             let read_started = Instant::now();
             match reader.read_message_with_size() {
