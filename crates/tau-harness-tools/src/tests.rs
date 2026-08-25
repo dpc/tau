@@ -1,4 +1,4 @@
-use std::{cell as path_std_cell, path as path_std_path};
+use std::path as path_std_path;
 
 use super::*;
 
@@ -55,39 +55,36 @@ fn status_errors_redact_rejected_arguments() {
     assert!(!message.contains("working"));
 }
 
-/// The status parser accepts only the closed state set and canonicalizes
-/// titles.
+/// The status parser lowers every model-reportable state to its matching
+/// protocol phase while canonicalizing titles and rejecting internal variants.
 #[test]
 fn status_arguments_are_closed_and_canonical() {
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("state".to_owned()),
-            CborValue::Text("working".to_owned()),
-        ),
-        (
-            CborValue::Text("task_name".to_owned()),
-            CborValue::Text("  trace lifecycle  ".to_owned()),
-        ),
-    ]);
-    let report = parse_status_args(&args).expect("valid status arguments");
-    assert_eq!(report.phase(), tau_proto::AgentWorkStatusPhase::Working);
-    assert_eq!(report.title(), "trace lifecycle");
-
-    let mut waiting = args.clone();
-    let CborValue::Map(entries) = &mut waiting else {
-        unreachable!()
+    let arguments = |state: &str| {
+        CborValue::Map(vec![
+            (
+                CborValue::Text("state".to_owned()),
+                CborValue::Text(state.to_owned()),
+            ),
+            (
+                CborValue::Text("task_name".to_owned()),
+                CborValue::Text("  trace lifecycle  ".to_owned()),
+            ),
+        ])
     };
-    entries[0].1 = CborValue::Text("waiting".to_owned());
-    let report = parse_status_args(&waiting).expect("waiting is model-reportable");
-    assert_eq!(report.phase(), tau_proto::AgentWorkStatusPhase::Waiting);
+
+    for (state, phase) in [
+        ("working", tau_proto::AgentWorkStatusPhase::Working),
+        ("done", tau_proto::AgentWorkStatusPhase::Done),
+        ("blocked", tau_proto::AgentWorkStatusPhase::Blocked),
+        ("waiting", tau_proto::AgentWorkStatusPhase::Waiting),
+    ] {
+        let report = parse_status_args(&arguments(state)).expect("model-reportable state");
+        assert_eq!(report.phase(), phase, "{state}");
+        assert_eq!(report.title(), "trace lifecycle", "{state}");
+    }
 
     for state in ["unknown", "Working", "idle"] {
-        let mut invalid = args.clone();
-        let CborValue::Map(entries) = &mut invalid else {
-            unreachable!()
-        };
-        entries[0].1 = CborValue::Text(state.to_owned());
-        assert!(parse_status_args(&invalid).is_err());
+        assert!(parse_status_args(&arguments(state)).is_err());
     }
 
     let legacy_title = CborValue::Map(vec![
@@ -363,6 +360,31 @@ fn tool_background_result(call_id: &str) -> tau_proto::ToolBackgroundResult {
     }
 }
 
+fn tool_error(call_id: &str) -> tau_proto::ToolError {
+    tau_proto::ToolError {
+        call_id: call_id.into(),
+        tool_name: ToolName::new("shell"),
+        tool_type: ToolType::Function,
+        message: "failed".to_owned(),
+        details: None,
+        presentation: Default::default(),
+        display: None,
+        originator: PromptOriginator::User,
+    }
+}
+
+fn tool_background_error(call_id: &str) -> tau_proto::ToolBackgroundError {
+    tau_proto::ToolBackgroundError {
+        call_id: call_id.into(),
+        tool_name: ToolName::new("shell"),
+        tool_type: ToolType::Function,
+        message: "failed".to_owned(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
+    }
+}
+
 /// The public agent-start schema must request only the prompt and explicit
 /// role, keeping display names independent of delegation.
 #[test]
@@ -397,39 +419,51 @@ fn agent_start_spec_advertises_prompt_and_required_explicit_role() {
     );
 }
 
-/// The runtime parser rejects omitted or empty roles instead of silently
-/// selecting a default, while preserving explicitly selected roles.
+/// The local agent-start parser requires nonempty text prompt and role fields
+/// rather than silently selecting defaults or accepting unusable work.
 #[test]
-fn agent_start_runtime_requires_explicit_nonempty_role() {
-    let arguments = |role: Option<&str>| {
-        let mut entries = vec![(
-            CborValue::Text("prompt".to_owned()),
-            CborValue::Text("Review this change".to_owned()),
-        )];
+fn agent_start_parser_requires_nonempty_text_prompt_and_role() {
+    let arguments = |prompt: Option<CborValue>, role: Option<CborValue>| {
+        let mut entries = Vec::new();
+        if let Some(prompt) = prompt {
+            entries.push((CborValue::Text("prompt".to_owned()), prompt));
+        }
         if let Some(role) = role {
-            entries.push((
-                CborValue::Text("role".to_owned()),
-                CborValue::Text(role.to_owned()),
-            ));
+            entries.push((CborValue::Text("role".to_owned()), role));
         }
         CborValue::Map(entries)
     };
 
-    assert_eq!(
-        parse_delegate_args(&arguments(None)).expect_err("missing role"),
-        "missing string argument: role"
-    );
-    assert_eq!(
-        parse_delegate_args(&arguments(Some(" "))).expect_err("empty role"),
-        "`role` must not be empty"
-    );
-    for role in ["engineer", "reviewer"] {
-        assert_eq!(
-            parse_delegate_args(&arguments(Some(role)))
-                .expect("explicit role")
-                .role,
-            role
+    for (field, value) in [
+        ("prompt", None),
+        ("prompt", Some(CborValue::Integer(1.into()))),
+        ("prompt", Some(CborValue::Text(" \t ".to_owned()))),
+        ("role", None),
+        ("role", Some(CborValue::Integer(1.into()))),
+        ("role", Some(CborValue::Text(" \t ".to_owned()))),
+    ] {
+        let (prompt, role) = if field == "prompt" {
+            (value, Some(CborValue::Text("engineer".to_owned())))
+        } else {
+            (
+                Some(CborValue::Text("Review this change".to_owned())),
+                value,
+            )
+        };
+        assert!(
+            parse_delegate_args(&arguments(prompt, role)).is_err(),
+            "{field} must be nonempty text"
         );
+    }
+
+    for role in ["engineer", "reviewer"] {
+        let parsed = parse_delegate_args(&arguments(
+            Some(CborValue::Text("Review this change".to_owned())),
+            Some(CborValue::Text(role.to_owned())),
+        ))
+        .expect("explicit prompt and role");
+        assert_eq!(parsed.prompt, "Review this change");
+        assert_eq!(parsed.role, role);
     }
 }
 
@@ -487,10 +521,14 @@ fn built_in_tool_descriptions_match_public_contract() {
     );
 }
 
+/// The advertised agent-watch interface is closed, foreground-only, and bound
+/// to a validated target id plus explicit enable switch.
 #[test]
 fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
     let spec = agent_watch_tool_spec();
     assert_eq!(spec.name.as_str(), AGENT_WATCH_TOOL_NAME);
+    assert!(spec.enabled_by_default);
+    assert_eq!(spec.background_support, Some(BackgroundSupport::Never));
     let params = spec.parameters.expect("agent_watch schema");
     let required = params
         .get("required")
@@ -527,8 +565,11 @@ fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
             .contains("ASCII letters")
     );
     assert_eq!(required, vec!["agent_id", "enable"]);
+    assert_eq!(params["additionalProperties"], false);
 }
 
+/// The local agent-watch parser requires an object with nonempty textual target
+/// id and boolean enable field before handing topology intent to the harness.
 #[test]
 fn agent_watch_args_require_non_empty_agent_id_and_bool_enable() {
     let args = CborValue::Map(vec![
@@ -541,6 +582,30 @@ fn agent_watch_args_require_non_empty_agent_id_and_bool_enable() {
     let parsed = parse_agent_watch_args(&args).expect("valid watch args");
     assert_eq!(parsed.agent_id.as_str(), "agent-a");
     assert!(parsed.enable);
+
+    for arguments in [
+        CborValue::Map(vec![(
+            CborValue::Text("enable".to_owned()),
+            CborValue::Bool(true),
+        )]),
+        CborValue::Map(vec![(
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        )]),
+        CborValue::Integer(1.into()),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("agent_id".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+            (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+        ]),
+    ] {
+        assert!(
+            parse_agent_watch_args(&arguments).is_err(),
+            "required fields must have their documented types"
+        );
+    }
 
     let err = parse_agent_watch_args(&CborValue::Map(vec![
         (
@@ -574,30 +639,6 @@ fn agent_watch_args_require_non_empty_agent_id_and_bool_enable() {
     ]))
     .expect_err("invalid agent_id should fail");
     assert!(err.starts_with("invalid `agent_id`:"));
-}
-
-/// Agent watch display args should make both the watch action and target agent
-/// visible in the compact tool line, preventing ambiguous bare `agent_watch`
-/// rows in the transcript.
-#[test]
-fn agent_watch_display_args_summarize_action_and_agent() {
-    let enable = CborValue::Map(vec![
-        (
-            CborValue::Text("agent_id".to_owned()),
-            CborValue::Text("agent-a".to_owned()),
-        ),
-        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
-    ]);
-    let disable = CborValue::Map(vec![
-        (
-            CborValue::Text("agent_id".to_owned()),
-            CborValue::Text("agent-a".to_owned()),
-        ),
-        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
-    ]);
-
-    assert_eq!(agent_watch_display_args(&enable), "watch agent-a");
-    assert_eq!(agent_watch_display_args(&disable), "unwatch agent-a");
 }
 
 /// Invalid agent watch display args should still expose whitelisted safe fields
@@ -636,26 +677,6 @@ fn agent_watch_display_args_falls_back_to_safe_fields() {
     assert_eq!(agent_watch_display_args(&unsafe_enable), "agent-a");
 }
 
-/// Terminal agent watch results must carry the same bounded display args as the
-/// in-progress row so compact history does not regress to a bare
-/// `agent_watch ok` entry after completion.
-#[test]
-fn agent_watch_success_display_keeps_action_and_agent() {
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("agent_id".to_owned()),
-            CborValue::Text("agent-a".to_owned()),
-        ),
-        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
-    ]);
-
-    let display = agent_watch_success_display(&args);
-
-    assert_eq!(display.args, "watch agent-a");
-    assert_eq!(display.status, ToolUseStatus::Success);
-    assert_eq!(display.status_text, "ok");
-}
-
 /// Enabling or re-enabling through the actual tool-result formatter includes
 /// the sanitized current snapshot exactly once and never model-input framing.
 #[test]
@@ -674,25 +695,6 @@ fn agent_watch_enable_result_includes_safe_current_snapshot() {
         agent_watch_enabled_result("agent-a", None),
         "Watching agent `agent-a`"
     );
-}
-
-/// Terminal agent watch errors must also preserve sanitized display args while
-/// keeping unsafe malformed identifiers out of the compact history row.
-#[test]
-fn agent_watch_error_display_keeps_safe_action() {
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("agent_id".to_owned()),
-            CborValue::Text("agent-missing".to_owned()),
-        ),
-        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
-    ]);
-
-    let display = agent_watch_error_display(&args, "unknown agent: `agent-missing`");
-
-    assert_eq!(display.args, "unwatch agent-missing");
-    assert_eq!(display.status, ToolUseStatus::Error);
-    assert_eq!(display.status_text, "unknown agent: `agent-missing`");
 }
 
 #[derive(Default)]
@@ -838,90 +840,6 @@ fn finish_agent_watch_error_passes_informative_display() {
     assert_eq!(display.status_text, "unknown agent: `agent-missing`");
 }
 
-/// A stopped-target classification from the handler's atomic watch adapter
-/// must finish as a tool error without reaching the adapter's mutation branch.
-#[test]
-fn agent_watch_stopped_target_errors_without_mutation() {
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("agent_id".to_owned()),
-            CborValue::Text("agent-stopped".to_owned()),
-        ),
-        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
-    ]);
-    let parsed = parse_agent_watch_args(&args).expect("valid watch arguments");
-    let mutation_called = path_std_cell::Cell::new(false);
-    let result = agent_watch_tool_result("agent-watcher", &parsed, |_, watched_id, enable| {
-        assert!(enable);
-        if watched_id == "agent-stopped" {
-            return Err(format!("agent is not live: `{watched_id}`"));
-        }
-        mutation_called.set(true);
-        Ok(None)
-    });
-    let error = result.expect_err("stopped target must fail");
-    let mut finisher = RecordingAgentWatchFinisher::default();
-    finish_agent_watch_error(
-        &mut finisher,
-        &AgentId::parse("watcher-cid").expect("valid agent id"),
-        ToolCallId::from("watch-stopped"),
-        ToolName::new(AGENT_WATCH_TOOL_NAME),
-        ToolType::Function,
-        &args,
-        error,
-    );
-
-    assert!(!mutation_called.get());
-    assert!(finisher.success.is_none());
-    let call = finisher.error.expect("tool error recorded");
-    assert_eq!(call.call_id.as_str(), "watch-stopped");
-    assert_eq!(call.message, "agent is not live: `agent-stopped`");
-    assert_eq!(
-        call.display.expect("error display").status,
-        ToolUseStatus::Error
-    );
-}
-
-/// The tool-result adapter must pass a host cycle rejection through as an
-/// informative tool error with original details and no success completion.
-#[test]
-fn agent_watch_cycle_error_preserves_safe_display_and_details() {
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("agent_id".to_owned()),
-            CborValue::Text("agent-a".to_owned()),
-        ),
-        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
-    ]);
-    let parsed = parse_agent_watch_args(&args).expect("valid watch arguments");
-    let error = agent_watch_tool_result("agent-b", &parsed, |watcher, watched, enable| {
-        assert_eq!((watcher, watched, enable), ("agent-b", "agent-a", true));
-        Err("agent watch would create a cycle: `agent-b` -> `agent-a`".to_owned())
-    })
-    .expect_err("closing edge must fail");
-    let mut finisher = RecordingAgentWatchFinisher::default();
-    finish_agent_watch_error(
-        &mut finisher,
-        &AgentId::parse("watcher-cid").expect("valid agent id"),
-        ToolCallId::from("watch-cycle"),
-        ToolName::new(AGENT_WATCH_TOOL_NAME),
-        ToolType::Function,
-        &args,
-        error,
-    );
-
-    assert!(finisher.success.is_none());
-    let call = finisher.error.expect("tool error recorded");
-    assert_eq!(
-        call.message,
-        "agent watch would create a cycle: `agent-b` -> `agent-a`"
-    );
-    assert_eq!(call.details, Some(args));
-    let display = call.display.expect("error display");
-    assert_eq!(display.args, "watch agent-a");
-    assert_eq!(display.status, ToolUseStatus::Error);
-}
-
 /// Ensures the message tool rejects the removed `user` recipient rather than
 /// treating that reserved value as an ordinary agent identifier.
 #[test]
@@ -937,14 +855,26 @@ fn message_recipient_parser_rejects_user() {
     assert_eq!(error, "unsupported message recipient: `user`");
 }
 
-/// Ensures model-visible message-tool help advertises only agent and session
-/// recipients after removal of the misleading user-delivery form.
+/// Model-visible message help must provide every supported routing form and
+/// exact required keys without reviving the removed user-delivery form.
 #[test]
 fn message_tool_schema_does_not_advertise_user_recipient() {
     let spec = message_tool_spec();
     let description = spec.description.expect("message tool description");
     let parameters = spec.parameters.expect("message tool parameters");
 
+    assert_eq!(
+        parameters["required"],
+        serde_json::json!(["recipient_id", "message"])
+    );
+    for form in [
+        "local agent id",
+        "&<session-id>",
+        "&<session-id>/@<agent-id>",
+        "<session-id>/<agent-id>",
+    ] {
+        assert!(description.contains(form), "missing address form {form:?}");
+    }
     assert!(!description.contains("user"));
     assert!(
         !parameters["properties"]["recipient_id"]["description"]
@@ -1116,43 +1046,65 @@ fn message_initial_display_includes_message_payload() {
     );
 }
 
+/// Runtime bookkeeping retains a logical tool name through a background
+/// placeholder, then clears both tracking maps for every terminal event.
 #[test]
 fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
-    let mut state = BuiltinState::default();
-    state.record_tool_started("shell-call".into(), ToolName::new("shell"));
+    let terminal_events = [
+        Event::ToolResult(tool_result("shell-call", ToolResultKind::Final)),
+        Event::ProviderToolResult(tool_result("shell-call", ToolResultKind::Final)),
+        Event::ToolError(tool_error("shell-call")),
+        Event::ProviderToolError(tool_error("shell-call")),
+        Event::ToolBackgroundResult(tool_background_result("shell-call")),
+        Event::ToolBackgroundError(tool_background_error("shell-call")),
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: "shell-call".into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: ToolType::Function,
+            presentation: Default::default(),
+            display: None,
+        }),
+        Event::ToolRejected(tau_proto::ToolRejected {
+            call_id: "shell-call".into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: ToolType::Function,
+            message: "rejected".to_owned(),
+            originator: PromptOriginator::User,
+        }),
+    ];
 
-    state.record_runtime_bookkeeping_event(&Event::ProviderToolResult(tool_result(
+    let mut placeholder_state = BuiltinState::default();
+    let call_id = ToolCallId::from("shell-call");
+    placeholder_state.record_tool_started(call_id.clone(), ToolName::new("shell"));
+    placeholder_state.cancel_requested.insert(call_id.clone());
+    placeholder_state.record_runtime_bookkeeping_event(&Event::ProviderToolResult(tool_result(
         "shell-call",
         ToolResultKind::BackgroundPlaceholder,
     )));
-    let display = state
-        .initial_display(&wait_call("shell-call"))
-        .expect("wait display after placeholder");
-    assert_eq!(display.args, "shell");
+    assert!(
+        placeholder_state
+            .in_progress_tool_names
+            .contains_key(&call_id)
+    );
+    assert!(placeholder_state.cancel_requested.contains(&call_id));
 
-    state.record_runtime_bookkeeping_event(&Event::ToolBackgroundResult(tool_background_result(
-        "shell-call",
-    )));
-    let display = state
-        .initial_display(&wait_call("shell-call"))
-        .expect("wait display after finish");
-    assert_eq!(display.args, "");
-}
+    for event in terminal_events {
+        let mut state = BuiltinState::default();
+        let call_id = ToolCallId::from("shell-call");
+        state.record_tool_started(call_id.clone(), ToolName::new("shell"));
+        state.cancel_requested.insert(call_id.clone());
 
-/// Ensures cancellation bookkeeping follows the target tool lifecycle instead
-/// of keeping stale ids forever, so a completed target is not later reported as
-/// "already canceled" and the in-memory set stays bounded.
-#[test]
-fn cancel_request_tracking_is_cleared_when_target_finishes() {
-    let mut state = BuiltinState::default();
-    let call_id = ToolCallId::from("shell-call");
-    state.cancel_requested.insert(call_id.clone());
+        state.record_runtime_bookkeeping_event(&event);
 
-    state.record_runtime_bookkeeping_event(&Event::ToolBackgroundResult(tool_background_result(
-        call_id.as_str(),
-    )));
-
-    assert!(!state.cancel_requested.contains(&call_id));
+        assert!(
+            !state.in_progress_tool_names.contains_key(&call_id),
+            "{event:?} must clear its tool name"
+        );
+        assert!(
+            !state.cancel_requested.contains(&call_id),
+            "{event:?} must clear its cancellation request"
+        );
+    }
 }
 
 /// Ensures duplicate-cancel bookkeeping is checked only after owner-scoped
@@ -1245,28 +1197,8 @@ fn delegate_instruction_is_compact_and_exact() {
     );
 }
 
-/// Ensures the compact bootstrap does not regress to stale tool, watch
-/// lifecycle, follow-up, or task-heading instructions.
-#[test]
-fn delegate_instruction_omits_stale_bootstrap_prose() {
-    let instruction = delegate_instruction("engineer_parent", "inspect the change");
-
-    for stale_text in [
-        "using `agent_start` tool",
-        "automatically watching this conversation",
-        "`agent_watch`",
-        "while that watch remains enabled",
-        "Complete your task",
-        "Respond to additional requests",
-        "### Task",
-    ] {
-        assert!(
-            !instruction.contains(stale_text),
-            "bootstrap unexpectedly contained {stale_text:?}"
-        );
-    }
-}
-
+/// Agent-start results are routing metadata only: the child response travels
+/// through watch notifications, so legacy child output and `agent_id` stay out.
 #[test]
 fn delegate_result_includes_only_caller_and_sub_agent_ids() {
     // `agent_start` no longer returns the sub-agent's first final text as tool
@@ -1284,31 +1216,6 @@ fn delegate_result_includes_only_caller_and_sub_agent_ids() {
     );
     assert_eq!(cbor_map_text(&value, "agent_id"), None);
     assert_eq!(cbor_map_text(&value, "output"), None);
-}
-
-/// Ensures the built-in `agent_start` tool's immediate success descriptor
-/// contains the started agent id and prompt-size metadata that replaced the old
-/// long-running delegate progress line.
-#[test]
-fn agent_start_success_display_names_agent_and_uses_standard_status() {
-    // Immediate `agent_start` completion no longer carries the child's final
-    // answer, so its display descriptor must still give the user useful spawn
-    // metadata in the normal tool-call block.
-    let display = agent_start_success_display(
-        "engineer_child",
-        ToolUseStats {
-            matches: None,
-            lines: Some(2),
-            bytes: Some(12),
-        },
-    );
-
-    assert_eq!(display.args, "");
-    assert_eq!(display.stats.lines, Some(2));
-    assert_eq!(display.stats.bytes, Some(12));
-    assert_eq!(display.info_chips, vec!["@engineer_child"]);
-    assert_eq!(display.status, ToolUseStatus::Success);
-    assert_eq!(display.status_text, "ok");
 }
 
 #[derive(Default)]
@@ -1423,56 +1330,59 @@ fn truncated_skill_search_uses_standard_success_status() {
     assert_eq!(cbor_map_bool(&result, "truncated"), Some(true));
 }
 
+/// Empty skill searches preserve their structured content-search choice and
+/// suggest searching file content only when that branch has not run yet.
 #[test]
-fn skill_search_guidance_omits_content_hint_when_content_was_already_searched() {
-    let (result, _) = skill_search_result(
-        &["missing".to_owned()],
-        true,
-        SkillSearchOutcome {
-            hits: Vec::new(),
-            total_matches: 0,
-            truncated: false,
-            auto_load_name: None,
-            warnings: Vec::new(),
-        },
-    );
+fn skill_search_guidance_matches_content_search_branch() {
+    for (search_content, suggests_content_search) in [(false, true), (true, false)] {
+        let (result, _) = skill_search_result(
+            &["missing".to_owned()],
+            search_content,
+            SkillSearchOutcome {
+                hits: Vec::new(),
+                total_matches: 0,
+                truncated: false,
+                auto_load_name: None,
+                warnings: Vec::new(),
+            },
+        );
 
-    assert_eq!(cbor_map_bool(&result, "search_content"), Some(true));
-    let guidance = cbor_map_text(&result, "guidance").expect("guidance");
-    assert!(guidance.contains("No skills matched"));
-    assert!(!guidance.contains("search_content: true"));
+        assert_eq!(
+            cbor_map_bool(&result, "search_content"),
+            Some(search_content)
+        );
+        let guidance = cbor_map_text(&result, "guidance").expect("guidance");
+        assert!(guidance.contains("No skills matched"));
+        assert_eq!(
+            guidance.contains("search_content: true"),
+            suggests_content_search
+        );
+    }
 }
 
-#[test]
-fn skill_search_guidance_suggests_content_search_only_when_not_already_enabled() {
-    let (result, _) = skill_search_result(
-        &["missing".to_owned()],
-        false,
-        SkillSearchOutcome {
-            hits: Vec::new(),
-            total_matches: 0,
-            truncated: false,
-            auto_load_name: None,
-            warnings: Vec::new(),
-        },
-    );
-
-    let guidance = cbor_map_text(&result, "guidance").expect("guidance");
-    assert!(guidance.contains("search_content: true"));
-}
-
+/// Query normalization rejects punctuation-only input without echoing it and
+/// preserves hyphenated exact skill names as one advertised search term.
 #[test]
 fn skill_query_rejects_whitespace_without_echoing_raw_input() {
+    for raw_query in ["  \n\t  ", "?!.,"] {
+        let args = CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text(raw_query.to_owned()),
+        )]);
+
+        let err = extract_skill_search_queries(&args).expect_err("empty normalized query");
+
+        assert_eq!(err, "query must include at least one non-empty term");
+        assert!(!err.contains(raw_query));
+    }
     let args = CborValue::Map(vec![(
         CborValue::Text("query".to_owned()),
-        CborValue::Text("  \n\t  ".to_owned()),
+        CborValue::Text("tau-tool-verification".to_owned()),
     )]);
-
-    let err = extract_skill_search_queries(&args).expect_err("whitespace query should fail");
-
-    assert_eq!(err, "query must include at least one non-empty term");
-    assert!(!err.contains('\n'));
-    assert!(!err.contains('\t'));
+    assert_eq!(
+        extract_skill_search_queries(&args).expect("hyphenated exact name"),
+        vec!["tau-tool-verification"]
+    );
 }
 
 /// Ensures self-compaction is available by default, cross-agent compaction
@@ -1584,8 +1494,8 @@ fn discovery_tools_are_disabled_by_default_in_separate_groups() {
     }
 }
 
-/// Bounded discovery parsing rejects unknown filters, invalid states, and
-/// non-positive limits instead of silently broadening enumeration.
+/// Discovery parsing rejects disallowed filters and invalid numeric bounds,
+/// while defaulting omitted or oversized limits to the public result cap.
 #[test]
 fn discovery_arguments_are_strict_and_bounded() {
     let valid = CborValue::Map(vec![
@@ -1601,6 +1511,31 @@ fn discovery_arguments_are_strict_and_bounded() {
     let parsed = parse_discovery_args(&valid, false).expect("valid session filters");
     assert_eq!(parsed.query.as_deref(), Some("peer"));
     assert_eq!(parsed.limit, DISCOVERY_MAX_RESULTS);
+    for (label, arguments) in [
+        ("zero", CborValue::Integer(0.into())),
+        ("negative", CborValue::Integer((-1).into())),
+        ("non-integer", CborValue::Text("1".to_owned())),
+    ] {
+        let arguments = CborValue::Map(vec![(CborValue::Text("limit".to_owned()), arguments)]);
+        assert!(
+            parse_discovery_args(&arguments, false).is_err(),
+            "{label} limit must be rejected"
+        );
+    }
+    for arguments in [
+        CborValue::Map(Vec::new()),
+        CborValue::Map(vec![(
+            CborValue::Text("limit".to_owned()),
+            CborValue::Integer(500_u64.into()),
+        )]),
+    ] {
+        assert_eq!(
+            parse_discovery_args(&arguments, false)
+                .expect("omitted or oversized limit")
+                .limit,
+            DISCOVERY_MAX_RESULTS
+        );
+    }
     for state in ["restored_unavailable", "stopped"] {
         let parsed = parse_discovery_args(
             &CborValue::Map(vec![(
@@ -1622,6 +1557,19 @@ fn discovery_arguments_are_strict_and_bounded() {
         )
         .is_err()
     );
+    for filter in ["role", "group", "state"] {
+        assert!(
+            parse_discovery_args(
+                &CborValue::Map(vec![(
+                    CborValue::Text(filter.to_owned()),
+                    CborValue::Text("x".to_owned()),
+                )]),
+                false,
+            )
+            .is_err(),
+            "session discovery must reject agent-only {filter} filter"
+        );
+    }
     assert!(
         parse_discovery_args(
             &CborValue::Map(vec![(
@@ -1643,6 +1591,19 @@ fn discovery_arguments_are_strict_and_bounded() {
             )
             .is_err(),
             "{filter} must have a byte bound"
+        );
+    }
+    for filter in ["query", "role", "group"] {
+        assert!(
+            parse_discovery_args(
+                &CborValue::Map(vec![(
+                    CborValue::Text(filter.to_owned()),
+                    CborValue::Text("x".repeat(256)),
+                )]),
+                true,
+            )
+            .is_ok(),
+            "{filter} must accept its exact byte bound"
         );
     }
 }
