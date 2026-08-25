@@ -33,6 +33,7 @@ tau-ext-xmpp.workspace = true
 tau-ext-zulip.workspace = true
 
 [dev-dependencies]
+rostra-core.workspace = true
 rustix-openpty.workspace = true
 serde_json.workspace = true
 tau-harness.workspace = true

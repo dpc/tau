@@ -5663,6 +5663,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 name = "tau"
 version = "0.1.0"
 dependencies = [
+ "rostra-core",
  "rustix-openpty",
  "serde_json",
  "tau-cli",
@@ -5944,6 +5945,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

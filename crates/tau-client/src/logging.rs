@@ -29,8 +29,7 @@ pub fn init_logging_for(log_target: &'static str) {
 
 /// Installs the stderr subscriber used by first-party extension binaries.
 fn install_subscriber(default_filter: &str) {
-    let filter =
-        EnvFilter::try_from_env(ENV_VAR).unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let filter = filter_from_env(default_filter, std::env::var);
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -45,3 +44,18 @@ fn install_subscriber(default_filter: &str) {
         eprintln!("tau-client: failed to install tracing subscriber: {err}");
     }
 }
+
+/// Select the explicit operator filter or retain the caller's default on error.
+fn filter_from_env<F>(default_filter: &str, read_env: F) -> EnvFilter
+where
+    F: FnOnce(&'static str) -> Result<String, std::env::VarError>,
+{
+    read_env(ENV_VAR)
+        .ok()
+        .and_then(|filter| EnvFilter::try_new(filter).ok())
+        .unwrap_or_else(|| EnvFilter::new(default_filter))
+}
+
+#[cfg(test)]
+#[path = "logging_tests.rs"]
+mod logging_tests;

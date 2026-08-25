@@ -359,10 +359,10 @@ async fn post(invoke: &ToolStarted, client: &Client, secret: RostraIdSecretKey) 
         });
     }
     let event = client
-        .publish_event(secret, SocialPost::new_text(args.body, reply_to, tags))
-        .call()
+        .social_post(secret, args.body, reply_to, tags)
         .await
         .map_err(|_| ToolFailure::storage())?;
+    log_local_commit(&invoke.call_id, "post", event.event_id);
     #[cfg(test)]
     if let Some(gate) = test_gate {
         gate.committed
@@ -397,6 +397,7 @@ async fn react(invoke: &ToolStarted, client: &Client, secret: RostraIdSecretKey)
         .social_post(secret, reaction, reply_to, BTreeSet::new())
         .await
         .map_err(|_| ToolFailure::storage())?;
+    log_local_commit(&invoke.call_id, "reaction", event.event_id);
     Ok(result(client, event.event_id, "reaction"))
 }
 
@@ -564,4 +565,24 @@ fn result(client: &Client, event_id: rostra_core::EventId, operation: &str) -> S
         "publication": "asynchronous_best_effort"
     })
     .to_string()
+}
+
+/// Emit the post-commit diagnostic without exposing signed content or identity.
+pub(crate) fn log_local_commit(
+    call_id: &tau_proto::ToolCallId,
+    operation: &'static str,
+    event_id: rostra_core::EventId,
+) {
+    tracing::debug!(
+        target: crate::LOG_TARGET,
+        call_id = %call_id,
+        operation,
+        event_id = %short_event_id(event_id),
+        "local_commit"
+    );
+}
+
+/// Return a non-identifying diagnostic prefix for one event ID.
+pub(crate) fn short_event_id(event_id: rostra_core::EventId) -> String {
+    event_id.to_string().chars().take(12).collect()
 }
