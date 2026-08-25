@@ -1,4 +1,6 @@
 use std::os::unix as path_std_os_unix;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -13,11 +15,41 @@ fn store_rejects_invalid_keys() {
     let tempdir = TempDir::new().expect("tempdir");
     let store = VcrStore::new(tempdir.path());
 
-    let error = store
-        .put("tc-main/0001", &json!({"value": true}))
-        .expect_err("invalid key should fail");
+    for key in ["", ".", "..", "tc-main/0001", r"tc-main\0001", "日本"] {
+        let error = store
+            .put(key, &json!({"value": true}))
+            .expect_err("invalid key should fail");
+        assert!(matches!(error, VcrError::InvalidKey(rejected) if rejected == key));
+    }
+    for key in ["a", "A9", "tc-main-0001", "tc_main_0001"] {
+        assert!(store.path(key).is_ok(), "valid key {key:?} was rejected");
+    }
+}
 
-    assert!(matches!(error, VcrError::InvalidKey(key) if key == "tc-main/0001"));
+/// Side-artifact kinds are filename suffixes rather than paths. Their stricter
+/// grammar prevents a caller from selecting another cassette-owned file.
+#[test]
+fn artifact_kind_rejects_invalid_values() {
+    for kind in [
+        "",
+        ".",
+        "..",
+        "shell/output",
+        r"shell\output",
+        "日本",
+        "shell_output",
+    ] {
+        let error = ArtifactKind::new(kind).expect_err("invalid artifact kind should fail");
+        assert!(matches!(error, VcrError::InvalidArtifactKind(rejected) if rejected == kind));
+    }
+    for kind in ["a", "A9", "shell-output"] {
+        assert_eq!(
+            ArtifactKind::new(kind)
+                .expect("valid artifact kind")
+                .as_str(),
+            kind
+        );
+    }
 }
 
 /// The store is intentionally schema-agnostic: callers own the cassette shape,
@@ -104,32 +136,69 @@ fn store_rejects_symlinked_root_directory() {
 /// prompt or tool payloads that can appear in either request.
 #[test]
 fn request_mismatch_error_carries_only_redacted_payload_summaries() {
-    let error = request_mismatch("tc-main-0001", &json!({"old": true}), &json!({"new": true}));
+    let expected_marker = "expected-token-4f2a";
+    let actual_marker = "actual-prompt-61ce";
+    let expected_secret = format!("{expected_marker}_host_internal_example");
+    let actual_secret = format!("{actual_marker}_host_private_example");
+    let error = request_mismatch(
+        "tc-main-0001",
+        &json!({"authorization": expected_secret}),
+        &json!({"prompt": actual_secret}),
+    );
+    let debug = format!("{error:?}");
 
-    match error {
+    match &error {
         VcrError::RequestMismatch {
             expected, actual, ..
         } => {
             assert!(expected.contains("redacted payload"));
             assert!(actual.contains("redacted payload"));
-            assert!(!expected.contains("old"));
-            assert!(!actual.contains("new"));
+            assert!(!expected.contains(expected_marker));
+            assert!(!actual.contains(actual_marker));
         }
         other => panic!("unexpected error: {other:?}"),
     }
+    assert!(debug.contains("redacted payload"));
+    assert!(!debug.contains(expected_marker));
+    assert!(!debug.contains(actual_marker));
 }
 
 /// Most callers convert VCR errors directly to user-visible strings. Display
 /// must remain bounded and must not disclose either mismatched request.
 #[test]
 fn request_mismatch_display_redacts_serialized_payloads() {
-    let error = request_mismatch("tc-main-0001", &json!({"old": true}), &json!({"new": true}));
+    let expected_marker = "expected-secret-marker";
+    let actual_marker = "actual-secret-marker";
+    let expected_secret = format!("{expected_marker}{}", "x".repeat(4096));
+    let actual_secret = format!("{actual_marker}{}", "y".repeat(4096));
+    let error = request_mismatch(
+        "tc-main-0001",
+        &json!({"authorization": expected_secret}),
+        &json!({"prompt": actual_secret}),
+    );
+    let debug = format!("{error:?}");
     let display = error.to_string();
 
+    match &error {
+        VcrError::RequestMismatch {
+            expected, actual, ..
+        } => {
+            assert!(!expected.contains(expected_marker));
+            assert!(!actual.contains(actual_marker));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert!(!debug.contains(expected_marker));
+    assert!(!debug.contains(actual_marker));
     assert!(display.contains("tc-main-0001"));
     assert!(display.contains("redacted payload"));
-    assert!(!display.contains("old"));
-    assert!(!display.contains("new"));
+    assert!(!display.contains(expected_marker));
+    assert!(!display.contains(actual_marker));
+    assert!(
+        display.len() <= 512,
+        "redacted mismatch display grew to {} bytes",
+        display.len()
+    );
 }
 
 /// Recording is deliberately create-only so concurrent refreshers and CI
@@ -151,6 +220,54 @@ fn store_put_is_exclusive_and_preserves_existing_cassette() {
         .expect("read")
         .expect("cassette exists");
     assert_eq!(loaded, json!({"version": 1}));
+
+    let race_root = tempdir.path().join("race");
+    let race_store = VcrStore::new(&race_root);
+    let barrier = Arc::new(Barrier::new(2));
+    let first_store = race_store.clone();
+    let first_barrier = Arc::clone(&barrier);
+    let first = thread::spawn(move || {
+        first_barrier.wait();
+        first_store.put("race", &json!({"winner": "first"}))
+    });
+    let second_store = race_store.clone();
+    let second_barrier = Arc::clone(&barrier);
+    let second = thread::spawn(move || {
+        second_barrier.wait();
+        second_store.put("race", &json!({"winner": "second"}))
+    });
+    let results = [
+        first.join().expect("first writer"),
+        second.join().expect("second writer"),
+    ];
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "same-key race must publish exactly one cassette"
+    );
+    assert!(
+        results
+            .iter()
+            .filter(|result| result.is_err())
+            .all(|result| matches!(result, Err(VcrError::Write { .. }))),
+        "losing publisher must receive the exclusive-publication error"
+    );
+    let winning_value = race_store
+        .get::<serde_json::Value>("race")
+        .expect("read race winner")
+        .expect("race winner exists");
+    let winning_bytes = std::fs::read(race_root.join("race.yaml")).expect("read winner bytes");
+    assert!(
+        winning_value == json!({"winner": "first"}) || winning_value == json!({"winner": "second"}),
+        "winner must remain a complete cassette"
+    );
+    assert_eq!(
+        winning_bytes,
+        serde_yaml_ng::to_string(&winning_value)
+            .expect("serialize winning cassette")
+            .into_bytes()
+    );
+    assert!(!race_root.join(".race.yaml.stage").exists());
 }
 
 /// Oversized files are rejected from metadata before YAML parsing, bounding
@@ -158,17 +275,54 @@ fn store_put_is_exclusive_and_preserves_existing_cassette() {
 #[test]
 fn store_rejects_oversized_cassette() {
     let tempdir = TempDir::new().expect("tempdir");
+    let store = VcrStore::new(tempdir.path());
+
+    std::fs::write(
+        tempdir.path().join("exact.yaml"),
+        vec![b'x'; MAX_CASSETTE_BYTES as usize],
+    )
+    .expect("write exact-limit fixture");
+    let exact: String = store
+        .get("exact")
+        .expect("exact-limit read")
+        .expect("exact-limit cassette exists");
+    assert_eq!(exact.len(), MAX_CASSETTE_BYTES as usize);
+
     std::fs::write(
         tempdir.path().join("large.yaml"),
         vec![b'x'; (MAX_CASSETTE_BYTES + 1) as usize],
     )
     .expect("write oversized fixture");
-    let store = VcrStore::new(tempdir.path());
-
     let error = store
         .get::<serde_json::Value>("large")
         .expect_err("oversized cassette must fail");
-    assert!(matches!(error, VcrError::TooLarge { .. }));
+    assert!(matches!(
+        error,
+        VcrError::TooLarge {
+            bytes,
+            limit: MAX_CASSETTE_BYTES,
+            ..
+        } if bytes == MAX_CASSETTE_BYTES + 1
+    ));
+
+    let exact_value = yaml_string_at_limit(MAX_CASSETTE_BYTES as usize);
+    store
+        .put("exact-write", &exact_value)
+        .expect("exact-limit write");
+    let oversized_value = yaml_string_at_limit(MAX_CASSETTE_BYTES as usize + 1);
+    let error = store
+        .put("large-write", &oversized_value)
+        .expect_err("oversized write must fail");
+    assert!(matches!(
+        error,
+        VcrError::TooLarge {
+            bytes,
+            limit: MAX_CASSETTE_BYTES,
+            ..
+        } if bytes == MAX_CASSETTE_BYTES + 1
+    ));
+    assert!(!tempdir.path().join("large-write.yaml").exists());
+    assert!(!tempdir.path().join(".large-write.yaml.stage").exists());
 }
 
 /// Tau's safe automatic recording workflow is record-if-missing: existing
@@ -211,6 +365,8 @@ fn escaped_bytes_serialize_as_single_readable_string() {
     assert_eq!(loaded.bytes.as_slice(), b"hello \\ path \xFF");
 }
 
+/// Escaped byte helpers preserve valid UTF-8, invalid byte prefixes, and
+/// literal backslashes without changing the caller-owned byte sequence.
 #[test]
 fn escaped_byte_helpers_round_trip_mixed_utf8_and_invalid_bytes() {
     let bytes = b"snowman: \xE2\x98\x83 bad: \xF0( slash: \\";
@@ -246,22 +402,103 @@ fn bundled_side_artifact_round_trips_and_is_exclusive() {
             .expect("read side"),
         b"payload"
     );
-    assert!(
+    let error = store
+        .put_with_side(
+            "call",
+            &ArtifactKind::new("shell-output").expect("kind"),
+            &json!({"value": false}),
+            b"other",
+            16,
+        )
+        .expect_err("rewrite must fail");
+    assert!(matches!(error, VcrError::Write { .. }));
+    let loaded: serde_json::Value = store
+        .get("call")
+        .expect("read original cassette")
+        .expect("original cassette exists");
+    assert_eq!(loaded, cassette);
+    assert_eq!(
         store
-            .put_with_side(
+            .get_side(
                 "call",
                 &ArtifactKind::new("shell-output").expect("kind"),
-                &cassette,
-                b"other",
                 16
             )
-            .is_err()
+            .expect("read original side"),
+        b"payload"
+    );
+    let error = store
+        .get_side("call", &ArtifactKind::new("shell-output").expect("kind"), 3)
+        .expect_err("small side limit must fail");
+    assert!(matches!(
+        error,
+        VcrError::TooLarge {
+            bytes: 7,
+            limit: 3,
+            ..
+        }
+    ));
+
+    let race_root = tempdir.path().join("bundle-race");
+    let race_store = VcrStore::new(&race_root);
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    let barrier = Arc::new(Barrier::new(2));
+    let first_store = race_store.clone();
+    let first_kind = kind.clone();
+    let first_barrier = Arc::clone(&barrier);
+    let first = thread::spawn(move || {
+        first_barrier.wait();
+        first_store.put_with_side(
+            "race",
+            &first_kind,
+            &json!({"winner": "first"}),
+            b"first-side",
+            16,
+        )
+    });
+    let second_store = race_store.clone();
+    let second_kind = kind.clone();
+    let second_barrier = Arc::clone(&barrier);
+    let second = thread::spawn(move || {
+        second_barrier.wait();
+        second_store.put_with_side(
+            "race",
+            &second_kind,
+            &json!({"winner": "second"}),
+            b"second-side",
+            16,
+        )
+    });
+    let results = [
+        first.join().expect("first bundle"),
+        second.join().expect("second bundle"),
+    ];
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "same-key bundle race must publish exactly one pair"
     );
     assert!(
-        store
-            .get_side("call", &ArtifactKind::new("shell-output").expect("kind"), 3)
-            .is_err()
+        results
+            .iter()
+            .filter(|result| result.is_err())
+            .all(|result| matches!(result, Err(VcrError::Write { .. }))),
+        "losing bundle publisher must receive the exclusive-publication error"
     );
+    let winner: serde_json::Value = race_store
+        .get("race")
+        .expect("read bundle winner")
+        .expect("bundle winner exists");
+    let side = race_store
+        .get_side("race", &kind, 16)
+        .expect("read bundle winner side");
+    match winner {
+        value if value == json!({"winner": "first"}) => assert_eq!(side, b"first-side"),
+        value if value == json!({"winner": "second"}) => assert_eq!(side, b"second-side"),
+        other => panic!("unexpected bundle winner: {other:?}"),
+    }
+    assert!(!race_root.join(".race.yaml.stage").exists());
+    assert!(!race_root.join(".race.shell-output.stage").exists());
 }
 
 /// Unix side reads reject a symlink instead of following it outside the VCR
@@ -296,13 +533,125 @@ fn bundled_side_artifact_rejects_oversize_before_publication() {
     let tempdir = TempDir::new().expect("tempdir");
     let store = VcrStore::new(tempdir.path());
     let kind = ArtifactKind::new("shell-output").expect("kind");
-    assert!(
-        store
-            .put_with_side("call", &kind, &json!({}), b"too large", 3)
-            .is_err()
+    store
+        .put_with_side("exact", &kind, &json!({}), b"123", 3)
+        .expect("exact side limit publishes");
+    assert_eq!(
+        store.get_side("exact", &kind, 3).expect("exact side"),
+        b"123"
     );
+    let error = store
+        .put_with_side("call", &kind, &json!({}), b"too large", 3)
+        .expect_err("oversized side must fail");
+    assert!(matches!(
+        error,
+        VcrError::TooLarge {
+            bytes: 9,
+            limit: 3,
+            ..
+        }
+    ));
     assert!(!tempdir.path().join("call.yaml").exists());
     assert!(!tempdir.path().join("call.shell-output").exists());
+    assert!(!tempdir.path().join(".call.yaml.stage").exists());
+    assert!(!tempdir.path().join(".call.shell-output.stage").exists());
+}
+
+/// Newly created VCR paths hold captured requests and outputs, so Unix records
+/// the owner-only modes promised by the storage boundary.
+#[cfg(unix)]
+#[test]
+fn store_creates_private_root_cassette_side_and_lock() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let root = tempdir.path().join("new").join("vcr");
+    let store = VcrStore::new(&root);
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    store
+        .put_with_side("call", &kind, &json!({}), b"side", 4)
+        .expect("publish private bundle");
+
+    for (path, expected_mode) in [
+        (root, 0o700),
+        (tempdir.path().join("new/vcr/call.yaml"), 0o600),
+        (tempdir.path().join("new/vcr/call.shell-output"), 0o600),
+        (tempdir.path().join("new/vcr/call.bundle.lock"), 0o600),
+    ] {
+        let mode = std::fs::metadata(&path)
+            .expect("private path metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, expected_mode, "{} mode", path.display());
+    }
+}
+
+/// A retry reclaims regular crash-stage files before publication, while a
+/// non-regular stage fails closed instead of being removed as if it were ours.
+#[test]
+fn bundled_side_artifact_recovers_regular_stages_and_rejects_nonregular_stage() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let store = VcrStore::new(tempdir.path());
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    std::fs::write(
+        tempdir.path().join(".call.yaml.stage"),
+        b"interrupted cassette",
+    )
+    .expect("cassette stage");
+    std::fs::write(
+        tempdir.path().join(".call.shell-output.stage"),
+        b"interrupted side",
+    )
+    .expect("side stage");
+    store
+        .put_with_side("call", &kind, &json!({}), b"replacement", 16)
+        .expect("retry bundle");
+    assert!(!tempdir.path().join(".call.yaml.stage").exists());
+    assert!(!tempdir.path().join(".call.shell-output.stage").exists());
+
+    std::fs::create_dir(tempdir.path().join(".blocked.shell-output.stage"))
+        .expect("nonregular side stage");
+    let error = store
+        .put_with_side("blocked", &kind, &json!({}), b"side", 16)
+        .expect_err("nonregular stage must fail closed");
+    assert!(matches!(error, VcrError::UnsafePath { .. }));
+    assert!(!tempdir.path().join("blocked.yaml").exists());
+    assert!(!tempdir.path().join("blocked.shell-output").exists());
+}
+
+/// Directory final paths are not cassettes or side artifacts and must fail
+/// closed instead of being treated as missing or read as arbitrary directory
+/// data.
+#[test]
+fn store_rejects_nonregular_final_paths() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::fs::create_dir(tempdir.path().join("cassette.yaml")).expect("cassette directory");
+    std::fs::create_dir(tempdir.path().join("side.shell-output")).expect("side directory");
+    let store = VcrStore::new(tempdir.path());
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+
+    assert!(matches!(
+        store.get::<serde_json::Value>("cassette"),
+        Err(VcrError::UnsafePath { .. })
+    ));
+    assert!(matches!(
+        store.get_side("side", &kind, 16),
+        Err(VcrError::UnsafePath { .. })
+    ));
+}
+
+fn yaml_string_at_limit(limit: usize) -> String {
+    let one_byte = serde_yaml_ng::to_string("x").expect("serialize one-byte YAML string");
+    let overhead = one_byte.len() - 1;
+    let value = "x".repeat(limit - overhead);
+    assert_eq!(
+        serde_yaml_ng::to_string(&value)
+            .expect("serialize YAML string")
+            .len(),
+        limit
+    );
+    value
 }
 
 /// Cassette publication failure removes the side published by that bundle.
