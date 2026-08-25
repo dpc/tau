@@ -987,15 +987,6 @@ impl AgentStore {
             self.ensure_locked(agent_id)?;
         }
         self.load_agent_if_needed(agent_id)?;
-        let agent_dir = self.agent_dir(agent_id);
-        if persistence.is_durable() {
-            fs::create_dir_all(&agent_dir).map_err(|source| {
-                AgentStoreError::CreateParentDirectory {
-                    path: agent_dir.clone(),
-                    source,
-                }
-            })?;
-        }
 
         let tree = self
             .agents

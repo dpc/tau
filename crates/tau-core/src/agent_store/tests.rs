@@ -325,6 +325,51 @@ fn semantic_append_continues_while_sync_is_blocked() {
     );
 }
 
+/// A first durable append creates and locks its missing branch, while later
+/// appends reuse that retained ownership and preserve the journal sequence.
+#[test]
+fn durable_repeated_append_reuses_first_append_branch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let agent_dir = temp.path().join(agent_id.as_str());
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+
+    assert!(!agent_dir.exists(), "first append must create the branch");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("first append creates and locks branch");
+    assert!(
+        agent_dir.join("lock").is_file(),
+        "first append creates lock"
+    );
+    assert!(
+        agent_dir.join("events.cbor").is_file(),
+        "first append creates journal"
+    );
+
+    let second = store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "warm"),
+        )
+        .expect("warm append reuses retained branch lock");
+    assert_eq!(second.seq, PersistedAgentEventSeq::new(1));
+
+    drop(store);
+    let mut reopened = AgentStore::open_lazy(temp.path()).expect("reopen store");
+    reopened
+        .lock_and_recover_agent(agent_id.as_str())
+        .expect("replay journal");
+    assert_eq!(
+        reopened
+            .agent_events(agent_id.as_str())
+            .expect("replayed events")
+            .len(),
+        2
+    );
+}
+
 /// A later writable lifetime re-covers both an existing store root and its
 /// locked branch as independent typed boundary targets.
 #[test]
