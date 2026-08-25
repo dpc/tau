@@ -80,45 +80,24 @@ fn plain_cell_lines(lines: &[&str]) -> Vec<Vec<Cell>> {
 
 // --- layout tests ---
 
-/// Defines the layout base case: even empty content owns one addressable row so
-/// cursor code never has to handle a zero-line prompt.
+/// Empty content owns one addressable row, while wrapping and newlines split
+/// rows without adding phantom rows at exact-width boundaries.
 #[test]
-fn layout_empty_produces_one_empty_line() {
-    let lines = layout_lines().content(&StyledText::new()).width(80).call();
-    assert_eq!(line_chars(&lines), vec![""]);
-}
-
-/// Documents the non-wrapping baseline for short plain text before exercising
-/// the edge cases below.
-#[test]
-fn layout_short_produces_one_line() {
-    let lines = layout_lines()
-        .content(&StyledText::from("abc"))
-        .width(80)
-        .call();
-    assert_eq!(line_chars(&lines), vec!["abc"]);
-}
-
-/// Protects the cell-width wrapping contract used by prompt and block renderers
-/// to map logical content onto terminal rows.
-#[test]
-fn layout_wraps_at_width() {
-    let lines = layout_lines()
-        .content(&StyledText::from("abcde"))
-        .width(3)
-        .call();
-    assert_eq!(line_chars(&lines), vec!["abc", "de"]);
-}
-
-/// Exact-width generic content must stop at the current row; continuation rows
-/// are only added by prompt cursor policy when needed.
-#[test]
-fn layout_exact_width_is_one_line() {
-    let lines = layout_lines()
-        .content(&StyledText::from("abc"))
-        .width(3)
-        .call();
-    assert_eq!(line_chars(&lines), vec!["abc"]);
+fn layout_lines_obeys_empty_wrap_and_newline_boundaries() {
+    for (content, width, expected) in [
+        ("", 80, &[""][..]),
+        ("abc", 80, &["abc"][..]),
+        ("abcde", 3, &["abc", "de"][..]),
+        ("abc", 3, &["abc"][..]),
+        ("abc\ndef", 80, &["abc", "def"][..]),
+        ("abc\ndef", 3, &["abc", "def"][..]),
+    ] {
+        let lines = layout_lines()
+            .content(&StyledText::from(content))
+            .width(width)
+            .call();
+        assert_eq!(line_chars(&lines), expected);
+    }
 }
 
 /// Emoji presentation sequences such as `⚠️` occupy two terminal columns even
@@ -219,27 +198,6 @@ fn layout_preserves_styles() {
     assert_eq!(lines[0][3], Cell::new('d', style));
 }
 
-/// Explicit newlines must split visual rows even when no wrapping is needed.
-#[test]
-fn layout_handles_newlines() {
-    let lines = layout_lines()
-        .content(&StyledText::from("abc\ndef"))
-        .width(80)
-        .call();
-    assert_eq!(line_chars(&lines), vec!["abc", "def"]);
-}
-
-/// Covers the boundary where an explicit newline occurs at the wrap width,
-/// avoiding either merged rows or phantom blank rows.
-#[test]
-fn layout_newline_and_wrap() {
-    let lines = layout_lines()
-        .content(&StyledText::from("abc\ndef"))
-        .width(3)
-        .call();
-    assert_eq!(line_chars(&lines), vec!["abc", "def"]);
-}
-
 /// Non-newline control characters must be sanitized before cell emission so
 /// untrusted styled text cannot inject terminal controls such as CSI clears.
 #[test]
@@ -336,7 +294,7 @@ fn cell_api_sanitizes_controls() {
     assert_eq!(Cell::plain('\x1b').ch, '�');
 
     let cells = [Cell {
-        ch: '\x1b',
+        ch: '\t',
         style: Style::default(),
         width: 0,
         hyperlink: None,
@@ -379,19 +337,34 @@ fn screen_update_normalizes_public_cells_before_caching() {
 
 // --- layout_block tests ---
 
-/// Documents the block layout invariant: rows are padded to terminal width so
-/// repainting can clear stale content.
+/// Blocks pad every row to the terminal width while margins and alignment keep
+/// their exact column geometry, including when oversized margins are clamped.
 #[test]
-fn layout_block_plain() {
-    let block = StyledBlock::new("hello");
-    let lines = layout_block(&block, 20);
-    assert_eq!(lines.len(), 1);
-    // Row should be exactly 20 cells wide (content + padding).
-    assert_eq!(lines[0].len(), 20);
-    let text: String = lines[0].iter().map(|c| c.ch).collect();
-    assert!(text.starts_with("hello"), "text: {text:?}");
-    // Remaining chars should be spaces.
-    assert!(text[5..].chars().all(|c| c == ' '));
+fn layout_block_applies_padding_margins_and_alignment() {
+    let cases = [
+        (StyledBlock::new("hello"), 20, &["hello               "][..]),
+        (
+            StyledBlock::new("hi").margin_left(2).margin_right(3),
+            20,
+            &["  hi                "][..],
+        ),
+        (
+            StyledBlock::new("hi").margin_left(10).margin_right(10),
+            5,
+            &["    h", "    i"][..],
+        ),
+        (
+            StyledBlock::new("hi").align(Align::Center),
+            10,
+            &["    hi    "][..],
+        ),
+    ];
+
+    for (block, width, expected) in cases {
+        let lines = layout_block(&block, width);
+        assert_eq!(line_chars(&lines), expected);
+        assert!(lines.iter().all(|line| cols(line) == width));
+    }
 }
 
 /// Width-adaptive excerpts preserve the first-line beginning and last-line end
@@ -585,44 +558,6 @@ fn styled_block_alternative_layouts_are_exclusive() {
     assert!(rows.iter().all(|row| !row.contains("hidden")));
 }
 
-/// Margins are part of the full-width block row but outside the content area;
-/// this protects left/right spacing math.
-#[test]
-fn layout_block_with_margins() {
-    let block = StyledBlock::new("hi").margin_left(2).margin_right(3);
-    let lines = layout_block(&block, 20);
-    assert_eq!(lines[0].len(), 20);
-    let text: String = lines[0].iter().map(|c| c.ch).collect();
-    // 2 margin + "hi" + padding + 3 margin = 20
-    assert_eq!(&text[..2], "  ", "left margin");
-    assert_eq!(&text[2..4], "hi", "content");
-    assert_eq!(&text[17..20], "   ", "right margin");
-}
-
-/// Oversized margins are clamped so every block row still fits the terminal
-/// width and leaves at least one column for content.
-#[test]
-fn layout_block_clamps_margins_to_width() {
-    let block = StyledBlock::new("hi").margin_left(10).margin_right(10);
-    let lines = layout_block(&block, 5);
-
-    for line in &lines {
-        assert_eq!(cols(line), 5);
-        assert_eq!(line.len(), 5);
-    }
-}
-
-/// Center alignment splits spare cells evenly so status/header blocks stay
-/// visually stable.
-#[test]
-fn layout_block_center_alignment() {
-    let block = StyledBlock::new("hi").align(Align::Center);
-    let lines = layout_block(&block, 10);
-    let text: String = lines[0].iter().map(|c| c.ch).collect();
-    // "hi" is 2 chars, padding = 8, left = 4, right = 4.
-    assert_eq!(text, "    hi    ");
-}
-
 /// Block padding must be based on terminal columns, including emoji variation
 /// sequences, so rows padded to full width do not overrun the terminal.
 #[test]
@@ -728,10 +663,11 @@ fn layout_block_bg_applied_to_content_area() {
     assert_eq!(lines[0][3].style.bg, Some(bg), "padding has bg");
 }
 
-/// Combining a block background with styled text must not overwrite the
-/// foreground color from the span.
+/// Block cells preserve span foregrounds over the background and restore the
+/// default foreground before emitting background-only padding.
 #[test]
 fn layout_block_content_fg_preserved_with_bg() {
+    crossterm::style::force_color_output(true);
     let fg = Color::Red;
     let bg = Color::DarkGreen;
     let block = StyledBlock::new(StyledText::from(Span::new("x", Style::default().fg(fg)))).bg(bg);
@@ -740,40 +676,21 @@ fn layout_block_content_fg_preserved_with_bg() {
     assert_eq!(lines[0][0].ch, 'x');
     assert_eq!(lines[0][0].style.fg, Some(fg));
     assert_eq!(lines[0][0].style.bg, Some(bg));
-}
 
-/// Smoke-tests the complete block rendering path through ANSI output and a
-/// terminal emulator, not just the in-memory cells.
-#[test]
-fn layout_block_renders_through_vt100() {
-    let bg = Color::Blue;
-    let block = StyledBlock::new(StyledText::from(Span::new(
-        "test",
-        Style::default().fg(Color::White),
-    )))
-    .bg(bg)
-    .margin_left(1);
-    let lines = layout_block(&block, 20);
+    let mut emitted = Vec::new();
+    emit_styled_cells(&mut emitted, &lines[0]).expect("block cell emission should succeed");
 
-    // Render through Screen + vt100.
-    let mut term = vt100::Parser::new(5, 20, 0);
-    let mut screen = Screen::new(20);
-    let cursor = (0, 0);
-    let mut buf = Vec::new();
-    screen.update(&mut buf, &lines, cursor).expect("render ok");
-    term.process(&buf);
-
-    let row = term.screen().rows(0, 20).next().unwrap_or_default();
-    assert!(row.starts_with(" test"), "row: {row:?}");
-
-    // vt100 does not reliably preserve the exact foreground color
-    // mapping for crossterm colors here, so assert that styling was
-    // emitted at all rather than hard-coding vt100 color indices.
-    let rendered = String::from_utf8(buf).expect("screen output should be utf8-ish ANSI");
-    assert!(
-        rendered.contains("\u{1b}["),
-        "expected ANSI styling escapes in output, got: {rendered:?}"
-    );
+    let mut term = vt100::Parser::new(1, 5, 0);
+    term.process(&emitted);
+    assert_eq!(term.screen().rows(0, 5).next(), Some("x    ".to_owned()));
+    let content = term.screen().cell(0, 0).expect("content cell");
+    assert_eq!(content.fgcolor(), vt100::Color::Idx(9));
+    assert_eq!(content.bgcolor(), vt100::Color::Idx(2));
+    let padding = term.screen().cell(0, 1).expect("padding cell");
+    assert_eq!(padding.fgcolor(), vt100::Color::Default);
+    assert_eq!(padding.bgcolor(), vt100::Color::Idx(2));
+    assert_eq!(term.screen().fgcolor(), vt100::Color::Default);
+    assert_eq!(term.screen().bgcolor(), vt100::Color::Default);
 }
 
 // --- screen rendering tests (using vt100 as a headless terminal) ---
@@ -929,32 +846,35 @@ fn cursor_in_middle_of_wrapped_content() {
 
 // --- styled rendering tests ---
 
-/// Ensures styled spans generate terminal styling escapes while preserving the
-/// visible text.
+/// Default and colored spans apply the requested foreground and reset it before
+/// a following default-style sentinel.
 #[test]
 fn styled_content_renders_with_color() {
+    crossterm::style::force_color_output(true);
     let mut t = TestTerm::new(24, 80);
     let style = Style::default().fg(Color::Blue);
-    let styled = StyledText::from(vec![Span::plain("hi "), Span::new("world", style)]);
+    let styled = StyledText::from(vec![
+        Span::plain("hi "),
+        Span::new("world", style),
+        Span::plain("!"),
+    ]);
     let desired = layout_lines().content(&styled).width(80).call();
     let mut buf = Vec::new();
-    t.screen.update(&mut buf, &desired, (0, 8)).expect("ok");
+    emit_styled_cells(&mut buf, &desired[0]).expect("cell emission should succeed");
     t.term.process(&buf);
 
-    assert_eq!(t.row_text(0), "hi world");
-
-    // "hi " should be default style.
-    let cell_h = t.term.screen().cell(0, 0).expect("cell exists");
-    assert!(!cell_h.bold());
-    assert_eq!(cell_h.fgcolor(), vt100::Color::Default);
-
-    // vt100's color decoding is not stable enough here to assert an
-    // exact palette index, but the renderer should have emitted style
-    // escapes for the colored span.
-    let rendered = String::from_utf8(buf).expect("screen output should be utf8-ish ANSI");
-    assert!(
-        rendered.contains("\u{1b}["),
-        "expected ANSI styling escapes in output, got: {rendered:?}"
+    assert_eq!(t.row_text(0), "hi world!");
+    assert_eq!(
+        t.term.screen().cell(0, 3).expect("colored cell").fgcolor(),
+        vt100::Color::Idx(12)
+    );
+    assert_eq!(
+        t.term
+            .screen()
+            .cell(0, 8)
+            .expect("default-style sentinel")
+            .fgcolor(),
+        vt100::Color::Default
     );
 }
 
@@ -998,272 +918,10 @@ fn styled_diff_only_rerenders_changed_styles() {
     assert!(cell.bold());
 }
 
-// --- multi-zone prompt tests ---
+// --- scrolling tests ---
 
-/// Helper to build a multi-zone layout: above-prompt lines, then
-/// input line(s) with optional right-prompt on the first input line.
-fn build_prompt_layout(
-    above: &str,
-    left: &str,
-    input: &str,
-    right: &str,
-    width: usize,
-) -> (Vec<Vec<Cell>>, (usize, usize)) {
-    let mut desired: Vec<Vec<Cell>> = Vec::new();
-    let above_row_count = if above.is_empty() {
-        0
-    } else {
-        let above_styled: StyledText = above.into();
-        desired.extend(layout_lines().content(&above_styled).width(width).call());
-        desired.len()
-    };
-
-    let content = format!("{left}{input}");
-    let content_styled: StyledText = content.into();
-    let mut input_lines = layout_lines().content(&content_styled).width(width).call();
-
-    // Right prompt on first input line if it fits and input is single-line.
-    if !right.is_empty() && !input_lines.is_empty() {
-        let first = &input_lines[0];
-        let right_styled: StyledText = right.into();
-        let right_cells = right_styled.to_cells();
-        let first_cols = cols(first);
-        let right_cols = cols(&right_cells);
-        let needed = first_cols + 1 + right_cols;
-        if needed <= width && input_lines.len() == 1 {
-            let padding = width - first_cols - right_cols;
-            let mut padded = first.clone();
-            padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
-            padded.extend(right_cells);
-            input_lines[0] = padded;
-        }
-    }
-
-    desired.extend(input_lines);
-
-    let cursor_cols = crate::style::display_width(&format!("{left}{input}"));
-    let cursor_row = above_row_count + cursor_cols / width;
-    let cursor_col = cursor_cols % width;
-
-    (desired, (cursor_row, cursor_col))
-}
-
-/// Multi-zone layouts must keep status/above-prompt rows before the editable
-/// input row and offset the cursor accordingly.
-#[test]
-fn above_prompt_renders_before_input() {
-    let mut t = TestTerm::new(24, 40);
-    let (lines, cursor) = build_prompt_layout("status line", "> ", "hello", "", 40);
-    let mut buf = Vec::new();
-    t.screen.update(&mut buf, &lines, cursor).expect("ok");
-    t.term.process(&buf);
-
-    assert_eq!(t.row_text(0), "status line");
-    assert_eq!(t.row_text(1), "> hello");
-    assert_eq!(t.cursor(), (1, 7));
-}
-
-/// Multiple above-prompt rows should stack above input without confusing cursor
-/// row accounting.
-#[test]
-fn multi_line_above_prompt() {
-    let mut t = TestTerm::new(24, 40);
-    let (lines, cursor) = build_prompt_layout("line one\nline two", "> ", "hi", "", 40);
-    let mut buf = Vec::new();
-    t.screen.update(&mut buf, &lines, cursor).expect("ok");
-    t.term.process(&buf);
-
-    assert_eq!(t.row_text(0), "line one");
-    assert_eq!(t.row_text(1), "line two");
-    assert_eq!(t.row_text(2), "> hi");
-    assert_eq!(t.cursor(), (2, 4));
-}
-
-/// Right prompt content should be right-aligned on a single input row when it
-/// fits.
-#[test]
-fn right_prompt_shown_when_space_available() {
-    let mut t = TestTerm::new(24, 40);
-    let (lines, cursor) = build_prompt_layout("", "> ", "hi", "[ok]", 40);
-    let mut buf = Vec::new();
-    t.screen.update(&mut buf, &lines, cursor).expect("ok");
-    t.term.process(&buf);
-
-    let row = t.row_text(0);
-    assert!(row.starts_with("> hi"), "row: {row:?}");
-    assert!(row.ends_with("[ok]"), "row: {row:?}");
-    assert_eq!(row.len(), 40);
-}
-
-/// Right prompt content must disappear when the input plus gap would exceed
-/// terminal width.
-#[test]
-fn right_prompt_hidden_when_input_too_long() {
-    let mut t = TestTerm::new(24, 20);
-    // "> " (2) + 15 chars + 1 gap + "[ok]" (4) = 22 > 20.
-    let (lines, cursor) = build_prompt_layout("", "> ", "abcdefghijklmno", "[ok]", 20);
-    let mut buf = Vec::new();
-    t.screen.update(&mut buf, &lines, cursor).expect("ok");
-    t.term.process(&buf);
-
-    let row = t.row_text(0);
-    assert!(
-        !row.contains("[ok]"),
-        "right prompt should be hidden, row: {row:?}"
-    );
-    assert!(row.starts_with("> abcdefghijklmno"), "row: {row:?}");
-}
-
-/// Once input wraps, the right prompt is hidden so it cannot be rendered on the
-/// wrong visual row.
-#[test]
-fn right_prompt_hidden_when_input_wraps() {
-    let mut t = TestTerm::new(24, 10);
-    // Input wraps to second line — right prompt should not appear.
-    let (lines, cursor) = build_prompt_layout("", "> ", "abcdefghij", "[x]", 10);
-    let mut buf = Vec::new();
-    t.screen.update(&mut buf, &lines, cursor).expect("ok");
-    t.term.process(&buf);
-
-    let row0 = t.row_text(0);
-    let row1 = t.row_text(1);
-    assert!(!row0.contains("[x]"), "row0: {row0:?}");
-    assert_eq!(row1, "ij");
-}
-
-/// Covers the combined status, input, and right-prompt path that real prompts
-/// use.
-#[test]
-fn all_three_zones_together() {
-    let mut t = TestTerm::new(24, 40);
-    let (lines, cursor) = build_prompt_layout("tau v0.1", "$ ", "ls", "[main]", 40);
-    let mut buf = Vec::new();
-    t.screen.update(&mut buf, &lines, cursor).expect("ok");
-    t.term.process(&buf);
-
-    assert_eq!(t.row_text(0), "tau v0.1");
-    let prompt_row = t.row_text(1);
-    assert!(prompt_row.starts_with("$ ls"), "row: {prompt_row:?}");
-    assert!(prompt_row.ends_with("[main]"), "row: {prompt_row:?}");
-    assert_eq!(t.cursor(), (1, 4));
-}
-
-// --- full_render / scrollback tests ---
-
-/// Verifies the basic technique: output more lines than the
-/// terminal height using \r\n, then check that overflow went
-/// into scrollback and the visible screen shows the last rows.
-#[test]
-fn overflow_lines_go_to_scrollback() {
-    // 5 rows tall, 20 cols, 100 lines of scrollback buffer.
-    let mut term = vt100::Parser::new(5, 20, 100);
-
-    // Output 10 lines (more than 5 rows).
-    let mut buf = Vec::new();
-    for i in 0..10 {
-        if 0 < i {
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(format!("line {i}").as_bytes());
-    }
-    term.process(&buf);
-
-    // Visible screen should show the last 5 lines (5-9).
-    let visible: Vec<String> = term.screen().rows(0, 20).collect();
-    assert_eq!(visible[0], "line 5");
-    assert_eq!(visible[1], "line 6");
-    assert_eq!(visible[2], "line 7");
-    assert_eq!(visible[3], "line 8");
-    assert_eq!(visible[4], "line 9");
-
-    // Scrollback should contain lines 0-4.
-    // Set scrollback offset to see them.
-    term.screen_mut().set_scrollback(5);
-    let scrolled: Vec<String> = term.screen().rows(0, 20).collect();
-    assert_eq!(scrolled[0], "line 0");
-    assert_eq!(scrolled[1], "line 1");
-    assert_eq!(scrolled[2], "line 2");
-    assert_eq!(scrolled[3], "line 3");
-    assert_eq!(scrolled[4], "line 4");
-}
-
-/// Verifies clear screen + scrollback (\x1b[2J\x1b[H\x1b[3J),
-/// then re-output at a different width — the full_render technique
-/// used on resize.
-#[test]
-fn clear_and_rerender_scrollback() {
-    let mut term = vt100::Parser::new(5, 20, 100);
-
-    // First render: 8 lines.
-    let mut buf = Vec::new();
-    for i in 0..8 {
-        if 0 < i {
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(format!("old line {i}").as_bytes());
-    }
-    term.process(&buf);
-
-    // Verify initial state: visible = lines 3-7, scrollback = 0-2.
-    let visible: Vec<String> = term.screen().rows(0, 20).collect();
-    assert_eq!(visible[0], "old line 3");
-
-    // Now simulate resize: clear + re-render with new content.
-    let mut buf2 = Vec::new();
-    buf2.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J"); // clear screen + scrollback
-    for i in 0..8 {
-        if 0 < i {
-            buf2.extend_from_slice(b"\r\n");
-        }
-        buf2.extend_from_slice(format!("new line {i}").as_bytes());
-    }
-    term.process(&buf2);
-
-    // Visible screen should show the last 5 new lines.
-    let visible: Vec<String> = term.screen().rows(0, 20).collect();
-    assert_eq!(visible[0], "new line 3");
-    assert_eq!(visible[1], "new line 4");
-    assert_eq!(visible[2], "new line 5");
-    assert_eq!(visible[3], "new line 6");
-    assert_eq!(visible[4], "new line 7");
-
-    // Scrollback should have new lines 0-2.
-    term.screen_mut().set_scrollback(3);
-    let scrolled: Vec<String> = term.screen().rows(0, 20).collect();
-    assert_eq!(scrolled[0], "new line 0");
-    assert_eq!(scrolled[1], "new line 1");
-    assert_eq!(scrolled[2], "new line 2");
-}
-
-/// Verifies cursor positioning after outputting more lines than
-/// the terminal height (the MoveUp technique used in full_render).
-#[test]
-fn cursor_positioning_after_overflow() {
-    let mut term = vt100::Parser::new(5, 20, 100);
-
-    // Output 8 lines, then move cursor up to where "line 5"
-    // is (which should be row 0 of the visible screen).
-    let mut buf = Vec::new();
-    for i in 0..8 {
-        if 0 < i {
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(format!("line {i}").as_bytes());
-    }
-    // Cursor is now at row 4 (bottom of visible screen), after "line 7".
-    // Move up 4 rows to get to row 0 (where "line 3" is).
-    buf.extend_from_slice(b"\x1b[4A"); // MoveUp(4)
-    buf.extend_from_slice(b"\x1b[10G"); // MoveToColumn(10), 1-indexed
-    term.process(&buf);
-
-    let (row, col) = term.screen().cursor_position();
-    assert_eq!(row, 0);
-    assert_eq!(col, 9); // MoveToColumn is 1-indexed, vt100 returns 0-indexed
-}
-
-/// End-to-end test of the full_render function using vt100.
-/// Simulates: output history + live area, then position cursor
-/// in the input area using the same logic as full_render.
+/// A scrolling render after an exact-width row must anchor its newline at
+/// column zero so it does not duplicate physical rows.
 #[test]
 fn render_scrolling_after_exact_width_line_does_not_duplicate_rows() {
     let width = 5;
@@ -1297,224 +955,6 @@ fn render_scrolling_after_exact_width_line_does_not_duplicate_rows() {
 
     let visible: Vec<String> = term.screen().rows(0, width as u16).collect();
     assert_eq!(visible, vec!["BBBBB", "ccccc", "ddddd"]);
-}
-
-/// End-to-end model of a full redraw: overflow builds scrollback, visible rows
-/// are the viewport, and the cursor returns to input.
-#[test]
-fn full_render_via_vt100() {
-    use crossterm::QueueableCommand;
-    use crossterm::cursor::{MoveToColumn, MoveUp};
-
-    let height: usize = 5;
-    let width: usize = 30;
-    let mut term = vt100::Parser::new(height as u16, width as u16, 100);
-
-    // Build "all_lines": 3 history + 2 above + 1 input + 1 below = 7 lines.
-    // Viewport (last 5): above0, above1, "> hello", below0, but wait
-    // that's only 4 visible from the live area. Let me just use strings.
-    let lines_text = [
-        "history 0",
-        "history 1",
-        "history 2",
-        "above block A",
-        "above block B",
-        "> hello", // input line, cursor should be here
-        "below status",
-    ];
-
-    // The cursor is at the input line (index 5), column 7 ("> hello" = 7 chars).
-    let cursor_row: usize = 5;
-    let cursor_col: usize = 7;
-
-    // Simulate full_render: clear + output all lines.
-    let mut buf: Vec<u8> = Vec::new();
-    // Clear screen + scrollback.
-    buf.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J");
-    // Output all lines.
-    for (i, line) in lines_text.iter().enumerate() {
-        if 0 < i {
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(line.as_bytes());
-    }
-    term.process(&buf);
-
-    // After outputting, cursor is at the last line.
-    let total = lines_text.len(); // 7
-    let viewport_top = total.saturating_sub(height); // 7 - 5 = 2
-    let current_vp_row = total.saturating_sub(1).saturating_sub(viewport_top); // 6 - 2 = 4
-    let cursor_vp_row = cursor_row.saturating_sub(viewport_top); // 5 - 2 = 3
-
-    // Move cursor from current position to cursor position.
-    let up = current_vp_row.saturating_sub(cursor_vp_row); // 4 - 3 = 1
-    let mut buf2: Vec<u8> = Vec::new();
-    if 0 < up {
-        (&mut buf2 as &mut dyn std::io::Write)
-            .queue(MoveUp(up as u16))
-            .expect("ok");
-    }
-    (&mut buf2 as &mut dyn std::io::Write)
-        .queue(MoveToColumn(cursor_col as u16))
-        .expect("ok");
-    term.process(&buf2);
-
-    // Verify visible screen (rows 2-6 of all_lines).
-    let visible: Vec<String> = term.screen().rows(0, width as u16).collect();
-    assert_eq!(visible[0], "history 2");
-    assert_eq!(visible[1], "above block A");
-    assert_eq!(visible[2], "above block B");
-    assert_eq!(visible[3], "> hello");
-    assert_eq!(visible[4], "below status");
-
-    // Verify cursor position.
-    let (r, c) = term.screen().cursor_position();
-    assert_eq!(r, cursor_vp_row as u16, "cursor row");
-    assert_eq!(c, cursor_col as u16, "cursor col");
-
-    // Verify scrollback contains history 0 and 1.
-    term.screen_mut().set_scrollback(2);
-    let scrolled: Vec<String> = term.screen().rows(0, width as u16).collect();
-    assert_eq!(scrolled[0], "history 0");
-    assert_eq!(scrolled[1], "history 1");
-}
-
-/// Verifies full_render with fewer lines than terminal height
-/// (no scrollback needed).
-#[test]
-fn full_render_no_overflow() {
-    let height: usize = 10;
-    let width: usize = 30;
-    let mut term = vt100::Parser::new(height as u16, width as u16, 100);
-
-    let lines_text = [
-        "above", "> hi", // cursor here, col 4
-        "below",
-    ];
-    let cursor_row: usize = 1;
-    let cursor_col: usize = 4;
-
-    let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J");
-    for (i, line) in lines_text.iter().enumerate() {
-        if 0 < i {
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(line.as_bytes());
-    }
-
-    let total = lines_text.len(); // 3
-    let viewport_top = total.saturating_sub(height); // 0
-    let current_vp_row = total.saturating_sub(1).saturating_sub(viewport_top); // 2
-    let cursor_vp_row = cursor_row.saturating_sub(viewport_top); // 1
-
-    let up = current_vp_row.saturating_sub(cursor_vp_row); // 1
-    if 0 < up {
-        use std::io::Write;
-        (&mut buf as &mut dyn Write)
-            .queue(crossterm::cursor::MoveUp(up as u16))
-            .expect("ok");
-    }
-    {
-        use std::io::Write;
-        (&mut buf as &mut dyn Write)
-            .queue(crossterm::cursor::MoveToColumn(cursor_col as u16))
-            .expect("ok");
-    }
-    term.process(&buf);
-
-    let visible: Vec<String> = term.screen().rows(0, width as u16).collect();
-    assert_eq!(visible[0], "above");
-    assert_eq!(visible[1], "> hi");
-    assert_eq!(visible[2], "below");
-
-    let (r, c) = term.screen().cursor_position();
-    assert_eq!(r, 1, "cursor row");
-    assert_eq!(c, 4, "cursor col");
-}
-
-/// Simulates a resize: initial render at width 20, then resize to
-/// width 10 (causing lines to re-wrap and produce more rows),
-/// clear + re-render. Verifies scrollback is rebuilt correctly
-/// with the new wrapping.
-#[test]
-fn scrollback_rebuilt_after_resize() {
-    let height: usize = 5;
-
-    // --- Phase 1: render at width 20 ---
-    let width1: u16 = 20;
-    let mut term = vt100::Parser::new(height as u16, width1, 100);
-
-    // 7 lines at width 20 (2 scroll into scrollback on a 5-row terminal).
-    let phase1 = [
-        "aaaaaaaa", // 8 chars, fits in 20
-        "bbbbbbbb",
-        "cccccccc",
-        "dddddddd",
-        "eeeeeeee",
-        "> input", // cursor line
-        "status bar below",
-    ];
-
-    let mut buf: Vec<u8> = Vec::new();
-    for (i, line) in phase1.iter().enumerate() {
-        if 0 < i {
-            buf.extend_from_slice(b"\r\n");
-        }
-        buf.extend_from_slice(line.as_bytes());
-    }
-    term.process(&buf);
-
-    // Verify: visible = lines 2-6, scrollback = lines 0-1.
-    let visible: Vec<String> = term.screen().rows(0, width1).collect();
-    assert_eq!(visible[0], "cccccccc");
-    assert_eq!(visible[4], "status bar below");
-
-    // --- Phase 2: resize to width 10, re-render ---
-    // At width 10, "status bar below" (16 chars) wraps to 2 lines.
-    // Total lines increase.
-    // Create a fresh parser at the new size (simulates the real
-    // terminal being resized — our clear+rerender rebuilds
-    // everything from scratch anyway).
-    let width2: u16 = 10;
-    let mut term = vt100::Parser::new(height as u16, width2, 100);
-
-    let phase2 = [
-        "aaaaaaaa", // fits in 10
-        "bbbbbbbb",
-        "cccccccc",
-        "dddddddd",
-        "eeeeeeee",
-        "> input",
-        "status bar", // "status bar below" wraps at 10
-        " below",
-    ];
-
-    let mut buf2: Vec<u8> = Vec::new();
-    buf2.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J"); // clear + clear scrollback
-    for (i, line) in phase2.iter().enumerate() {
-        if 0 < i {
-            buf2.extend_from_slice(b"\r\n");
-        }
-        buf2.extend_from_slice(line.as_bytes());
-    }
-    term.process(&buf2);
-
-    // Total = 8 lines, height = 5, so viewport_top = 3.
-    // Visible: lines 3-7 = dddddddd, eeeeeeee, > input, status bar, " below"
-    let visible2: Vec<String> = term.screen().rows(0, width2).collect();
-    assert_eq!(visible2[0], "dddddddd", "visible row 0 after resize");
-    assert_eq!(visible2[1], "eeeeeeee", "visible row 1 after resize");
-    assert_eq!(visible2[2], "> input", "visible row 2 after resize");
-    assert_eq!(visible2[3], "status bar", "visible row 3 after resize");
-    assert_eq!(visible2[4], " below", "visible row 4 after resize");
-
-    // Scrollback should have lines 0-2 (aaaaaaaa, bbbbbbbb, cccccccc).
-    term.screen_mut().set_scrollback(3);
-    let scrolled: Vec<String> = term.screen().rows(0, width2).collect();
-    assert_eq!(scrolled[0], "aaaaaaaa", "scrollback row 0 after resize");
-    assert_eq!(scrolled[1], "bbbbbbbb", "scrollback row 1 after resize");
-    assert_eq!(scrolled[2], "cccccccc", "scrollback row 2 after resize");
 }
 
 struct PendingWrapTerm {
@@ -1715,117 +1155,88 @@ fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
     );
 }
 
-/// Regression budget for differential rendering. A moderately complex TUI
-/// layout is first rendered far enough to populate scrollback; changing one
-/// visible character through the normal no-growth `update()` path must not
-/// accidentally fall back to full-screen output.
+/// A scrolling frame normalizes a late hand-built cell, repaints that suffix
+/// without redrawing unchanged rows, and caches the normalized viewport.
 #[test]
 fn scrolling_single_cell_change_has_bounded_output() {
-    const WIDTH: usize = 80;
-    const HEIGHT: usize = 20;
-    const MAX_DIFF_BYTES: usize = 1_200;
+    crossterm::style::force_color_output(true);
+    const WIDTH: usize = 5;
+    const HEIGHT: usize = 3;
 
-    fn complex_lines(changed_char: char) -> Vec<Vec<Cell>> {
-        let mut all = Vec::new();
-        for i in 0..36 {
-            let mut text = StyledText::new();
-            text.push(Span::new(
-                format!("agent-{i:02} "),
-                Style::default().fg(Color::Cyan).bold(),
-            ));
-            text.push(Span::new(
-                "processed tool output with cached context and progress ",
-                Style::default(),
-            ));
-            let marker = if i == 28 { changed_char } else { 'a' };
-            text.push(Span::new(
-                format!("marker={marker} status=ready"),
-                Style::default().fg(Color::Yellow),
-            ));
-            let block = StyledBlock::new(text)
-                .right_content(Span::new(
-                    format!("#{i:03}"),
-                    Style::default().fg(Color::DarkGrey),
-                ))
-                .margins(1, 1)
-                .bg(if i % 2 == 0 {
-                    Color::DarkBlue
-                } else {
-                    Color::DarkGreen
-                });
-            all.extend(layout_block(&block, WIDTH));
-        }
-        all
-    }
-
-    let before = complex_lines('x');
-    assert!(HEIGHT < before.len(), "fixture must create scrollback");
+    let before = plain_cell_lines(&["aaaaa", "bbbbb", "ccccc", "ddddd"]);
     let mut screen = Screen::new(WIDTH);
-    let mut term = vt100::Parser::new(HEIGHT as u16, WIDTH as u16, 200);
+    let mut term = vt100::Parser::new(HEIGHT as u16, WIDTH as u16, 20);
     let mut initial = Vec::new();
     screen
-        .render_scrolling(&mut initial, &before, 0, HEIGHT, (before.len() - 1, 0))
-        .expect("initial render should succeed");
+        .render_scrolling(&mut initial, &before, 0, HEIGHT, (3, WIDTH))
+        .expect("initial scrolling render should succeed");
     term.process(&initial);
 
-    let after = complex_lines('y');
-    let changed_rows: Vec<_> = before
-        .iter()
-        .zip(after.iter())
-        .enumerate()
-        .filter_map(|(row, (old, new))| (old != new).then_some(row))
-        .collect();
-    assert_eq!(
-        changed_rows.len(),
-        1,
-        "fixture should change one physical row"
-    );
-    let prev_viewport_top = before.len().saturating_sub(HEIGHT);
-    assert!(
-        prev_viewport_top <= changed_rows[0] && changed_rows[0] < before.len(),
-        "changed row must be visible: changed={} viewport={}..{}",
-        changed_rows[0],
-        prev_viewport_top,
-        before.len()
-    );
-
-    let visible_after = &after[prev_viewport_top..];
-    let mut full_visible = Vec::new();
-    Screen::new(WIDTH)
-        .update(&mut full_visible, visible_after, (HEIGHT - 1, 0))
-        .expect("full visible render should succeed");
-
+    let mut raw_after = before.clone();
+    raw_after[3][3] = Cell {
+        ch: '\t',
+        style: Style::default().fg(Color::Cyan),
+        width: 1,
+        hyperlink: None,
+    };
+    let visible_after = &raw_after[1..];
+    let mut normalized_after = before[1..].to_vec();
+    normalized_after[2][3] = Cell::new(' ', Style::default().fg(Color::Cyan));
     let mut diff = Vec::new();
     screen
-        .update(&mut diff, visible_after, (HEIGHT - 1, 0))
+        .update(&mut diff, visible_after, (HEIGHT - 1, WIDTH))
         .expect("differential render should succeed");
+    assert_eq!(&diff[..4], b"\x1b[4G");
+    let payload = &diff[4..];
+    assert!(
+        payload.ends_with(b"d"),
+        "changed suffix must retain the trailing cell"
+    );
+    assert_eq!(
+        payload.iter().filter(|byte| **byte == b'd').count(),
+        1,
+        "changed suffix must not repaint the unchanged ddd prefix"
+    );
+    for unchanged_row in [b"bbbbb".as_slice(), b"ccccc".as_slice(), b"ddd".as_slice()] {
+        assert!(
+            !payload
+                .windows(unchanged_row.len())
+                .any(|bytes| bytes == unchanged_row),
+            "changed suffix must not repaint {unchanged_row:?}: {diff:?}"
+        );
+    }
     term.process(&diff);
-    let visible_text = term
-        .screen()
-        .rows(0, WIDTH as u16)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        visible_text.contains("marker=y"),
-        "updated viewport should contain new marker: {visible_text:?}"
-    );
-    assert!(
-        !visible_text.contains("marker=x"),
-        "updated viewport should not contain stale marker: {visible_text:?}"
-    );
 
-    assert!(!diff.is_empty(), "changed cell should emit output");
-    assert!(
-        diff.len() < MAX_DIFF_BYTES,
-        "single-cell update emitted {} bytes, expected < {MAX_DIFF_BYTES}; output={:?}",
-        diff.len(),
+    let visible: Vec<String> = term.screen().rows(0, WIDTH as u16).collect();
+    assert_eq!(
+        visible,
+        vec!["bbbbb", "ccccc", "ddd d"],
+        "diff={:?}",
         String::from_utf8_lossy(&diff)
     );
+    assert_eq!(
+        term.screen()
+            .cell(2, 3)
+            .expect("normalized replacement cell")
+            .fgcolor(),
+        vt100::Color::Idx(14)
+    );
+    assert_eq!(
+        term.screen()
+            .cell(2, 4)
+            .expect("unchanged trailing cell")
+            .fgcolor(),
+        vt100::Color::Default
+    );
+    assert_eq!(screen.lines, normalized_after);
+
+    let mut unchanged = Vec::new();
+    screen
+        .update(&mut unchanged, visible_after, (HEIGHT - 1, WIDTH))
+        .expect("identical raw viewport update should succeed");
     assert!(
-        diff.len() * 4 < full_visible.len(),
-        "single-cell update should be much smaller than full visible render: diff={} full={}",
-        diff.len(),
-        full_visible.len()
+        unchanged.is_empty(),
+        "identical raw viewport must not repaint"
     );
 }
 
