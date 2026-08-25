@@ -1,14 +1,7 @@
 use super::*;
 
-/// Reproduces the reported weekly usage-window delay as a readable multi-day
-/// approximation instead of an opaque six-digit second count.
-#[test]
-fn formats_observed_provider_usage_window_delay() {
-    assert_eq!(format_approximate_duration_secs(419_322), "4d 20h");
-}
-
-/// Protects second, minute, hour, day, rounding, and integer-limit boundaries
-/// from unit conversion or overflow regressions.
+/// Protects second, minute, hour, multi-day truncation/rounding, and
+/// integer-limit boundaries from unit conversion or overflow regressions.
 #[test]
 fn formats_duration_unit_boundaries() {
     for (seconds, expected) in [
@@ -22,6 +15,7 @@ fn formats_duration_unit_boundaries() {
         (86_369, "23h 59m"),
         (86_370, "1d"),
         (86_400, "1d"),
+        (419_322, "4d 20h"),
         (u64::MAX, "213503982334601d 7h"),
     ] {
         assert_eq!(

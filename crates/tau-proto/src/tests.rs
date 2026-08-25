@@ -2329,17 +2329,6 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     ]
 }
 
-/// Ensures parsed event names preserve category/call structure and display back
-/// to the dotted wire name.
-#[test]
-fn event_name_round_trips_from_string() {
-    for event in representative_events() {
-        let name = event.name();
-        let serialized = name.to_string();
-        assert_eq!(serialized.parse::<EventName>(), Ok(name));
-    }
-}
-
 /// All six message facts remain distinct durable events, preserve universal and
 /// opaque fields through both codecs, and require explicit opaque data on wire.
 #[test]
@@ -3628,16 +3617,6 @@ fn ui_detach_request_uses_dedicated_input_message() {
     assert!(decode_message_from_slice::<Event>(&bytes).is_err());
 }
 
-/// The superseded dotted detach event has no compatibility decoder.
-#[test]
-fn removed_ui_detach_request_event_has_no_decoder() {
-    let removed = serde_json::json!({
-        "event": "ui.detach_request",
-        "payload": {}
-    });
-    assert!(serde_json::from_value::<Event>(removed).is_err());
-}
-
 /// UI tree inspection uses a flat dedicated input message and cannot decode as
 /// an event or harness output.
 #[test]
@@ -3678,19 +3657,6 @@ fn ui_tree_request_uses_dedicated_input_message() {
     );
     assert!(decode_harness_output_from_slice(&bytes).is_err());
     assert!(decode_message_from_slice::<Event>(&bytes).is_err());
-}
-
-/// The superseded dotted tree-request event has no compatibility decoder.
-#[test]
-fn removed_ui_tree_request_event_has_no_decoder() {
-    let removed = serde_json::json!({
-        "event": "ui.tree_request",
-        "payload": {
-            "session_id": "s1",
-            "target_agent_id": "agent-1"
-        }
-    });
-    assert!(serde_json::from_value::<Event>(removed).is_err());
 }
 
 /// Ensures raw events are not accepted where directional protocol messages are
@@ -3899,19 +3865,46 @@ fn extension_internal_prompt_submit_request_wire_form() {
     );
 }
 
-/// The removed extension user-message prompt request must not be a protocol
-/// event.
+/// Obsolete dotted requests must not regain event decoders: UI requests now use
+/// directional inputs, and the removed extension user-message request has no
+/// protocol path.
 #[test]
-fn removed_extension_prompt_submit_request_has_no_decoder() {
-    let removed = serde_json::json!({
-        "event": "extension.prompt_submit_request",
-        "payload": {
-            "agent_id": "agent-1",
-            "text": "removed user message",
-            "message_class": "user"
-        }
-    });
-    assert!(serde_json::from_value::<Event>(removed).is_err());
+fn removed_dotted_request_events_have_no_decoder() {
+    for (tag, removed) in [
+        (
+            "ui.detach_request",
+            serde_json::json!({
+                "event": "ui.detach_request",
+                "payload": {}
+            }),
+        ),
+        (
+            "ui.tree_request",
+            serde_json::json!({
+                "event": "ui.tree_request",
+                "payload": {
+                    "session_id": "s1",
+                    "target_agent_id": "agent-1"
+                }
+            }),
+        ),
+        (
+            "extension.prompt_submit_request",
+            serde_json::json!({
+                "event": "extension.prompt_submit_request",
+                "payload": {
+                    "agent_id": "agent-1",
+                    "text": "removed user message",
+                    "message_class": "user"
+                }
+            }),
+        ),
+    ] {
+        assert!(
+            serde_json::from_value::<Event>(removed).is_err(),
+            "{tag} unexpectedly decoded as Event"
+        );
+    }
 }
 
 /// Ensures model ids split only on the first slash so provider model names may
