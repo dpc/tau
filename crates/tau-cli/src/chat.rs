@@ -329,7 +329,7 @@ fn startup_disconnect_or_io_error(
 }
 
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
-fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
+pub(crate) fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &durable_emit_message(event))
 }
 
@@ -769,17 +769,47 @@ pub(crate) fn debounce_loop_with_wait(
             }
             g.pending.take()
         };
-        if let Some((epoch, draft)) = snapshot
-            && should_send_draft_snapshot(handle.as_ref(), epoch)
-        {
+        if let Some((epoch, draft)) = snapshot {
             // Best-effort: a write failure means the socket is gone,
             // and the input loop will notice on its next write.
-            let _ = send_event(&writer, &Event::UiPromptDraft(draft));
+            let _ = send_draft_snapshot_with_before_writer(
+                &writer,
+                handle.as_ref(),
+                epoch,
+                draft,
+                || {},
+            );
         }
         if !wait_after_send(&handle) {
             return;
         }
     }
+}
+
+/// Sends an eligible draft after revalidating it inside the serialized writer
+/// boundary.
+///
+/// `before_writer` exposes the validation-to-writer boundary to deterministic
+/// concurrency tests. Lock ordering is always writer then draft slot here.
+/// Invalidation only holds the draft slot and releases it before prompt
+/// submission acquires the writer, so this nesting cannot form a lock cycle.
+pub(crate) fn send_draft_snapshot_with_before_writer(
+    writer: &WriterHandle,
+    handle: &(Mutex<DraftSlot>, Condvar),
+    epoch: u64,
+    draft: UiPromptDraft,
+    before_writer: impl FnOnce(),
+) -> io::Result<bool> {
+    if !should_send_draft_snapshot(handle, epoch) {
+        return Ok(false);
+    }
+    before_writer();
+    let mut writer = locked(writer);
+    if !should_send_draft_snapshot(handle, epoch) {
+        return Ok(false);
+    }
+    writer.send_frame(&durable_emit_message(&Event::UiPromptDraft(draft)))?;
+    Ok(true)
 }
 
 pub(crate) fn should_send_draft_snapshot(handle: &(Mutex<DraftSlot>, Condvar), epoch: u64) -> bool {

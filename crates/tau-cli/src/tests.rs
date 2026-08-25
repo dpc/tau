@@ -30,7 +30,8 @@ use super::chat::{
     invalidate_pending_draft, is_known_static_command, leading_command_token,
     next_agent_cycle_selection, queue_prompt_draft_snapshot, redacted_command_echo_line,
     redacted_prompt_history_line, retarget_prompt_draft_snapshot, role_cycling_enabled,
-    should_send_draft_snapshot, terminal_options_from_settings,
+    send_draft_snapshot_with_before_writer, should_send_draft_snapshot,
+    terminal_options_from_settings,
 };
 use super::cli::{Command as CliCommand, DevCommand};
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
@@ -7582,6 +7583,69 @@ fn draft_snapshot_is_dropped_after_shutdown() {
     }
 
     assert!(!should_send_draft_snapshot(&handle, 0));
+}
+
+/// Prompt submission must win when it invalidates a draft after the worker's
+/// initial epoch check but before writer acquisition; otherwise the old prompt
+/// text can be published after the submission that cleared it.
+#[test]
+fn prompt_submission_suppresses_draft_validated_before_writer_acquisition() {
+    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+    let handle = Arc::new((
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    ));
+    let draft = tau_proto::UiPromptDraft {
+        session_id: test_session_id("s1"),
+        target_agent_id: None,
+        text: Some("stale".to_owned()),
+    };
+    let worker_writer = writer.clone();
+    let worker_handle = handle.clone();
+    let (validated_tx, validated_rx) = mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = mpsc::sync_channel(0);
+    let worker = std::thread::spawn(move || {
+        send_draft_snapshot_with_before_writer(
+            &worker_writer,
+            worker_handle.as_ref(),
+            0,
+            draft,
+            || {
+                validated_tx
+                    .send(())
+                    .expect("announce initial draft validation");
+                continue_rx
+                    .recv()
+                    .expect("wait for invalidation and submission");
+            },
+        )
+        .expect("draft send decision")
+    });
+    validated_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker must pause after initial epoch validation");
+
+    invalidate_pending_draft(handle.as_ref());
+    let submitted = Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
+        session_id: test_session_id("s1"),
+        text: "submitted".to_owned(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    });
+    super::chat::send_event(&writer, &submitted).expect("send invalidating prompt");
+    continue_tx.send(()).expect("release draft worker");
+
+    assert!(!worker.join().expect("join draft worker"));
+    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+    assert!(matches!(
+        reader.read_message().expect("read prompt submission"),
+        Some(tau_proto::HarnessInputMessage::Emit(emit))
+            if emit.event.as_ref() == &submitted
+    ));
 }
 
 /// The draft worker must send the first snapshot without waiting, then retain
