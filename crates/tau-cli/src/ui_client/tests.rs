@@ -103,6 +103,22 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
     }
 }
 
+/// Keeps provider errors available for cold-attach normalization without
+/// delivering their ignored live form, while canonical tool errors remain live.
+#[test]
+fn chat_subscription_keeps_provider_tool_errors_historical_only() {
+    let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
+        panic!("chat subscription must produce Subscribe")
+    };
+    let provider_error = EventSelector::Exact(EventName::PROVIDER_TOOL_ERROR);
+    let tool_error = EventSelector::Exact(EventName::TOOL_ERROR);
+
+    assert!(subscription.historical_selectors.contains(&provider_error));
+    assert!(!subscription.live_selectors.contains(&provider_error));
+    assert!(subscription.historical_selectors.contains(&tool_error));
+    assert!(subscription.live_selectors.contains(&tool_error));
+}
+
 /// Generic UI subscription construction remains capable of requesting
 /// `tool.request`; only the interactive chat allow-list drops the event.
 #[test]

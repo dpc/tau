@@ -316,7 +316,6 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::SESSION_STARTED),
         EventSelector::Exact(E::SESSION_SHUTDOWN),
         EventSelector::Exact(E::SESSION_AGENT_UNLOADED),
-        EventSelector::Exact(E::PROVIDER_TOOL_ERROR),
         EventSelector::Exact(E::PROVIDER_PROMPT_SUBMITTED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_UPDATED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_FINISHED),
@@ -378,6 +377,12 @@ pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
                 && **selector != EventSelector::Exact(EventName::TERM_BELL)
         })
         .cloned()
+        // Historical provider errors normalize into logical tool errors during
+        // cold attach. Live provider errors are deliberately ignored in favor
+        // of their canonical `tool.error` counterparts.
+        .chain(std::iter::once(EventSelector::Exact(
+            EventName::PROVIDER_TOOL_ERROR,
+        )))
         .collect();
     HarnessInputMessage::Subscribe(Subscribe {
         historical_selectors,
