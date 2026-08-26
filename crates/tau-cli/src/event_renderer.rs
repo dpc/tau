@@ -1499,6 +1499,65 @@ struct PromptState {
     started_at: Option<Instant>,
 }
 
+/// Joins output-index buckets in ascending index order without cloning the
+/// bucket strings. A missing-prefix marker is part of the checked allocation.
+fn join_indexed_text(text_by_index: &BTreeMap<u32, String>, missing_prefix: bool) -> String {
+    join_indexed_text_observed(text_by_index, missing_prefix, |_| {})
+}
+
+/// One exact unit of work performed while joining indexed streaming text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexedTextJoinStep {
+    /// One bucket length included in checked capacity accounting.
+    CapacityBucket,
+    /// The single joined-string allocation request, with its exact capacity.
+    Allocation(usize),
+    /// One borrowed bucket copied into the joined string, with its byte length.
+    CopyBucket(usize),
+}
+
+/// Joins indexed text while exposing deterministic allocation and copy work to
+/// focused tests. A no-op observer compiles away on the production call path.
+fn join_indexed_text_observed(
+    text_by_index: &BTreeMap<u32, String>,
+    missing_prefix: bool,
+    mut observe: impl FnMut(IndexedTextJoinStep),
+) -> String {
+    let content_len = checked_streamed_text_capacity(
+        text_by_index.values().map(|text| {
+            observe(IndexedTextJoinStep::CapacityBucket);
+            text.len()
+        }),
+        false,
+    )
+    .expect("streamed response length overflow");
+    let prefix = missing_prefix && content_len != 0;
+    let capacity = checked_streamed_text_capacity([content_len], prefix)
+        .expect("streamed response length overflow");
+    observe(IndexedTextJoinStep::Allocation(capacity));
+    let mut joined = String::with_capacity(capacity);
+    if prefix {
+        joined.push('…');
+    }
+    for text in text_by_index.values() {
+        observe(IndexedTextJoinStep::CopyBucket(text.len()));
+        joined.push_str(text);
+    }
+    joined
+}
+
+/// Computes the exact joined byte capacity and reports arithmetic overflow
+/// before asking the allocator for storage.
+fn checked_streamed_text_capacity(
+    lengths: impl IntoIterator<Item = usize>,
+    missing_prefix: bool,
+) -> Option<usize> {
+    lengths
+        .into_iter()
+        .chain(missing_prefix.then_some('…'.len_utf8()))
+        .try_fold(0usize, usize::checked_add)
+}
+
 /// Per-tool-call UI state held by [`EventRenderer`]. Created when the
 /// harness publishes `ToolStarted` (or when a sub-agent's finish marks the call
 /// as suppressed) and torn down on `ToolResult`/`ToolError`.
@@ -3257,11 +3316,10 @@ impl EventRenderer {
                 continue;
             };
             let block = if self.verbose_mode && self.show_thinking {
-                let display = state.thinking_text.clone().unwrap_or_default();
                 markdown_streaming_block_with_osc8(
                     &self.theme,
                     names::AGENT_THINKING,
-                    &display,
+                    state.thinking_text.as_deref().unwrap_or_default(),
                     &mut state.thinking_markdown_cache,
                     MarkdownStreamUpdate::Append,
                     self.osc8_links,
@@ -3683,15 +3741,11 @@ impl EventRenderer {
                     .thinking_text
                     .as_deref()
                     .filter(|text| !text.is_empty())
-                    .map(|text| (prompt_id.clone(), text.to_owned()))
+                    .map(|_| prompt_id.clone())
             })
             .collect::<Vec<_>>();
-        for (prompt_id, thinking) in missing {
-            self.update_live_thinking_block(
-                prompt_id.as_str(),
-                Some(thinking.as_str()),
-                MarkdownStreamUpdate::Replace,
-            );
+        for prompt_id in missing {
+            self.update_live_thinking_block(prompt_id.as_str(), MarkdownStreamUpdate::Replace);
         }
     }
 
@@ -7198,10 +7252,9 @@ impl EventRenderer {
                 return;
             }
         }
-        let (text, response_update, thinking, thinking_update) =
-            self.accumulate_response_update(update);
+        let (text, response_update, thinking_update) = self.accumulate_response_update(update);
         self.update_editor_current_response(update, &text);
-        self.update_live_thinking_block(spid, thinking.as_deref(), thinking_update);
+        self.update_live_thinking_block(spid, thinking_update);
         self.update_live_compaction_block(spid, update_compaction_status(update));
         self.update_live_response_block(spid, &text, response_update);
     }
@@ -7275,12 +7328,7 @@ impl EventRenderer {
     fn accumulate_response_update(
         &mut self,
         update: &tau_proto::ProviderResponseUpdated,
-    ) -> (
-        String,
-        MarkdownStreamUpdate,
-        Option<String>,
-        MarkdownStreamUpdate,
-    ) {
+    ) -> (String, MarkdownStreamUpdate, MarkdownStreamUpdate) {
         use std::ops::Bound;
 
         let state = self
@@ -7325,29 +7373,11 @@ impl EventRenderer {
                 }
             }
         }
-        let mut text = state
-            .response_text_by_index
-            .values()
-            .cloned()
-            .collect::<String>();
-        if state.missing_response_prefix && !text.is_empty() {
-            text.insert(0, '…');
-        }
-        let mut thinking = state
-            .thinking_text_by_index
-            .values()
-            .cloned()
-            .collect::<String>();
-        if state.missing_thinking_prefix && !thinking.is_empty() {
-            thinking.insert(0, '…');
-        }
-        state.thinking_text = (!thinking.is_empty()).then_some(thinking.clone());
-        (
-            text,
-            response_update,
-            (!thinking.is_empty()).then_some(thinking),
-            thinking_update,
-        )
+        let text = join_indexed_text(&state.response_text_by_index, state.missing_response_prefix);
+        let thinking =
+            join_indexed_text(&state.thinking_text_by_index, state.missing_thinking_prefix);
+        state.thinking_text = (!thinking.is_empty()).then_some(thinking);
+        (text, response_update, thinking_update)
     }
 
     fn update_editor_current_response(
@@ -7360,34 +7390,21 @@ impl EventRenderer {
         }
     }
 
-    fn update_live_thinking_block(
-        &mut self,
-        spid: &str,
-        thinking: Option<&str>,
-        update: MarkdownStreamUpdate,
-    ) {
+    fn update_live_thinking_block(&mut self, spid: &str, update: MarkdownStreamUpdate) {
         use tau_themes::names;
 
-        let Some(thinking) = thinking else {
+        let Some(state) = self.prompts.get_mut(spid) else {
             return;
         };
-        if thinking.is_empty() {
+        let Some(thinking) = state.thinking_text.as_deref() else {
             return;
-        }
-        self.prompts
-            .entry(spid.to_owned())
-            .or_default()
-            .thinking_text = Some(thinking.to_owned());
+        };
         if !self.verbose_mode || !self.show_thinking {
             if update == MarkdownStreamUpdate::Replace {
-                self.prompts
-                    .entry(spid.to_owned())
-                    .or_default()
-                    .thinking_markdown_cache = MarkdownStreamCache::default();
+                state.thinking_markdown_cache = MarkdownStreamCache::default();
             }
             return;
         }
-        let state = self.prompts.entry(spid.to_owned()).or_default();
         let block = markdown_streaming_block_with_osc8(
             &self.theme,
             names::AGENT_THINKING,
@@ -7396,7 +7413,7 @@ impl EventRenderer {
             update,
             self.osc8_links,
         );
-        let existing_tbid = self.prompts.get(spid).and_then(|s| s.thinking_block_id);
+        let existing_tbid = state.thinking_block_id;
         if let Some(tbid) = existing_tbid {
             self.handle.set_block(tbid, block);
         } else {

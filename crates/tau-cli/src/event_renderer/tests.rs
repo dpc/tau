@@ -2110,3 +2110,191 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
         "the causal terminal must naturally clear watched-agent activity"
     );
 }
+
+/// Indexed streaming joins must preserve bucket order, gap semantics, and
+/// same-index arrival order while rendering the retained reasoning allocation
+/// directly instead of replacing it with a second state copy.
+#[test]
+fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.prompts.insert(
+        "sp-indexed-ownership".to_owned(),
+        super::PromptState::default(),
+    );
+    renderer.ensure_live_response_block_for_prompt("sp-indexed-ownership");
+    let update = |deltas| tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: tau_proto::AgentPromptId::parse("sp-indexed-ownership")
+            .expect("valid prompt id"),
+        agent_id: agent_id("main"),
+        deltas,
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+
+    let first = update(vec![
+        tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 2,
+            text: "late-a".to_owned(),
+            phase: None,
+        },
+        tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "early".to_owned(),
+            phase: None,
+        },
+        tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 2,
+            text: "-b".to_owned(),
+            phase: None,
+        },
+        tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 3,
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "reason-late".to_owned(),
+        },
+        tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 1,
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: "reason-early".to_owned(),
+        },
+    ]);
+    let (response, response_update, thinking_update) = renderer.accumulate_response_update(&first);
+    assert_eq!(response, "earlylate-a-b");
+    assert_eq!(response_update, super::MarkdownStreamUpdate::Replace);
+    assert_eq!(thinking_update, super::MarkdownStreamUpdate::Replace);
+    let retained_pointer = renderer
+        .prompts
+        .get("sp-indexed-ownership")
+        .and_then(|state| state.thinking_text.as_ref())
+        .expect("joined reasoning")
+        .as_ptr();
+
+    renderer
+        .update_live_thinking_block("sp-indexed-ownership", super::MarkdownStreamUpdate::Replace);
+
+    let state = renderer
+        .prompts
+        .get("sp-indexed-ownership")
+        .expect("prompt state");
+    assert_eq!(
+        state.thinking_text.as_deref(),
+        Some("reason-earlyreason-late")
+    );
+    assert_eq!(
+        state
+            .thinking_text
+            .as_ref()
+            .expect("joined reasoning")
+            .as_ptr(),
+        retained_pointer,
+        "rendering must borrow the retained joined reasoning allocation"
+    );
+
+    let middle = update(vec![
+        tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 1,
+            text: "-middle-".to_owned(),
+            phase: None,
+        },
+        tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 2,
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: "-middle-".to_owned(),
+        },
+    ]);
+    let (response, response_update, thinking_update) = renderer.accumulate_response_update(&middle);
+    assert_eq!(response, "early-middle-late-a-b");
+    assert_eq!(response_update, super::MarkdownStreamUpdate::Replace);
+    assert_eq!(thinking_update, super::MarkdownStreamUpdate::Replace);
+    assert_eq!(
+        renderer
+            .prompts
+            .get("sp-indexed-ownership")
+            .and_then(|state| state.thinking_text.as_deref()),
+        Some("reason-early-middle-reason-late")
+    );
+}
+
+/// Capacity accounting must reject synthetic overflow without allocating and a
+/// long 1 KiB chunk sequence must retain only its buckets plus one joined
+/// reasoning snapshot at this seam.
+#[test]
+fn indexed_stream_join_checks_capacity_and_bounds_large_chunk_retention() {
+    assert_eq!(
+        super::checked_streamed_text_capacity([usize::MAX, 1], false),
+        None
+    );
+    assert_eq!(
+        super::checked_streamed_text_capacity([usize::MAX - 2], true),
+        None
+    );
+
+    let indexed_chunks = (0..64)
+        .map(|index| (index, "x".repeat(1024)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut capacity_bucket_visits = 0;
+    let mut allocation_capacities = Vec::new();
+    let mut copied_bucket_visits = 0;
+    let mut copied_bytes = 0;
+    let joined = super::join_indexed_text_observed(&indexed_chunks, true, |step| match step {
+        super::IndexedTextJoinStep::CapacityBucket => capacity_bucket_visits += 1,
+        super::IndexedTextJoinStep::Allocation(capacity) => {
+            allocation_capacities.push(capacity);
+        }
+        super::IndexedTextJoinStep::CopyBucket(bytes) => {
+            copied_bucket_visits += 1;
+            copied_bytes += bytes;
+        }
+    });
+    assert_eq!(capacity_bucket_visits, 64);
+    assert_eq!(allocation_capacities, [64 * 1024 + '…'.len_utf8()]);
+    assert_eq!(copied_bucket_visits, 64);
+    assert_eq!(copied_bytes, 64 * 1024);
+    assert_eq!(joined.len(), 64 * 1024 + '…'.len_utf8());
+
+    let mut renderer = renderer_for_agent_id_tests();
+    let chunk = "x".repeat(1024);
+    let update = tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: tau_proto::AgentPromptId::parse("sp-large-join").expect("valid prompt id"),
+        agent_id: agent_id("main"),
+        deltas: vec![
+            tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 7,
+                text: chunk.clone(),
+                phase: None,
+            },
+            tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index: 9,
+                kind: tau_proto::ReasoningTextKind::Summary,
+                text: chunk,
+            },
+        ],
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let mut final_response = String::new();
+    for _ in 0..64 {
+        (final_response, _, _) = renderer.accumulate_response_update(&update);
+    }
+
+    let state = renderer.prompts.get("sp-large-join").expect("prompt state");
+    let expected_len = 64 * 1024;
+    assert_eq!(final_response.len(), expected_len);
+    assert_eq!(final_response.capacity(), expected_len);
+    assert_eq!(state.response_text_by_index.len(), 1);
+    assert_eq!(state.response_text_by_index[&7].len(), expected_len);
+    assert_eq!(state.thinking_text_by_index.len(), 1);
+    assert_eq!(state.thinking_text_by_index[&9].len(), expected_len);
+    assert_eq!(
+        state
+            .thinking_text
+            .as_ref()
+            .expect("joined reasoning")
+            .len(),
+        expected_len
+    );
+}
