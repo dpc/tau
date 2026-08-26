@@ -461,6 +461,90 @@ fn cross_turn_identical_result_collapses_to_pointer() {
     h.shutdown().expect("shutdown");
 }
 
+/// Parallel results are retained inside the open core round until its last
+/// terminal arrives. Dedup must resolve the first pending canonical result so
+/// the second identical call still becomes a pointer in the aggregate node.
+#[test]
+fn same_round_identical_results_collapse_to_first_call() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let _shell = connect_ready_configured_extension(
+        &mut h,
+        "shell",
+        "configured-shell",
+        tau_proto::ClientKind::Tool,
+    );
+    let cid = ensure_test_user_agent(&mut h);
+    let calls = [("parallel_first", "read"), ("parallel_second", "read")];
+    seed_assistant_tool_round(&mut h, &cid, &calls);
+    for (call_id, tool_name) in calls {
+        let call_id: ToolCallId = call_id.into();
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_routing.tool_runtime.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new(tool_name),
+                internal_name: ToolName::new(tool_name),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        h.tool_routing
+            .tool_runtime
+            .pending_tool_providers
+            .insert(call_id, crate::test_connection_id("shell"));
+    }
+    let big = CborValue::Text("parallel payload".repeat(200));
+    for (call_id, tool_name) in calls {
+        h.handle_extension_event(
+            "shell",
+            TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
+                presentation: Default::default(),
+                call_id: call_id.into(),
+                tool_name: ToolName::new(tool_name),
+                tool_type: tau_proto::ToolType::Function,
+                result: big.clone(),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            })),
+        )
+        .expect("parallel tool result");
+    }
+
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .agent_id
+        .as_deref()
+        .expect("agent id");
+    let items = h
+        .session_runtime
+        .agent_store
+        .agent(agent_id)
+        .expect("agent tree")
+        .nodes()
+        .iter()
+        .find_map(|node| match &node.entry {
+            AgentEntry::ToolResults { items } => Some(items),
+            _ => None,
+        })
+        .expect("aggregate tool results");
+    assert_eq!(items[0].output.raw, big);
+    assert_eq!(
+        items[1].presentation,
+        tau_proto::ToolResultPresentation::HarnessDedupPointer
+    );
+    assert!(matches!(
+        &items[1].output.raw,
+        CborValue::Text(pointer) if pointer.contains("parallel_first")
+    ));
+    h.shutdown().expect("shutdown");
+}
+
 /// A configured tool may report ordinary payloads but cannot mint the
 /// harness-only representation that causes provider framing.
 #[test]

@@ -84,8 +84,8 @@ use crate::client_writer_lifecycle::{ClientWriterLifecycle, STARTUP_DISCONNECT_G
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
-    DEFAULT_THRESHOLD_BYTES, build_pointer_error_message, build_pointer_value,
-    encode_error_for_hash, encode_for_hash, hash_truncated,
+    DEFAULT_THRESHOLD_BYTES, ResultDedupMap, build_pointer_error_message, build_pointer_value,
+    canonical_value_eq, fingerprint_error, fingerprint_value, non_null_details,
 };
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;

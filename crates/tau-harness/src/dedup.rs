@@ -37,6 +37,7 @@
 //!    to make to recover the original.
 
 use std::collections::HashMap;
+use std::io::{self, Write};
 
 use tau_core::AgentEntry;
 use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultStatus};
@@ -52,11 +53,29 @@ pub(crate) const DEFAULT_THRESHOLD_BYTES: usize = 1024;
 /// content. BLAKE3 picked over SHA-256 for raw speed — this hash
 /// runs synchronously on the harness's main loop on every tool
 /// result. Truncation gives a ~10⁻¹⁹ collision probability per
-/// pair, which is fine — a collision would only mean two unrelated
-/// outputs get aliased, and the model would see a pointer to the
-/// "wrong" call. In practice the failure mode is so rare that
-/// chasing it isn't worth the wider hash.
+/// pair. Hash equality only selects candidate anchors; borrowed canonical
+/// content equality confirms every replacement, so a collision cannot alias
+/// unrelated outputs.
 pub(crate) type ResultHash = [u8; 16];
+
+/// Hash and encoded byte length computed without materializing the encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResultFingerprint {
+    /// Truncated content digest used to select possible matches.
+    pub(crate) hash: ResultHash,
+    /// Exact encoded length used for the dedup threshold and collision
+    /// filtering.
+    pub(crate) encoded_len: usize,
+}
+
+/// Location and identity of one retained canonical result.
+#[derive(Clone, Debug)]
+struct DedupAnchor {
+    /// Call whose full result remains in the transcript.
+    call_id: ToolCallId,
+    /// Exact aggregate node, or pending until its parallel round materializes.
+    node_id: Option<NodeId>,
+}
 
 /// Per-conversation dedup state. Tracks the hash of every full-fat
 /// tool result (and tool error message) seen on the current branch,
@@ -68,8 +87,9 @@ pub(crate) type ResultHash = [u8; 16];
 /// rebuilds from the new branch before the next dedup decision.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ResultDedupMap {
-    map: HashMap<ResultHash, ToolCallId>,
+    map: HashMap<ResultHash, Vec<DedupAnchor>>,
     built_for: Option<NodeId>,
+    pending: Vec<(ResultHash, ToolCallId)>,
 }
 
 impl ResultDedupMap {
@@ -87,62 +107,104 @@ impl ResultDedupMap {
 
     /// Replace contents from a freshly walked branch. Called after
     /// [`Self::needs_rebuild`] reports a mismatch, or eagerly on
-    /// session resume / session switch.
+    /// session resume / session switch. `branch` must walk from tip to root;
+    /// reverse candidate lookup then preserves the oldest canonical anchor.
     pub(crate) fn rebuild_from_branch<'a>(
         &mut self,
-        branch: impl IntoIterator<Item = &'a AgentEntry>,
+        branch: impl IntoIterator<Item = (NodeId, &'a AgentEntry)>,
         new_head: Option<NodeId>,
         threshold: usize,
     ) {
         self.map.clear();
-        for entry in branch {
+        self.pending.clear();
+        for (node_id, entry) in branch {
             let AgentEntry::ToolResults { items } = entry else {
                 continue;
             };
-            for item in items {
-                let (content_hash, content_bytes) = match &item.status {
-                    ToolResultStatus::Success => {
-                        let bytes = encode_tool_response_for_hash(&item.output);
-                        (hash_truncated(&bytes), bytes.len())
-                    }
+            for item in items.iter().rev() {
+                let fingerprint = match &item.status {
+                    ToolResultStatus::Success => fingerprint_value(&item.output.raw),
                     ToolResultStatus::Error { message } => {
-                        let bytes = encode_error_response_for_hash(message, &item.output);
-                        (hash_truncated(&bytes), bytes.len())
+                        fingerprint_error(message, non_null_details(&item.output.raw))
                     }
                     ToolResultStatus::Cancelled { reason } => {
-                        let bytes = encode_error_response_for_hash(reason, &item.output);
-                        (hash_truncated(&bytes), bytes.len())
+                        fingerprint_error(reason, non_null_details(&item.output.raw))
                     }
                 };
-                if content_bytes < threshold {
+                if fingerprint.encoded_len < threshold {
                     continue;
                 }
                 self.map
-                    .entry(content_hash)
-                    .or_insert_with(|| item.call_id.clone());
+                    .entry(fingerprint.hash)
+                    .or_default()
+                    .push(DedupAnchor {
+                        call_id: item.call_id.clone(),
+                        node_id: Some(node_id),
+                    });
             }
         }
         self.built_for = new_head;
     }
 
-    /// Look up `hash`. Returns the first `call_id` that produced this
-    /// content on the current branch, or `None` if it's new.
-    pub(crate) fn lookup(&self, hash: &ResultHash) -> Option<&ToolCallId> {
-        self.map.get(hash)
+    /// Finds the oldest hash candidate whose borrowed canonical content
+    /// matches.
+    pub(crate) fn find_matching(
+        &self,
+        hash: &ResultHash,
+        mut matches: impl FnMut(Option<NodeId>, &ToolCallId) -> bool,
+    ) -> Option<&ToolCallId> {
+        self.map
+            .get(hash)?
+            .iter()
+            .rev()
+            .find_map(|anchor| matches(anchor.node_id, &anchor.call_id).then_some(&anchor.call_id))
     }
 
-    /// Record a fresh `(hash, call_id)` pair. Caller must have
-    /// confirmed `lookup(&hash).is_none()` first; an
-    /// already-present hash is a programming error and triggers a
-    /// debug-assertion-only panic so production sessions just keep
-    /// the original mapping.
+    /// Returns the oldest anchor for unit tests that inspect map construction.
+    #[cfg(test)]
+    pub(crate) fn lookup(&self, hash: &ResultHash) -> Option<&ToolCallId> {
+        self.map
+            .get(hash)?
+            .iter()
+            .rev()
+            .map(|anchor| &anchor.call_id)
+            .next()
+    }
+
+    /// Records a fresh anchor pending the result's transcript fold.
     pub(crate) fn insert(&mut self, hash: ResultHash, call_id: ToolCallId) {
-        // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(
-            !self.map.contains_key(&hash),
-            "dedup map insert called on existing hash; lookup-before-insert was skipped"
-        );
-        self.map.insert(hash, call_id);
+        self.map.entry(hash).or_default().push(DedupAnchor {
+            call_id: call_id.clone(),
+            node_id: None,
+        });
+        self.pending.push((hash, call_id));
+    }
+
+    /// Promotes newly materialized parallel-round anchors to exact node ids.
+    pub(crate) fn resolve_pending(
+        &mut self,
+        mut resolution: impl FnMut(&ToolCallId) -> Option<Option<NodeId>>,
+    ) {
+        self.pending.retain(|(hash, call_id)| {
+            let Some(node_id) = resolution(call_id) else {
+                return true;
+            };
+            let Some(anchors) = self.map.get_mut(hash) else {
+                return false;
+            };
+            let Some(index) = anchors
+                .iter()
+                .position(|anchor| anchor.node_id.is_none() && anchor.call_id == *call_id)
+            else {
+                return false;
+            };
+            if let Some(node_id) = node_id {
+                anchors[index].node_id = Some(node_id);
+            } else {
+                anchors.remove(index);
+            }
+            false
+        });
     }
 
     /// Advance the map's "built for" cursor without touching the
@@ -170,67 +232,165 @@ impl ResultDedupMap {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.map.len()
+        self.map.values().map(Vec::len).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 }
 
-/// CBOR-encode `value` for hashing. Encoding (rather than e.g. a
-/// printable repr) keeps the hash stable across renderer changes
-/// (`cbor_to_text` is for human / LLM consumption only and may evolve
-/// formatting).
-pub(crate) fn encode_for_hash(value: &CborValue) -> Vec<u8> {
-    let mut buf = Vec::new();
-    // ciborium's writer is infallible into a `Vec<u8>`; a serialize
-    // failure here would mean a non-encodable CBOR value reached us,
-    // which `tau_proto` rules out at the type level.
-    ciborium::into_writer(value, &mut buf)
-        .expect("CborValue from tau_proto should always serialize back to CBOR");
-    buf
+/// Restores the live `Option` representation from persisted null details.
+pub(crate) fn non_null_details(value: &CborValue) -> Option<&CborValue> {
+    (!matches!(value, CborValue::Null)).then_some(value)
 }
 
-/// Companion to [`encode_for_hash`] for `ToolError` outcomes. Keys on
-/// the message string and the optional details payload jointly so a
-/// repeated error with the same message and same details collapses,
-/// while two errors that share a message but carry different details
-/// stay distinct.
-pub(crate) fn encode_error_for_hash(message: &str, details: Option<&CborValue>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    // Tag-prefix to keep the error keyspace disjoint from the result
-    // keyspace — without this, an error message text would collide
-    // with a result whose CBOR-encoded form was the same byte sequence.
-    buf.extend_from_slice(b"err\x00");
-    buf.extend_from_slice(message.as_bytes());
-    buf.push(0);
+/// Writer that streams canonical bytes into BLAKE3 while counting them.
+struct FingerprintWriter {
+    /// Incremental digest state.
+    hasher: blake3::Hasher,
+    /// Number of canonical bytes observed.
+    encoded_len: usize,
+    /// Serializer write calls, retained for deterministic work accounting.
+    writes: usize,
+}
+
+impl FingerprintWriter {
+    /// Finishes the streaming digest and truncates it to the map key width.
+    fn finish(self) -> ResultFingerprint {
+        let digest = self.hasher.finalize();
+        let mut hash = [0_u8; 16];
+        hash.copy_from_slice(&digest.as_bytes()[..16]);
+        ResultFingerprint {
+            hash,
+            encoded_len: self.encoded_len,
+        }
+    }
+}
+
+impl Default for FingerprintWriter {
+    fn default() -> Self {
+        Self {
+            hasher: blake3::Hasher::new(),
+            encoded_len: 0,
+            writes: 0,
+        }
+    }
+}
+
+impl Write for FingerprintWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.hasher.update(bytes);
+        self.encoded_len = self.encoded_len.saturating_add(bytes.len());
+        self.writes = self.writes.saturating_add(1);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Streams the stable CBOR encoding of `value` into a fingerprint.
+pub(crate) fn fingerprint_value(value: &CborValue) -> ResultFingerprint {
+    let mut writer = FingerprintWriter::default();
+    ciborium::into_writer(value, &mut writer)
+        .expect("CborValue from tau_proto should always serialize back to CBOR");
+    writer.finish()
+}
+
+/// Returns streaming work counters for allocation-independent regression tests.
+#[cfg(test)]
+pub(crate) fn fingerprint_value_work(value: &CborValue) -> (ResultFingerprint, usize) {
+    let mut writer = FingerprintWriter::default();
+    ciborium::into_writer(value, &mut writer)
+        .expect("CborValue from tau_proto should always serialize back to CBOR");
+    let writes = writer.writes;
+    (writer.finish(), writes)
+}
+
+/// Streams the disjoint error prefix, message, and optional raw details.
+pub(crate) fn fingerprint_error(message: &str, details: Option<&CborValue>) -> ResultFingerprint {
+    let mut writer = FingerprintWriter::default();
+    writer
+        .write_all(b"err\x00")
+        .expect("hash writer is infallible");
+    writer
+        .write_all(message.as_bytes())
+        .expect("hash writer is infallible");
+    writer.write_all(&[0]).expect("hash writer is infallible");
     if let Some(details) = details {
-        ciborium::into_writer(details, &mut buf)
+        ciborium::into_writer(details, &mut writer)
             .expect("CborValue from tau_proto should always serialize back to CBOR");
     }
-    buf
+    writer.finish()
 }
 
+/// Materializes canonical bytes only for compatibility-oracle tests.
+#[cfg(test)]
+pub(crate) fn encode_for_hash(value: &CborValue) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).expect("CborValue should serialize");
+    bytes
+}
+
+/// Materializes canonical error bytes only for compatibility-oracle tests.
+#[cfg(test)]
+pub(crate) fn encode_error_for_hash(message: &str, details: Option<&CborValue>) -> Vec<u8> {
+    let mut bytes = b"err\x00".to_vec();
+    bytes.extend_from_slice(message.as_bytes());
+    bytes.push(0);
+    if let Some(details) = details {
+        ciborium::into_writer(details, &mut bytes).expect("CborValue should serialize");
+    }
+    bytes
+}
+
+/// Hashes already materialized oracle bytes for compatibility tests.
+#[cfg(test)]
+pub(crate) fn hash_truncated(bytes: &[u8]) -> ResultHash {
+    let digest = blake3::hash(bytes);
+    digest.as_bytes()[..16]
+        .try_into()
+        .expect("fixed digest prefix")
+}
+
+/// Materializes one stored response only for compatibility-oracle tests.
+#[cfg(test)]
 pub(crate) fn encode_tool_response_for_hash(response: &tau_proto::ToolResponse) -> Vec<u8> {
     encode_for_hash(&response.raw)
 }
 
+/// Materializes one stored error only for compatibility-oracle tests.
+#[cfg(test)]
 pub(crate) fn encode_error_response_for_hash(
     message: &str,
     response: &tau_proto::ToolResponse,
 ) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"err\x00");
-    buf.extend_from_slice(message.as_bytes());
-    buf.push(0);
-    ciborium::into_writer(&response.raw, &mut buf)
-        .expect("CborValue from tau_proto should always serialize back to CBOR");
-    buf
+    encode_error_for_hash(message, non_null_details(&response.raw))
 }
 
-/// BLAKE3 of `bytes`, truncated to 16 bytes. See [`ResultHash`].
-pub(crate) fn hash_truncated(bytes: &[u8]) -> ResultHash {
-    let digest = blake3::hash(bytes);
-    let mut out = [0_u8; 16];
-    out.copy_from_slice(&digest.as_bytes()[..16]);
-    out
+/// Compares CBOR values by the bytes their stable serializer observes.
+pub(crate) fn canonical_value_eq(left: &CborValue, right: &CborValue) -> bool {
+    match (left, right) {
+        (CborValue::Float(left), CborValue::Float(right)) => left.to_bits() == right.to_bits(),
+        (CborValue::Array(left), CborValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| canonical_value_eq(left, right))
+        }
+        (CborValue::Map(left), CborValue::Map(right)) => {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|((lk, lv), (rk, rv))| {
+                    canonical_value_eq(lk, rk) && canonical_value_eq(lv, rv)
+                })
+        }
+        (CborValue::Tag(lt, lv), CborValue::Tag(rt, rv)) => lt == rt && canonical_value_eq(lv, rv),
+        _ => left == right,
+    }
 }
 
 /// Build the CBOR value that replaces a duplicate tool result.

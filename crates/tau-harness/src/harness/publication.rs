@@ -3,6 +3,8 @@
 //! The interception chain remains in `interception`; this module preserves the
 //! governed commit ordering from enqueue through persistence and publication.
 
+use tau_proto::ToolResultStatus;
+
 use super::*;
 
 impl Harness {
@@ -42,10 +44,6 @@ impl Harness {
         if !needs {
             return Some(());
         }
-        // Walk the branch under an immutable borrow of the store, then
-        // hand the snapshot to the conversation under a mut borrow —
-        // the branch iterator borrows the tree, so we materialize it
-        // into an owned Vec first to release the tree borrow.
         let agent_id = self
             .agent_runtime
             .agent_registry
@@ -54,18 +52,59 @@ impl Harness {
             .identity
             .agent_id
             .clone();
-        let branch: Vec<tau_core::AgentEntry> = agent_id
+        let mut rebuilt = ResultDedupMap::new();
+        if let Some(tree) = agent_id
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-            .map(|t| t.branch_from(head).into_iter().cloned().collect())
-            .unwrap_or_default();
+        {
+            let branch_from_tip = std::iter::successors(head, |node_id| {
+                tree.node(*node_id).and_then(|node| node.parent_id)
+            })
+            .filter_map(|node_id| tree.node(node_id).map(|node| (node_id, &node.entry)));
+            rebuilt.rebuild_from_branch(branch_from_tip, head, DEFAULT_THRESHOLD_BYTES);
+        } else {
+            rebuilt.rebuild_from_branch(std::iter::empty(), head, DEFAULT_THRESHOLD_BYTES);
+        }
         let conv = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
-        conv.execution.result_dedup.rebuild_from_branch(
-            branch.iter(),
-            head,
-            DEFAULT_THRESHOLD_BYTES,
-        );
+        conv.execution.result_dedup = rebuilt;
         Some(())
+    }
+
+    /// Resolves pending parallel-round anchors after their aggregate node
+    /// folds.
+    fn resolve_pending_dedup_anchors(&mut self, cid: &AgentId) {
+        let agent_id = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.agent_id.clone());
+        let Some(tree) = agent_id
+            .as_deref()
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+        else {
+            return;
+        };
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
+            return;
+        };
+        let built_for = agent.identity.head;
+        agent.execution.result_dedup.resolve_pending(|call_id| {
+            if tree.pending_terminal_tool_result(call_id).is_some() {
+                return None;
+            }
+            Some(
+                tree.terminal_tool_result_node_id(call_id)
+                    .filter(|node_id| {
+                        built_for.is_some_and(|head| {
+                            tree.is_ancestor_head(
+                                tau_proto::AgentHead::Node(*node_id),
+                                tau_proto::AgentHead::Node(head),
+                            )
+                        })
+                    }),
+            )
+        });
     }
 
     /// Replace `result.result` with a pointer if a previous tool
@@ -77,15 +116,37 @@ impl Harness {
         if self.ensure_dedup_built_for_branch(cid).is_none() {
             return;
         }
-        let bytes = encode_for_hash(&result.result);
-        if bytes.len() < DEFAULT_THRESHOLD_BYTES {
+        self.resolve_pending_dedup_anchors(cid);
+        let fingerprint = fingerprint_value(&result.result);
+        if fingerprint.encoded_len < DEFAULT_THRESHOLD_BYTES {
             return;
         }
-        let hash = hash_truncated(&bytes);
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return;
+        };
+        let tree = conv
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id));
+        let original_call_id = conv
+            .execution
+            .result_dedup
+            .find_matching(&fingerprint.hash, |node_id, call_id| {
+                tree.and_then(|tree| match node_id {
+                    Some(node_id) => tree.terminal_tool_result_at(node_id, call_id),
+                    None => tree.pending_terminal_tool_result(call_id),
+                })
+                .is_some_and(|item| {
+                    matches!(item.status, ToolResultStatus::Success)
+                        && canonical_value_eq(&item.output.raw, &result.result)
+                })
+            })
+            .cloned();
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
-        if let Some(original_call_id) = conv.execution.result_dedup.lookup(&hash).cloned() {
+        if let Some(original_call_id) = original_call_id {
             // Belt-and-suspenders: refuse to point a call at itself.
             // This can't happen in practice — `tool_agents`
             // already drops the call_id between intake and now — but
@@ -101,7 +162,7 @@ impl Harness {
                 tool = %result.tool_name,
                 call_id = %result.call_id,
                 points_to = %original_call_id,
-                bytes = bytes.len(),
+                bytes = fingerprint.encoded_len,
                 "deduping tool result against earlier identical output"
             );
             result.result = build_pointer_value(&original_call_id, &result.tool_name);
@@ -109,7 +170,7 @@ impl Harness {
         } else {
             conv.execution
                 .result_dedup
-                .insert(hash, result.call_id.clone());
+                .insert(fingerprint.hash, result.call_id.clone());
         }
     }
 
@@ -121,15 +182,46 @@ impl Harness {
         if self.ensure_dedup_built_for_branch(cid).is_none() {
             return;
         }
-        let bytes = encode_error_for_hash(&error.message, error.details.as_ref());
-        if bytes.len() < DEFAULT_THRESHOLD_BYTES {
+        self.resolve_pending_dedup_anchors(cid);
+        let fingerprint = fingerprint_error(&error.message, error.details.as_ref());
+        if fingerprint.encoded_len < DEFAULT_THRESHOLD_BYTES {
             return;
         }
-        let hash = hash_truncated(&bytes);
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return;
+        };
+        let tree = conv
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id));
+        let original_call_id = conv
+            .execution
+            .result_dedup
+            .find_matching(&fingerprint.hash, |node_id, call_id| {
+                tree.and_then(|tree| match node_id {
+                    Some(node_id) => tree.terminal_tool_result_at(node_id, call_id),
+                    None => tree.pending_terminal_tool_result(call_id),
+                })
+                .is_some_and(|item| {
+                    let stored_message = match &item.status {
+                        ToolResultStatus::Error { message } => message,
+                        ToolResultStatus::Cancelled { reason } => reason,
+                        ToolResultStatus::Success => return false,
+                    };
+                    stored_message == &error.message
+                        && match (non_null_details(&item.output.raw), error.details.as_ref()) {
+                            (Some(stored), Some(incoming)) => canonical_value_eq(stored, incoming),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                })
+            })
+            .cloned();
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
-        if let Some(original_call_id) = conv.execution.result_dedup.lookup(&hash).cloned() {
+        if let Some(original_call_id) = original_call_id {
             if original_call_id == error.call_id {
                 return;
             }
@@ -139,7 +231,7 @@ impl Harness {
                 tool = %error.tool_name,
                 call_id = %error.call_id,
                 points_to = %original_call_id,
-                bytes = bytes.len(),
+                bytes = fingerprint.encoded_len,
                 "deduping tool error against earlier identical output"
             );
             error.message = build_pointer_error_message(&original_call_id, &error.tool_name);
@@ -148,7 +240,7 @@ impl Harness {
         } else {
             conv.execution
                 .result_dedup
-                .insert(hash, error.call_id.clone());
+                .insert(fingerprint.hash, error.call_id.clone());
         }
     }
 

@@ -423,6 +423,8 @@ pub struct AgentTree {
     retained_provider_image_bytes: u64,
     /// Sole tree-global foreground round, keyed by its assistant node.
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
+    /// Materialized terminal result node indexed by globally unique call id.
+    terminal_tool_result_nodes: HashMap<ToolCallId, NodeId>,
     /// Reverse ownership from every open call ID to the sole round's assistant.
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
     /// Branch-applicable context committed while provider tool adjacency is
@@ -1212,6 +1214,35 @@ impl AgentTree {
         !self.pending_tool_rounds.is_empty()
     }
 
+    /// Returns a terminal tool result by call id, including results retained in
+    /// an incomplete parallel round that has not materialized its aggregate
+    /// transcript node yet.
+    #[must_use]
+    pub fn pending_terminal_tool_result(&self, call_id: &ToolCallId) -> Option<&ToolResultItem> {
+        self.pending_tool_rounds
+            .values()
+            .find_map(|round| round.terminal_results.get(call_id))
+    }
+
+    /// Returns the aggregate node containing a materialized terminal result.
+    #[must_use]
+    pub fn terminal_tool_result_node_id(&self, call_id: &ToolCallId) -> Option<NodeId> {
+        self.terminal_tool_result_nodes.get(call_id).copied()
+    }
+
+    /// Returns one materialized terminal result from its exact aggregate node.
+    #[must_use]
+    pub fn terminal_tool_result_at(
+        &self,
+        node_id: NodeId,
+        call_id: &ToolCallId,
+    ) -> Option<&ToolResultItem> {
+        let AgentEntry::ToolResults { items } = &self.node(node_id)?.entry else {
+            return None;
+        };
+        items.iter().find(|item| &item.call_id == call_id)
+    }
+
     /// Returns unfinished calls from the sole open foreground provider round.
     ///
     /// Unlike [`Self::unresolved_foreground_tool_calls_from`], this query is
@@ -1559,6 +1590,7 @@ impl AgentTree {
             active_outer_turn: None,
             retained_provider_image_bytes: 0,
             pending_tool_rounds: HashMap::new(),
+            terminal_tool_result_nodes: HashMap::new(),
             tool_call_rounds: HashMap::new(),
             pending_context_inputs: Vec::new(),
             background_completed_tool_calls: HashSet::new(),
@@ -4766,10 +4798,15 @@ impl AgentTree {
                     .expect("terminal round missing tool result")
             })
             .collect();
-        let mut head = self.append_node_at(
+        let result_node_id = self.append_node_at(
             Some(round.assistant_node_id),
             AgentEntry::ToolResults { items },
         );
+        for call_id in &round.call_order {
+            self.terminal_tool_result_nodes
+                .insert(call_id.clone(), result_node_id);
+        }
+        let mut head = result_node_id;
         let mut pending = std::mem::take(&mut self.pending_context_inputs);
         pending.sort_by_key(|input| input.durable_event_seq.get());
         for input in pending {
