@@ -1006,7 +1006,7 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
     ) {
-        self.suspended_interceptor_connections
+        self.publication.suspended_interceptor_connections
             .insert(connection_id.clone());
     }
 
@@ -1018,7 +1018,7 @@ impl Harness {
         completion: &AgentPublishCompletion,
     ) {
         let transaction_id = completion.transaction_id();
-        self.deferred_publishes.retain(|publish| {
+        self.publication.deferred.retain(|publish| {
             publish
                 .sync_head_for
                 .as_ref()
@@ -1035,7 +1035,7 @@ impl Harness {
         let mut canceled_prompt_ids = Vec::new();
         let mut canceled_initial_prompts = Vec::new();
         let mut canceled_watch_retirements = Vec::new();
-        let removed_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
+        let removed_pending = self.publication.pending_intercept.as_ref().is_some_and(|pending| {
             pending
                 .sync_head_for
                 .as_ref()
@@ -1047,7 +1047,7 @@ impl Harness {
         });
         if removed_pending {
             let pending = self
-                .pending_intercept
+                .publication.pending_intercept
                 .take()
                 .expect("matched pending intercept");
             if let Some(prompt_id) = pending
@@ -1075,7 +1075,7 @@ impl Harness {
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             self.rollback_rejected_activation_successor(&pending.event);
         }
-        self.deferred_publishes.retain(|publish| {
+        self.publication.deferred.retain(|publish| {
             let canceled = publish
                 .sync_head_for
                 .as_ref()
@@ -1140,7 +1140,7 @@ impl Harness {
     /// Drop-equivalent cleanup, suspend in-flight responders, and drain the
     /// retained FIFO.
     pub(crate) fn quiesce_synchronized_publications_for_rollover(&mut self) {
-        if let Some(pending) = self.pending_intercept.take() {
+        if let Some(pending) = self.publication.pending_intercept.take() {
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             if Self::is_synchronized_agent_checkpoint_or_completion(
                 &pending.event,
@@ -1179,8 +1179,8 @@ impl Harness {
         // shell, and peer failure paths. Retain mandatory terminal/lifecycle
         // publications, including SessionShutdown, and force their interception
         // chains to completion before changing the bound session.
-        let mut retained = VecDeque::with_capacity(self.deferred_publishes.len());
-        while let Some(publish) = self.deferred_publishes.pop_front() {
+        let mut retained = VecDeque::with_capacity(self.publication.deferred.len());
+        while let Some(publish) = self.publication.deferred.pop_front() {
             if let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) = publish
                 .sync_head_for
                 .as_ref()
@@ -1206,10 +1206,10 @@ impl Harness {
                 self.discard_deferred_publish(publish, "session rollover canceled publication");
             }
         }
-        self.deferred_publishes = retained;
+        self.publication.deferred = retained;
         loop {
             self.drain_deferred_publishes();
-            let Some(pending_must_pass) = self.pending_intercept.take() else {
+            let Some(pending_must_pass) = self.publication.pending_intercept.take() else {
                 break;
             };
             self.suspend_interceptor_after_destructive_cancel(&pending_must_pass.conn_id);
@@ -1288,7 +1288,7 @@ impl Harness {
     ) -> bool {
         let mut cleared = false;
         if let Some(Event::ProviderModelsUpdated(update)) = self
-            .pending_intercept
+            .publication.pending_intercept
             .as_mut()
             .map(|pending| &mut pending.event)
             && &update.publisher_extension_id == publisher
@@ -1296,7 +1296,7 @@ impl Harness {
             update.models.clear();
             cleared = true;
         }
-        for deferred in &mut self.deferred_publishes {
+        for deferred in &mut self.publication.deferred {
             if let Event::ProviderModelsUpdated(update) = &mut deferred.event
                 && &update.publisher_extension_id == publisher
             {
@@ -1313,14 +1313,14 @@ impl Harness {
         &mut self,
         canceled: &std::collections::HashSet<tau_proto::AgentMessageId>,
     ) {
-        if self.pending_intercept.as_ref().is_some_and(|pending| {
+        if self.publication.pending_intercept.as_ref().is_some_and(|pending| {
             matches!(
                 &pending.event,
                 Event::AgentMessageReceived(received)
                     if canceled.contains(&received.message_id)
             )
         }) {
-            let pending = self.pending_intercept.take().expect("matched peer receive");
+            let pending = self.publication.pending_intercept.take().expect("matched peer receive");
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             self.fail_pending_external_receive(
                 &pending.event,
@@ -1329,8 +1329,8 @@ impl Harness {
             );
             self.discard_peer_activation_reservation(&pending.source.peer_context);
         }
-        let mut retained = VecDeque::with_capacity(self.deferred_publishes.len());
-        while let Some(deferred) = self.deferred_publishes.pop_front() {
+        let mut retained = VecDeque::with_capacity(self.publication.deferred.len());
+        while let Some(deferred) = self.publication.deferred.pop_front() {
             if matches!(
                 deferred.event(),
                 Event::AgentMessageReceived(received)
@@ -1344,7 +1344,7 @@ impl Harness {
                 retained.push_back(deferred);
             }
         }
-        self.deferred_publishes = retained;
+        self.publication.deferred = retained;
         self.drain_deferred_publishes();
         self.drain_publish_idle_dispatches();
     }
@@ -1387,13 +1387,13 @@ impl Harness {
     /// True when no event is parked in interception and no publish is
     /// queued behind one.
     pub(super) fn publish_chain_is_idle(&self) -> bool {
-        self.pending_intercept.is_none() && self.deferred_publishes.is_empty()
+        self.publication.pending_intercept.is_none() && self.publication.deferred.is_empty()
     }
 
     /// True when `cid` already has a prompt dispatch waiting for a
     /// publish/interception condition.
     pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &AgentId) -> bool {
-        self.pending_publish_idle_dispatches.iter().any(|queued| {
+        self.publication.idle_dispatches.iter().any(|queued| {
             &queued.cid == cid
                 && (!queued.obligation.is_committed()
                     || queued.activation_through.is_none()
@@ -1415,7 +1415,7 @@ impl Harness {
             return;
         }
         if !self
-            .pending_publish_idle_dispatches
+            .publication.idle_dispatches
             .iter()
             .any(|deferred| deferred.cid == *cid && deferred.obligation.is_committed())
         {
@@ -1530,7 +1530,7 @@ impl Harness {
                         | crate::agent::OutputLengthContinuationState::OwnerReady(_)
                 )
             });
-        self.pending_publish_idle_dispatches
+        self.publication.idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
                 activation_cut: None,
@@ -1654,9 +1654,9 @@ impl Harness {
         activation_cut: Option<tau_proto::AgentHead>,
         activation_through: Option<tau_proto::AgentHead>,
     ) {
-        self.pending_publish_idle_dispatches
+        self.publication.idle_dispatches
             .retain(|deferred| deferred.cid != cid || deferred.obligation.is_committed());
-        self.pending_publish_idle_dispatches
+        self.publication.idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
                 activation_cut,
@@ -1689,9 +1689,9 @@ impl Harness {
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
                 })
         });
-        self.pending_publish_idle_dispatches
+        self.publication.idle_dispatches
             .retain(|deferred| deferred.cid != cid || deferred.obligation.is_committed());
-        self.pending_publish_idle_dispatches
+        self.publication.idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
                 activation_cut,
@@ -1710,7 +1710,7 @@ impl Harness {
         cid: &AgentId,
         activation_through: Option<tau_proto::AgentHead>,
     ) {
-        self.pending_publish_idle_dispatches.retain(|deferred| {
+        self.publication.idle_dispatches.retain(|deferred| {
             deferred.cid != *cid
                 || !deferred.obligation.is_committed()
                 || deferred.activation_through != activation_through
@@ -1733,7 +1733,7 @@ impl Harness {
         let Some(tree) = tree else {
             return;
         };
-        self.pending_publish_idle_dispatches.retain(|deferred| {
+        self.publication.idle_dispatches.retain(|deferred| {
             deferred.cid != *cid
                 || !deferred.obligation.is_committed()
                 || deferred
@@ -1750,7 +1750,7 @@ impl Harness {
         activation_cut: tau_proto::AgentHead,
         steer: tau_proto::AgentHead,
     ) {
-        self.pending_publish_idle_dispatches.retain(|deferred| {
+        self.publication.idle_dispatches.retain(|deferred| {
             if deferred.cid != *cid {
                 return true;
             }
@@ -1885,8 +1885,8 @@ impl Harness {
             connection_id: source.cloned(),
             peer_context,
         };
-        if self.pending_intercept.is_some() {
-            self.deferred_publishes.push_back(DeferredPublish {
+        if self.publication.pending_intercept.is_some() {
+            self.publication.deferred.push_back(DeferredPublish {
                 source,
                 event,
                 persist,
@@ -1930,7 +1930,7 @@ impl Harness {
         mut cursor: Option<InterceptorCursor>,
     ) {
         loop {
-            let Some(interceptor_match) = self.interceptors.next_for(&event, cursor.as_ref())
+            let Some(interceptor_match) = self.publication.interceptors.next_for(&event, cursor.as_ref())
             else {
                 self.commit_event(
                     source.connection_id.as_ref(),
@@ -1943,7 +1943,7 @@ impl Harness {
             };
             let interceptor = interceptor_match.registration;
             if self
-                .suspended_interceptor_connections
+                .publication.suspended_interceptor_connections
                 .contains(&interceptor.connection_id)
             {
                 cursor = Some(InterceptorCursor {
@@ -1973,7 +1973,7 @@ impl Harness {
                 .as_ref()
                 .is_ok_and(|report| report.delivered_to.iter().any(|id| id == &conn_id));
             if delivered {
-                self.pending_intercept = Some(PendingIntercept {
+                self.publication.pending_intercept = Some(PendingIntercept {
                     conn_id: conn_id.clone(),
                     event,
                     persist,
@@ -1994,7 +1994,7 @@ impl Harness {
                 error = ?report.err(),
                 "interceptor request delivery failed; skipping interceptor"
             );
-            self.interceptors.remove_connection(&conn_id);
+            self.publication.interceptors.remove_connection(&conn_id);
             cursor = Some(InterceptorCursor {
                 set: interceptor_match.set,
                 registration: interceptor,
@@ -2015,7 +2015,7 @@ impl Harness {
         conn_id: &tau_proto::ConnectionId,
         reply: InterceptReply,
     ) -> Result<(), crate::HarnessError> {
-        if self.suspended_interceptor_connections.remove(conn_id) {
+        if self.publication.suspended_interceptor_connections.remove(conn_id) {
             tracing::warn!(
                 target: "tau_harness::interception",
                 connection_id = %conn_id,
@@ -2023,7 +2023,7 @@ impl Harness {
             );
             return Ok(());
         }
-        let Some(pending) = self.pending_intercept.take() else {
+        let Some(pending) = self.publication.pending_intercept.take() else {
             tracing::warn!(
                 target: "tau_harness::interception",
                 connection_id = %conn_id,
@@ -2040,7 +2040,7 @@ impl Harness {
                  continuing to wait",
             );
             // Restore — we're still waiting on the original responder.
-            self.pending_intercept = Some(pending);
+            self.publication.pending_intercept = Some(pending);
             return Ok(());
         }
         self.advance_pending_intercept(pending, reply.action);
@@ -2058,11 +2058,11 @@ impl Harness {
         &mut self,
         conn_id: &tau_proto::ConnectionId,
     ) {
-        let Some(pending) = self.pending_intercept.take() else {
+        let Some(pending) = self.publication.pending_intercept.take() else {
             return;
         };
         if pending.conn_id != *conn_id {
-            self.pending_intercept = Some(pending);
+            self.publication.pending_intercept = Some(pending);
             return;
         }
         tracing::warn!(
@@ -2071,7 +2071,7 @@ impl Harness {
             "interceptor disconnected mid-reply; treating as Pass(None)",
         );
         self.advance_pending_intercept(pending, InterceptAction::Pass(None));
-        if self.pending_publish_error.is_none() {
+        if self.publication.pending_error.is_none() {
             self.drain_deferred_publishes();
             self.drain_publish_idle_dispatches();
         }
@@ -2217,8 +2217,8 @@ impl Harness {
     /// Drain `deferred_publishes` until either it's empty or one of
     /// them parks a new intercept.
     fn drain_deferred_publishes(&mut self) {
-        while self.pending_intercept.is_none() {
-            let Some(deferred) = self.deferred_publishes.pop_front() else {
+        while self.publication.pending_intercept.is_none() {
+            let Some(deferred) = self.publication.deferred.pop_front() else {
                 break;
             };
             let DeferredPublish {
@@ -2245,19 +2245,19 @@ impl Harness {
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
         let mut attempted = Vec::new();
         while self.publish_chain_is_idle() {
-            for index in 0..self.pending_publish_idle_dispatches.len() {
-                let needs_binding = self.pending_publish_idle_dispatches[index]
+            for index in 0..self.publication.idle_dispatches.len() {
+                let needs_binding = self.publication.idle_dispatches[index]
                     .obligation
                     .is_committed()
-                    && self.pending_publish_idle_dispatches[index]
+                    && self.publication.idle_dispatches[index]
                         .activation_through
                         .is_none();
                 if !needs_binding {
                     continue;
                 }
-                let cid = self.pending_publish_idle_dispatches[index].cid.clone();
+                let cid = self.publication.idle_dispatches[index].cid.clone();
                 if let Some(source_seq) =
-                    self.pending_publish_idle_dispatches[index].activation_source_seq
+                    self.publication.idle_dispatches[index].activation_source_seq
                 {
                     let materialized = self
                         .agent_registry
@@ -2274,20 +2274,20 @@ impl Harness {
                     let Some((node_id, parent_id)) = materialized else {
                         continue;
                     };
-                    self.pending_publish_idle_dispatches[index].activation_through =
+                    self.publication.idle_dispatches[index].activation_through =
                         Some(tau_proto::AgentHead::Node(node_id));
-                    self.pending_publish_idle_dispatches[index].activation_cut = Some(
+                    self.publication.idle_dispatches[index].activation_cut = Some(
                         parent_id.map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                     );
                     continue;
                 }
                 let through = self.selected_head_for_agent(&cid);
                 let cut = self.activation_cut_before_current_head(&cid);
-                self.pending_publish_idle_dispatches[index].activation_through = through;
-                self.pending_publish_idle_dispatches[index].activation_cut = cut;
+                self.publication.idle_dispatches[index].activation_through = through;
+                self.publication.idle_dispatches[index].activation_cut = cut;
             }
             let Some(index) = self
-                .pending_publish_idle_dispatches
+                .publication.idle_dispatches
                 .iter()
                 .enumerate()
                 .find_map(|(index, deferred)| {
@@ -2303,14 +2303,14 @@ impl Harness {
             else {
                 break;
             };
-            let deferred = self.pending_publish_idle_dispatches[index].clone();
+            let deferred = self.publication.idle_dispatches[index].clone();
             let cid = deferred.cid.clone();
             if !self.agent_registry.agents.contains_key(&cid) {
-                self.pending_publish_idle_dispatches.remove(index);
+                self.publication.idle_dispatches.remove(index);
                 continue;
             }
             if !deferred.obligation.is_committed() {
-                self.pending_publish_idle_dispatches.remove(index);
+                self.publication.idle_dispatches.remove(index);
             }
             if deferred.obligation.is_committed()
                 && self.schedule_standalone_auto_compaction_for_activation(
@@ -2321,7 +2321,7 @@ impl Harness {
                         .or_else(|| self.activation_cut_before_current_head(&cid)),
                 )
             {
-                if self.pending_publish_idle_dispatches.iter().any(|queued| {
+                if self.publication.idle_dispatches.iter().any(|queued| {
                     queued.cid == cid
                         && queued.obligation.is_committed()
                         && queued.activation_through == deferred.activation_through
@@ -2336,7 +2336,7 @@ impl Harness {
             self.checkpoint_or_send_prompt(&cid, deferred.activation_cut);
             if deferred.obligation.is_committed()
                 && self
-                    .pending_publish_idle_dispatches
+                    .publication.idle_dispatches
                     .iter()
                     .any(|queued| Self::same_deferred_prompt_dispatch(queued, &deferred))
             {

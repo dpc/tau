@@ -909,15 +909,15 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         }),
     )
     .expect("park waiter readiness");
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
     assert!(h.pending_agent_discovery.contains_key(&agent_id));
 
     h.handle_disconnect(&crate::test_connection_id("stale-owner"));
 
     assert!(!h.pending_agent_discovery.contains_key(&agent_id));
-    assert!(h.pending_intercept.is_none());
+    assert!(h.publication.pending_intercept.is_none());
     assert!(
-        h.pending_publish_idle_dispatches.is_empty(),
+        h.publication.idle_dispatches.is_empty(),
         "readiness resolution must drain deferred prompt dispatch"
     );
     let prompt = read_nth_prompt_created(&h, 0);

@@ -344,7 +344,7 @@ fn terminal_report_commits_before_canonical_completion_and_injection() {
     );
     assert!(matches!(
         harness
-            .pending_intercept
+            .publication.pending_intercept
             .as_ref()
             .map(|pending| &pending.event),
         Some(Event::ShellCommandFinished(_))

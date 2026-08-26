@@ -467,7 +467,7 @@ fn pre_ready_session_snapshot_waits_for_commit_before_activation() {
         })),
     )
     .expect("park startup snapshot");
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
     assert_eq!(
         h.extensions
             .pending_session_discovery_declarations

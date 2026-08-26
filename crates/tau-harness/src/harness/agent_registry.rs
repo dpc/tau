@@ -1205,7 +1205,7 @@ impl Harness {
                 "agent runtime indicator declaration must contain at most {MAX_AGENT_RUNTIME_INDICATORS} unique values"
             );
             if let Err(error) = self.handle_extension_protocol_failure(source_id, message) {
-                self.pending_publish_error.get_or_insert(error);
+                self.publication.pending_error.get_or_insert(error);
             }
             return;
         }
@@ -1503,7 +1503,7 @@ impl Harness {
             cid,
             "compaction canceled because the target agent unloaded",
         );
-        self.pending_publish_idle_dispatches
+        self.publication.idle_dispatches
             .retain(|dispatch| &dispatch.cid != cid);
         let mut peer_internal_calls = self
             .tool_runtime
@@ -2159,7 +2159,7 @@ impl Harness {
         } else {
             self.publish_event(None, loaded);
         }
-        if self.pending_intercept.is_none()
+        if self.publication.pending_intercept.is_none()
             && self
                 .pending_agent_discovery
                 .get(&agent_id_proto)

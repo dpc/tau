@@ -622,7 +622,7 @@ fn tool_prefix_interception_protects_canonical_registration() {
     )
     .expect("commit declaration");
     let Some(Event::ToolRegister(mut forged)) = h
-        .pending_intercept
+        .publication.pending_intercept
         .as_ref()
         .map(|pending| pending.event.clone())
     else {
@@ -806,7 +806,7 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     )
     .expect("declare first withdrawal");
     let Some(Event::ToolUnregister(mut forged)) = h
-        .pending_intercept
+        .publication.pending_intercept
         .as_ref()
         .map(|pending| pending.event.clone())
     else {

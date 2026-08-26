@@ -1052,7 +1052,7 @@ impl Harness {
                 }
             });
         if let Some(owner) = output_length_owner {
-            let terminal_write_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
+            let terminal_write_pending = self.publication.pending_intercept.as_ref().is_some_and(|pending| {
                 matches!(
                         &pending.event,
                     Event::ProviderResponseFinished(response)
@@ -1062,7 +1062,7 @@ impl Harness {
                                 tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
                             )
                 )
-            }) || self.deferred_publishes.iter().any(|pending| {
+            }) || self.publication.deferred.iter().any(|pending| {
                 matches!(
                     pending.event(),
                     Event::ProviderResponseFinished(response)

@@ -105,7 +105,7 @@ fn replaced_progress_report_is_validated_only_after_commit() {
         .expect("commit replacement report");
     assert!(matches!(
         harness
-            .pending_intercept
+            .publication.pending_intercept
             .as_ref()
             .map(|pending| &pending.event),
         Some(Event::ToolProgress(_))

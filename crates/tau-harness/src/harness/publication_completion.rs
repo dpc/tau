@@ -125,7 +125,7 @@ impl Harness {
         });
         if let (Some(sync), Some(batch_parent)) = (sync.as_mut(), batch_parent) {
             sync.suppress_activation_dispatch = true;
-            self.pending_publish_idle_dispatches
+            self.publication.idle_dispatches
                 .retain(|dispatch| dispatch.cid != sync.cid);
             sync.continuation = Some(PostCommitContinuation::AgentPublish(Box::new(
                 AgentPublishCompletion::OutputLengthContinuation {
@@ -532,7 +532,7 @@ impl Harness {
             return;
         };
         if let AgentPublishCompletion::InitialPromptSubmission { correlation } = completion {
-            self.pending_publish_idle_dispatches
+            self.publication.idle_dispatches
                 .retain(|dispatch| dispatch.cid != cid);
             if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent.in_flight_prompt = None;
@@ -1668,7 +1668,7 @@ impl Harness {
             _ => {}
         }
         let Some(append_outcome) = append_outcome else {
-            let disconnect_batch_pending = self.disconnect_terminal_batch_pending.contains(call_id);
+            let disconnect_batch_pending = self.publication.disconnect_terminal_batch_pending.contains(call_id);
             let runtime_cid = runtime_only_cid.clone().or_else(|| {
                 self.tool_runtime
                     .tool_agents
@@ -1798,7 +1798,7 @@ impl Harness {
             return;
         }
 
-        if self.disconnect_terminal_batch_pending.contains(call_id) {
+        if self.publication.disconnect_terminal_batch_pending.contains(call_id) {
             self.finish_tool_call_runtime_state(call_id.as_str());
             self.clear_tool_call_tracking(call_id.as_str());
             self.release_disconnect_terminal_batch_after_commit(call_id, Some(cid));
@@ -1854,17 +1854,17 @@ impl Harness {
         call_id: &ToolCallId,
         cid: Option<AgentId>,
     ) {
-        if !self.disconnect_terminal_batch_pending.remove(call_id) {
+        if !self.publication.disconnect_terminal_batch_pending.remove(call_id) {
             return;
         }
         if let Some(cid) = cid {
-            self.disconnect_terminal_batch_completed
+            self.publication.disconnect_terminal_batch_completed
                 .push((call_id.clone(), cid));
         }
-        if !self.disconnect_terminal_batch_pending.is_empty() {
+        if !self.publication.disconnect_terminal_batch_pending.is_empty() {
             return;
         }
-        let completed = std::mem::take(&mut self.disconnect_terminal_batch_completed);
+        let completed = std::mem::take(&mut self.publication.disconnect_terminal_batch_completed);
         self.drain_pending_tool_invocations_or_report();
         for (completed_call_id, completed_cid) in completed {
             self.maybe_complete_agent_turn_for(&completed_cid, completed_call_id.as_str());
@@ -2775,7 +2775,7 @@ impl Harness {
                 .insert(unloaded.agent_id.to_string());
             self.discard_input_wait_for(&cid);
             self.pending_agent_publish_completions.remove(&cid);
-            self.pending_publish_idle_dispatches
+            self.publication.idle_dispatches
                 .retain(|dispatch| dispatch.cid != cid);
             self.enqueued_standalone_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);

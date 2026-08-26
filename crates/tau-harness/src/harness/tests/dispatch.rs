@@ -1785,7 +1785,7 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     assert!(h.agent_registry.agents[&cid].next_ctx_id.is_none());
 
     h.system_prompt_templates.insert(
@@ -1890,7 +1890,7 @@ fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
             if failed.request_id == "create-duplicate-tools"
                 && failed.ctx_id == "prompt-duplicate-tools"
     )));
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     assert!(h.agent_registry.agents[&cid].next_ctx_id.is_none());
 
     h.registry.unregister_connection(&provider);
@@ -2282,12 +2282,12 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
     )
     .expect("commit B after A terminal");
     let activation_b = h
-        .pending_publish_idle_dispatches
+        .publication.idle_dispatches
         .back()
         .and_then(|dispatch| dispatch.activation_through)
         .expect("B committed watermark");
     assert!(
-        h.pending_publish_idle_dispatches
+        h.publication.idle_dispatches
             .iter()
             .any(|dispatch| { dispatch.activation_through == Some(activation_b) })
     );
@@ -5578,7 +5578,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     h.handle_provider_response_finished(response)
         .expect("reject invalid side-agent tool call");
 
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
     let parked_call_id = h
         .tool_runtime
         .tool_agents
@@ -6754,7 +6754,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         0,
         "queued work drains only after the full disconnect batch commits"
     );
-    if h.pending_intercept.is_some() {
+    if h.publication.pending_intercept.is_some() {
         h.handle_extension_event(
             "disconnect-terminal-interceptor",
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -6840,8 +6840,8 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
 
     assert_eq!(h.tool_runtime.tool_turn.pending_len(), 1);
     assert!(tool_invoke_call_ids(&live_events).is_empty());
-    assert!(!h.disconnect_terminal_batch_pending.is_empty());
-    assert!(h.disconnect_terminal_batch_completed.is_empty());
+    assert!(!h.publication.disconnect_terminal_batch_pending.is_empty());
+    assert!(h.publication.disconnect_terminal_batch_completed.is_empty());
 
     std::fs::remove_dir(&journal).expect("remove journal blocker");
     std::fs::rename(&backup, &journal).expect("restore journal");
@@ -14123,7 +14123,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
             activation_cut: Some(tau_proto::AgentHead::Root),
         }),
     );
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
 
     let shell_conn = h
         .extension_connection_id("shell")
@@ -14150,8 +14150,8 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     assert_eq!(h.current_session_id.as_str(), "s2");
     assert!(h.pending_agent_publish_completions.is_empty());
     assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
-    assert!(h.pending_publish_idle_dispatches.is_empty());
-    assert!(h.pending_intercept.is_none());
+    assert!(h.publication.idle_dispatches.is_empty());
+    assert!(h.publication.pending_intercept.is_none());
     assert!(event_log_events(&h).into_iter().any(|event| {
         matches!(
             event,
@@ -14179,7 +14179,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         text: Some("new session event".to_owned()),
     });
     h.publish_event(None, new_session_draft.clone());
-    assert!(h.pending_intercept.is_none());
+    assert!(h.publication.pending_intercept.is_none());
     h.handle_extension_event(
         "rollover-completion-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -14194,7 +14194,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         text: Some("interception resumes after stale reply".to_owned()),
     });
     h.publish_event(None, post_stale_draft.clone());
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
     h.handle_extension_event(
         "rollover-completion-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -19251,7 +19251,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             .into_iter()
             .any(|event| matches!(event, Event::AgentPromptCreated(_)))
     );
-    assert!(h.pending_publish_idle_dispatches.iter().any(|deferred| {
+    assert!(h.publication.idle_dispatches.iter().any(|deferred| {
         deferred.cid == cid
             && deferred.activation_cut == Some(tau_proto::AgentHead::Node(message_node))
     }));
@@ -19318,7 +19318,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     let branch_a = h.agent_registry.agents[&cid]
         .head
         .expect("branch A activation node");
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
     h.provider_model_info
         .get_mut(&"test/model".into())
         .expect("test model")
@@ -19346,7 +19346,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
         "off-branch state: {:?}",
         h.agent_registry.agents[&cid].activation_dispatch
     );
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
 
     h.publish_for_agent(
         &cid,
@@ -19363,7 +19363,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
         })
         .expect("reselected activation checkpoint");
     assert_eq!(checkpoint.through, tau_proto::AgentHead::Node(branch_a));
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
 }
 
 /// Above the proactive threshold, a readiness-deferred activation remains
@@ -19434,7 +19434,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
         h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
 
     h.publish_for_agent(
         &cid,
@@ -19453,14 +19453,14 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
             panic!(
                 "reselected activation compaction; state={:?}, deferred={}",
                 h.agent_registry.agents[&cid].activation_dispatch,
-                h.pending_publish_idle_dispatches.len()
+                h.publication.idle_dispatches.len()
             )
         });
     assert_eq!(
         started.resume_through,
         Some(tau_proto::AgentHead::Node(branch_a))
     );
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
 }
 
 /// Comparable readiness-deferred activations remain distinct until one
@@ -19486,7 +19486,7 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
         .expect("park B");
     let branch_b = h.agent_registry.agents[&cid].head.expect("B");
     assert_ne!(branch_a, branch_b);
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+    assert_eq!(h.publication.idle_dispatches.len(), 2);
 
     finish_test_agent_context_wait(&mut h, &agent_id);
     h.drain_publish_idle_dispatches();
@@ -19499,7 +19499,7 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[0].through, tau_proto::AgentHead::Node(branch_b));
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
 }
 
 /// Expected provider-submission phase for an inference lifecycle assertion.
@@ -19631,11 +19631,11 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         PendingPrompt::user("ready activation".to_owned()),
     )
     .expect("defer ready activation");
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
-    assert_eq!(h.pending_publish_idle_dispatches[0].cid, retained_cid);
-    assert_eq!(h.pending_publish_idle_dispatches[1].cid, ready_cid);
-    let retained_obligation = h.pending_publish_idle_dispatches[0].clone();
-    let ready_obligation = h.pending_publish_idle_dispatches[1].clone();
+    assert_eq!(h.publication.idle_dispatches.len(), 2);
+    assert_eq!(h.publication.idle_dispatches[0].cid, retained_cid);
+    assert_eq!(h.publication.idle_dispatches[1].cid, ready_cid);
+    let retained_obligation = h.publication.idle_dispatches[0].clone();
+    let ready_obligation = h.publication.idle_dispatches[1].clone();
     assert!(retained_obligation.obligation.is_committed());
     assert!(ready_obligation.obligation.is_committed());
     assert!(matches!(
@@ -19670,8 +19670,8 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         h.agent_registry.agents[&retained_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    let retained = &h.pending_publish_idle_dispatches[0];
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    let retained = &h.publication.idle_dispatches[0];
     assert_eq!(retained.cid, retained_cid);
     assert_eq!(
         retained.activation_through,
@@ -19686,8 +19686,8 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
     let events_before_stable_drain = event_log_events(&h);
     h.drain_publish_idle_dispatches();
     assert_eq!(event_log_events(&h), events_before_stable_drain);
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    let retained = &h.pending_publish_idle_dispatches[0];
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    let retained = &h.publication.idle_dispatches[0];
     assert_eq!(retained.cid, retained_cid);
     assert_eq!(
         retained.activation_through,
@@ -19720,8 +19720,8 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         submitted_ready_checkpoint.agent_prompt_id,
         ready_checkpoint.agent_prompt_id
     );
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    assert_eq!(h.pending_publish_idle_dispatches[0].cid, retained_cid);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches[0].cid, retained_cid);
     assert!(events.iter().all(|event| !matches!(
         event,
         Event::AgentInferenceDispatchStarted(started)
@@ -19745,7 +19745,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         &h.agent_registry.agents[&retained_cid],
         &retained_checkpoint,
     );
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
 
     let retained_provider =
         h.pending_provider_prompts[&retained_checkpoint.agent_prompt_id].clone();
@@ -19775,7 +19775,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
             checkpoint.agent_prompt_id
         );
     }
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -19810,11 +19810,11 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
         PendingPrompt::user("runnable activation".to_owned()),
     )
     .expect("defer runnable activation");
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
-    assert_eq!(h.pending_publish_idle_dispatches[0].cid, blocked_cid);
-    assert_eq!(h.pending_publish_idle_dispatches[1].cid, runnable_cid);
-    let blocked_obligation = h.pending_publish_idle_dispatches[0].clone();
-    let runnable_obligation = h.pending_publish_idle_dispatches[1].clone();
+    assert_eq!(h.publication.idle_dispatches.len(), 2);
+    assert_eq!(h.publication.idle_dispatches[0].cid, blocked_cid);
+    assert_eq!(h.publication.idle_dispatches[1].cid, runnable_cid);
+    let blocked_obligation = h.publication.idle_dispatches[0].clone();
+    let runnable_obligation = h.publication.idle_dispatches[1].clone();
     finish_test_agent_context_wait(&mut h, &blocked_agent_id);
     finish_test_agent_context_wait(&mut h, &runnable_agent_id);
     h.agent_registry
@@ -19883,14 +19883,14 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
                 && created.agent_id == runnable_agent_id
     )));
     assert_eq!(
-        h.pending_publish_idle_dispatches
+        h.publication.idle_dispatches
             .iter()
             .filter(|deferred| deferred.cid == blocked_cid)
             .count(),
         1
     );
     assert!(
-        h.pending_publish_idle_dispatches
+        h.publication.idle_dispatches
             .iter()
             .all(|deferred| deferred.cid != runnable_cid)
     );
@@ -19931,7 +19931,7 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
             if created.agent_prompt_id == blocked_checkpoints[0].agent_prompt_id
                 && created.agent_id == blocked_agent_id
     )));
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -19979,8 +19979,8 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
     .expect("defer runnable activation");
     finish_test_agent_context_wait(&mut h, &unroutable_agent_id);
     finish_test_agent_context_wait(&mut h, &runnable_agent_id);
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
-    let unroutable_obligation = h.pending_publish_idle_dispatches[0].clone();
+    assert_eq!(h.publication.idle_dispatches.len(), 2);
+    let unroutable_obligation = h.publication.idle_dispatches[0].clone();
 
     h.drain_publish_idle_dispatches();
 
@@ -20032,8 +20032,8 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
         runnable_sequence,
         ["checkpoint", "started", "created", "submitted"]
     );
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    let retained = &h.pending_publish_idle_dispatches[0];
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    let retained = &h.publication.idle_dispatches[0];
     assert_eq!(retained.cid, unroutable_obligation.cid);
     assert_eq!(
         retained.activation_cut,
@@ -20054,7 +20054,7 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
     )));
 
     h.drain_publish_idle_dispatches();
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
     assert!(event_log_events(&h).iter().all(|event| !matches!(
         event,
         Event::AgentInferenceDispatchStarted(started)
@@ -20085,7 +20085,7 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
             if created.agent_prompt_id == unroutable_checkpoints[0].agent_prompt_id
                 && created.agent_id == unroutable_agent_id
     )));
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -20121,7 +20121,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
         .expect("park branch B");
     let branch_b = h.agent_registry.agents[&cid].head.expect("branch B");
     assert_ne!(branch_a, branch_b);
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+    assert_eq!(h.publication.idle_dispatches.len(), 2);
 
     finish_test_agent_context_wait(&mut h, &agent_id);
     h.drain_publish_idle_dispatches();
@@ -20135,7 +20135,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
         .collect::<Vec<_>>();
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[0].through, tau_proto::AgentHead::Node(branch_b));
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
 
     h.handle_provider_response_finished(provider_text_response(
         &branch_b_prompt.agent_prompt_id,
@@ -20163,7 +20163,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
         tau_proto::AgentHead::Node(branch_a),
         "branch_a={branch_a:?}, branch_b={branch_b:?}, checkpoints={checkpoints:?}"
     );
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
 }
 
 /// A selected sibling message wake may dispatch while a readiness-deferred
@@ -20219,7 +20219,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     let branch_b = h.agent_registry.agents[&cid]
         .head
         .expect("branch B wake node");
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
     assert_eq!(
         h.agent_registry.agents[&cid].pending_message_wakes.len(),
         1,
@@ -20247,7 +20247,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
         first_checkpoint.through,
         tau_proto::AgentHead::Node(branch_b)
     );
-    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
     assert!(
         h.agent_registry.agents[&cid]
             .pending_message_wakes
@@ -20272,7 +20272,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
         .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
         .count();
     assert_eq!(checkpoints, 2);
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
 }
 
 /// A restored standalone continuation rejects off-branch reconciliation
@@ -22434,7 +22434,7 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
     .expect("scheduler dispatch");
 
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::ProviderToolResult(result))
             if result.call_id.as_str() == "scheduler-compact"
                 && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
@@ -22691,7 +22691,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
         originator: tau_proto::PromptOriginator::User,
     });
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             self_compaction_terminal: Some(tau_proto::SelfCompactionTerminal {
                 outcome: tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
@@ -22848,7 +22848,7 @@ fn manual_self_compaction_failure_delivers_error_once() {
     ));
     assert!(!h.wait_completion_is_retained_for_test(&cid, &call_id));
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentInferenceDispatchStarted(started))
             if started.transaction_id.is_none()
     ));
@@ -22966,7 +22966,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
         }),
     );
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentPromptSteered(steered))
             if steered.self_compaction_terminal.is_some()
     ));
@@ -27669,7 +27669,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
         .iter()
         .filter(|event| matches!(event, Event::ProviderPromptSubmitted(_)))
         .count();
-    h.pending_publish_idle_dispatches.push_back(
+    h.publication.idle_dispatches.push_back(
         path_crate_harness::interception::DeferredPromptDispatch {
             activation_source_seq: None,
             cid: cid.clone(),
@@ -27720,7 +27720,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
         crate::agent::ActivationDispatchState::None
     ));
     assert_eq!(
-        h.pending_publish_idle_dispatches
+        h.publication.idle_dispatches
             .iter()
             .filter(|deferred| deferred.cid == cid && !deferred.obligation.is_committed())
             .count(),
@@ -27795,7 +27795,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
         })
         .collect::<Vec<_>>();
     assert_eq!(sequence, ["checkpoint", "started", "created", "submitted"]);
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -27989,7 +27989,7 @@ fn agent_unload_discards_registered_input_wait() {
     assert!(!h.pending_agent_publish_completions.contains_key(&cid));
     assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
     assert!(
-        h.pending_publish_idle_dispatches
+        h.publication.idle_dispatches
             .iter()
             .all(|dispatch| dispatch.cid != cid)
     );
@@ -32428,7 +32428,7 @@ fn wait_resolves_on_synthetic_tool_error() {
         },
     );
 
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
     assert!(h.tool_runtime.tool_agents.contains_key("target-call"));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -32443,7 +32443,7 @@ fn wait_resolves_on_synthetic_tool_error() {
     )
     .expect("commit canonical synthetic error");
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "the wait helper's own canonical error remains parked"
     );
     h.handle_extension_event(
@@ -38818,7 +38818,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
             },
         );
         let recipient_id = result.recipient_id.expect("auto-start recipient");
-        assert!(h.pending_intercept.is_some(), "creation fact is ordered");
+        assert!(h.publication.pending_intercept.is_some(), "creation fact is ordered");
         h.handle_extension_event(
             "peer-marker-interceptor",
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -38826,7 +38826,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
             })),
         )
         .expect("attempt to drop protected creation fact");
-        assert!(h.pending_intercept.is_none());
+        assert!(h.publication.pending_intercept.is_none());
         h.shutdown().expect("shutdown");
         recipient_id
     };
@@ -39600,9 +39600,9 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
         message_tool_call(MESSAGE_CALL_ID, recipient_id.as_str(), BODY).arguments,
     ))
     .expect("run sender message tool");
-    assert!(h.pending_intercept.is_some());
-    assert!(!h.deferred_publishes.is_empty());
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.pending_intercept.is_some());
+    assert!(!h.publication.deferred.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     h.handle_extension_event(
         "nested-message-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -39613,9 +39613,9 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     drop(interceptor);
 
     assert!(!h.input_wait_pending_for(&recipient_cid));
-    assert!(h.pending_intercept.is_none());
-    assert!(h.deferred_publishes.is_empty());
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.pending_intercept.is_none());
+    assert!(h.publication.deferred.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     let checkpoints = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -39820,7 +39820,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
         }),
         recipient_prompts_before_timer + 1
     );
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -40149,7 +40149,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
             crate::agent::ActivationDispatchState::DispatchUncertain { .. }
         ));
         assert!(
-            h.pending_intercept.is_none(),
+            h.publication.pending_intercept.is_none(),
             "provider loss without activating input retains uncertainty without a closer"
         );
         let input = || {
@@ -40200,7 +40200,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
             "failed receipt append creates no runtime obligation"
         );
         assert!(
-            h.pending_intercept.is_none(),
+            h.publication.pending_intercept.is_none(),
             "failed receipt append cannot enqueue Stale"
         );
         std::fs::remove_dir(&journal).expect("remove receipt blocker");

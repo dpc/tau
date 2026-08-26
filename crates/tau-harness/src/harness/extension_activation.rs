@@ -316,7 +316,7 @@ impl Harness {
         let component_name = self
             .authenticated_source_name(source_id)
             .expect("authenticated extension source must retain its canonical name");
-        self.interceptors.replace_for_connection(
+        self.publication.interceptors.replace_for_connection(
             source_id,
             component_name,
             intercept.selectors,

@@ -532,7 +532,7 @@ impl Harness {
     ) -> Option<ConnectionId> {
         source
             .cloned()
-            .or_else(|| self.derived_publish_source.clone())
+            .or_else(|| self.publication.derived_source.clone())
     }
 
     pub(super) fn mint_agent_runtime_incarnation(&mut self) -> u64 {
@@ -550,12 +550,12 @@ impl Harness {
         source: Option<ConnectionId>,
         body: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let previous_source = self.derived_publish_source.clone();
+        let previous_source = self.publication.derived_source.clone();
         if source.is_some() {
-            self.derived_publish_source = source;
+            self.publication.derived_source = source;
         }
         let output = body(self);
-        self.derived_publish_source = previous_source;
+        self.publication.derived_source = previous_source;
         output
     }
 

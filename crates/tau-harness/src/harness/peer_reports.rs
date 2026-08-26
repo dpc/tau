@@ -1037,7 +1037,7 @@ impl Harness {
         if let Err(error) =
             self.handle_extension_internal_prompt_submit_request(&extension.publisher, request)
         {
-            self.pending_publish_error.get_or_insert(error);
+            self.publication.pending_error.get_or_insert(error);
         }
     }
 
@@ -1065,7 +1065,7 @@ impl Harness {
             return;
         }
         if let Err(error) = self.handle_start_agent_request(source_id, request.clone()) {
-            self.pending_publish_error.get_or_insert(error);
+            self.publication.pending_error.get_or_insert(error);
         }
     }
 
@@ -1194,7 +1194,7 @@ impl Harness {
             }
             Event::ExtensionContextReady(ready) => {
                 if let Err(error) = self.apply_extension_context_ready(source_id, ready.clone()) {
-                    self.pending_publish_error.get_or_insert(error);
+                    self.publication.pending_error.get_or_insert(error);
                 }
             }
             _ => unreachable!("caller filters per-agent context events"),
@@ -1307,7 +1307,7 @@ impl Harness {
                 self.reject_unroutable_extension_tool_request(request.clone(), tool_name);
             }
             Err(error) => {
-                self.pending_publish_error = Some(HarnessError::ToolRoute(error));
+                self.publication.pending_error = Some(HarnessError::ToolRoute(error));
             }
         }
     }
@@ -1586,7 +1586,7 @@ impl Harness {
                 },
             );
             if let Err(error) = result {
-                self.pending_publish_error.get_or_insert(error);
+                self.publication.pending_error.get_or_insert(error);
             }
         }
     }
@@ -1793,7 +1793,7 @@ impl Harness {
                 if let Err(error) =
                     self.apply_extension_session_context_ready(source_id, ready.clone())
                 {
-                    self.pending_publish_error.get_or_insert(error);
+                    self.publication.pending_error.get_or_insert(error);
                 }
             }
             _ => unreachable!("caller filters session-discovery events"),
@@ -1936,7 +1936,7 @@ impl Harness {
                 MAX_EXTENSION_ACTIVATION_MESSAGES, MAX_EXTENSION_ACTIVATION_BYTES
             );
             if let Err(error) = self.handle_extension_protocol_failure(source_id, message) {
-                self.pending_publish_error.get_or_insert(error);
+                self.publication.pending_error.get_or_insert(error);
             }
             return false;
         }
@@ -2104,16 +2104,16 @@ impl Harness {
         if remove {
             pending.remove(&source_id);
         }
-        if self.pending_publish_error.is_none()
+        if self.publication.pending_error.is_none()
             && let Err(error) = self.maybe_finish_extension_activation(Some(&source_id))
         {
-            self.pending_publish_error = Some(error);
+            self.publication.pending_error = Some(error);
         }
     }
 
     /// Propagate a fatal error raised synchronously by downstream publish work.
     pub(super) fn take_pending_publish_error(&mut self) -> Result<(), HarnessError> {
-        match self.pending_publish_error.take() {
+        match self.publication.pending_error.take() {
             Some(error) => Err(error),
             None => Ok(()),
         }

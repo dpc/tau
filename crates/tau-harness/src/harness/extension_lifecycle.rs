@@ -149,9 +149,9 @@ impl Harness {
         // readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
         self.clear_agent_runtime_indicators_for_source(connection_id);
-        self.suspended_interceptor_connections
+        self.publication.suspended_interceptor_connections
             .remove(&connection_id.clone());
-        self.interceptors.remove_connection(connection_id);
+        self.publication.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         if is_extension {
             self.unregister_connection_tools_for_disconnect(connection_id);
@@ -328,7 +328,7 @@ impl Harness {
             self.refresh_provider_models_and_publish_state();
         }
         if !self.extensions.resolving_initial_collisions {
-            if self.disconnect_terminal_batch_pending.is_empty() {
+            if self.publication.disconnect_terminal_batch_pending.is_empty() {
                 self.drain_pending_tool_invocations_or_report();
                 for (call_id, cid) in completed_foreground_calls {
                     self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
@@ -611,7 +611,7 @@ impl Harness {
             .filter(|call_id| !self.tool_runtime.tool_turn.is_backgrounded(call_id))
             .cloned()
             .collect::<Vec<_>>();
-        self.disconnect_terminal_batch_pending
+        self.publication.disconnect_terminal_batch_pending
             .extend(foreground_batch);
 
         let completed_foreground_calls: Vec<(ToolCallId, AgentId)> = Vec::new();

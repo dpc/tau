@@ -6083,7 +6083,7 @@ fn provider_ready_waits_for_intercepted_declarations_and_coalesces_final_state()
         ExtensionState::Handshaking
     );
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::ProviderModelsDeclared(update)) if update.models.is_empty()
     ));
 
@@ -6971,7 +6971,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
             .iter()
             .any(|event| matches!(event, Event::AgentPromptCreated(_)))
     );
-    assert!(!h.pending_publish_idle_dispatches.is_empty());
+    assert!(!h.publication.idle_dispatches.is_empty());
     let agent_id = h
         .agent_registry
         .agents
@@ -7005,7 +7005,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
 
     h.handle_disconnect(&crate::test_connection_id(conn_id));
 
-    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.publication.idle_dispatches.is_empty());
     assert!(
         !h.agent_context
             .template_value(Some(&agent_id))
@@ -10713,7 +10713,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 17))
         .expect("length terminal accepted");
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "planned steer is intercepted"
     );
     assert!(h.agent_registry.agents.values().any(|agent| {
@@ -10787,7 +10787,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
     )
     .expect("retry retained planned steer");
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentInferenceDispatchStarted(owner))
             if owner.output_length_continuation.is_some()
     ));
@@ -10976,7 +10976,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
     .expect("register owner interceptor");
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 7))
         .expect("planned response");
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
 
     let sibling = h
         .append_direct_agent_semantic_event(
@@ -11012,7 +11012,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
     )
     .expect("release old selected-branch steer");
     while matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentPromptSteered(steered))
             if steered.internal_kind
                 == Some(tau_proto::InternalPromptKind::OutputLengthContinuation)
@@ -11027,12 +11027,12 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
     }
     assert!(
         matches!(
-            h.pending_intercept.as_ref().map(|pending| &pending.event),
+            h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
             Some(Event::AgentInferenceDispatchStarted(owner))
                 if owner.output_length_continuation.is_some()
         ),
         "pending: {:?}",
-        h.pending_intercept
+        h.publication.pending_intercept
             .as_ref()
             .map(|pending| pending.event.name())
     );
@@ -11220,7 +11220,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
     );
     assert!(h.agent_registry.agents[&cid].pending_cancel.is_none());
     assert!(
-        !h.pending_publish_idle_dispatches
+        !h.publication.idle_dispatches
             .iter()
             .any(|dispatch| dispatch.cid == cid)
     );
@@ -11381,7 +11381,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
             )
             .expect("commit dormant steer");
             while matches!(
-                h.pending_intercept.as_ref().map(|pending| &pending.event),
+                h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
                 Some(Event::AgentPromptSteered(_))
             ) {
                 h.handle_extension_event(
@@ -11393,7 +11393,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
                 .expect("commit exact dormant steer");
             }
             assert_eq!(
-                h.pending_intercept
+                h.publication.pending_intercept
                     .as_ref()
                     .map(|pending| pending.event.name()),
                 Some(parked_event),
@@ -11617,7 +11617,7 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
     h.handle_provider_response_finished(terminal)
         .expect("real successor terminal");
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentOuterTurnFinished(_))
     ));
     assert_eq!(
@@ -12329,9 +12329,9 @@ fn output_length_attempt_four_restores_late_watcher_terminal_incomplete() {
         live_late.len(),
         1,
         "pending_intercept={}, deferred={}, publish_idle={}",
-        h.pending_intercept.is_some(),
-        h.deferred_publishes.len(),
-        h.pending_publish_idle_dispatches.len(),
+        h.publication.pending_intercept.is_some(),
+        h.publication.deferred.len(),
+        h.publication.idle_dispatches.len(),
     );
     assert!(live_late[0].initial);
     assert!(matches!(
@@ -12478,7 +12478,7 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionStarted(_))
     ));
     std::fs::rename(&journal_path, &backup_path).expect("park journal for start");
@@ -12651,7 +12651,7 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
             "compact replacement",
         ))
         .expect("commit compaction");
-        descendant_prompt_id = match h.pending_intercept.as_ref().map(|pending| &pending.event) {
+        descendant_prompt_id = match h.publication.pending_intercept.as_ref().map(|pending| &pending.event) {
             Some(Event::AgentInferenceDispatchStarted(started)) => started.agent_prompt_id.clone(),
             other => panic!("expected parked descendant checkpoint, got {other:?}"),
         };
@@ -12772,7 +12772,7 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
     .expect("register rejection interceptor");
     h.handle_provider_response_finished(super::dispatch::context_overflow_response(&successor))
         .expect("park rejection");
-    assert!(h.pending_intercept.is_some());
+    assert!(h.publication.pending_intercept.is_some());
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
         &tau_proto::UiCancelPrompt {
@@ -13034,7 +13034,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     )
     .expect("commit response");
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionStarted(_))
     ));
     h.handle_cancel_prompt(
@@ -13053,7 +13053,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     )
     .expect("commit start");
     assert!(matches!(
-        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionFailed(_))
     ));
     h.handle_cancel_prompt(
@@ -13130,7 +13130,7 @@ fn output_length_finish_append_failure_retries_before_new_work() {
     });
     h.handle_provider_response_finished(completed)
         .expect("successor response");
-    assert!(h.pending_intercept.is_some(), "settled finish is parked");
+    assert!(h.publication.pending_intercept.is_some(), "settled finish is parked");
 
     let journal_path = td
         .path()
@@ -13178,7 +13178,7 @@ fn output_length_finish_append_failure_retries_before_new_work() {
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "retried finish is interceptable"
     );
     h.handle_extension_event(
@@ -13202,7 +13202,7 @@ fn output_length_finish_append_failure_retries_before_new_work() {
             .values()
             .map(|agent| (&agent.outer_turn, &agent.output_length_continuation,))
             .collect::<Vec<_>>(),
-        h.pending_intercept.is_some()
+        h.publication.pending_intercept.is_some()
     );
     h.handle_disconnect(&crate::test_connection_id("length-finish-interceptor"));
     let next = read_nth_prompt_created(&h, 2);
@@ -13248,7 +13248,7 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 5))
         .expect("source length response");
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "successor prompt-start is parked"
     );
     h.provider_model_routes.remove(&source.model);
@@ -13259,7 +13259,7 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
         })),
     )
     .expect("release prompt-start after route loss");
-    if h.pending_intercept.is_some() {
+    if h.publication.pending_intercept.is_some() {
         h.handle_extension_event(
             "length-owner-interceptor",
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -13362,11 +13362,11 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 5))
         .expect("source length response");
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "successor delivery is parked"
     );
     h.provider_model_routes.remove(&source.model);
-    h.interceptors.replace_for_connection(
+    h.publication.interceptors.replace_for_connection(
         &crate::test_connection_id("length-created-interceptor"),
         crate::test_extension_name("length-created-interceptor"),
         vec![EventSelector::Exact(
@@ -13382,7 +13382,7 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
     )
     .expect("release successor after route loss");
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "local Failed terminal is parked"
     );
     h.handle_cancel_prompt(
@@ -13513,7 +13513,7 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
     )
     .expect("release normal prompt-start after route loss");
     assert!(
-        h.pending_intercept.is_some(),
+        h.publication.pending_intercept.is_some(),
         "synthetic failure prompt-start is parked"
     );
     h.handle_cancel_prompt(
@@ -13626,7 +13626,7 @@ fn output_length_real_terminal_race_cancels_with_exact_accounting() {
     });
     h.handle_provider_response_finished(terminal)
         .expect("park real successor terminal");
-    assert!(h.pending_intercept.is_some(), "real terminal is parked");
+    assert!(h.publication.pending_intercept.is_some(), "real terminal is parked");
     assert!(!matches!(
         h.agent_watch
             .provider_status
@@ -13834,7 +13834,7 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(
-        h.pending_intercept.is_none(),
+        h.publication.pending_intercept.is_none(),
         "approved exact retry is not intercepted a second time"
     );
     assert!(

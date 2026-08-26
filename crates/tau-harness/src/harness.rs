@@ -148,6 +148,7 @@ use crate::harness::interception::{
     PromptDispatchPhase,
 };
 use crate::harness::peer_messaging::PeerMessagingState;
+use crate::harness::publication_state::PublicationState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::subagents_tool::SubagentToolState;
@@ -1482,6 +1483,7 @@ mod prompt_materialization;
 mod provider_response;
 mod publication;
 mod publication_completion;
+mod publication_state;
 mod runtime_loop;
 mod session_runtime;
 mod tool_runtime;
@@ -1754,8 +1756,6 @@ pub struct Harness {
     /// Retry request ids that targeted ephemeral agents before one-shot
     /// correlation was consumed.
     ephemeral_provider_retry_requests: HashSet<tau_proto::RetryPromptRequestId>,
-    /// Source inherited by synchronous successors of a committed event/report.
-    derived_publish_source: Option<ConnectionId>,
     /// Harness-local acceptance order for visible user interactions.
     ///
     /// This is routing authority for untargeted live shell output; wall-clock
@@ -1786,31 +1786,8 @@ pub struct Harness {
     /// Production rollback poison lives in the process-wide detached writer.
     /// This harness-local compatibility state supports deterministic tests.
     debug_log_poisoned: bool,
-    /// Event emission interceptors, exact name first and prefix fallback.
-    pub(crate) interceptors: InterceptorRegistry,
-    /// Interceptor connections with one destructively canceled request whose
-    /// uncorrelated reply is still owed. Their registrations remain installed
-    /// but are skipped until that stale reply is consumed.
-    pub(crate) suspended_interceptor_connections: HashSet<tau_proto::ConnectionId>,
-    /// Currently in-flight interception. While `Some(_)`, no new
-    /// publishes commit — they queue onto `deferred_publishes` until
-    /// the awaited [`InterceptReply`] arrives (or the awaited
-    /// connection disconnects, treated as `Pass(None)`).
-    pub(crate) pending_intercept: Option<PendingIntercept>,
-    /// Fatal error raised while a parked publish commits downstream. The
-    /// surrounding runtime/interception operation takes and propagates it.
-    pending_publish_error: Option<HarnessError>,
-    /// Foreground terminals synthesized as one disconnect batch.
-    disconnect_terminal_batch_pending: HashSet<ToolCallId>,
-    /// Calls whose runtime settlement waits for the whole disconnect batch.
-    disconnect_terminal_batch_completed: Vec<(ToolCallId, AgentId)>,
-    /// Publishes that arrived while `pending_intercept` was active.
-    /// Drained in FIFO order once the pending intercept resolves.
-    pub(crate) deferred_publishes: VecDeque<DeferredPublish>,
-    /// Publish-idle fallback dispatches and exact committed branch-owned
-    /// activation obligations. Committed entries remain until a durable
-    /// checkpoint or standalone start acknowledges their watermark.
-    pub(crate) pending_publish_idle_dispatches: VecDeque<interception::DeferredPromptDispatch>,
+    /// Interception, deferred publication, and post-commit continuation state.
+    pub(crate) publication: PublicationState,
     /// All available models.
     pub(crate) available_models: Vec<ModelId>,
     /// Model snapshots published by provider extensions, keyed by sender

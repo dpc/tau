@@ -925,7 +925,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
             .map(|(_, event)| event.name())
             .collect::<Vec<_>>(),
         harness
-            .pending_intercept
+            .publication.pending_intercept
             .as_ref()
             .map(|pending| pending.event.name()),
         committed_events(&harness)
@@ -1082,7 +1082,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
 fn startup_connection_handling_surfaces_pending_publish_error_once() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.pending_publish_error = Some(HarnessError::Participant(
+    harness.publication.pending_error = Some(HarnessError::Participant(
         "terminal dispatch failed".to_owned(),
     ));
 

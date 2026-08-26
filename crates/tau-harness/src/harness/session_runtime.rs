@@ -943,7 +943,7 @@ impl Harness {
         self.quiesce_synchronized_publications_for_rollover();
         self.pending_agent_publish_completions.clear();
         self.enqueued_standalone_inference_checkpoints.clear();
-        self.pending_publish_idle_dispatches.clear();
+        self.publication.idle_dispatches.clear();
         self.clear_session_agent_context();
         self.agent_runtime_indicators.clear();
         self.subagents =
