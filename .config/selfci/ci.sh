@@ -17,6 +17,13 @@ function job_lint() {
   if ! .config/ast-grep/test-path-filters.sh; then
     selfci step fail
   fi
+  selfci step start "Rust physical line limit"
+  if ! .config/selfci/test-rust-physical-line-limit.sh; then
+    selfci step fail
+  fi
+  if ! .config/selfci/check-rust-physical-line-limit.sh; then
+    selfci step fail
+  fi
 
   selfci step start "treefmt"
   if ! treefmt --ci ; then

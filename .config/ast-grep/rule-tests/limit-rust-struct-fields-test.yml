@@ -1,0 +1,68 @@
+id: limit-rust-struct-fields
+valid:
+  - |
+      struct NamedTwentyNine {
+          f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+          f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+          f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+          f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+          f29: u8,
+      }
+  - |
+      #[derive(Clone)]
+      struct GenericThirty<T> {
+          f01: T, f02: T, f03: T, f04: T, f05: T, f06: T, f07: T, f08: T,
+          f09: T, f10: T, f11: T, f12: T, f13: T, f14: T, f15: T, f16: T,
+          f17: T, f18: T, f19: T, f20: T, f21: T, f22: T, f23: T, f24: T,
+          f25: T, f26: T, f27: T, f28: T, f29: T, f30: T,
+      }
+  - |
+      struct FirstThirty(
+          #[allow(dead_code)] pub u8, // First tuple field.
+          pub u8, /* Second tuple field. */
+          pub u8, u8, u8, u8, u8, u8, u8, u8,
+          u8, u8, u8, u8, u8, u8, u8, u8, u8, u8,
+          u8, u8, u8, u8, u8, u8, u8, u8, u8, u8,
+      );
+
+      struct SecondThirty {
+          f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+          f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+          f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+          f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+          f29: u8, f30: u8,
+      }
+invalid:
+  - |
+      struct NamedThirtyOne {
+          f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+          f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+          f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+          f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+          f29: u8, f30: u8, f31: u8,
+      }
+  - |
+      #[repr(transparent)]
+      struct AttributedGenericTuple<T>(
+          #[allow(dead_code)] pub T, // First tuple field.
+          #[allow(dead_code)] pub T, /* Second tuple field. */
+          #[allow(dead_code)] pub T,
+          T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+          T, T, T, T, T, T,
+      );
+  - |
+      struct SmallFirst {
+          f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+          f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+          f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+          f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+          f29: u8,
+      }
+
+      struct OversizedSecond {
+          f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+          f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+          f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+          f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+          f29: u8, f30: u8, f31: u8,
+      }

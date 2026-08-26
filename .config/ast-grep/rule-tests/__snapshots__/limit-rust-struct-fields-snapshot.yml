@@ -1,0 +1,116 @@
+id: limit-rust-struct-fields
+snapshots:
+  ? |
+    #[repr(transparent)]
+    struct AttributedGenericTuple<T>(
+        #[allow(dead_code)] pub T, // First tuple field.
+        #[allow(dead_code)] pub T, /* Second tuple field. */
+        #[allow(dead_code)] pub T,
+        T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+        T, T, T, T, T, T,
+    );
+  : labels:
+    - source: |-
+        struct AttributedGenericTuple<T>(
+            #[allow(dead_code)] pub T, // First tuple field.
+            #[allow(dead_code)] pub T, /* Second tuple field. */
+            #[allow(dead_code)] pub T,
+            T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+            T, T, T, T, T, T,
+        );
+      style: primary
+      start: 21
+      end: 290
+    - source: T
+      style: secondary
+      start: 285
+      end: 286
+    - source: |-
+        (
+            #[allow(dead_code)] pub T, // First tuple field.
+            #[allow(dead_code)] pub T, /* Second tuple field. */
+            #[allow(dead_code)] pub T,
+            T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+            T, T, T, T, T, T,
+        )
+      style: secondary
+      start: 53
+      end: 289
+  ? |
+    struct NamedThirtyOne {
+        f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+        f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+        f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+        f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+        f29: u8, f30: u8, f31: u8,
+    }
+  : labels:
+    - source: |-
+        struct NamedThirtyOne {
+            f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+            f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+            f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+            f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+            f29: u8, f30: u8, f31: u8,
+        }
+      style: primary
+      start: 0
+      end: 324
+    - source: 'f31: u8'
+      style: secondary
+      start: 314
+      end: 321
+    - source: |-
+        {
+            f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+            f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+            f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+            f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+            f29: u8, f30: u8, f31: u8,
+        }
+      style: secondary
+      start: 22
+      end: 324
+  ? |
+    struct SmallFirst {
+        f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+        f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+        f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+        f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+        f29: u8,
+    }
+
+    struct OversizedSecond {
+        f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+        f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+        f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+        f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+        f29: u8, f30: u8, f31: u8,
+    }
+  : labels:
+    - source: |-
+        struct OversizedSecond {
+            f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+            f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+            f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+            f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+            f29: u8, f30: u8, f31: u8,
+        }
+      style: primary
+      start: 304
+      end: 629
+    - source: 'f31: u8'
+      style: secondary
+      start: 619
+      end: 626
+    - source: |-
+        {
+            f01: u8, f02: u8, f03: u8, f04: u8, f05: u8, f06: u8, f07: u8,
+            f08: u8, f09: u8, f10: u8, f11: u8, f12: u8, f13: u8, f14: u8,
+            f15: u8, f16: u8, f17: u8, f18: u8, f19: u8, f20: u8, f21: u8,
+            f22: u8, f23: u8, f24: u8, f25: u8, f26: u8, f27: u8, f28: u8,
+            f29: u8, f30: u8, f31: u8,
+        }
+      style: secondary
+      start: 327
+      end: 629

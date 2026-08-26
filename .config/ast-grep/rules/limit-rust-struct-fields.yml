@@ -1,0 +1,29 @@
+id: limit-rust-struct-fields
+language: Rust
+severity: error
+message: >-
+  This struct has at least 31 fields. Split the type into coherent logical
+  substates rather than suppressing this check.
+rule:
+  kind: struct_item
+  has:
+    any:
+      - kind: field_declaration_list
+        has:
+          all:
+            - kind: field_declaration
+            - nthChild:
+                position: 31
+                ofRule:
+                  kind: field_declaration
+      - kind: ordered_field_declaration_list
+        has:
+          nthChild:
+            position: 31
+            ofRule:
+              not:
+                any:
+                  - kind: attribute_item
+                  - kind: block_comment
+                  - kind: line_comment
+                  - kind: visibility_modifier
